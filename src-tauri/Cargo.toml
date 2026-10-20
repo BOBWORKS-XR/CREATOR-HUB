@@ -1,6 +1,6 @@
 [package]
 name = "creator-hub"
-version = "0.1.12"
+version = "0.1.16"
 description = "Creator Hub app manager"
 authors = ["Creator Works"]
 license = "MIT"
@@ -10,10 +10,13 @@ edition = "2021"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+creator-hub-mcp-router = { path = "../native/mcp-router" }
+creator-project-setup = { path = "../modules/project-setup/src-tauri", default-features = false, optional = true }
+creator-works-mcp-launcher = { path = "../modules/mcp/launcher/src-tauri", default-features = false, features = ["integrated-service"], optional = true }
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 tauri-plugin-single-instance = "=2.4.4"
-tauri-plugin-updater = { version = "=2.11.0", default-features = false, features = ["native-tls", "system-proxy"] }
+tauri-plugin-updater = { version = "=2.11.0", default-features = false, features = ["native-tls", "system-proxy", "zip"] }
 base64 = "0.22"
 dirs = "6"
 serde = { version = "1", features = ["derive"] }
@@ -25,18 +28,32 @@ reqwest = { version = "0.13", default-features = false, features = ["blocking", 
 sysinfo = "0.38"
 fs2 = "0.4"
 getrandom = "0.3"
+uuid = { version = "1", features = ["v4"] }
 tokio = { version = "1", features = ["macros", "time"] }
 tempfile = "3"
 flate2 = "=1.1.10"
 tar = "=0.4.46"
+toml_edit = "=0.20.2"
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.55"
+windows = { version = "=0.61.3", features = ["Win32_System_Com", "Win32_UI_Shell", "Win32_Storage_FileSystem"] }
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp", "Win32_Storage_FileSystem"] }
 
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
+experimental-linux-migration = []
+linux-production-migration = ["experimental-linux-migration"]
+experimental-flatpak-host = ["dep:gio"]
+experimental-flatpak-ui = ["dep:gio"]
+experimental-linux-portable-host = ["dep:creator-hub-linux-portable-deployment", "integrated-features", "experimental-flatpak-host"]
+experimental-linux-portable-update = ["experimental-linux-portable-host", "creator-hub-linux-portable-deployment/experimental-restart"]
+integrated-features = ["dep:creator-project-setup", "dep:creator-works-mcp-launcher"]
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gio = { version = "=0.18.4", optional = true }
+creator-hub-linux-portable-deployment = { path = "../native/linux-portable-deployment", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

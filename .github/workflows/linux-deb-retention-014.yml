@@ -1,0 +1,55 @@
+name: One Linux DEB runtime-retention upgrade (disposable validation only)
+on:
+  push:
+    branches: [validation/linux-deb-retention-014]
+    paths: ['.github/workflows/linux-deb-retention-014.yml']
+permissions:
+  contents: read
+  actions: read
+jobs:
+  deb-retention:
+    if: github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.repository_id == '1364807512' && github.ref == 'refs/heads/validation/linux-deb-retention-014'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    env:
+      CREATOR_LINUX_DEB_RETENTION: '1'
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24.17.0
+      - name: Focused preflight before any download or installation
+        run: |
+          python3 -B scripts/linux-deb-retention-probe.test.py
+          node --check scripts/linux-deb-retention-sdk.cjs
+          node --test scripts/linux-deb-retention-sdk.test.cjs
+      - name: Reuse exact original and candidate DEBs from first transaction; do not rebuild product bytes
+        uses: actions/download-artifact@v5
+        with:
+          artifact-ids: '11929999662'
+          run-id: '38642404016'
+          github-token: ${{ github.token }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/linux-deb-retention-reuse
+      - name: Install the lockfile-pinned official SDK without build or lifecycle scripts
+        run: npm ci --prefix modules/mcp --omit=dev --ignore-scripts --no-audit --no-fund
+      - name: Provision package metadata and desktop-discovery support
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends python3-gi
+      - name: Pin original DEB, install baseline, hold SDK connection and upgrade once via dpkg
+        run: node scripts/linux-deb-retention-sdk.cjs
+      - name: Capture package bytes, ownership hashes, SDK results and failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-deb-retention-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/linux-deb-retention/*.json
+            ${{ runner.temp }}/linux-deb-retention/*.stdout
+            ${{ runner.temp }}/linux-deb-retention/*.stderr
+            ${{ runner.temp }}/linux-deb-retention/*.deb

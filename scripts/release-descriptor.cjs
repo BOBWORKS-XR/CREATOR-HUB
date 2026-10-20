@@ -79,6 +79,12 @@ async function main() {
   }
   if (app === 'hub' && descriptor.installerProtocol !== 1) throw Error('Hub update publication requires reviewed native installer acceptance.');
   fs.mkdirSync(output, { recursive: true });
+  let staged;
+  if (app === 'hub') {
+    staged = path.resolve(output, asset);
+    fs.copyFileSync(installer, staged, fs.constants.COPYFILE_EXCL);
+    if (fs.statSync(staged).size !== descriptor.byteLength || await hash(staged) !== descriptor.sha256) throw Error('Hub installer changed while staging. Nothing was signed.');
+  }
   const file = path.resolve(output, 'creator-hub-windows-x86_64.json');
   fs.writeFileSync(file, `${JSON.stringify(descriptor, null, 2)}\n`, { flag: 'wx' });
   const cli = require.resolve('@tauri-apps/cli/tauri.js');
@@ -96,8 +102,6 @@ async function main() {
   fs.writeFileSync(`${file}.minisig`, signature, { flag: 'wx' });
   if (app === 'hub') {
     // Sign an owned copy of the exact accepted installer, never alter CI evidence.
-    const staged = path.resolve(output, asset);
-    fs.copyFileSync(installer, staged, fs.constants.COPYFILE_EXCL);
     sign(staged);
     const installerSignature = fs.readFileSync(`${staged}.sig`, 'utf8').trim();
     const manifest = updaterManifest(applications[app], version, asset, installerSignature);

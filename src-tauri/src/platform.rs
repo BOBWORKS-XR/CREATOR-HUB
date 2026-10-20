@@ -352,6 +352,25 @@ fn gui_name(app: AppId, name: &str) -> bool {
 }
 
 pub fn running(app: AppId, exe: &Path) -> Result<Running, String> {
+    running_inner(app, exe, true)
+}
+
+/// GUI-only migration keeps all old Node/server paths and connections intact.
+/// Do not turn unrelated Node command visibility into a GUI-close requirement.
+#[cfg(any(windows, target_os = "linux"))]
+pub fn running_gui(app: AppId, exe: &Path) -> Result<Running, String> {
+    running_inner(app, exe, false)
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn gui_image_name(app: AppId, image: Option<&Path>) -> bool {
+    image
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| gui_name(app, name))
+}
+
+fn running_inner(app: AppId, exe: &Path, inspect_runtime: bool) -> Result<Running, String> {
     let mut system = System::new();
     system.refresh_processes_specifics(
         ProcessesToUpdate::All,
@@ -377,6 +396,10 @@ pub fn running(app: AppId, exe: &Path) -> Result<Running, String> {
             && ((name.ends_with(".exe") && !name.ends_with("-setup.exe"))
                 || (!name.contains('.') && !name.ends_with("-setup")));
         let is_gui = gui_name(app, &name) || portable_setup;
+        // Linux's comm name is limited to 15 bytes; Creator GUI names are longer.
+        // The kernel executable path still needs the exact same_path check below.
+        #[cfg(target_os = "linux")]
+        let is_gui = is_gui || gui_image_name(app, process.exe());
         if is_gui {
             match process.exe() {
                 Some(actual) if same_path(actual, exe) => result.gui.push(pid.as_u32()),
@@ -389,7 +412,7 @@ pub fn running(app: AppId, exe: &Path) -> Result<Running, String> {
                 }
             }
         }
-        if app == AppId::Mcp && (name == "node.exe" || name == "node") {
+        if inspect_runtime && app == AppId::Mcp && (name == "node.exe" || name == "node") {
             let command = process
                 .cmd()
                 .iter()
@@ -490,6 +513,73 @@ pub fn window_action(pids: &[u32], executable: &Path, close: bool) -> Result<(),
 #[cfg(test)]
 mod legacy_name_tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "child fixture invoked only by the owned Linux process test"]
+    fn linux_named_gui_child() {
+        assert_eq!(std::env::var("CREATOR_GUI_PROCESS_FIXTURE").unwrap(), "1");
+        std::thread::sleep(std::time::Duration::from_secs(3));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_gui_inventory_uses_actual_kernel_image_without_stopping_the_process() {
+        let root = tempfile::tempdir().unwrap();
+        let exe = root.path().join("creator-works-mcp-launcher");
+        std::fs::copy(std::env::current_exe().unwrap(), &exe).unwrap();
+        let mut child = Command::new(&exe)
+            .args([
+                "--exact",
+                "platform::legacy_name_tests::linux_named_gui_child",
+                "--ignored",
+            ])
+            .env("CREATOR_GUI_PROCESS_FIXTURE", "1")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let observed = running_gui(AppId::Mcp, &exe).unwrap();
+        let result = child.wait().unwrap();
+        assert!(
+            observed.gui.contains(&child.id()),
+            "Long Linux GUI image was missed"
+        );
+        assert!(!observed.other_copy);
+        assert!(!observed.server);
+        assert!(
+            result.success(),
+            "Fixture must exit normally, without a signal"
+        );
+        let absent = running_gui(AppId::Mcp, &exe).unwrap();
+        assert!(!absent.gui.contains(&child.id()));
+    }
+
+    #[test]
+    fn full_kernel_image_name_identifies_long_linux_gui_names_not_node_connections() {
+        assert!(gui_image_name(
+            AppId::Mcp,
+            Some(Path::new("/usr/bin/creator-works-mcp-launcher"))
+        ));
+        assert!(gui_image_name(
+            AppId::Setup,
+            Some(Path::new("/usr/bin/creator-project-setup"))
+        ));
+        for image in [
+            None,
+            Some(Path::new("/usr/bin/node")),
+            Some(Path::new("/usr/bin/creator-works-m")),
+            Some(Path::new("/other/creator-works-mcp-launcher-extra")),
+        ] {
+            assert!(!gui_image_name(AppId::Mcp, image));
+            assert!(!gui_image_name(AppId::Setup, image));
+        }
+        assert!(!gui_image_name(
+            AppId::Setup,
+            Some(Path::new("/usr/bin/creator-works-mcp-launcher"))
+        ));
+    }
+
     #[test]
     fn managed_installs_require_the_windows_installer_contract() {
         assert_eq!(

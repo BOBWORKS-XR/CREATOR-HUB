@@ -1,0 +1,564 @@
+{
+  "schemaVersion": 1,
+  "purpose": "Passive public-package evidence only; not discovery, retirement authority, publisher trust, or native acceptance.",
+  "nativeAcceptance": false,
+  "capturedAt": "2026-10-14T19:32:24.346Z",
+  "extraction": "7-Zip 26.00 x64 on Windows; named members only; no package, GUI, Node, installer or server executed.",
+  "sources": [
+    "https://api.github.com/repos/BOBWORKS-XR/CREATOR-WORKS-UNITY-MCP/releases/tags/v2.7.7",
+    "https://api.github.com/repos/BOBWORKS-XR/CREATOR-PROJECT-SETUP/releases/tags/v0.3.7"
+  ],
+  "packages": [
+    {
+      "product": "mcp",
+      "release": "https://github.com/BOBWORKS-XR/CREATOR-WORKS-UNITY-MCP/releases/tag/v2.7.7",
+      "releaseId": 402569194,
+      "targetCommit": "9cd12e28d1dd05057b84166d4718a5d6369eff93",
+      "asset": "Creator.Works.MCP-2.7.7-1.x86_64.rpm",
+      "packageBytes": 96657620,
+      "packageSha256": "9217fbdfd814d168b2b501bf6bb82661dfcf0482b95b4a67b285d29391dcfa75",
+      "packageUrl": "https://github.com/BOBWORKS-XR/CREATOR-WORKS-UNITY-MCP/releases/download/v2.7.7/Creator.Works.MCP-2.7.7-1.x86_64.rpm",
+      "control": [],
+      "members": [
+        {
+          "member": "./usr/bin/creator-works-mcp-launcher",
+          "bytes": 20525304,
+          "sha256": "6cc50ba3c770c1774512a99dc24d514f4350f51d03fd27bb4259ec16249c2ab2"
+        },
+        {
+          "member": "./usr/lib/Creator Works MCP/server/LICENSE",
+          "bytes": 1068,
+          "sha256": "b1cfe8ff7191d3e9c6c6b0f832adcd2ebece8e6070ef72d2f7afc1c082fb757f"
+        },
+        {
+          "member": "./usr/lib/Creator Works MCP/server/THIRD_PARTY_NOTICES.md",
+          "bytes": 7433,
+          "sha256": "1a9baf94795f84f17fd692cb7c14de19d94905d5bec494a9e9ee090a8f7b69d1"
+        },
+        {
+          "member": "./usr/lib/Creator Works MCP/server/creator-works-mcp.mjs",
+          "bytes": 1221209,
+          "sha256": "8d7cbe21d3b3691d6b1aa052846d6ee36f4274c18bd4228c6d4a73583be74149"
+        },
+        {
+          "member": "./usr/lib/Creator Works MCP/server/runtime/LICENSE",
+          "bytes": 156926,
+          "sha256": "4573185d56580da2b890ba34a85a409257640f1c5632eade4300137266194d18"
+        },
+        {
+          "member": "./usr/lib/Creator Works MCP/server/runtime/VERSION",
+          "bytes": 8,
+          "sha256": "98182b41c9ce3357797985cf12dc3b0124490ef88bc918a905373e7688e6aec9"
+        },
+        {
+          "member": "./usr/lib/Creator Works MCP/server/runtime/node",
+          "bytes": 123459976,
+          "sha256": "62d66443847de1f527f74afe715900b12884ace52136dc9cd8e91e61acc2f527"
+        },
+        {
+          "member": "./usr/lib/Creator Works MCP/server/runtime/node.exe",
+          "bytes": 123459976,
+          "sha256": "62d66443847de1f527f74afe715900b12884ace52136dc9cd8e91e61acc2f527"
+        },
+        {
+          "member": "./usr/lib/Creator Works MCP/server/unity-extension/Editor/BanterMCPBridge.cs",
+          "bytes": 358150,
+          "sha256": "eaa70b9696c05e3ebce0abe3d98d8ebb5188f37d0747e6b143fa43ae48f32aca"
+        },
+        {
+          "member": "./usr/lib/Creator Works MCP/server/unity-extension/Editor/CreatorWorksMCPLogo.png",
+          "bytes": 52329,
+          "sha256": "f3f68baa0d887de92e6cf7aba8beae7ff8ea5c44b13444f018413041ade19ea7"
+        },
+        {
+          "member": "./usr/share/applications/Creator Works MCP.desktop",
+          "bytes": 236,
+          "sha256": "735562f1441694a3ca1384cb34016251b9f05323d6fbca7de372d50fb6ff4087"
+        }
+      ]
+    },
+    {
+      "product": "mcp",
+      "release": "https://github.com/BOBWORKS-XR/CREATOR-WORKS-UNITY-MCP/releases/tag/v2.7.7",
+      "releaseId": 402569194,
+      "targetCommit": "9cd12e28d1dd05057b84166d4718a5d6369eff93",
+      "asset": "Creator.Works.MCP_2.7.7_aarch64.dmg",
+      "packageBytes": 83146047,
+      "packageSha256": "e4e8ac91938cc32f53c8390003ad6eed0d577d46931083c3182d87df66e5ba78",
+      "packageUrl": "https://github.com/BOBWORKS-XR/CREATOR-WORKS-UNITY-MCP/releases/download/v2.7.7/Creator.Works.MCP_2.7.7_aarch64.dmg",
+      "control": [],
+      "members": [
+        {
+          "member": "Creator Works MCP/Creator Works MCP.app/Contents/Info.plist",
+          "bytes": 1176,
+          "sha256": "89c740c664074e29c9b4f40fc66b0aa78ec572de0a9a9f3ea6f772700d385ddc"
+        },
+        {
+          "member": "Creator Works MCP/Creator Works MCP.app/Contents/_CodeSignature/CodeResources",
+          "bytes": 4810,
+          "sha256": "cc4de8217ab7df1bf5a8695b480e1ab7670c2df1ca206578cc6faae69feb2bb3"
+        },
+        {
+          "member": "Creator Works MCP/Creator Works MCP.app/Contents/MacOS/creator-works-mcp-launcher",
+          "bytes": 17051392,
+          "sha256": "2e7f6aaa4594287fb147862d851017de5f79a6a90a6e41133f336c23eca00c66"
+        },
+        {
+          "member": "Creator Works MCP/Creator Works MCP.app/Contents/Resources/icon.icns",
+          "bytes": 168699,
+          "sha256": "e37475440cfcc412b8fa598cda8257fe8ddee48c0e5bcc3311541dc89b5a0af7"
+        },
+        {
+          "member": "Creator Works MCP/Creator Works MCP.app/Contents/Resources/server/creator-works-mcp.mjs",
+          "bytes": 1221209,
+          "sha256": "8d7cbe21d3b3691d6b1aa052846d6ee36f4274c18bd4228c6d4a73583be74149"
+        },
+        {
+          "member": "Creator Works MCP/Creator Works MCP.app/Contents/Resources/server/LICENSE",
+          "bytes": 1068,
+          "sha256": "b1cfe8ff7191d3e9c6c6b0f832adcd2ebece8e6070ef72d2f7afc1c082fb757f"
+        },
+        {
+          "member": "Creator Works MCP/Creator Works MCP.app/Contents/Resources/server/THIRD_PARTY_NOTICES.md",
+          "bytes": 7433,
+          "sha256": "1a9baf94795f84f17fd692cb7c14de19d94905d5bec494a9e9ee090a8f7b69d1"
+        },
+        {
+          "member": "Creator Works MCP/Creator Works MCP.app/Contents/Resources/server/runtime/LICENSE",
+          "bytes": 156926,
+          "sha256": "4573185d56580da2b890ba34a85a409257640f1c5632eade4300137266194d18"
+        },
+        {
+          "member": "Creator Works MCP/Creator Works MCP.app/Contents/Resources/server/runtime/node",
+          "bytes": 120591840,
+          "sha256": "f5f9b9db4d95f5e0340982685f083de654c21eef9d9122cab5321081ccaa2601"
+        },
+        {
+          "member": "Creator Works MCP/Creator Works MCP.app/Contents/Resources/server/runtime/node.exe",
+          "bytes": 120591840,
+          "sha256": "f5f9b9db4d95f5e0340982685f083de654c21eef9d9122cab5321081ccaa2601"
+        },
+        {
+          "member": "Creator Works MCP/Creator Works MCP.app/Contents/Resources/server/runtime/VERSION",
+          "bytes": 8,
+          "sha256": "98182b41c9ce3357797985cf12dc3b0124490ef88bc918a905373e7688e6aec9"
+        },
+        {
+          "member": "Creator Works MCP/Creator Works MCP.app/Contents/Resources/server/unity-extension/Editor/BanterMCPBridge.cs",
+          "bytes": 358150,
+          "sha256": "eaa70b9696c05e3ebce0abe3d98d8ebb5188f37d0747e6b143fa43ae48f32aca"
+        },
+        {
+          "member": "Creator Works MCP/Creator Works MCP.app/Contents/Resources/server/unity-extension/Editor/CreatorWorksMCPLogo.png",
+          "bytes": 52329,
+          "sha256": "f3f68baa0d887de92e6cf7aba8beae7ff8ea5c44b13444f018413041ade19ea7"
+        }
+      ]
+    },
+    {
+      "product": "mcp",
+      "release": "https://github.com/BOBWORKS-XR/CREATOR-WORKS-UNITY-MCP/releases/tag/v2.7.7",
+      "releaseId": 402569194,
+      "targetCommit": "9cd12e28d1dd05057b84166d4718a5d6369eff93",
+      "asset": "Creator.Works.MCP_2.7.7_amd64.AppImage",
+      "packageBytes": 126319096,
+      "packageSha256": "75829fe6def919eb5ff9cc9560d4211e86d316069dfa3c6fc652df3c8fbb09de",
+      "packageUrl": "https://github.com/BOBWORKS-XR/CREATOR-WORKS-UNITY-MCP/releases/download/v2.7.7/Creator.Works.MCP_2.7.7_amd64.AppImage",
+      "control": [],
+      "members": [
+        {
+          "member": "AppRun",
+          "bytes": 274,
+          "sha256": "eb0b254ac0dae6543e6dd7cd02e1baf40a060de95b927313122d6b46323c00aa"
+        },
+        {
+          "member": "AppRun.wrapped",
+          "bytes": 31552,
+          "sha256": "f30140a43a0a59e46db21bdefdf749b9e9f2c6946e92afabbacf98b8ae73fb4f"
+        },
+        {
+          "member": "Creator Works MCP.desktop",
+          "bytes": 48,
+          "mode": "lrwxrwxrwx",
+          "symbolicLink": "usr/share/applications/Creator Works MCP.desktop",
+          "hardLink": null
+        },
+        {
+          "member": "usr/bin/creator-works-mcp-launcher",
+          "bytes": 20562081,
+          "sha256": "32ffc9172ed630dc5d18e205bc0e6d7a1ff27bb9865714d4c630ee998c54a343"
+        },
+        {
+          "member": "usr/lib/Creator Works MCP/server/LICENSE",
+          "bytes": 1068,
+          "sha256": "b1cfe8ff7191d3e9c6c6b0f832adcd2ebece8e6070ef72d2f7afc1c082fb757f"
+        },
+        {
+          "member": "usr/lib/Creator Works MCP/server/THIRD_PARTY_NOTICES.md",
+          "bytes": 7433,
+          "sha256": "1a9baf94795f84f17fd692cb7c14de19d94905d5bec494a9e9ee090a8f7b69d1"
+        },
+        {
+          "member": "usr/lib/Creator Works MCP/server/creator-works-mcp.mjs",
+          "bytes": 1221209,
+          "sha256": "8d7cbe21d3b3691d6b1aa052846d6ee36f4274c18bd4228c6d4a73583be74149"
+        },
+        {
+          "member": "usr/lib/Creator Works MCP/server/runtime/LICENSE",
+          "bytes": 156926,
+          "sha256": "4573185d56580da2b890ba34a85a409257640f1c5632eade4300137266194d18"
+        },
+        {
+          "member": "usr/lib/Creator Works MCP/server/runtime/VERSION",
+          "bytes": 8,
+          "sha256": "98182b41c9ce3357797985cf12dc3b0124490ef88bc918a905373e7688e6aec9"
+        },
+        {
+          "member": "usr/lib/Creator Works MCP/server/runtime/node",
+          "bytes": 123468168,
+          "sha256": "0d950b73272dae118ac74590791e3c64eefc2e5c9565cd51bc7fa93abbf9d516"
+        },
+        {
+          "member": "usr/lib/Creator Works MCP/server/runtime/node.exe",
+          "bytes": 123468168,
+          "sha256": "0d950b73272dae118ac74590791e3c64eefc2e5c9565cd51bc7fa93abbf9d516"
+        },
+        {
+          "member": "usr/lib/Creator Works MCP/server/unity-extension/Editor/BanterMCPBridge.cs",
+          "bytes": 358150,
+          "sha256": "eaa70b9696c05e3ebce0abe3d98d8ebb5188f37d0747e6b143fa43ae48f32aca"
+        },
+        {
+          "member": "usr/lib/Creator Works MCP/server/unity-extension/Editor/CreatorWorksMCPLogo.png",
+          "bytes": 52329,
+          "sha256": "f3f68baa0d887de92e6cf7aba8beae7ff8ea5c44b13444f018413041ade19ea7"
+        },
+        {
+          "member": "usr/share/applications/Creator Works MCP.desktop",
+          "bytes": 236,
+          "sha256": "735562f1441694a3ca1384cb34016251b9f05323d6fbca7de372d50fb6ff4087"
+        }
+      ]
+    },
+    {
+      "product": "mcp",
+      "release": "https://github.com/BOBWORKS-XR/CREATOR-WORKS-UNITY-MCP/releases/tag/v2.7.7",
+      "releaseId": 402569194,
+      "targetCommit": "9cd12e28d1dd05057b84166d4718a5d6369eff93",
+      "asset": "Creator.Works.MCP_2.7.7_amd64.deb",
+      "packageBytes": 96666824,
+      "packageSha256": "db47aed5f5acd4e00e8e0782361444de228c4181eeea4970f90116f1f16cf10b",
+      "packageUrl": "https://github.com/BOBWORKS-XR/CREATOR-WORKS-UNITY-MCP/releases/download/v2.7.7/Creator.Works.MCP_2.7.7_amd64.deb",
+      "control": [
+        {
+          "member": "control",
+          "bytes": 297,
+          "sha256": "1b5ab5aa32886336f2eec3e48690c09286715e7438448813dcaa070c73111213"
+        },
+        {
+          "member": "md5sums",
+          "bytes": 1265,
+          "sha256": "556261ac6789876557ddbff925a8652f94ca8649ad251acac64a07f501b1208f"
+        }
+      ],
+      "members": [
+        {
+          "member": "usr/bin/creator-works-mcp-launcher",
+          "bytes": 20525304,
+          "sha256": "6cc50ba3c770c1774512a99dc24d514f4350f51d03fd27bb4259ec16249c2ab2"
+        },
+        {
+          "member": "usr/lib/Creator Works MCP/server/LICENSE",
+          "bytes": 1068,
+          "sha256": "b1cfe8ff7191d3e9c6c6b0f832adcd2ebece8e6070ef72d2f7afc1c082fb757f"
+        },
+        {
+          "member": "usr/lib/Creator Works MCP/server/runtime/LICENSE",
+          "bytes": 156926,
+          "sha256": "4573185d56580da2b890ba34a85a409257640f1c5632eade4300137266194d18"
+        },
+        {
+          "member": "usr/lib/Creator Works MCP/server/runtime/node",
+          "bytes": 123459976,
+          "sha256": "62d66443847de1f527f74afe715900b12884ace52136dc9cd8e91e61acc2f527"
+        },
+        {
+          "member": "usr/lib/Creator Works MCP/server/runtime/VERSION",
+          "bytes": 8,
+          "sha256": "98182b41c9ce3357797985cf12dc3b0124490ef88bc918a905373e7688e6aec9"
+        },
+        {
+          "member": "usr/lib/Creator Works MCP/server/runtime/node.exe",
+          "bytes": 123459976,
+          "sha256": "62d66443847de1f527f74afe715900b12884ace52136dc9cd8e91e61acc2f527"
+        },
+        {
+          "member": "usr/lib/Creator Works MCP/server/creator-works-mcp.mjs",
+          "bytes": 1221209,
+          "sha256": "8d7cbe21d3b3691d6b1aa052846d6ee36f4274c18bd4228c6d4a73583be74149"
+        },
+        {
+          "member": "usr/lib/Creator Works MCP/server/THIRD_PARTY_NOTICES.md",
+          "bytes": 7433,
+          "sha256": "1a9baf94795f84f17fd692cb7c14de19d94905d5bec494a9e9ee090a8f7b69d1"
+        },
+        {
+          "member": "usr/lib/Creator Works MCP/server/unity-extension/Editor/CreatorWorksMCPLogo.png",
+          "bytes": 52329,
+          "sha256": "f3f68baa0d887de92e6cf7aba8beae7ff8ea5c44b13444f018413041ade19ea7"
+        },
+        {
+          "member": "usr/lib/Creator Works MCP/server/unity-extension/Editor/BanterMCPBridge.cs",
+          "bytes": 358150,
+          "sha256": "eaa70b9696c05e3ebce0abe3d98d8ebb5188f37d0747e6b143fa43ae48f32aca"
+        },
+        {
+          "member": "usr/share/applications/Creator Works MCP.desktop",
+          "bytes": 236,
+          "sha256": "735562f1441694a3ca1384cb34016251b9f05323d6fbca7de372d50fb6ff4087"
+        }
+      ]
+    },
+    {
+      "product": "mcp",
+      "release": "https://github.com/BOBWORKS-XR/CREATOR-WORKS-UNITY-MCP/releases/tag/v2.7.7",
+      "releaseId": 402569194,
+      "targetCommit": "9cd12e28d1dd05057b84166d4718a5d6369eff93",
+      "asset": "Creator.Works.MCP_2.7.7_x64.dmg",
+      "packageBytes": 85872792,
+      "packageSha256": "ef6efca28df84da4f5ea01f4bcee24e8ae77964d84b65c3b9a808fbdb755a79e",
+      "packageUrl": "https://github.com/BOBWORKS-XR/CREATOR-WORKS-UNITY-MCP/releases/download/v2.7.7/Creator.Works.MCP_2.7.7_x64.dmg",
+      "control": [],
+      "members": [
+        {
+          "member": "Creator Works MCP/Creator Works MCP.app/Contents/Info.plist",
+          "bytes": 1176,
+          "sha256": "89c740c664074e29c9b4f40fc66b0aa78ec572de0a9a9f3ea6f772700d385ddc"
+        },
+        {
+          "member": "Creator Works MCP/Creator Works MCP.app/Contents/_CodeSignature/CodeResources",
+          "bytes": 4810,
+          "sha256": "709adb90181b696c737449b6554fbce32d97981afbd5f49176b325957b632a15"
+        },
+        {
+          "member": "Creator Works MCP/Creator Works MCP.app/Contents/MacOS/creator-works-mcp-launcher",
+          "bytes": 17667936,
+          "sha256": "cb0390af593cf85306b76688f83427d8a744a5094b99c5f673248ed72005fbca"
+        },
+        {
+          "member": "Creator Works MCP/Creator Works MCP.app/Contents/Resources/icon.icns",
+          "bytes": 168699,
+          "sha256": "e37475440cfcc412b8fa598cda8257fe8ddee48c0e5bcc3311541dc89b5a0af7"
+        },
+        {
+          "member": "Creator Works MCP/Creator Works MCP.app/Contents/Resources/server/creator-works-mcp.mjs",
+          "bytes": 1221209,
+          "sha256": "8d7cbe21d3b3691d6b1aa052846d6ee36f4274c18bd4228c6d4a73583be74149"
+        },
+        {
+          "member": "Creator Works MCP/Creator Works MCP.app/Contents/Resources/server/LICENSE",
+          "bytes": 1068,
+          "sha256": "b1cfe8ff7191d3e9c6c6b0f832adcd2ebece8e6070ef72d2f7afc1c082fb757f"
+        },
+        {
+          "member": "Creator Works MCP/Creator Works MCP.app/Contents/Resources/server/THIRD_PARTY_NOTICES.md",
+          "bytes": 7433,
+          "sha256": "1a9baf94795f84f17fd692cb7c14de19d94905d5bec494a9e9ee090a8f7b69d1"
+        },
+        {
+          "member": "Creator Works MCP/Creator Works MCP.app/Contents/Resources/server/runtime/LICENSE",
+          "bytes": 156926,
+          "sha256": "4573185d56580da2b890ba34a85a409257640f1c5632eade4300137266194d18"
+        },
+        {
+          "member": "Creator Works MCP/Creator Works MCP.app/Contents/Resources/server/runtime/node",
+          "bytes": 122917328,
+          "sha256": "bd6cd97b046bd816399fea7893bcf6867e9ec55fd02aef3284875dd32b31e060"
+        },
+        {
+          "member": "Creator Works MCP/Creator Works MCP.app/Contents/Resources/server/runtime/node.exe",
+          "bytes": 122917328,
+          "sha256": "bd6cd97b046bd816399fea7893bcf6867e9ec55fd02aef3284875dd32b31e060"
+        },
+        {
+          "member": "Creator Works MCP/Creator Works MCP.app/Contents/Resources/server/runtime/VERSION",
+          "bytes": 8,
+          "sha256": "98182b41c9ce3357797985cf12dc3b0124490ef88bc918a905373e7688e6aec9"
+        },
+        {
+          "member": "Creator Works MCP/Creator Works MCP.app/Contents/Resources/server/unity-extension/Editor/BanterMCPBridge.cs",
+          "bytes": 358150,
+          "sha256": "eaa70b9696c05e3ebce0abe3d98d8ebb5188f37d0747e6b143fa43ae48f32aca"
+        },
+        {
+          "member": "Creator Works MCP/Creator Works MCP.app/Contents/Resources/server/unity-extension/Editor/CreatorWorksMCPLogo.png",
+          "bytes": 52329,
+          "sha256": "f3f68baa0d887de92e6cf7aba8beae7ff8ea5c44b13444f018413041ade19ea7"
+        }
+      ]
+    },
+    {
+      "product": "setup",
+      "release": "https://github.com/BOBWORKS-XR/CREATOR-PROJECT-SETUP/releases/tag/v0.3.7",
+      "releaseId": 402568854,
+      "targetCommit": "4a76945272560f9e0d2b93296a5223bf3e891eb2",
+      "asset": "Creator.Project.Setup-0.3.7-1.x86_64.rpm",
+      "packageBytes": 5966708,
+      "packageSha256": "f1842a30b18e2e7505b4707b5c49ca41485e8d53f728fa715a5ad46fcbd0e853",
+      "packageUrl": "https://github.com/BOBWORKS-XR/CREATOR-PROJECT-SETUP/releases/download/v0.3.7/Creator.Project.Setup-0.3.7-1.x86_64.rpm",
+      "control": [],
+      "members": [
+        {
+          "member": "./usr/bin/creator-project-setup",
+          "bytes": 20899824,
+          "sha256": "56e0bc61cbadba67c991b4c65521c8af9da096723838c85de187aa71741394d1"
+        },
+        {
+          "member": "./usr/share/applications/Creator Project Setup.desktop",
+          "bytes": 255,
+          "sha256": "2e1476333e1463aef76b9117dfde1c980829b1a76952f25717a6ce303bd087db"
+        }
+      ]
+    },
+    {
+      "product": "setup",
+      "release": "https://github.com/BOBWORKS-XR/CREATOR-PROJECT-SETUP/releases/tag/v0.3.7",
+      "releaseId": 402568854,
+      "targetCommit": "4a76945272560f9e0d2b93296a5223bf3e891eb2",
+      "asset": "Creator.Project.Setup_0.3.7_aarch64.dmg",
+      "packageBytes": 4424902,
+      "packageSha256": "addb89d072b65ea8def467c9ee35382103b922b40490b8394a1fdb19c841c3d6",
+      "packageUrl": "https://github.com/BOBWORKS-XR/CREATOR-PROJECT-SETUP/releases/download/v0.3.7/Creator.Project.Setup_0.3.7_aarch64.dmg",
+      "control": [],
+      "members": [
+        {
+          "member": "Creator Project Setup/Creator Project Setup.app/Contents/Info.plist",
+          "bytes": 1106,
+          "sha256": "363e40c08064c6ca9f75f7f358604c445606a580b17833357e22b10897b88482"
+        },
+        {
+          "member": "Creator Project Setup/Creator Project Setup.app/Contents/_CodeSignature/CodeResources",
+          "bytes": 2440,
+          "sha256": "66c1f0339ae85cf2112a3c81dc1e17ce7bf9033dac7eaf822fb826df5bb4b338"
+        },
+        {
+          "member": "Creator Project Setup/Creator Project Setup.app/Contents/MacOS/creator-project-setup",
+          "bytes": 14354064,
+          "sha256": "2d460179cfbfc184f2cd8427fa6fdd31c25a2930f3738e534c2f7c5a37bc6a4e"
+        },
+        {
+          "member": "Creator Project Setup/Creator Project Setup.app/Contents/Resources/icon.icns",
+          "bytes": 168699,
+          "sha256": "e37475440cfcc412b8fa598cda8257fe8ddee48c0e5bcc3311541dc89b5a0af7"
+        }
+      ]
+    },
+    {
+      "product": "setup",
+      "release": "https://github.com/BOBWORKS-XR/CREATOR-PROJECT-SETUP/releases/tag/v0.3.7",
+      "releaseId": 402568854,
+      "targetCommit": "4a76945272560f9e0d2b93296a5223bf3e891eb2",
+      "asset": "Creator.Project.Setup_0.3.7_amd64.AppImage",
+      "packageBytes": 85748216,
+      "packageSha256": "9a9af495d4809784c2b2edb718426f414956338136a72cdea90a069182f25ee5",
+      "packageUrl": "https://github.com/BOBWORKS-XR/CREATOR-PROJECT-SETUP/releases/download/v0.3.7/Creator.Project.Setup_0.3.7_amd64.AppImage",
+      "control": [],
+      "members": [
+        {
+          "member": "AppRun",
+          "bytes": 274,
+          "sha256": "eb0b254ac0dae6543e6dd7cd02e1baf40a060de95b927313122d6b46323c00aa"
+        },
+        {
+          "member": "AppRun.wrapped",
+          "bytes": 31552,
+          "sha256": "f30140a43a0a59e46db21bdefdf749b9e9f2c6946e92afabbacf98b8ae73fb4f"
+        },
+        {
+          "member": "Creator Project Setup.desktop",
+          "bytes": 52,
+          "mode": "lrwxrwxrwx",
+          "symbolicLink": "usr/share/applications/Creator Project Setup.desktop",
+          "hardLink": null
+        },
+        {
+          "member": "usr/bin/creator-project-setup",
+          "bytes": 20918864,
+          "sha256": "556aafb0e8e4d227c7cdd985d43a245133029a93c3651d90131a07c738e3c825"
+        },
+        {
+          "member": "usr/share/applications/Creator Project Setup.desktop",
+          "bytes": 255,
+          "sha256": "2e1476333e1463aef76b9117dfde1c980829b1a76952f25717a6ce303bd087db"
+        }
+      ]
+    },
+    {
+      "product": "setup",
+      "release": "https://github.com/BOBWORKS-XR/CREATOR-PROJECT-SETUP/releases/tag/v0.3.7",
+      "releaseId": 402568854,
+      "targetCommit": "4a76945272560f9e0d2b93296a5223bf3e891eb2",
+      "asset": "Creator.Project.Setup_0.3.7_amd64.deb",
+      "packageBytes": 5966970,
+      "packageSha256": "be18f23450146e71a2960e2110474f6e0409a9521a3ced308b7fd6a6d584c63d",
+      "packageUrl": "https://github.com/BOBWORKS-XR/CREATOR-PROJECT-SETUP/releases/download/v0.3.7/Creator.Project.Setup_0.3.7_amd64.deb",
+      "control": [
+        {
+          "member": "control",
+          "bytes": 347,
+          "sha256": "e0d549d19d4f8820b4e07cb05bca5c8f165bfc82a9ad255c5dc9d7233e9606e9"
+        },
+        {
+          "member": "md5sums",
+          "bytes": 442,
+          "sha256": "976a39bd65c2038de06bd8fb3d962d9e38d840a821f9ba25dbd46cb6f7824ed5"
+        }
+      ],
+      "members": [
+        {
+          "member": "usr/bin/creator-project-setup",
+          "bytes": 20899824,
+          "sha256": "f9c3a25c062b68cafed0c46b762532bed72127635015587324119a02d63b2944"
+        },
+        {
+          "member": "usr/share/applications/Creator Project Setup.desktop",
+          "bytes": 255,
+          "sha256": "2e1476333e1463aef76b9117dfde1c980829b1a76952f25717a6ce303bd087db"
+        }
+      ]
+    },
+    {
+      "product": "setup",
+      "release": "https://github.com/BOBWORKS-XR/CREATOR-PROJECT-SETUP/releases/tag/v0.3.7",
+      "releaseId": 402568854,
+      "targetCommit": "4a76945272560f9e0d2b93296a5223bf3e891eb2",
+      "asset": "Creator.Project.Setup_0.3.7_x64.dmg",
+      "packageBytes": 4691680,
+      "packageSha256": "d7b131c74c2187ee0f4ccb24bf3a73df1f600e3c3785d0cc2f30044302a96a7a",
+      "packageUrl": "https://github.com/BOBWORKS-XR/CREATOR-PROJECT-SETUP/releases/download/v0.3.7/Creator.Project.Setup_0.3.7_x64.dmg",
+      "control": [],
+      "members": [
+        {
+          "member": "Creator Project Setup/Creator Project Setup.app/Contents/Info.plist",
+          "bytes": 1106,
+          "sha256": "363e40c08064c6ca9f75f7f358604c445606a580b17833357e22b10897b88482"
+        },
+        {
+          "member": "Creator Project Setup/Creator Project Setup.app/Contents/_CodeSignature/CodeResources",
+          "bytes": 2440,
+          "sha256": "66c1f0339ae85cf2112a3c81dc1e17ce7bf9033dac7eaf822fb826df5bb4b338"
+        },
+        {
+          "member": "Creator Project Setup/Creator Project Setup.app/Contents/MacOS/creator-project-setup",
+          "bytes": 14745072,
+          "sha256": "f76b2d94dcb1984695c847bc02b461e32da493161a3ad946808312795b411fe9"
+        },
+        {
+          "member": "Creator Project Setup/Creator Project Setup.app/Contents/Resources/icon.icns",
+          "bytes": 168699,
+          "sha256": "e37475440cfcc412b8fa598cda8257fe8ddee48c0e5bcc3311541dc89b5a0af7"
+        }
+      ]
+    }
+  ]
+}

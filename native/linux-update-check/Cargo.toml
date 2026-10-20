@@ -1,0 +1,14 @@
+[package]
+name = "creator-hub-linux-update-check"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+path = "../../src-tauri/src/linux_update.rs"
+
+[dependencies]
+sha2 = "0.10"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"

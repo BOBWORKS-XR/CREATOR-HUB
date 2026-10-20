@@ -1,0 +1,144 @@
+name: Owned Mac Root capture and finite native-dialog close scope (not acceptance)
+on:
+  push:
+    branches: [validation/mac-root-probe-014]
+    paths: ['.github/workflows/native-macos-app-probe.yml']
+permissions:
+  contents: read
+  actions: read
+jobs:
+  probe:
+    if: ${{ false }} # macOS support suspended; preserve historical workflow only.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: macos-arm64
+            artifact: 11847788914
+            digest: c3035a479a2b1143b72697adc8d17cd8d7d4c00256127e4a4e90a7e97773a499
+          - os: macos-15-intel
+            target: macos-intel
+            artifact: 11848917655
+            digest: 86f42ff5ddb41eb58360da35f61ead98823d68f713a4c67f9f237ced8d17d6c4
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24.17.0
+      - run: npm ci --ignore-scripts
+      - name: Validate read-only Root associations and compile native Mac sampler without app actions
+        run: node --test scripts/native-macos-app-probe.test.cjs scripts/native-macos-window.test.cjs
+      - name: Verify exact successful native package provenance
+        uses: actions/github-script@v8
+        env:
+          TARGET: ${{ matrix.target }}
+          ARTIFACT: ${{ matrix.artifact }}
+          DIGEST: ${{ matrix.digest }}
+        with:
+          script: |
+            const fs=require('node:fs'),path=require('node:path');
+            const h=require('./scripts/native-unix-hosted-acceptance.cjs');
+            const expected={target:process.env.TARGET,runId:38463917023,artifactId:Number(process.env.ARTIFACT),
+              sourceCommit:'8ba08a390ce888ea8e478cbcc79f52d7ca73587b',buildCommit:'5283fd05252d6bbe3253d41ded4064ec50cddbc7',
+              baseCommit:'35a16a45814d821d65b5d203628478449174cd55',zipSha256:process.env.DIGEST};
+            const {data:run}=await github.rest.actions.getWorkflowRun({...context.repo,run_id:expected.runId});
+            const {data:artifact}=await github.rest.actions.getArtifact({...context.repo,artifact_id:expected.artifactId});
+            const {data:source}=await github.rest.git.getCommit({...context.repo,commit_sha:expected.sourceCommit});
+            const {data:build}=await github.rest.git.getCommit({...context.repo,commit_sha:expected.buildCommit});
+            const jobs=await github.paginate(github.rest.actions.listJobsForWorkflowRunAttempt,{...context.repo,run_id:expected.runId,attempt_number:run.run_attempt,per_page:100});
+            const binding={expected,run,artifact,source,build,jobs};h.validateBinding(binding);
+            fs.writeFileSync(path.join(process.env.RUNNER_TEMP,'root-package-binding.json'),JSON.stringify(binding),{flag:'wx'});
+      - name: Download pinned ZIP and extract only original metadata and DMG
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT: ${{ matrix.artifact }}
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT/zip" > "$RUNNER_TEMP/root-package.zip"
+          python3 - <<'PY'
+          import hashlib,json,os,pathlib,stat,zipfile
+          root=pathlib.Path(os.environ['RUNNER_TEMP']); b=json.loads((root/'root-package-binding.json').read_text())
+          f=root/'root-package.zip'; h=hashlib.sha256()
+          assert f.stat().st_size==b['artifact']['size_in_bytes']
+          with f.open('rb') as stream:
+              for chunk in iter(lambda:stream.read(1048576),b''): h.update(chunk)
+          assert h.hexdigest()==b['expected']['zipSha256']
+          out=root/'root-package-input';out.mkdir(mode=0o700)
+          with zipfile.ZipFile(f) as z:
+              names=[i.filename for i in z.infolist()]
+              assert len(names)<=1024 and len(names)==len(set(names))
+              dmg=[n for n in names if n.startswith('native-packages/') and n.endswith('.dmg') and n.count('/')==1]
+              assert len(dmg)==1
+              for name in ['builtin-manifest.json','unix-package-integrity.json','experimental-unix.json']+dmg:
+                  e=z.getinfo(name);assert not e.is_dir() and not stat.S_ISLNK(e.external_attr>>16)
+                  assert '\\' not in name and all(p not in ('','..','.') for p in name.split('/'))
+                  assert 0<e.file_size<=(536870912 if name in dmg else 1048576)
+                  target=out/name;target.parent.mkdir(parents=True,exist_ok=True)
+                  with z.open(e) as source,target.open('xb') as output:
+                      for chunk in iter(lambda:source.read(1048576),b''):output.write(chunk)
+          PY
+      - name: Verify real code/resource bytes before any app launch
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const fs=require('node:fs'),path=require('node:path');const h=require('./scripts/native-unix-hosted-acceptance.cjs');
+            const tmp=process.env.RUNNER_TEMP,output=path.join(tmp,'root-package-proof');fs.mkdirSync(output,{mode:0o700});
+            const binding=JSON.parse(fs.readFileSync(path.join(tmp,'root-package-binding.json')));
+            const report=h.inspectCandidate(path.join(tmp,'root-package-input'),output,binding,path.join(tmp,'root-package.zip'),'-');
+            if(!report.packageIntegrityTested) throw Error(report.error||'Exact native package verification failed');
+            core.exportVariable('APP_PATH',path.join(output,'extracted','Creator Hub.app'));
+            core.exportVariable('HUB_SHA256',report.package.hubSha256);
+      - name: Check current Swift sampler compilation and refusal contracts before launching
+        env:
+          CREATOR_MACOS_OWNED_GUI_TEST: '1'
+        run: node --test scripts/native-macos-app-probe.test.cjs scripts/native-macos-window.test.cjs
+      - name: Capture changes-only owned Root readiness and exact normal-closure diagnostics
+        env:
+          CREATOR_MACOS_APP_PROBE: '1'
+          CREATOR_MACOS_OWNED_GUI_TEST: '1'
+        run: |
+          node scripts/native-macos-app-probe.cjs --app "$APP_PATH" --hub-sha256 "$HUB_SHA256" --output "$RUNNER_TEMP/root-app-probe"
+      - name: Retain only package proof and owned tool/capture reports, including failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mac-root-surface-${{ runner.arch }}-${{ github.sha }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/root-package-proof/report.json
+            ${{ runner.temp }}/root-package-binding.json
+            ${{ runner.temp }}/root-app-probe/*.json
+            ${{ runner.temp }}/root-app-probe/*.stdout
+            ${{ runner.temp }}/root-app-probe/*.stderr
+            ${{ runner.temp }}/root-app-probe/window-bitmap/receipt.json
+      - name: Admit only a completed exact-owned-window bitmap diagnostic
+        if: always()
+        id: bitmap
+        run: |
+          node - <<'NODE'
+          const fs=require('node:fs'), path=require('node:path');
+          const root=path.join(process.env.RUNNER_TEMP,'root-app-probe');
+          try {
+            const report=JSON.parse(fs.readFileSync(path.join(root,'report.json'),'utf8'));
+            const file=path.join(root,'window-bitmap','root-window.png');
+            if(report.windowBitmap?.completed!==true || report.windowBitmap.diagnosticOnly!==true) process.exit(0);
+            const meta=fs.lstatSync(file);
+            if(!meta.isFile() || meta.isSymbolicLink() || meta.size<=0 || meta.size>10*1024*1024) throw Error('Invalid diagnostic bitmap');
+            fs.appendFileSync(process.env.GITHUB_OUTPUT,'completed=true\n');
+          } catch(error) {
+            if(error.code!=='ENOENT') throw error;
+          }
+          NODE
+      - name: Retain completed owned-window bitmap, never another desktop surface
+        if: always() && steps.bitmap.outputs.completed == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: mac-root-window-${{ runner.arch }}-${{ github.sha }}
+          path: ${{ runner.temp }}/root-app-probe/window-bitmap/root-window.png
+          retention-days: 7
+          if-no-files-found: error

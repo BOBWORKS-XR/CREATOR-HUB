@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Creator Hub</title>
+  <link rel="stylesheet" href="base.css">
+  <link rel="stylesheet" href="suite.css">
+  <link rel="stylesheet" href="hub.css">
+  <link rel="stylesheet" href="features/styles.css">
+  <link rel="stylesheet" href="community.css">
+</head>
+<body>
+  <div id="suite-dismiss" class="suite-dismiss" aria-hidden="true"></div>
+  <div id="suite-shell" class="suite-shell">
+  <div class="suite-brand" aria-hidden="true"><span>CREATOR</span> <strong>HUB</strong></div>
+  <button class="suite-trigger" id="suite-trigger" type="button" aria-expanded="false" aria-controls="suite-menu" aria-label="Open Creator apps" title="Creator apps"><span class="suite-mark hub-mark"><img src="creator-works-logo.png" alt=""><span class="suite-letter">H</span></span></button>
+  <nav id="suite-menu" class="suite-menu" aria-label="Creator apps" aria-hidden="true" inert>
+    <button class="suite-item current" data-view="hub" type="button" aria-current="page"><span class="suite-mark hub-mark"><img src="creator-works-logo.png" alt=""><span class="suite-letter">H</span></span><span class="suite-item-copy"><strong>Creator Hub</strong><small>Apps and projects</small></span></button>
+    <div class="suite-entry"><button class="suite-item" data-view="mcp" type="button"><span class="suite-mark"><img src="creator-works-logo.png" alt=""><span class="suite-letter">M</span></span><span class="suite-item-copy"><strong>Creator Works MCP</strong><small>AI tools for Unity</small><span id="menu-status-mcp" class="suite-item-status">Checking</span></span></button><button id="menu-download-mcp" class="suite-download hidden" type="button" title="Download latest Creator Works MCP" aria-label="Download latest Creator Works MCP"><span class="icon icon-download" aria-hidden="true"></span></button></div>
+    <div class="suite-entry"><button class="suite-item" data-view="setup" type="button"><span class="suite-mark"><img src="creator-works-logo.png" alt=""><span class="suite-letter">P</span></span><span class="suite-item-copy"><strong>Project Setup</strong><small>Unity + Creator SDK projects</small><span id="menu-status-setup" class="suite-item-status">Checking</span></span></button><button id="menu-download-setup" class="suite-download hidden" type="button" title="Download latest Project Setup" aria-label="Download latest Project Setup"><span class="icon icon-download" aria-hidden="true"></span></button></div>
+    <div class="suite-item unavailable"><span class="suite-mark converter-mark"><img src="sidequest-mark-white.svg" alt=""><span class="suite-letter">C</span></span><span class="suite-item-copy"><strong>Creator Converter</strong><small>SideQuest / Coming soon</small></span></div>
+    <button class="suite-item" data-view="plugins" type="button"><span class="suite-mark plugins-mark"><img src="icons/creator-plugins.png" alt=""></span><span class="suite-item-copy"><strong>Creator Plugins</strong><small>Retirement notice</small></span></button>
+  </nav>
+  </div>
+  <header class="app-header">
+    <div class="title-block"><h1 id="page-title" class="brand-name"><span>CREATOR</span> <strong>HUB</strong></h1><p id="mode-description">Unity tools. One place.</p></div>
+    <span id="platform-status" class="preview-status">Desktop</span>
+  </header>
+  <main>
+    <div id="inventory-error" class="inventory-error hidden" role="alert"><p id="inventory-error-message"></p><button id="retry-inventory" class="text-button" type="button"><span class="icon icon-refresh" aria-hidden="true"></span>Retry app discovery</button></div>
+    <div id="unified-home-updater" class="hidden"><details id="update-settings"><summary>Update settings</summary></details></div>
+    <nav id="hub-pages" class="hub-pages" aria-label="Hub pages">
+      <h2 id="projects-home-title" hidden>Projects</h2>
+      <button id="hub-tab-apps" class="text-button current" data-view="hub" type="button" aria-current="page" aria-controls="view-hub">Apps</button>
+      <button id="hub-tab-projects" class="text-button" data-view="projects" type="button" aria-controls="view-projects">Projects</button>
+      <button id="check-updates" class="text-button hub-page-action" type="button"><span class="icon icon-refresh" aria-hidden="true"></span>Check for updates</button>
+      <div class="project-actions hub-page-action hidden"><button id="refresh-projects" class="icon-button" type="button" title="Refresh projects" aria-label="Refresh projects"><span class="icon icon-refresh" aria-hidden="true"></span></button><button id="add-project" class="text-button" type="button"><span class="icon icon-folder" aria-hidden="true"></span>Add project</button><button class="text-button" data-view="setup" type="button">New project</button></div>
+    </nav>
+    <section id="view-hub" aria-labelledby="hub-tab-apps">
+      <div class="app-list">
+        <div class="app-entry" id="entry-mcp">
+        <button class="app-row" type="button" data-view="mcp" aria-label="View Creator Works MCP">
+          <span class="suite-mark"><img src="creator-works-logo.png" alt=""><span class="suite-letter">M</span></span>
+          <span class="app-row-copy"><strong>Creator Works MCP</strong><small>Connect AI assistants to Unity with scene, prefab, component and asset tools.</small></span>
+          <span id="status-mcp" class="row-status">Checking</span><span class="icon icon-arrow" aria-hidden="true"></span>
+        </button>
+        <button id="update-mcp" class="primary-button row-update hidden" type="button" aria-label="Update Creator Works MCP" aria-describedby="update-reason-mcp"><span class="icon icon-download" aria-hidden="true"></span><span>Update app</span></button>
+        <p id="update-reason-mcp" class="row-update-reason hidden" role="status"></p>
+        <button id="disconnect-mcp-row" class="runtime-button row-runtime hidden" type="button"><span class="icon icon-disconnect" aria-hidden="true"></span>Disconnect MCP only</button>
+        </div>
+        <div class="app-entry" id="entry-setup">
+        <button class="app-row" type="button" data-view="setup" aria-label="View Creator Project Setup">
+          <span class="suite-mark"><img src="creator-works-logo.png" alt=""><span class="suite-letter">P</span></span>
+          <span class="app-row-copy"><strong>Creator Project Setup</strong><small>Install Unity modules and create or validate Creator SDK projects.</small></span>
+          <span id="status-setup" class="row-status">Checking</span><span class="icon icon-arrow" aria-hidden="true"></span>
+        </button>
+        <button id="update-setup" class="primary-button row-update hidden" type="button" aria-label="Update Creator Project Setup" aria-describedby="update-reason-setup"><span class="icon icon-download" aria-hidden="true"></span><span>Update app</span></button>
+        <p id="update-reason-setup" class="row-update-reason hidden" role="status"></p>
+        </div>
+        <div class="app-row unavailable"><span class="suite-mark converter-mark"><img src="sidequest-mark-white.svg" alt=""><span class="suite-letter">C</span></span><span class="app-row-copy"><strong>Creator Converter</strong><small>SideQuest / Built-in rendering to Universal Render Pipeline.</small></span><span class="row-status">Coming soon</span></div>
+        <button class="app-row" type="button" data-view="plugins" aria-label="View Creator Plugins"><span class="suite-mark plugins-mark"><img src="icons/creator-plugins.png" alt=""></span><span class="app-row-copy"><strong>Creator Plugins</strong><small>Retirement notice. Existing project assets are unchanged.</small></span><span class="row-status" data-plugins-status>Retired</span><span class="icon icon-arrow" aria-hidden="true"></span></button>
+      </div>
+      <div class="update-preferences"><label><input id="preview-channel" type="checkbox" checked> Include prereleases</label><label><input id="auto-download" type="checkbox" checked> Download verified updates automatically</label><label><input id="restore-hosted-views" type="checkbox" checked> Reopen Hub app views after updating</label></div>
+      <p id="preferences-status" class="error" role="status" hidden></p>
+      <section class="hub-update" aria-labelledby="hub-update-title">
+        <div class="page-heading"><h2 id="hub-update-title" tabindex="-1">Creator Hub update</h2><button id="hub-update-button" class="primary-button" type="button" disabled><span class="icon icon-download" aria-hidden="true"></span>Update Hub</button></div>
+        <p id="hub-update-status" role="status">Checking Hub...</p>
+        <p id="hub-update-warning" class="secondary hidden"></p>
+      </section>
+      <p id="catalog-status" class="catalog-status" role="status">Checking installed apps...</p>
+    </section>
+    <section id="view-projects" class="hidden" aria-labelledby="hub-tab-projects">
+      <div class="project-filters"><input id="project-search" type="search" aria-label="Search projects" placeholder="Search projects"><select id="project-sdk" aria-label="Filter by SDK"><option value="sdk">Creator SDK + Banter</option><option value="creator">Creator SDK / Altspace</option><option value="banter">Banter SDK</option><option value="all">All known projects</option></select><select id="project-sort" aria-label="Sort projects"><option value="modified">Recently modified</option><option value="name">Name A-Z</option></select></div>
+      <p id="project-status" class="catalog-status" role="status"></p>
+      <p id="project-warnings" class="catalog-status"></p>
+      <div id="project-list" class="project-list"></div>
+    </section>
+    <section id="view-builtin" class="builtin-opening hidden" aria-labelledby="builtin-title">
+      <button class="text-button" type="button" data-view="hub"><span class="icon icon-back" aria-hidden="true"></span>All apps</button>
+      <h2 id="builtin-title"></h2>
+      <div role="status"><p id="builtin-status"></p><p id="builtin-detail"></p></div>
+      <button id="builtin-open" class="primary-button hidden" type="button"><span class="icon icon-refresh" aria-hidden="true"></span><span>Retry opening</span></button>
+    </section>
+    <section id="view-detail" class="hidden" aria-labelledby="tool-title">
+      <div class="page-heading"><button class="text-button" type="button" data-view="hub"><span class="icon icon-back" aria-hidden="true"></span>All apps</button><span>Standalone app</span></div>
+      <div class="tool-heading"><span class="suite-mark tool-mark"><img src="creator-works-logo.png" alt=""><span id="tool-letter" class="suite-letter">M</span></span><div><h2 id="tool-title"></h2><p id="tool-summary"></p></div></div>
+      <dl id="tool-facts" class="tool-facts"></dl>
+      <div class="compatibility-note" role="status"><strong id="compatibility-status"></strong><p id="compatibility-detail"></p></div>
+      <div id="tool-state" class="tool-state"></div>
+      <section id="update-blockers" class="update-blockers hidden" aria-labelledby="update-blockers-title"><h3 id="update-blockers-title">Before updating</h3><p id="update-blockers-help"></p><details id="update-blockers-details"><summary>Show running connections and apps</summary><ul id="update-blockers-list"></ul></details><p id="update-blockers-status" role="status"></p><button id="disconnect-mcp-detail" class="runtime-button hidden" type="button"><span class="icon icon-disconnect" aria-hidden="true"></span>Disconnect MCP only</button><button id="recheck-app" class="text-button" type="button"><span class="icon icon-refresh" aria-hidden="true"></span>Check again</button></section>
+      <div id="detected-copies"></div>
+      <button id="host-setup-button" class="primary-button hidden" type="button">Open hosted Setup preview</button>
+      <button id="host-mcp-button" class="primary-button hidden" type="button">Open hosted MCP preview</button>
+      <div class="tool-actions"><button id="release-button" class="primary-button" type="button" disabled><span class="icon icon-download" aria-hidden="true"></span><span id="primary-label">Checking</span></button><button id="download-button" class="text-button" type="button" disabled><span class="icon icon-download" aria-hidden="true"></span>Download only</button><button id="open-button" class="text-button hidden" type="button">Open app</button><button id="adopt-button" class="text-button" type="button">Use existing app</button><button id="source-button" class="text-button" type="button">Source on GitHub <span class="icon icon-external" aria-hidden="true"></span></button></div>
+      <div id="install-options" class="update-preferences"><label><input id="reopen-app" type="checkbox" checked> Open after installation</label><label><input id="close-running" type="checkbox"> Allow compatible idle app to close for update</label></div>
+    </section>
+    <section id="view-hosted" class="hidden" aria-label="Hosted Creator app" inert>
+      <div class="hosted-toolbar"><span id="hosted-status" role="status">Opening app</span><button id="hosted-stop" class="text-button" type="button">Close view</button></div>
+      <div id="hosted-content"></div>
+    </section>
+    <section id="view-native-features" hidden inert aria-label="Creator tools"></section>
+    <div id="action-error" class="result hidden" role="alert"></div>
+    <div id="hosted-restore" class="result hidden" role="status"><p id="hosted-restore-message"></p><button id="retry-hosted-restore" class="secondary-button hidden" type="button">Retry reopening apps</button></div>
+    <div id="operation-progress" class="operation-progress hidden" role="status"><div><strong id="progress-message"></strong><button id="cancel-download" class="text-button hidden" type="button">Cancel download</button></div><progress id="download-progress" max="1"></progress><span id="progress-bytes"></span></div>
+    <section id="view-plugins" class="hidden" aria-labelledby="plugins-title"></section>
+  </main>
+  <footer><span>Creator Hub <span class="footer-version">Preview</span></span><div class="footer-links"><button id="convergence-reopen" class="text-button" type="button" hidden>Review migration</button><button class="text-button" type="button" data-resource="hub-plan">Roadmap <span class="icon icon-external" aria-hidden="true"></span></button><button class="text-button" type="button" data-resource="github">GitHub <span class="icon icon-external" aria-hidden="true"></span></button><button class="text-button" type="button" data-resource="sdk-source">Creator SDK source <span class="icon icon-external" aria-hidden="true"></span></button></div></footer>
+  <button id="context-help-open" class="context-help-open" type="button" aria-haspopup="dialog" aria-controls="context-help-dialog" title="Help and troubleshooting">Help</button>
+  <dialog id="context-help-dialog" class="context-help-dialog" aria-labelledby="context-help-title">
+    <div class="context-help-heading"><div><h2 id="context-help-title">Creator Hub help</h2><p>What each app does and where to start.</p></div><button id="context-help-close" class="icon-button" type="button" aria-label="Close help" title="Close help">×</button></div>
+    <div class="context-help-content" id="hub-help-content">
+      <details open><summary>Which app do I need?</summary><p><strong>Creator Hub</strong> brings your Creator tools and Unity projects together. <strong>Project Setup</strong> creates and validates a Creator SDK project. <strong>Creator Works MCP</strong> connects a supported AI client to Unity tools. Setup is not the MCP. The Creator Plugins catalogue is retiring from the apps; its page contains the retirement notice.</p></details>
+      <details><summary>An app says Not installed</summary><p>Choose its download/install action in Apps. Hub checks the release and verifies the download before asking you to approve installation. Unity Editor licensing and sign-in remain with Unity.</p></details>
+      <details><summary>My AI cannot see MCP tools</summary><p>Open Creator Works MCP and use its Connection guide when available, or check the existing client setup controls. Claude Code and Claude Desktop are separate clients; the Claude website is not Claude Desktop. Compatible MCP builds offer Desktop configuration on Windows and macOS, not Linux. Fully quit and reopen a changed client, then ask your AI to call get_bridge_status. Saved settings alone do not prove a live connection. The AI model and billing come from your chosen client/provider, not MCP.</p></details>
+      <details><summary>What happened to Creator Plugins?</summary><p>The in-app catalogue and new package imports have been retired. Existing imported assets, project files and import receipts are not removed. Already-installed Unity catalogue windows are not silently rewritten by Hub.</p></details>
+      <details><summary>AI token or usage costs are high</summary><p>Charges depend on your AI provider, client and model. Check provider billing and usage limits, reduce unnecessary context, disable fast/high-cost modes where available, and try a less expensive model for routine MCP tasks. MCP cannot set or cap your provider’s charges.</p></details>
+      <details><summary>Something failed</summary><p>Read the message shown in the app first. Retry discovery for app status, or refresh the relevant list. For project operations, close the project in Unity when asked and keep a separate backup. Include the app version and its local log when reporting a problem; remove private project paths or credentials first.</p></details>
+    </div>
+    <div class="context-help-content" id="feature-help-content" hidden></div>
+  </dialog>
+  <script src="native.js"></script>
+  <script src="hosted.js"></script>
+  <script src="projects.js"></script>
+  <script src="community.js"></script>
+  <dialog id="usage-terms-dialog" class="usage-terms-dialog" aria-labelledby="usage-terms-title">
+    <div id="usage-terms-form">
+      <h2 id="usage-terms-title">Terms of use and risk acknowledgement</h2>
+      <p class="terms-version">Creator Suite Terms v2026-09-28. This acknowledgement is saved on this device.</p>
+      <div class="usage-terms-copy" tabindex="0">
+        <p>Creator Hub and its companion tools are provided “as is” and “as available”, without warranties, to the maximum extent permitted by applicable law.</p>
+        <p>The tools can change Unity projects, files, settings, packages and installed components. Errors or incompatibilities may cause project corruption, data loss, failed setup or builds, or other damage. Keep independent backups and review changes before relying on them.</p>
+        <p>Basic Unity knowledge is recommended. Support is not guaranteed.</p>
+        <p>AI-generated output and tool actions can be unpredictable. Token use and charges depend on your AI provider, client, model, prompts and settings. The apps' developers do not control, estimate or cap that usage. Check your provider's billing and usage limits.</p>
+        <p>To the maximum extent permitted by law, you assume the risks of using the software and release its authors, maintainers and contributors from claims arising from that use. They are not liable for project corruption, data loss, setup or build problems, indirect or consequential losses, or AI-provider usage and charges.</p>
+        <p>Nothing in this notice excludes or limits rights or liability that cannot legally be excluded or limited.</p>
+      </div>
+      <label class="usage-terms-accept"><input id="usage-terms-checkbox" type="checkbox"><span>I have read and agree to these terms, including the risk assumption and liability limitations above.</span></label>
+      <p id="usage-terms-error" class="usage-terms-error" role="alert" hidden></p>
+      <button id="usage-terms-continue" class="primary-button" type="button" disabled>Accept and continue</button>
+    </div>
+  </dialog>
+  <script src="usage-terms.js"></script>
+  <dialog id="convergence-dialog" class="convergence-dialog" aria-labelledby="convergence-title">
+    <h2 id="convergence-title">Move to unified Creator Hub</h2>
+    <p id="convergence-summary">Your MCP and Project Setup settings can be used by Hub. Unity projects stay where they are.</p>
+    <ul id="convergence-details"></ul>
+    <p id="convergence-error" role="alert" hidden></p>
+    <div class="convergence-actions">
+      <button id="convergence-later" class="text-button" type="button">Keep existing apps for now</button>
+      <button id="convergence-refresh" class="text-button" type="button" hidden>Check again</button>
+      <button id="convergence-prepare" class="primary-button" type="button">Back up and continue</button>
+      <button id="convergence-connections" class="primary-button" type="button" hidden>Move existing connections</button>
+      <button id="convergence-retire" class="primary-button" type="button" hidden>Finish migration</button>
+    </div>
+  </dialog>
+  <script src="convergence.js"></script>
+  <script src="help.js"></script>
+  <script src="feature-pages.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

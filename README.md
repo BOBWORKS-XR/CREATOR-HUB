@@ -1,7 +1,35 @@
 # Creator Hub
 
 **Unity tools in one window.** Open Creator SDK / Altspace and Banter projects,
-manage Creator Works MCP and Creator Project Setup, and browse community plugins.
+use Creator Works MCP and create or inspect projects with Project Setup.
+
+**Platform scope:** unified 0.1.14 targets Windows x64. Linux/Flatpak remain
+unpublished development work; macOS support is suspended. Existing Mac/Linux
+downloads remain historical builds, not supported unified updates.
+
+## Creator Hub 0.1.14
+
+Project Setup and MCP are included in Hub, with one installer and update stream.
+Their source histories are retained under `modules/project-setup` and
+`modules/mcp`. Future development lives in this repository.
+
+[Windows installer and release](https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/tag/v0.1.14)
+and [exact package checks and publication status](docs/RELEASE-0.1.14.md).
+Existing Hub users can check for updates. Standalone users install Hub and follow
+the first-launch migration review. Recognized MCP 2.7.7 / Setup 0.3.7 installations
+get verified backups, reviewed AI-client routing and separately approved removal
+of the old app interfaces. Settings and retained MCP runtimes stay available;
+Unity projects are not moved. Unknown/custom/conflicting copies are not silently
+overwritten or removed.
+
+The standalone repositories, historical downloads and old signed updater files
+remain available. Their update feeds are not silently redirected to Hub.
+Creator Plugins is retiring on October 20, 2026. The app shows a temporary notice,
+not an active catalogue; until that date visit [creatorplugins.store](https://creatorplugins.store/).
+
+See [the unified product and migration requirements](docs/UNIFIED-CREATOR-HUB.md).
+The following sections are retained release history, not current unified-product
+instructions or the latest download.
 
 ## Windows 0.1.7
 
@@ -105,14 +133,20 @@ Tauri / Rust with a plain JavaScript frontend and Playwright tests, not Electron
 
 ```powershell
 npm ci
+npm --prefix modules/mcp ci
+npm --prefix modules/project-setup ci
+npm run check:sources
+npm run test:modules
 cargo test --release --manifest-path src-tauri/Cargo.toml
 npm run test:ui
 npm run dev
 ```
 
-Hosted tests need `CREATOR_SETUP_SOURCE` and `CREATOR_MCP_SOURCE` pointing
-to the companion frontend folders. Release builds use reviewed exact companion
-hashes, never an arbitrary version label.
+Hosted browser tests use the module frontend folders by default; optional
+`CREATOR_SETUP_SOURCE` and `CREATOR_MCP_SOURCE` overrides remain available for
+explicit legacy fixtures. Existing legacy-compatible packages use reviewed exact
+companion hashes, never an arbitrary version label. Unified packaging and migration
+are separate acceptance work and are release-blocked on this branch.
 
 [MIT licence](LICENSE) | [Third-party notices](THIRD_PARTY_NOTICES.md) |
 [Creator SDK source](https://greenfield-registry.sdq.st/-/web/detail/com.sidequest.creator-sdk)

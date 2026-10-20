@@ -1,0 +1,1085 @@
+import Foundation
+
+struct Refusal: Error, CustomStringConvertible {
+    let description: String
+    let diagnostic: [String: Any]?
+    let closeDialog: [String: Any]?
+    init(_ message: String, diagnostic: [String: Any]? = nil, closeDialog: [String: Any]? = nil) {
+        description = message; self.diagnostic = diagnostic; self.closeDialog = closeDialog
+    }
+}
+
+struct ImageIdentity: Codable, Equatable {
+    let sha256: String
+    let device: String
+    let inode: String
+    let size: UInt64
+    let modifiedSeconds: Int64
+    let modifiedNanoseconds: Int64
+    let uid: UInt32
+}
+
+struct ProcessIdentity: Codable, Equatable {
+    let pid: Int32
+    let startSeconds: UInt64
+    let startMicroseconds: UInt64
+    let executablePath: String
+    let image: ImageIdentity
+    let bundlePath: String
+    let bundleIdentifier: String
+    let infoPlist: ImageIdentity
+}
+
+struct Bounds: Codable, Equatable {
+    let x: Double
+    let y: Double
+    let width: Double
+    let height: Double
+}
+
+struct WindowIdentity: Codable, Equatable {
+    let id: UInt32
+    let pid: Int32
+    let bounds: Bounds
+}
+
+struct Owner: Codable {
+    let process: ProcessIdentity
+    let window: WindowIdentity
+}
+
+struct Control: Codable, Equatable {
+    let path: String
+    let role: String
+    let title: String
+    let pid: Int32
+    let windowID: UInt32
+    let dialog: String?
+    let enabled: Bool?
+    let hidden: Bool
+    let showing: Bool
+    let pressSupported: Bool
+}
+
+enum RootDialogState: String, Codable { case present, absent, unknown }
+let rootCloseDialogScope = "root-standard-window-first-order-native-dialogs"
+
+struct RootCloseChild: Codable {
+    let pid: Int32
+    let role: String?
+    let subrole: String?
+    let subroleVerified: Bool
+    let parentMatchesRoot: Bool
+    let windowMatchesRoot: Bool
+}
+
+struct RootCloseDialogInputs: Codable {
+    let windowCount: Int?
+    let rootSubrole: String?
+    let rootModal: Bool?
+    let children: [RootCloseChild]?
+    let withinLimits: Bool
+}
+
+struct RootCloseDialogEvidence: Codable, Equatable {
+    let scope: String
+    let state: RootDialogState
+    let windowCount: Int?
+    let childCount: Int?
+}
+
+func rootCloseDialogEvidence(_ input: RootCloseDialogInputs, _ pid: Int32) -> RootCloseDialogEvidence {
+    var state = RootDialogState.unknown
+    if input.rootModal == true || input.rootSubrole == "AXDialog" { state = .present }
+    else if pid > 0, input.withinLimits, input.windowCount == 1, input.rootSubrole == "AXStandardWindow",
+            input.rootModal == false, let children = input.children, children.count < 512 {
+        state = .absent
+        for child in children {
+            guard child.pid == pid, child.parentMatchesRoot, child.windowMatchesRoot,
+                  let role = child.role, role.utf8.count <= 128, child.subroleVerified,
+                  (child.subrole?.utf8.count ?? 0) <= 128 else { state = .unknown; break }
+            if role == "AXSheet" || child.subrole == "AXDialog" { state = .present; break }
+            // This finite gate supports only the ordinary Root window's native
+            // content containers and chrome. It is not a descendant/HTML audit.
+            guard ["AXGroup", "AXButton", "AXStaticText"].contains(role) else { state = .unknown; break }
+            if let subrole = child.subrole,
+               !["AXContentArea", "AXCloseButton", "AXMinimizeButton", "AXZoomButton", "AXFullScreenButton"].contains(subrole) {
+                state = .unknown; break
+            }
+        }
+    }
+    return RootCloseDialogEvidence(scope: rootCloseDialogScope, state: state, windowCount: input.windowCount,
+                                   childCount: input.children?.count)
+}
+
+func requireRootCloseDialogs(_ evidence: RootCloseDialogEvidence) throws {
+    guard evidence.scope == rootCloseDialogScope, evidence.state == .absent, evidence.windowCount == 1,
+          let count = evidence.childCount, count >= 0, count < 512 else {
+        throw Refusal("normal-close-dialog-" + evidence.state.rawValue, closeDialog: (try? object(evidence)) as? [String: Any])
+    }
+}
+
+struct Observation: Codable {
+    let process: ProcessIdentity
+    let window: WindowIdentity?
+    let windowMissingVerified: Bool
+    let accessibilityTrusted: Bool
+    let active: Bool
+    let truncated: Bool
+    let hasDialog: Bool
+    let controls: [Control]
+    var closeDialog: RootCloseDialogEvidence? = nil
+}
+
+enum Action: String, Codable, Equatable {
+    case mcpAllow = "mcp-allow"
+    case mcpDecline = "mcp-decline"
+    case previewAllow = "mcp-preview-allow"
+    case previewDecline = "mcp-preview-decline"
+    case setupAllow = "setup-allow"
+    case setupDecline = "setup-decline"
+    case closeWindow = "close-window"
+
+    var labels: (String, String)? {
+        switch self {
+        case .mcpAllow, .mcpDecline: return ("Enable MCP controls", "Not now")
+        case .previewAllow, .previewDecline: return ("Open read-only preview", "Not now")
+        case .setupAllow, .setupDecline: return ("Open in Hub", "Not now")
+        case .closeWindow: return nil
+        }
+    }
+    var selectsDecline: Bool {
+        [.mcpDecline, .previewDecline, .setupDecline].contains(self)
+    }
+}
+
+func hostedScope(_ env: [String: String], macOS: Bool) -> Bool {
+    macOS && env["GITHUB_ACTIONS"] == "true"
+        && env["RUNNER_ENVIRONMENT"] == "github-hosted"
+        && env["RUNNER_OS"] == "macOS"
+        && env["GITHUB_REPOSITORY"] == "BOBWORKS-XR/CREATOR-HUB"
+        && env["CREATOR_MACOS_OWNED_GUI_TEST"] == "1"
+}
+
+func validateIdentity(_ owner: Owner, _ observed: Observation, allowGone: Bool = false) throws {
+    guard observed.accessibilityTrusted else { throw Refusal("accessibility-denied") }
+    guard observed.process == owner.process else { throw Refusal("process-identity-drift") }
+    guard !observed.truncated else { throw Refusal("ax-incomplete") }
+    if let window = observed.window {
+        guard window == owner.window, window.pid == owner.process.pid else {
+            throw Refusal("window-identity-drift")
+        }
+    } else if !allowGone || !observed.windowMissingVerified {
+        throw Refusal("window-unverified")
+    }
+}
+
+func selectControl(_ owner: Owner, _ observed: Observation, _ action: Action) throws -> Control {
+    try validateIdentity(owner, observed)
+    guard observed.active else { throw Refusal("owned-app-not-active") }
+    let chosen: Control
+    if let labels = action.labels {
+        guard observed.hasDialog else { throw Refusal("native-consent-dialog-missing") }
+        let approved = observed.controls.filter { $0.title == labels.0 }
+        let declined = observed.controls.filter { $0.title == labels.1 }
+        guard approved.count == 1, declined.count == 1,
+              let dialog = approved[0].dialog, !dialog.isEmpty,
+              declined[0].dialog == dialog else { throw Refusal("consent-controls-ambiguous") }
+        for control in [approved[0], declined[0]] {
+            try validateControl(owner, control)
+        }
+        chosen = action.selectsDecline ? declined[0] : approved[0]
+    } else {
+        if let evidence = observed.closeDialog {
+            guard owner.process.bundleIdentifier == "com.creatorworks.hub" else { throw Refusal("normal-close-root-scope-required") }
+            try requireRootCloseDialogs(evidence)
+        }
+        let buttons = observed.controls.filter { $0.path == "close-button" }
+        guard buttons.count == 1, !observed.hasDialog else {
+            throw Refusal("normal-close-unverified-or-dialog-present")
+        }
+        chosen = buttons[0]
+        try validateControl(owner, chosen)
+    }
+    return chosen
+}
+
+func validateControl(_ owner: Owner, _ control: Control) throws {
+    guard control.role == "AXButton", control.pid == owner.process.pid,
+          control.windowID == owner.window.id, control.enabled == true,
+          !control.hidden, control.showing, control.pressSupported else {
+        throw Refusal("control-unready-or-foreign")
+    }
+}
+
+func validateAction(_ owner: Owner, _ before: Observation, _ immediate: Observation, _ action: Action) throws -> Control {
+    let first = try selectControl(owner, before, action)
+    let second = try selectControl(owner, immediate, action)
+    guard first == second else { throw Refusal("control-drift") }
+    return second
+}
+
+struct KernelObservation: Codable {
+    let bytes: Int32
+    let error: Int32
+    let pid: UInt32
+    let uid: UInt32
+    let realUID: UInt32
+    let startSeconds: UInt64
+    let startMicroseconds: UInt64
+}
+
+func expectedKernelPresent(_ sample: KernelObservation, _ expected: ProcessIdentity,
+                           bytes: Int32, missingErrno: Int32) throws -> Bool {
+    guard expected.pid > 0, expected.startSeconds > 0, expected.startMicroseconds < 1000000,
+          bytes > 0, missingErrno > 0 else { throw Refusal("expected-kernel-invalid") }
+    if sample.bytes == 0 && sample.error == missingErrno { return false }
+    guard sample.bytes == bytes, sample.error == 0 else { throw Refusal("expected-kernel-unavailable") }
+    guard sample.pid == UInt32(expected.pid), sample.uid == expected.image.uid,
+          sample.realUID == expected.image.uid, sample.startSeconds == expected.startSeconds,
+          sample.startMicroseconds == expected.startMicroseconds else { throw Refusal("expected-kernel-identity-drift") }
+    return true
+}
+
+func validateExpectedFinalKernel(_ sample: KernelObservation, _ expected: ProcessIdentity,
+                                 bytes: Int32, missingErrno: Int32) throws {
+    guard try expectedKernelPresent(sample, expected, bytes: bytes, missingErrno: missingErrno) else {
+        throw Refusal("expected-process-absent")
+    }
+}
+
+func closeTerminationTransition(_ reason: String?) -> Bool {
+    guard let reason = reason else { return true }
+    return ["expected-process-absent", "native-app-not-ready", "native-bundle-id-unverified",
+            "native-bundle-path-unverified", "native-executable-path-unverified"].contains(reason)
+}
+
+struct TerminationInputs: Codable {
+    let actionAttempted: Bool
+    let axResult: Int32
+    let beforeKernel: KernelObservation
+    let firstKernel: KernelObservation
+    let lastKernel: KernelObservation
+    let liveInspectionFailure: String?
+    let rootPathVerified: Bool
+    let imageBindingsVerified: Bool
+    let windowMissingVerified: Bool
+}
+
+struct NativeTermination: Codable {
+    let expectedProcess: ProcessIdentity
+    let expectedWindow: WindowIdentity
+    let kernelMissingVerified: Bool
+    let windowMissingVerified: Bool
+    let imageBindingsVerified: Bool
+    let firstKernelBytes: Int32
+    let firstKernelErrno: Int32
+    let lastKernelBytes: Int32
+    let lastKernelErrno: Int32
+}
+
+func validateNativeTermination(_ owner: Owner, _ before: Observation, _ immediate: Observation,
+                               _ action: Action, _ input: TerminationInputs, bytes: Int32, missingErrno: Int32) throws -> NativeTermination {
+    guard action == .closeWindow, input.actionAttempted, input.axResult == 0,
+          owner.process.bundleIdentifier == "com.creatorworks.hub" else { throw Refusal("termination-successful-root-close-required") }
+    _ = try validateAction(owner, before, immediate, action)
+    guard try expectedKernelPresent(input.beforeKernel, owner.process, bytes: bytes, missingErrno: missingErrno) else {
+        throw Refusal("termination-process-missing-before-action")
+    }
+    guard closeTerminationTransition(input.liveInspectionFailure) else { throw Refusal("termination-transition-unverified") }
+    guard try !expectedKernelPresent(input.firstKernel, owner.process, bytes: bytes, missingErrno: missingErrno),
+          try !expectedKernelPresent(input.lastKernel, owner.process, bytes: bytes, missingErrno: missingErrno) else {
+        throw Refusal("termination-kernel-not-missing")
+    }
+    guard input.rootPathVerified, input.imageBindingsVerified else { throw Refusal("termination-image-bindings-unverified") }
+    guard input.windowMissingVerified else { throw Refusal("termination-window-not-missing") }
+    return NativeTermination(expectedProcess: owner.process, expectedWindow: owner.window, kernelMissingVerified: true,
+                             windowMissingVerified: true, imageBindingsVerified: true,
+                             firstKernelBytes: input.firstKernel.bytes, firstKernelErrno: input.firstKernel.error,
+                             lastKernelBytes: input.lastKernel.bytes, lastKernelErrno: input.lastKernel.error)
+}
+
+func emit(_ value: Any) {
+    do {
+        var receipt = value as? [String: Any] ?? ["error": "evidence-serialization-failed"]
+        receipt["releaseReady"] = false
+        receipt["nativeGuiAccepted"] = false
+        let data = try JSONSerialization.data(withJSONObject: receipt, options: [.sortedKeys])
+        print(String(decoding: data, as: UTF8.self))
+    } catch { print("{\"error\":\"evidence-serialization-failed\",\"nativeGuiAccepted\":false,\"releaseReady\":false}") }
+}
+
+func object<T: Encodable>(_ value: T) throws -> Any {
+    try JSONSerialization.jsonObject(with: JSONEncoder().encode(value))
+}
+
+#if NATIVE_MACOS_WINDOW_FIXTURES
+// This separately compiled binary has no native frameworks or action implementation.
+struct Fixture: Decodable {
+    let owner: Owner
+    let before: Observation
+    let immediate: Observation
+    let after: Observation?
+    let action: Action
+    let termination: TerminationInputs?
+    let finalKernel: KernelObservation?
+    let rootCloseDialogs: RootCloseDialogInputs?
+}
+do {
+    let data = try FileHandle.standardInput.read(upToCount: 65537) ?? Data()
+    guard data.count <= 65536 else { throw Refusal("fixture-too-large") }
+    let fixture = try JSONDecoder().decode(Fixture.self, from: data)
+    _ = try validateAction(fixture.owner, fixture.before, fixture.immediate, fixture.action)
+    var closeEvidence: RootCloseDialogEvidence?
+    if let input = fixture.rootCloseDialogs {
+        guard fixture.action == .closeWindow, fixture.owner.process.bundleIdentifier == "com.creatorworks.hub" else {
+            throw Refusal("normal-close-root-scope-required")
+        }
+        let evidence = rootCloseDialogEvidence(input, fixture.owner.process.pid)
+        try requireRootCloseDialogs(evidence)
+        closeEvidence = evidence
+    }
+    if let sample = fixture.finalKernel {
+        try validateExpectedFinalKernel(sample, fixture.owner.process, bytes: 136, missingErrno: 3)
+    }
+    if let input = fixture.termination {
+        guard fixture.after == nil else { throw Refusal("termination-must-not-forge-after") }
+        let termination = try validateNativeTermination(fixture.owner, fixture.before, fixture.immediate, fixture.action, input,
+                                                        bytes: 136, missingErrno: 3)
+        var receipt: [String: Any] = ["fixtureAccepted": true, "nativeActionsAvailable": false, "closeOutcome": "native-termination",
+              "postIdentityVerified": false, "postTerminationVerified": true, "termination": try object(termination)]
+        if let evidence = closeEvidence { receipt["closeDialog"] = try object(evidence) }
+        emit(receipt)
+    } else {
+        guard let after = fixture.after else { throw Refusal("fixture-after-required") }
+        try validateIdentity(fixture.owner, after, allowGone: true)
+        var receipt: [String: Any] = ["fixtureAccepted": true, "nativeActionsAvailable": false]
+        if let evidence = closeEvidence { receipt["closeDialog"] = try object(evidence) }
+        emit(receipt)
+    }
+} catch {
+    var failure: [String: Any] = ["error": String(describing: error), "nativeActionsAvailable": false]
+    if let evidence = (error as? Refusal)?.closeDialog { failure["closeDialog"] = evidence }
+    emit(failure); exit(1)
+}
+#elseif os(macOS)
+import AppKit
+import ApplicationServices
+import CoreGraphics
+import CryptoKit
+import Darwin
+
+let allowedBundles = ["com.creatorworks.hub", "com.creatorworks.unitymcp.preview", "com.creatorworks.projectsetup"]
+let consentLabels = Set(["Enable MCP controls", "Open read-only preview", "Open in Hub", "Not now"])
+let maxImageBytes: UInt64 = 128 * 1024 * 1024
+// XNU: 4 * MAXPATHLEN, MAXPATHLEN = PATH_MAX = 1024; matches host_parent_macos.rs.
+let processPathBufferBytes = 4096
+
+func admission() throws {
+    guard hostedScope(ProcessInfo.processInfo.environment, macOS: true) else { throw Refusal("hosted-ci-opt-in-required") }
+    #if arch(arm64)
+    guard ProcessInfo.processInfo.environment["RUNNER_ARCH"] == "ARM64" else { throw Refusal("runner-architecture-mismatch") }
+    #elseif arch(x86_64)
+    guard ProcessInfo.processInfo.environment["RUNNER_ARCH"] == "X64" else { throw Refusal("runner-architecture-mismatch") }
+    #else
+    throw Refusal("unsupported-macos-architecture")
+    #endif
+}
+
+func trustedAX() throws {
+    guard AXIsProcessTrusted() else { throw Refusal("accessibility-denied") }
+}
+
+func canonical(_ path: String) throws -> String {
+    guard path.hasPrefix("/"), path.utf8.count <= 2048 else { throw Refusal("path-unverified") }
+    let url = URL(fileURLWithPath: path)
+    guard url.standardizedFileURL.path == path, url.resolvingSymlinksInPath().path == path else {
+        throw Refusal("linked-or-noncanonical-path")
+    }
+    return path
+}
+
+func allowedApp(_ app: String, _ executable: String, _ bundle: String) throws {
+    _ = try canonical(app); _ = try canonical(executable)
+    guard app.hasSuffix(".app"), allowedBundles.contains(bundle), executable.hasPrefix(app + "/Contents/") else {
+        throw Refusal("app-scope-unverified")
+    }
+    let env = ProcessInfo.processInfo.environment
+    guard let temporary = env["RUNNER_TEMP"] else { throw Refusal("runner-temp-unavailable") }
+    let roots = [URL(fileURLWithPath: temporary).resolvingSymlinksInPath().path,
+                 FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Applications").resolvingSymlinksInPath().path]
+    guard roots.contains(where: { app.hasPrefix($0 + "/") }) else { throw Refusal("app-outside-disposable-scope") }
+}
+
+func image(_ path: String, limit: UInt64 = maxImageBytes) throws -> ImageIdentity {
+    _ = try canonical(path)
+    let fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK)
+    guard fd >= 0 else { throw Refusal("image-open-failed") }
+    defer { Darwin.close(fd) }
+    var before = stat()
+    guard fstat(fd, &before) == 0, before.st_mode & S_IFMT == S_IFREG,
+          before.st_uid == getuid(), before.st_nlink == 1, before.st_size > 0,
+          UInt64(before.st_size) <= limit else { throw Refusal("image-ownership-or-size-unverified") }
+    var hasher = SHA256(), total: UInt64 = 0
+    var bytes = [UInt8](repeating: 0, count: 65536)
+    while true {
+        let count = bytes.withUnsafeMutableBytes { Darwin.read(fd, $0.baseAddress, $0.count) }
+        guard count >= 0 else { throw Refusal("image-read-failed") }
+        if count == 0 { break }
+        total += UInt64(count)
+        guard total <= limit else { throw Refusal("image-grew") }
+        hasher.update(data: Data(bytes.prefix(count)))
+    }
+    var after = stat(), named = stat()
+    guard fstat(fd, &after) == 0, lstat(path, &named) == 0,
+          before.st_dev == after.st_dev, before.st_ino == after.st_ino,
+          before.st_size == after.st_size, total == UInt64(after.st_size),
+          before.st_uid == after.st_uid, before.st_nlink == after.st_nlink, before.st_mode == after.st_mode,
+          before.st_mtimespec.tv_sec == after.st_mtimespec.tv_sec,
+          before.st_mtimespec.tv_nsec == after.st_mtimespec.tv_nsec,
+          named.st_dev == after.st_dev, named.st_ino == after.st_ino,
+          named.st_mode & S_IFMT == S_IFREG else { throw Refusal("image-drift") }
+    return ImageIdentity(sha256: hasher.finalize().map { String(format: "%02x", $0) }.joined(),
+                         device: String(before.st_dev), inode: String(before.st_ino), size: total,
+                         modifiedSeconds: Int64(before.st_mtimespec.tv_sec),
+                         modifiedNanoseconds: Int64(before.st_mtimespec.tv_nsec), uid: before.st_uid)
+}
+
+func kernelObservation(_ pid: Int32) -> KernelObservation {
+    var info = proc_bsdinfo()
+    errno = 0
+    let bytes = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, Int32(MemoryLayout<proc_bsdinfo>.size)), code = errno
+    return KernelObservation(bytes: bytes, error: code, pid: info.pbi_pid, uid: info.pbi_uid, realUID: info.pbi_ruid,
+                             startSeconds: info.pbi_start_tvsec, startMicroseconds: info.pbi_start_tvusec)
+}
+
+func process(_ pid: Int32, appPath: String, executable: String, expectedHash: String, bundle: String,
+             expectedKernel: ProcessIdentity? = nil) throws -> ProcessIdentity {
+    try admission(); try trustedAX(); try allowedApp(appPath, executable, bundle)
+    guard pid > 0, pid != getpid(), expectedHash.range(of: "^[a-f0-9]{64}$", options: .regularExpression) != nil else {
+        throw Refusal("invalid-process-request")
+    }
+    var info = proc_bsdinfo()
+    errno = 0
+    let kernelBytes = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, Int32(MemoryLayout<proc_bsdinfo>.size)), kernelErrno = errno
+    if let expected = expectedKernel {
+        let sample = KernelObservation(bytes: kernelBytes, error: kernelErrno, pid: info.pbi_pid, uid: info.pbi_uid,
+                                       realUID: info.pbi_ruid, startSeconds: info.pbi_start_tvsec, startMicroseconds: info.pbi_start_tvusec)
+        guard try expectedKernelPresent(sample, expected, bytes: Int32(MemoryLayout<proc_bsdinfo>.size), missingErrno: ESRCH) else {
+            throw Refusal("expected-process-absent")
+        }
+    }
+    guard kernelBytes == Int32(MemoryLayout<proc_bsdinfo>.size),
+          info.pbi_pid == UInt32(pid), info.pbi_uid == getuid(), info.pbi_ruid == getuid(),
+          info.pbi_start_tvsec > 0, info.pbi_start_tvusec < 1000000 else {
+        throw Refusal("process-absent-or-foreign")
+    }
+    var path = [CChar](repeating: 0, count: processPathBufferBytes)
+    let length = path.withUnsafeMutableBytes { proc_pidpath(pid, $0.baseAddress, UInt32($0.count)) }
+    guard length > 0, Int(length) < path.count, path[Int(length)] == 0,
+          String(cString: path) == executable else { throw Refusal("kernel-executable-path-unverified") }
+    guard let app = NSRunningApplication(processIdentifier: pid), !app.isTerminated,
+          app.isFinishedLaunching else { throw Refusal("native-app-not-ready") }
+    guard app.bundleIdentifier == bundle else { throw Refusal("native-bundle-id-unverified") }
+    guard app.bundleURL?.resolvingSymlinksInPath().path == appPath else { throw Refusal("native-bundle-path-unverified") }
+    guard app.executableURL?.resolvingSymlinksInPath().path == executable else { throw Refusal("native-executable-path-unverified") }
+    let binary = try image(executable)
+    guard binary.sha256 == expectedHash else { throw Refusal("executable-hash-mismatch") }
+    let plist = try image(appPath + "/Contents/Info.plist", limit: 65536)
+    guard Bundle(path: appPath)?.bundleIdentifier == bundle else { throw Refusal("bundle-identity-drift") }
+    var rechecked = proc_bsdinfo()
+    errno = 0
+    let recheckedBytes = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &rechecked, Int32(MemoryLayout<proc_bsdinfo>.size)), recheckedErrno = errno
+    if let expected = expectedKernel {
+        let sample = KernelObservation(bytes: recheckedBytes, error: recheckedErrno, pid: rechecked.pbi_pid, uid: rechecked.pbi_uid,
+                                       realUID: rechecked.pbi_ruid, startSeconds: rechecked.pbi_start_tvsec, startMicroseconds: rechecked.pbi_start_tvusec)
+        try validateExpectedFinalKernel(sample, expected, bytes: Int32(MemoryLayout<proc_bsdinfo>.size), missingErrno: ESRCH)
+    }
+    guard recheckedBytes == Int32(MemoryLayout<proc_bsdinfo>.size),
+          rechecked.pbi_pid == info.pbi_pid, rechecked.pbi_uid == info.pbi_uid,
+          rechecked.pbi_ruid == info.pbi_ruid,
+          rechecked.pbi_start_tvsec == info.pbi_start_tvsec,
+          rechecked.pbi_start_tvusec == info.pbi_start_tvusec else { throw Refusal("process-start-drift") }
+    return ProcessIdentity(pid: pid, startSeconds: info.pbi_start_tvsec, startMicroseconds: info.pbi_start_tvusec,
+                           executablePath: executable, image: binary, bundlePath: appPath,
+                           bundleIdentifier: bundle, infoPlist: plist)
+}
+
+func process(_ expected: ProcessIdentity) throws -> ProcessIdentity {
+    try process(expected.pid, appPath: expected.bundlePath, executable: expected.executablePath,
+                expectedHash: expected.image.sha256, bundle: expected.bundleIdentifier, expectedKernel: expected)
+}
+
+func cgWindows(_ pid: Int32, id: UInt32? = nil) throws -> [WindowIdentity] {
+    let options: CGWindowListOption = id == nil ? [.optionOnScreenOnly, .excludeDesktopElements] : [.optionIncludingWindow, .excludeDesktopElements]
+    guard let rows = CGWindowListCopyWindowInfo(options, id ?? kCGNullWindowID) as? [[String: Any]], rows.count <= 2048 else {
+        throw Refusal("cg-window-inventory-unavailable")
+    }
+    var result = [WindowIdentity]()
+    for row in rows {
+        guard let number = row[kCGWindowNumber as String] as? NSNumber,
+              let owner = row[kCGWindowOwnerPID as String] as? NSNumber else { throw Refusal("cg-window-identity-unavailable") }
+        if let id = id, number.uint32Value == id, owner.int32Value != pid { throw Refusal("foreign-window") }
+        guard owner.int32Value == pid else { continue }
+        guard (row[kCGWindowLayer as String] as? NSNumber)?.intValue == 0,
+              (row[kCGWindowIsOnscreen as String] as? NSNumber)?.boolValue == true,
+              ((row[kCGWindowAlpha as String] as? NSNumber)?.doubleValue ?? 0) > 0,
+              let dictionary = row[kCGWindowBounds as String] as? [String: Any],
+              let rectangle = CGRect(dictionaryRepresentation: dictionary as CFDictionary),
+              rectangle.width > 0, rectangle.height > 0 else { throw Refusal("owned-window-not-showing") }
+        result.append(WindowIdentity(id: number.uint32Value, pid: pid,
+                                     bounds: Bounds(x: rectangle.minX, y: rectangle.minY, width: rectangle.width, height: rectangle.height)))
+    }
+    guard result.count <= 32 else { throw Refusal("too-many-owned-windows") }
+    return result
+}
+
+func attribute(_ element: AXUIElement, _ key: String) -> CFTypeRef? {
+    AXUIElementSetMessagingTimeout(element, 0.2)
+    var value: CFTypeRef?
+    guard AXUIElementCopyAttributeValue(element, key as CFString, &value) == .success else { return nil }
+    return value
+}
+
+func element(_ value: CFTypeRef?) throws -> AXUIElement {
+    guard let value = value, CFGetTypeID(value) == AXUIElementGetTypeID() else { throw Refusal("ax-element-unavailable") }
+    return value as! AXUIElement
+}
+
+func children(_ item: AXUIElement, _ key: String) throws -> [AXUIElement] {
+    AXUIElementSetMessagingTimeout(item, 0.2)
+    var count = 0
+    let status = AXUIElementGetAttributeValueCount(item, key as CFString, &count)
+    if status == .attributeUnsupported || status == .noValue { return [] }
+    guard status == .success, count >= 0, count <= 512 else { throw Refusal("ax-children-unbounded") }
+    if count == 0 { return [] }
+    var array: CFArray?
+    guard AXUIElementCopyAttributeValues(item, key as CFString, 0, count, &array) == .success,
+          let values = array as? [AXUIElement], values.count == count else { throw Refusal("ax-children-unreadable") }
+    return values
+}
+
+func axPID(_ item: AXUIElement, _ expected: Int32) throws {
+    var pid: pid_t = 0
+    guard AXUIElementGetPid(item, &pid) == .success, pid == expected else { throw Refusal("foreign-ax-element") }
+}
+
+func axBounds(_ item: AXUIElement) throws -> Bounds {
+    guard let position = attribute(item, kAXPositionAttribute), let size = attribute(item, kAXSizeAttribute),
+          CFGetTypeID(position) == AXValueGetTypeID(), CFGetTypeID(size) == AXValueGetTypeID() else {
+        throw Refusal("ax-bounds-unavailable")
+    }
+    var point = CGPoint.zero, extent = CGSize.zero
+    guard AXValueGetValue(position as! AXValue, .cgPoint, &point), AXValueGetValue(size as! AXValue, .cgSize, &extent),
+          extent.width > 0, extent.height > 0 else { throw Refusal("ax-bounds-unavailable") }
+    return Bounds(x: point.x, y: point.y, width: extent.width, height: extent.height)
+}
+
+func hitMatches(_ root: AXUIElement, _ selected: AXUIElement, _ bounds: Bounds, _ pid: Int32) -> Bool {
+    var hit: AXUIElement?
+    // Query only this control's center, never traverse or emit a global AX tree.
+    let desktop = AXUIElementCreateSystemWide()
+    AXUIElementSetMessagingTimeout(desktop, 0.2)
+    guard AXUIElementCopyElementAtPosition(desktop, Float(bounds.x + bounds.width / 2), Float(bounds.y + bounds.height / 2), &hit) == .success else { return false }
+    for _ in 0..<5 {
+        guard let item = hit, (try? axPID(item, pid)) != nil else { return false }
+        if CFEqual(item, selected) { return true }
+        hit = try? element(attribute(item, kAXParentAttribute))
+    }
+    return false
+}
+
+struct NativeObservation {
+    let value: Observation
+    let elements: [String: AXUIElement]
+    let axWindow: AXUIElement?
+}
+
+func postProcessStatus(_ expected: ProcessIdentity) -> [String: Any] {
+    var info = proc_bsdinfo()
+    errno = 0
+    let bytes = proc_pidinfo(expected.pid, PROC_PIDTBSDINFO, 0, &info, Int32(MemoryLayout<proc_bsdinfo>.size))
+    let code = errno
+    let state: String
+    if bytes == 0 && code == ESRCH { state = "absent" }
+    else if bytes == Int32(MemoryLayout<proc_bsdinfo>.size) {
+        state = info.pbi_pid == UInt32(expected.pid) && info.pbi_uid == expected.image.uid
+            && info.pbi_ruid == expected.image.uid && info.pbi_start_tvsec == expected.startSeconds
+            && info.pbi_start_tvusec == expected.startMicroseconds ? "same-kernel-process" : "different-process"
+    } else { state = "unavailable" }
+    return ["state": state, "pid": expected.pid, "kernelBytes": bytes, "errno": code,
+            "expectedStartSeconds": expected.startSeconds, "expectedStartMicroseconds": expected.startMicroseconds,
+            "diagnosticOnly": true, "postIdentityVerified": false]
+}
+
+func foreignChildDiagnostic(_ item: AXUIElement, parent: AXUIElement?, path: String,
+                            owner: Owner, rootWindow: AXUIElement) -> [String: Any]? {
+    guard ProcessInfo.processInfo.environment["CREATOR_MACOS_APP_PROBE"] == "1",
+          owner.process.bundleIdentifier == "com.creatorworks.hub", let parent = parent else { return nil }
+    var result: [String: Any] = ["path": path, "diagnosticOnly": true, "subtreeEntered": false,
+                                "rootStillOwned": false, "root": (try? object(owner)) ?? NSNull()]
+    do {
+        let before = try observe(owner, controls: false)
+        guard let native = before.axWindow, CFEqual(native, rootWindow),
+              before.value.process == owner.process, before.value.window == owner.window else {
+            throw Refusal("diagnostic-root-reference-drift")
+        }
+        var pid: pid_t = 0
+        let status = AXUIElementGetPid(item, &pid)
+        result["pidStatus"] = status.rawValue
+        if status == .success { result["pid"] = pid }
+        if let role = attribute(item, kAXRoleAttribute) as? String, role.utf8.count <= 128 { result["role"] = role }
+        func linkage(_ key: String, _ expected: AXUIElement, _ matches: String) -> [String: Any] {
+            var link: [String: Any] = ["available": false, matches: false]
+            guard let raw = attribute(item, key), CFGetTypeID(raw) == AXUIElementGetTypeID() else { return link }
+            let element = raw as! AXUIElement
+            var linkedPID: pid_t = 0
+            link["available"] = true; link[matches] = CFEqual(element, expected)
+            let linkedStatus = AXUIElementGetPid(element, &linkedPID)
+            link["pidStatus"] = linkedStatus.rawValue
+            if linkedStatus == .success { link["pid"] = linkedPID }
+            if let role = attribute(element, kAXRoleAttribute) as? String, role.utf8.count <= 128 { link["role"] = role }
+            return link
+        }
+        result["nativeParent"] = linkage(kAXParentAttribute, parent, "parentMatchesTraversalParent")
+        result["nativeWindow"] = linkage(kAXWindowAttribute, rootWindow, "windowMatchesRoot")
+        if status == .success && pid > 0 {
+            var info = proc_bsdinfo()
+            errno = 0
+            let bytes = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, Int32(MemoryLayout<proc_bsdinfo>.size))
+            var kernel: [String: Any] = ["bytes": bytes, "errno": errno]
+            if bytes == Int32(MemoryLayout<proc_bsdinfo>.size), info.pbi_pid == UInt32(pid) {
+                kernel["parentPID"] = info.pbi_ppid; kernel["uid"] = info.pbi_uid
+                kernel["startSeconds"] = info.pbi_start_tvsec; kernel["startMicroseconds"] = info.pbi_start_tvusec
+            }
+            result["kernelProcess"] = kernel
+        }
+        let after = try observe(owner, controls: false)
+        guard let native = after.axWindow, CFEqual(native, rootWindow),
+              after.value.process == owner.process, after.value.window == owner.window else {
+            throw Refusal("diagnostic-root-reference-drift")
+        }
+        result["rootStillOwned"] = true; result["rootNativeCFReferenceUnchanged"] = true
+    } catch { result["rootFenceError"] = String(describing: error) }
+    return result
+}
+
+func observe(_ owner: Owner, controls: Bool = true, allowGone: Bool = false) throws -> NativeObservation {
+    let identity = try process(owner.process)
+    guard identity == owner.process else { throw Refusal("process-identity-drift") }
+    try trustedAX()
+    let windows = try cgWindows(identity.pid, id: owner.window.id)
+    guard windows.count <= 1 else { throw Refusal("window-ambiguous") }
+    let active = NSRunningApplication(processIdentifier: identity.pid)?.isActive == true
+    if windows.isEmpty {
+        guard allowGone else { throw Refusal("window-unverified") }
+        return NativeObservation(value: Observation(process: identity, window: nil, windowMissingVerified: true,
+                                                   accessibilityTrusted: true, active: active, truncated: false, hasDialog: false, controls: []), elements: [:], axWindow: nil)
+    }
+    let window = windows[0]
+    guard window == owner.window else { throw Refusal("window-identity-drift") }
+    let root = AXUIElementCreateApplication(identity.pid)
+    AXUIElementSetMessagingTimeout(root, 0.2)
+    let axWindows = try children(root, kAXWindowsAttribute)
+    guard axWindows.count <= 32 else { throw Refusal("ax-windows-unbounded") }
+    var matches = [AXUIElement]()
+    for item in axWindows {
+        try axPID(item, identity.pid)
+        guard attribute(item, kAXRoleAttribute) as? String == kAXWindowRole else { throw Refusal("ax-window-role-unverified") }
+        if try axBounds(item) == window.bounds { matches.append(item) }
+    }
+    guard matches.count == 1 else { throw Refusal("ax-cg-window-mapping-unverified") }
+    let axWindow = matches[0]
+    if !controls {
+        return NativeObservation(value: Observation(process: identity, window: window, windowMissingVerified: false,
+                                                   accessibilityTrusted: true, active: active, truncated: false, hasDialog: false, controls: []), elements: [:], axWindow: axWindow)
+    }
+    let deadline = ProcessInfo.processInfo.systemUptime + 4
+    var seen = [AXUIElement](), found = [Control](), native = [String: AXUIElement](), hasDialog = false
+    func append(_ item: AXUIElement, path: String, dialog: String?, title: String) throws {
+        let parentWindow = try element(attribute(item, kAXWindowAttribute))
+        guard CFEqual(parentWindow, axWindow) else { throw Refusal("control-window-mismatch") }
+        let bounds = try axBounds(item)
+        let contained = bounds.x >= window.bounds.x && bounds.y >= window.bounds.y
+            && bounds.x + bounds.width <= window.bounds.x + window.bounds.width
+            && bounds.y + bounds.height <= window.bounds.y + window.bounds.height
+        var actions: CFArray?
+        guard AXUIElementCopyActionNames(item, &actions) == .success,
+              let names = actions as? [String], names.count <= 32 else { throw Refusal("ax-actions-unreadable") }
+        found.append(Control(path: path, role: attribute(item, kAXRoleAttribute) as? String ?? "", title: title,
+                             pid: identity.pid, windowID: window.id, dialog: dialog,
+                             enabled: (attribute(item, kAXEnabledAttribute) as? NSNumber)?.boolValue,
+                             hidden: (attribute(item, "AXHidden") as? NSNumber)?.boolValue == true,
+                             showing: contained && hitMatches(root, item, bounds, identity.pid),
+                             pressSupported: names.contains(kAXPressAction)))
+        native[path] = item
+    }
+    func visit(_ item: AXUIElement, _ depth: Int, _ path: String, _ dialog: String?, _ web: Bool, _ parent: AXUIElement?) throws {
+        guard depth <= 16, seen.count < 512, ProcessInfo.processInfo.systemUptime < deadline else { throw Refusal("ax-incomplete") }
+        if seen.contains(where: { CFEqual($0, item) }) { return }
+        seen.append(item)
+        do { try axPID(item, identity.pid) }
+        catch { throw Refusal("foreign-ax-element", diagnostic: foreignChildDiagnostic(item, parent: parent, path: path, owner: owner, rootWindow: axWindow)) }
+        guard let role = attribute(item, kAXRoleAttribute) as? String else { throw Refusal("ax-role-unreadable") }
+        let inWeb = web || role == "AXWebArea"
+        let nativeDialog = !inWeb && (role == kAXSheetRole || attribute(item, kAXSubroleAttribute) as? String == "AXDialog")
+        hasDialog = hasDialog || nativeDialog
+        let scope = nativeDialog ? path : dialog
+        if role == kAXButtonRole, let title = attribute(item, kAXTitleAttribute) as? String, consentLabels.contains(title) {
+            try append(item, path: path, dialog: inWeb ? nil : scope, title: title)
+        }
+        // Public AXChildren includes contained sheets; identify them by kAXSheetRole.
+        let descendants = try children(item, kAXChildrenAttribute)
+        for (index, child) in descendants.enumerated() { try visit(child, depth + 1, path + "/" + String(index), scope, inWeb, item) }
+    }
+    try visit(axWindow, 0, "window", nil, false, nil)
+    if let value = attribute(axWindow, kAXCloseButtonAttribute) {
+        let close = try element(value)
+        try axPID(close, identity.pid)
+        guard attribute(close, kAXSubroleAttribute) as? String == "AXCloseButton" else { throw Refusal("normal-close-subrole-unverified") }
+        try append(close, path: "close-button", dialog: nil, title: "")
+    }
+    guard ProcessInfo.processInfo.systemUptime < deadline else { throw Refusal("ax-incomplete") }
+    try trustedAX()
+    return NativeObservation(value: Observation(process: identity, window: window, windowMissingVerified: false,
+                                               accessibilityTrusted: true, active: active, truncated: false, hasDialog: hasDialog, controls: found), elements: native, axWindow: axWindow)
+}
+
+func closeAttribute(_ item: AXUIElement, _ key: String, optional: Bool = false) throws -> CFTypeRef? {
+    guard AXUIElementSetMessagingTimeout(item, 0.2) == .success else { throw Refusal("normal-close-message-timeout-unverified") }
+    var value: CFTypeRef?
+    let status = AXUIElementCopyAttributeValue(item, key as CFString, &value)
+    if optional && (status == .noValue || status == .attributeUnsupported) { return nil }
+    guard status == .success, let value = value else { throw Refusal("normal-close-attribute-unreadable") }
+    return value
+}
+
+func closeString(_ item: AXUIElement, _ key: String, optional: Bool = false) throws -> String? {
+    guard let value = try closeAttribute(item, key, optional: optional) else { return nil }
+    guard CFGetTypeID(value) == CFStringGetTypeID(), let text = value as? String, text.utf8.count <= 128 else {
+        throw Refusal("normal-close-string-type-unverified")
+    }
+    return text
+}
+
+func closeBoolean(_ item: AXUIElement, _ key: String, optional: Bool = false) throws -> Bool? {
+    guard let value = try closeAttribute(item, key, optional: optional) else { return nil }
+    guard CFGetTypeID(value) == CFBooleanGetTypeID() else { throw Refusal("normal-close-boolean-type-unverified") }
+    return CFBooleanGetValue(value as! CFBoolean)
+}
+
+func closeChildren(_ item: AXUIElement, _ key: String) throws -> [AXUIElement] {
+    guard AXUIElementSetMessagingTimeout(item, 0.2) == .success else { throw Refusal("normal-close-message-timeout-unverified") }
+    var count = 0
+    guard AXUIElementGetAttributeValueCount(item, key as CFString, &count) == .success, count >= 0, count < 512 else {
+        throw Refusal("normal-close-child-inventory-unverified")
+    }
+    if count == 0 { return [] }
+    var array: CFArray?
+    guard AXUIElementCopyAttributeValues(item, key as CFString, 0, count, &array) == .success, let array = array,
+          CFGetTypeID(array) == CFArrayGetTypeID(), CFArrayGetCount(array) == count else {
+        throw Refusal("normal-close-child-inventory-unverified")
+    }
+    for index in 0..<count {
+        guard let raw = CFArrayGetValueAtIndex(array, index),
+              CFGetTypeID(Unmanaged<CFTypeRef>.fromOpaque(raw).takeUnretainedValue()) == AXUIElementGetTypeID() else {
+            throw Refusal("normal-close-child-type-unverified")
+        }
+    }
+    guard let result = array as? [AXUIElement], result.count == count else { throw Refusal("normal-close-child-type-unverified") }
+    return result
+}
+
+func observeRootClose(_ owner: Owner) throws -> NativeObservation {
+    let deadline = ProcessInfo.processInfo.systemUptime + 4
+    var windowCount: Int?, rootSubrole: String?, rootModal: Bool?, childFacts: [RootCloseChild]?
+    var stage = "root-identity", childIndex: Int?
+    func evidence() -> RootCloseDialogEvidence {
+        rootCloseDialogEvidence(RootCloseDialogInputs(windowCount: windowCount, rootSubrole: rootSubrole, rootModal: rootModal,
+            children: childFacts, withinLimits: ProcessInfo.processInfo.systemUptime < deadline), owner.process.pid)
+    }
+    do {
+        guard owner.process.bundleIdentifier == "com.creatorworks.hub" else { throw Refusal("normal-close-root-scope-required") }
+        let base = try observe(owner, controls: false)
+        try validateIdentity(owner, base.value)
+        guard let window = base.axWindow else { throw Refusal("normal-close-root-reference-unverified") }
+        let root = AXUIElementCreateApplication(owner.process.pid)
+        stage = "window-inventory"
+        let windows = try closeChildren(root, kAXWindowsAttribute)
+        windowCount = windows.count
+        guard windows.count == 1, CFEqual(windows[0], window) else { throw Refusal("normal-close-extra-or-changed-window") }
+        try axPID(windows[0], owner.process.pid)
+        stage = "root-subrole"
+        rootSubrole = try closeString(window, kAXSubroleAttribute)
+        stage = "root-modal"
+        rootModal = try closeBoolean(window, kAXModalAttribute)
+        stage = "child-inventory"
+        let nativeChildren = try closeChildren(window, kAXChildrenAttribute)
+        var facts = [RootCloseChild]()
+        // First-order native chrome/sheet inventory only. No recursive child or
+        // remote metadata read is needed to select the window's AXCloseButton.
+        stage = "child-metadata"
+        for (index, child) in nativeChildren.enumerated() {
+            childIndex = index
+            guard ProcessInfo.processInfo.systemUptime < deadline else { throw Refusal("normal-close-incomplete") }
+            try axPID(child, owner.process.pid)
+            let parent = try element(closeAttribute(child, kAXParentAttribute)), linkedWindow = try element(closeAttribute(child, kAXWindowAttribute))
+            facts.append(RootCloseChild(pid: owner.process.pid, role: try closeString(child, kAXRoleAttribute),
+                subrole: try closeString(child, kAXSubroleAttribute, optional: true), subroleVerified: true,
+                parentMatchesRoot: CFEqual(parent, window), windowMatchesRoot: CFEqual(linkedWindow, window)))
+        }
+        childFacts = facts
+        stage = "dialog-scope"; childIndex = nil
+        try requireRootCloseDialogs(evidence())
+        stage = "close-control"
+        let close = try element(closeAttribute(window, kAXCloseButtonAttribute))
+        try axPID(close, owner.process.pid)
+        guard nativeChildren.filter({ CFEqual($0, close) }).count == 1,
+              try closeString(close, kAXRoleAttribute) == kAXButtonRole,
+              try closeString(close, kAXSubroleAttribute) == "AXCloseButton" else { throw Refusal("normal-close-subrole-unverified") }
+        let parentWindow = try element(closeAttribute(close, kAXWindowAttribute))
+        guard CFEqual(parentWindow, window) else { throw Refusal("control-window-mismatch") }
+        let bounds = try axBounds(close), b = owner.window.bounds
+        let contained = bounds.x >= b.x && bounds.y >= b.y && bounds.x + bounds.width <= b.x + b.width && bounds.y + bounds.height <= b.y + b.height
+        var actions: CFArray?
+        guard AXUIElementCopyActionNames(close, &actions) == .success, let names = actions as? [String], names.count <= 32 else {
+            throw Refusal("ax-actions-unreadable")
+        }
+        let control = Control(path: "close-button", role: kAXButtonRole, title: "", pid: owner.process.pid, windowID: owner.window.id,
+            dialog: nil, enabled: try closeBoolean(close, kAXEnabledAttribute), hidden: try closeBoolean(close, "AXHidden", optional: true) == true,
+            showing: contained && hitMatches(root, close, bounds, owner.process.pid), pressSupported: names.contains(kAXPressAction))
+        try validateControl(owner, control)
+        stage = "post-root-fence"
+        let after = try observe(owner, controls: false)
+        guard let held = after.axWindow, CFEqual(held, window), ProcessInfo.processInfo.systemUptime < deadline else {
+            throw Refusal("normal-close-root-reference-drift")
+        }
+        try validateIdentity(owner, after.value)
+        var value = Observation(process: after.value.process, window: after.value.window, windowMissingVerified: false,
+            accessibilityTrusted: after.value.accessibilityTrusted, active: after.value.active, truncated: false, hasDialog: false, controls: [control])
+        let finalEvidence = evidence()
+        try requireRootCloseDialogs(finalEvidence)
+        value.closeDialog = finalEvidence
+        return NativeObservation(value: value, elements: ["close-button": close], axWindow: held)
+    } catch {
+        var detail = (try? object(evidence())) as? [String: Any] ?? [:]
+        detail["stage"] = stage; detail["childIndex"] = childIndex.map { $0 as Any } ?? NSNull()
+        detail["rootSubrole"] = rootSubrole.map { $0 as Any } ?? NSNull()
+        detail["rootModal"] = rootModal.map { $0 as Any } ?? NSNull()
+        if let facts = childFacts { detail["firstOrderMetadata"] = facts.prefix(16).compactMap { try? object($0) } }
+        throw Refusal(String(describing: error), closeDialog: detail)
+    }
+}
+
+func nativeTermination(_ owner: Owner, _ before: Observation, _ immediate: Observation, _ beforeKernel: KernelObservation,
+                       _ firstKernel: KernelObservation, _ liveFailure: String?, _ result: AXError) throws -> NativeTermination {
+    try admission(); try trustedAX()
+    guard result == .success, owner.process.bundleIdentifier == "com.creatorworks.hub", closeTerminationTransition(liveFailure),
+          try !expectedKernelPresent(firstKernel, owner.process, bytes: Int32(MemoryLayout<proc_bsdinfo>.size), missingErrno: ESRCH) else {
+        throw Refusal("termination-transition-unverified")
+    }
+    try allowedApp(owner.process.bundlePath, owner.process.executablePath, owner.process.bundleIdentifier)
+    guard try image(owner.process.executablePath) == owner.process.image,
+          try image(owner.process.bundlePath + "/Contents/Info.plist", limit: 65536) == owner.process.infoPlist,
+          Bundle(path: owner.process.bundlePath)?.bundleIdentifier == owner.process.bundleIdentifier else {
+        throw Refusal("termination-image-bindings-unverified")
+    }
+    // Query the exact ID without PID/visibility filters: a hidden, lingering or
+    // reused CG window must not be mistaken for absence.
+    guard let windows = CGWindowListCopyWindowInfo([.optionIncludingWindow], owner.window.id) as? [[String: Any]],
+          windows.count <= 2048 else { throw Refusal("termination-cg-inventory-unavailable") }
+    guard windows.isEmpty else { throw Refusal("termination-window-not-missing") }
+    let lastKernel = kernelObservation(owner.process.pid)
+    return try validateNativeTermination(owner, before, immediate, .closeWindow,
+        TerminationInputs(actionAttempted: true, axResult: result.rawValue, beforeKernel: beforeKernel, firstKernel: firstKernel,
+                          lastKernel: lastKernel, liveInspectionFailure: liveFailure, rootPathVerified: true,
+                          imageBindingsVerified: true, windowMissingVerified: true),
+        bytes: Int32(MemoryLayout<proc_bsdinfo>.size), missingErrno: ESRCH)
+}
+
+enum ClosePostcondition {
+    case live(NativeObservation)
+    case terminated(NativeTermination)
+}
+
+func observeSuccessfulClose(_ owner: Owner, _ before: Observation, _ immediate: Observation,
+                            _ beforeKernel: KernelObservation, _ result: AXError) throws -> ClosePostcondition {
+    guard result == .success else { throw Refusal("ax-action-refused") }
+    let firstKernel = kernelObservation(owner.process.pid)
+    if try !expectedKernelPresent(firstKernel, owner.process, bytes: Int32(MemoryLayout<proc_bsdinfo>.size), missingErrno: ESRCH) {
+        return .terminated(try nativeTermination(owner, before, immediate, beforeKernel, firstKernel, nil, result))
+    }
+    do {
+        let after = try observe(owner, controls: false, allowGone: true)
+        try validateIdentity(owner, after.value, allowGone: true)
+        return .live(after)
+    } catch let refusal as Refusal {
+        // Only live process/AppKit disappearance can enter this transition.
+        // Kernel drift, AX/CG failures, permissions and image errors stay refused.
+        guard closeTerminationTransition(refusal.description) else { throw refusal }
+        let missing = kernelObservation(owner.process.pid)
+        guard try !expectedKernelPresent(missing, owner.process, bytes: Int32(MemoryLayout<proc_bsdinfo>.size), missingErrno: ESRCH) else {
+            throw refusal
+        }
+        return .terminated(try nativeTermination(owner, before, immediate, beforeKernel, missing, refusal.description, result))
+    }
+}
+
+func ownerFile(_ path: String) throws -> Owner {
+    _ = try canonical(path)
+    guard let temporary = ProcessInfo.processInfo.environment["RUNNER_TEMP"],
+          path.hasPrefix(URL(fileURLWithPath: temporary).resolvingSymlinksInPath().path + "/") else { throw Refusal("owner-file-outside-runner-temp") }
+    let fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK)
+    guard fd >= 0 else { throw Refusal("owner-file-unavailable") }
+    let file = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+    var meta = stat()
+    guard fstat(fd, &meta) == 0, meta.st_mode & S_IFMT == S_IFREG,
+          meta.st_uid == getuid(), meta.st_nlink == 1, meta.st_size <= 8192 else { throw Refusal("owner-file-unverified") }
+    let data = try file.read(upToCount: 8193) ?? Data()
+    guard data.count <= 8192,
+          let keys = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+          Set(keys.keys) == Set(["process", "window"]) else { throw Refusal("owner-schema-unverified") }
+    let owner = try JSONDecoder().decode(Owner.self, from: data)
+    guard owner.window.id > 0, owner.window.pid == owner.process.pid,
+          owner.process.pid > 0, owner.process.startSeconds > 0, owner.process.startMicroseconds < 1000000 else {
+        throw Refusal("owner-identity-invalid")
+    }
+    return owner
+}
+
+func nativeMain() {
+    var attempted = false
+    var beforeEvidence: Any?
+    var afterEvidence: Any?
+    var actionStarted: Double?
+    var actionReturned: Double?
+    var closeOwner: Owner?
+    var axResult: Int32?
+    do {
+        // Admission precedes all file, process, AX, display, and window inspection.
+        try admission()
+        let args = Array(CommandLine.arguments.dropFirst())
+        guard !args.isEmpty else { throw Refusal("expected-availability-identify-inspect-press-or-close") }
+        if args[0] == "availability" {
+            guard args.count == 1 else { throw Refusal("availability-takes-no-target-or-options") }
+            emit(["schemaVersion": 1, "command": "availability", "probeOnly": true,
+                  "runnerArchitecture": ProcessInfo.processInfo.environment["RUNNER_ARCH"]!,
+                  "accessibilityTrusted": AXIsProcessTrusted(), "targetInspectionPerformed": false,
+                  "actionAttempted": false, "permissionRequestsPerformed": false])
+            return
+        }
+        if args[0] == "identify", args.count == 6, let pid = Int32(args[1]) {
+            try trustedAX()
+            let first = try process(pid, appPath: args[2], executable: args[3], expectedHash: args[4], bundle: args[5])
+            let windows = try cgWindows(pid)
+            guard try process(first) == first else { throw Refusal("process-identity-drift") }
+            emit(["process": try object(first), "windows": try object(windows), "permissionRequestsPerformed": false])
+            return
+        }
+        guard ["inspect", "press", "close"].contains(args[0]),
+              args.count == (args[0] == "press" ? 3 : 2) else { throw Refusal("unknown-native-command") }
+        try trustedAX()
+        let owner = try ownerFile(args[1])
+        let rootClose = args[0] == "close" && owner.process.bundleIdentifier == "com.creatorworks.hub"
+        let before = try (rootClose ? observeRootClose(owner) : observe(owner))
+        if args[0] == "inspect" {
+            try validateIdentity(owner, before.value)
+            emit(["observation": try object(before.value), "permissionRequestsPerformed": false]); return
+        }
+        guard let action = args[0] == "close" ? Action.closeWindow : Action(rawValue: args[2]),
+              args[0] != "press" || action != .closeWindow else { throw Refusal("unknown-native-action") }
+        let immediate = try (rootClose ? observeRootClose(owner) : observe(owner))
+        beforeEvidence = try object(immediate.value)
+        let selected = try validateAction(owner, before.value, immediate.value, action)
+        guard let target = immediate.elements[selected.path], let original = before.elements[selected.path],
+              CFEqual(target, original), let firstWindow = before.axWindow, let lastWindow = immediate.axWindow,
+              CFEqual(firstWindow, lastWindow) else { throw Refusal("native-control-reference-drift") }
+        // A final identity fence precedes the one allowed AXPress. No focus or retry.
+        let fence = try (rootClose ? observeRootClose(owner) : observe(owner, controls: false))
+        try validateIdentity(owner, fence.value)
+        if rootClose {
+            _ = try selectControl(owner, fence.value, .closeWindow)
+            guard let finalClose = fence.elements["close-button"], CFEqual(finalClose, target) else { throw Refusal("native-control-reference-drift") }
+        }
+        guard fence.value.active, let fenceWindow = fence.axWindow, CFEqual(fenceWindow, lastWindow) else {
+            throw Refusal("native-window-reference-drift")
+        }
+        try axPID(target, owner.process.pid)
+        let targetWindow = try element(attribute(target, kAXWindowAttribute))
+        guard CFEqual(targetWindow, fenceWindow),
+              attribute(target, kAXRoleAttribute) as? String == selected.role,
+              (action == .closeWindow
+                ? attribute(target, kAXSubroleAttribute) as? String == "AXCloseButton"
+                : attribute(target, kAXTitleAttribute) as? String == selected.title),
+              (attribute(target, kAXEnabledAttribute) as? NSNumber)?.boolValue == true,
+              (attribute(target, "AXHidden") as? NSNumber)?.boolValue != true,
+              hitMatches(AXUIElementCreateApplication(owner.process.pid), target, try axBounds(target), owner.process.pid) else {
+            throw Refusal("control-state-drift")
+        }
+        try admission(); try trustedAX()
+        var closeKernel: KernelObservation?
+        if action == .closeWindow {
+            let sample = kernelObservation(owner.process.pid)
+            guard try expectedKernelPresent(sample, owner.process, bytes: Int32(MemoryLayout<proc_bsdinfo>.size), missingErrno: ESRCH) else {
+                throw Refusal("termination-process-missing-before-action")
+            }
+            closeKernel = sample
+        }
+        actionStarted = ProcessInfo.processInfo.systemUptime
+        if action == .closeWindow { closeOwner = owner }
+        attempted = true
+        let result = AXUIElementPerformAction(target, kAXPressAction as CFString)
+        axResult = result.rawValue
+        actionReturned = ProcessInfo.processInfo.systemUptime
+        let after: NativeObservation
+        if action == .closeWindow, result == .success, owner.process.bundleIdentifier == "com.creatorworks.hub",
+           let beforeKernel = closeKernel {
+            let outcome = try observeSuccessfulClose(owner, before.value, immediate.value, beforeKernel, result)
+            switch outcome {
+            case .terminated(let termination):
+                emit(["action": action.rawValue, "axAction": "AXPress", "axResult": result.rawValue,
+                      "before": try object(immediate.value), "actionAttempted": true, "closeOutcome": "native-termination",
+                      "postIdentityVerified": false, "postTerminationVerified": true, "termination": try object(termination),
+                      "actionStartedUptime": actionStarted!, "actionReturnedUptime": actionReturned!,
+                      "postInspectionCompletedUptime": ProcessInfo.processInfo.systemUptime,
+                      "forceKillPerformed": false, "permissionRequestsPerformed": false,
+                      "syntheticTestOnly": true, "customerConsent": false])
+                return
+            case .live(let observed):
+                after = observed
+            }
+        } else {
+            // Preserve live inspection even when another action/AXPress refused.
+            after = try observe(owner, controls: false, allowGone: true)
+        }
+        afterEvidence = try object(after.value)
+        try validateIdentity(owner, after.value, allowGone: true)
+        guard result == .success else { throw Refusal("ax-action-refused") }
+        emit(["action": action.rawValue, "axAction": "AXPress", "before": try object(immediate.value),
+              "after": try object(after.value), "actionAttempted": true, "postIdentityVerified": true,
+              "actionStartedUptime": actionStarted!, "actionReturnedUptime": actionReturned!,
+              "postInspectionCompletedUptime": ProcessInfo.processInfo.systemUptime,
+              "windowGone": after.value.window == nil, "forceKillPerformed": false,
+              "permissionRequestsPerformed": false, "syntheticTestOnly": true, "customerConsent": false])
+    } catch {
+        var failure: [String: Any] = ["error": String(describing: error), "actionAttempted": attempted,
+                                    "postIdentityVerified": false, "forceKillPerformed": false, "permissionRequestsPerformed": false]
+        if let before = beforeEvidence { failure["before"] = before }
+        if let after = afterEvidence { failure["after"] = after }
+        if let started = actionStarted { failure["actionStartedUptime"] = started }
+        if let returned = actionReturned { failure["actionReturnedUptime"] = returned }
+        if let diagnostic = (error as? Refusal)?.diagnostic { failure["foreignElement"] = diagnostic }
+        if let evidence = (error as? Refusal)?.closeDialog { failure["closeDialog"] = evidence }
+        if attempted, let owner = closeOwner {
+            failure["action"] = "close-window"; failure["axAction"] = "AXPress"
+            if let result = axResult { failure["axResult"] = result }
+            failure["postProcessStatus"] = postProcessStatus(owner.process)
+        }
+        emit(failure)
+        exit(attempted ? 3 : 2)
+    }
+}
+nativeMain()
+#else
+emit(["error": "native-macos-required", "actionAttempted": false]); exit(2)
+#endif

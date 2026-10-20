@@ -2,6 +2,13 @@ const { test, expect } = require('@playwright/test');
 const entry = require('./fixtures/community/start-location.json');
 const path = require('node:path');
 const { verifyCommunityMedia } = require('../scripts/verify-community-media.cjs');
+// Historical protocol coverage only, isolated from the shipped Hub interface.
+test.beforeEach(async ({ page }) => {
+  await page.route('http://127.0.0.1:4188/', route => route.fulfill({ path: path.join(__dirname, 'fixtures/community/legacy-hub.html'), contentType: 'text/html' }));
+  await page.route('**/app.js', route => route.fulfill({ path: path.join(__dirname, 'fixtures/community/legacy-app.js'), contentType: 'text/javascript' }));
+  await page.route('**/community.css', route => route.fulfill({ path: path.join(__dirname, 'fixtures/community/legacy-community.css'), contentType: 'text/css' }));
+  await page.route('**/community.js', route => route.fulfill({ path: path.join(__dirname, 'fixtures/community/legacy-catalogue.js'), contentType: 'text/javascript' }));
+});
 async function load(page, options = {}) {
   await page.addInitScript(({ entry, options }) => {
     localStorage.setItem('creator-usage-terms.hub', JSON.stringify({ policyVersion: '2026-09-28-v1', acceptedAt: '2026-09-28T00:00:00.000Z' }));
@@ -271,7 +278,9 @@ for (const width of [1100, 680, 390, 320]) test(`grid view preserves cards, deta
   expect(await page.evaluate(() => window.calls.length)).toBe(before);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   const cards = await page.locator('.community-item').evaluateAll(nodes => nodes.map(node => ({ x: node.getBoundingClientRect().x, y: node.getBoundingClientRect().y, width: node.getBoundingClientRect().width })));
-  if (width >= 680) expect(cards[0].y).toBe(cards[1].y);
+  // Columns follow container space after the fixed navigation/Help gutters.
+  const listWidth = (await page.locator('.community-list').boundingBox()).width;
+  if (listWidth >= 2 * 260 + 16) expect(cards[0].y).toBe(cards[1].y);
   else expect(cards[1].y).toBeGreaterThan(cards[0].y);
   await page.locator('.community-details summary').first().click();
   await expect(page.locator('[data-id="grid.2"] .community-visual')).toContainText('No preview supplied');

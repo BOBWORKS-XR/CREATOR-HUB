@@ -1,0 +1,30 @@
+name: Native Mac GUI admission (component only)
+on:
+  workflow_dispatch:
+  push:
+    branches: [validation/unified-mac-gui]
+    paths:
+      - '.github/workflows/native-mac-gui-admission.yml'
+      - 'native/mcp-router/src/gui_exec_macos.rs'
+permissions:
+  contents: read
+jobs:
+  admission:
+    if: ${{ false }} # macOS support suspended; preserve historical workflow only.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, macos-15-intel]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.99.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native/mcp-router
+          cache-on-failure: true
+      - run: cargo fmt --manifest-path native/mcp-router/Cargo.toml --check
+      - run: cargo clippy --release --locked --manifest-path native/mcp-router/Cargo.toml --all-targets -- -D warnings
+      - name: Native direct-parent admission, refusal, private pipes and EOF
+        run: cargo test --release --locked --manifest-path native/mcp-router/Cargo.toml gui_exec_macos::tests -- --test-threads=1

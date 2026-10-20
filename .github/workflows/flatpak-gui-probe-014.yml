@@ -1,0 +1,82 @@
+name: One pinned Root 14 Flatpak GUI capture (not host or release acceptance)
+on:
+  push:
+    branches: [validation/flatpak-gui-014]
+    paths: ['.github/workflows/flatpak-gui-probe-014.yml']
+permissions:
+  contents: read
+  actions: read
+jobs:
+  capture:
+    if: github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.repository_id == '1364807512'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    env:
+      CREATOR_FLATPAK_GUI_PROBE: '1'
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24.17.0
+      - run: npm ci --ignore-scripts
+      - name: Test parsers, pinned source contracts, capped logs and fixture refusals before dispatching any app
+        run: |
+          node --test scripts/flatpak-gui-probe.test.cjs scripts/flatpak-package.test.cjs scripts/flatpak-retention.test.cjs
+          python3 -B scripts/flatpak-gui-probe.test.py
+      - name: Verify successful immutable package producer and product source, then download original ZIP
+        uses: actions/github-script@v8
+        with:
+          script: |
+            await require('./scripts/flatpak-gui-probe.cjs').download(github,context);
+      - name: Read exact current bundle from original ZIP without rebuilding
+        run: python3 -B scripts/flatpak-gui-probe.py stage
+      - name: Provision public Platform and private X11 capture prerequisites on disposable host only
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends flatpak binutils python3-gi gir1.2-gtk-3.0 \
+            libx11-6 libxres1 dbus-x11 xvfb xauth openbox tesseract-ocr tesseract-ocr-eng
+          sudo flatpak remote-add --system --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+          sudo flatpak install --system --noninteractive --assumeyes --no-related flathub org.gnome.Platform/x86_64/50
+      - name: One actual normal-sandbox launch, owned bitmap/OCR and source-proven normal close only
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/flatpak-gui-probe"
+          export HOME="$root/home" XDG_CONFIG_HOME="$root/config" XDG_DATA_HOME="$root/data"
+          export XDG_CACHE_HOME="$root/cache" XDG_RUNTIME_DIR="$root/runtime" TMPDIR="$root/tmp"
+          export CREATOR_FLATPAK_GUI_NODE="$(node -p 'process.execPath')"
+          dbus-run-session -- xvfb-run -a --server-args='-screen 0 1280x800x24 -nolisten tcp' \
+            /usr/bin/python3 -B scripts/flatpak-gui-probe.py probe
+      - name: Retain compact capture first for bounded diagnosis
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: flatpak-gui-capture-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/flatpak-gui-probe/*.json
+            ${{ runner.temp }}/flatpak-gui-probe/*.txt
+            ${{ runner.temp }}/flatpak-gui-probe/*.stdout
+            ${{ runner.temp }}/flatpak-gui-probe/*.stderr
+            ${{ runner.temp }}/flatpak-gui-probe/*.png
+            ${{ runner.temp }}/flatpak-gui-probe/*.log
+      - name: Preserve exact original ZIP, source proof, screenshot, native logs and first failure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: flatpak-gui-probe-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/flatpak-gui-input.zip
+            ${{ runner.temp }}/flatpak-gui-source.json
+            ${{ runner.temp }}/flatpak-gui-probe/*.json
+            ${{ runner.temp }}/flatpak-gui-probe/*.txt
+            ${{ runner.temp }}/flatpak-gui-probe/*.stdout
+            ${{ runner.temp }}/flatpak-gui-probe/*.stderr
+            ${{ runner.temp }}/flatpak-gui-probe/*.png
+            ${{ runner.temp }}/flatpak-gui-probe/*.log
+            ${{ runner.temp }}/flatpak-gui-probe/input/*

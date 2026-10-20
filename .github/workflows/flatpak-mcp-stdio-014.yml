@@ -1,0 +1,92 @@
+name: Disposable seeded Flatpak SDK stdio replacement (not acceptance)
+# One reviewed rerun: portable empty-environment refusal regression; product pins unchanged.
+on:
+  push:
+    branches: [validation/flatpak-mcp-stdio-014]
+    paths: ['.github/workflows/flatpak-mcp-stdio-014.yml']
+permissions:
+  contents: read
+  actions: read
+jobs:
+  seeded-stdio:
+    if: >-
+      github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.repository_id == '1364807512' &&
+      github.ref == 'refs/heads/validation/flatpak-mcp-stdio-014' && github.event_name == 'push'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    env:
+      CREATOR_FLATPAK_PACKAGE_TEST: '1'
+      CREATOR_FLATPAK_MCP_STDIO_PROBE: '1'
+      CREATOR_FLATPAK_MCP_STDIO_SEEDED_ROUTE: '1'
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24.17.0
+      - uses: dtolnay/rust-toolchain@1.99.0
+      - run: npm ci --ignore-scripts
+      - run: npm --prefix modules/mcp ci --ignore-scripts
+      - name: Portable preflight before downloads, compilation or installation
+        run: >-
+          node --test scripts/flatpak-mcp-stdio-run.test.cjs
+          scripts/flatpak-mcp-stdio-probe.test.cjs scripts/flatpak-package.test.cjs
+          scripts/flatpak-retention.test.cjs scripts/flatpak-replacement-source.test.cjs
+          scripts/module-archive.test.cjs
+      - name: Verify exact source, run, job, artifact, production public key and original ZIPs
+        uses: actions/github-script@v8
+        with:
+          script: await require('./scripts/flatpak-mcp-stdio-run.cjs').downloadInputs(github, context);
+      - name: Extract only the reviewed original inputs and create new seven-file stages
+        run: node scripts/flatpak-mcp-stdio-run.cjs stage
+      - name: Build only the shared decoder and explicit production-Store fixture driver
+        shell: bash
+        run: |
+          set -euo pipefail
+          tools="$RUNNER_TEMP/flatpak-stdio-tools"
+          cargo build --locked --release --manifest-path native/module-archive/Cargo.toml --target-dir "$tools/decoder"
+          cargo build --locked --release --manifest-path native/mcp-router/Cargo.toml --example fixture-driver --target-dir "$tools/driver"
+      - name: Provision the existing public GNOME 50 offline packaging environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends flatpak flatpak-builder appstream desktop-file-utils
+          sudo flatpak remote-add --system --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+          sudo flatpak install --system --noninteractive --assumeyes --no-related flathub org.gnome.Platform/x86_64/50 org.gnome.Sdk/x86_64/50
+      - name: Explicitly seed disposable signed route, replace package and exercise SDK stdio
+        shell: bash
+        run: |
+          set -euo pipefail
+          tools="$RUNNER_TEMP/flatpak-stdio-tools"
+          decoder="$tools/decoder/release/creator-hub-module-archive"
+          driver="$tools/driver/release/examples/fixture-driver"
+          decoder_sha=$(sha256sum "$decoder" | cut -d ' ' -f1)
+          driver_sha=$(sha256sum "$driver" | cut -d ' ' -f1)
+          node scripts/flatpak-mcp-stdio-run.cjs run "$decoder" "$decoder_sha" "$driver" "$driver_sha"
+      - name: Upload compact seeded-only reports and bindings first, including failures
+        id: compact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: flatpak-seeded-stdio-compact-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/creator-flatpak-stdio-inputs/*-binding.json
+            ${{ runner.temp }}/creator-flatpak-stdio-inputs/*-stage/flatpak-stage.json
+            ${{ runner.temp }}/creator-flatpak-stdio-inputs/*-stage/builtin-manifest.json
+            ${{ runner.temp }}/creator-flatpak-stdio-inputs/*-stage/signed-unix-assembly.json
+            ${{ runner.temp }}/creator-flatpak-stdio-*/flatpak-mcp-stdio-report.json
+            ${{ runner.temp }}/creator-flatpak-stdio-*/build-*/metadata
+      - name: Optional original large evidence after compact capture
+        if: always() && steps.compact.outcome == 'success' && vars.CREATOR_FLATPAK_STDIO_UPLOAD_LARGE == '1'
+        uses: actions/upload-artifact@v4
+        with:
+          name: flatpak-seeded-stdio-originals-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/creator-flatpak-stdio-inputs/*.zip
+            ${{ runner.temp }}/creator-flatpak-stdio-*/*.flatpak

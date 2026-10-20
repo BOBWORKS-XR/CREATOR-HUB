@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { spawnSync } = require('node:child_process');
-const { LEGACY_LIMIT, PUBLICATION_HEADROOM, inspectFeed, inspectDraft } = require('./check-release-feed.cjs');
+const { LEGACY_LIMIT, PUBLICATION_HEADROOM, RELEASE_NOT_VISIBLE, inspectFeed, inspectDraft } = require('./check-release-feed.cjs');
 const descriptor = 'creator-hub-windows-x86_64.json';
 const release = () => ({ tag_name: 'v0.1.3', draft: false, assets: [{ name: descriptor }, { name: `${descriptor}.minisig` }] });
 const bytes = items => Buffer.from(JSON.stringify(items));
@@ -25,6 +25,20 @@ test('draft, missing signature and unexpected version cannot satisfy publication
   assert.throws(() => inspectFeed(bytes([release()]), '0.1.4'), /missing/);
   assert.throws(() => inspectFeed(bytes({}), '0.1.3'), /not an array/);
 });
+
+test('only an absent public target has the release-not-visible error code', () => {
+  assert.equal(typeof RELEASE_NOT_VISIBLE, 'string');
+  for (const items of [[], [{ ...release(), tag_name: 'v0.1.2' }], [{ ...release(), draft: true }]]) {
+    assert.throws(() => inspectFeed(bytes(items), '0.1.3'), error => error.code === RELEASE_NOT_VISIBLE);
+  }
+});
+
+test('missing catalog assets, malformed feeds and size failures are not visibility delays', () => {
+  for (const body of [bytes([{ ...release(), assets: [{ name: descriptor }] }]),
+    bytes([{ ...release(), assets: null }]), bytes({}), Buffer.from('{'), Buffer.alloc(LEGACY_LIMIT + 1)]) {
+    assert.throws(() => inspectFeed(body, '0.1.3'), error => error.code !== RELEASE_NOT_VISIBLE);
+  }
+});
 test('self-update installation harness refuses non-disposable machines before doing work', () => {
   const result = spawnSync(process.execPath, [require.resolve('./native-self-update-smoke.cjs')], { encoding: 'utf8', env: { ...process.env, GITHUB_ACTIONS: 'false' } });
   assert.notEqual(result.status, 0);
@@ -42,6 +56,26 @@ test('self-update acceptance accepts explicit target hashes and derives the targ
   assert.match(workflow, /gh release download/);
   assert.match(workflow, /Published installer differs from its checksum/);
   assert.match(workflow, /inputs\.target_version/);
+});
+
+test('self-update workflow builds and admits the exact baseline required by its native harness', () => {
+  const source = require('node:fs').readFileSync(require.resolve('./native-self-update-smoke.cjs'), 'utf8');
+  assert.match(source, /require\('\.\/self-update-baselines\.cjs'\)/);
+  assert.match(source, /const from = selectBaseline\(to\.version\)/);
+  assert.match(source, /assertPreviousStable\(report\.feed\.previousStable, from\)/);
+  const acceptance = source.slice(source.indexOf('\n(async () => {'));
+  const feedGate = acceptance.indexOf('assertPreviousStable(report.feed.previousStable, from)');
+  assert.ok(feedGate >= 0 && acceptance.indexOf('const setup = spawn(installer') > feedGate);
+  const workflow = require('node:fs').readFileSync(require('node:path').join(__dirname, '..', '.github', 'workflows', 'self-update-acceptance.yml'), 'utf8');
+  assert.match(workflow, /\$selected = node scripts\/self-update-baselines\.cjs/);
+  assert.match(workflow, /if \(\$LASTEXITCODE -ne 0\) \{ throw 'Public self-update baseline selection failed\.'/);
+  assert.match(workflow, /"version=\$\(\$baseline\.version\)" >> \$env:GITHUB_OUTPUT/);
+  assert.equal((workflow.match(/SELECTED_FROM_VERSION: \$\{\{ steps\.baseline\.outputs\.version \}\}/g) || []).length, 2);
+  assert.match(workflow, /Build-HostedUpdateFixture\.ps1 -FromVersion \$env:SELECTED_FROM_VERSION/);
+  assert.match(workflow, /\$fixture\.fromVersion -ne \$env:SELECTED_FROM_VERSION/);
+  assert.ok(workflow.indexOf('id: target') < workflow.indexOf('id: baseline'));
+  assert.ok(workflow.indexOf('id: baseline') < workflow.indexOf('Build-HostedUpdateFixture.ps1'));
+  assert.doesNotMatch(workflow, /FromVersion 0\.1\.11|\$fixture\.fromVersion -ne '0\.1\.11'/);
 });
 test('draft gate accounts for full asset metadata and release notes before publication', () => {
   const current = bytes([{ ...release(), tag_name: 'v0.1.2', body: 'x'.repeat(240000) }]);

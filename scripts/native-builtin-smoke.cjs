@@ -1,0 +1,527 @@
+// Disposable component hosting checks, not full guide/migration acceptance.
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const crypto = require('node:crypto');
+const { spawn, execFileSync } = require('node:child_process');
+const { chromium } = require('@playwright/test');
+const { verifyStage } = require('./build-unified.cjs');
+const { saveBuiltinSettings } = require('./native-builtin-save.cjs');
+const { managedLocations, verifyMigratedTarget } = require('./native-managed-target.cjs');
+const { helpOcclusion } = require('../tests/help-layout.cjs');
+if (process.env.GITHUB_ACTIONS !== 'true' || process.env.RUNNER_ENVIRONMENT !== 'github-hosted' || process.env.RUNNER_OS !== 'Windows') {
+  throw Error('Built-in native acceptance is restricted to a disposable GitHub-hosted Windows runner.');
+}
+let directory = path.resolve(process.argv[2]);
+const descriptor = JSON.parse(fs.readFileSync(path.join(directory, 'builtin-manifest.json')));
+verifyStage(path.join(directory, 'modules'), descriptor);
+let hub = path.join(directory, 'creator-hub.exe');
+const out = path.resolve('artifacts', `native-suite-${Date.now()}`);
+fs.mkdirSync(out);
+const report = { scope: 'component-built-in-smoke-not-guide-acceptance', releaseReady: false, sourceRevision: process.env.GITHUB_SHA, candidateSourceRevision: process.env.CREATOR_CANDIDATE_SOURCE || process.env.GITHUB_SHA, hubSha256: crypto.createHash('sha256').update(fs.readFileSync(hub)).digest('hex'), checks: [], passed: false };
+const backendPids = new Map();
+const installedMode = process.argv[3];
+let expectedRegistrations = [];
+let installed;
+let legacyClients = [];
+const watchdog = setTimeout(() => {
+  report.passed = false;
+  report.error = 'Native acceptance exceeded its 5-minute deadline; no successful outcome is assumed.';
+  try { if (fs.existsSync(policy)) webviewPolicy('Restore'); }
+  catch (error) { report.policyCleanupError = String(error); }
+  fs.writeFileSync(path.join(out, 'report.json'), JSON.stringify(report, null, 2));
+  process.exit(1);
+}, 5 * 60 * 1000);
+watchdog.unref();
+const policy = path.join(out, 'webview-policy.json');
+function webviewPolicy(action) {
+  execFileSync('powershell.exe', ['-NoProfile', '-File', path.resolve('scripts/native-webview-policy.ps1'), '-Action', action, '-StateFile', policy], { windowsHide: true, timeout: 30000 });
+}
+function native(pid, executable, action, value = '') {
+  return execFileSync('powershell.exe', ['-NoProfile', '-File', path.resolve('scripts/native-window.ps1'),
+    '-TargetPid', String(pid), '-ExpectedExecutable', executable, '-Action', action, '-Value', value], { windowsHide: true, encoding: 'utf8', timeout: 15000 });
+}
+const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+async function retry(action, seconds = 45) {
+  let last;
+  for (const deadline = Date.now() + seconds * 1000; Date.now() < deadline;) {
+    try { return await action(); } catch (error) { last = error; await delay(250); }
+  }
+  throw last;
+}
+function registrations() {
+  const expected = require('./native-installed-baseline.cjs').registrationArray(expectedRegistrations);
+  return execFileSync('powershell.exe', ['-NoProfile', '-Command',
+    `$expected=${expected}; $found=@(); $names=@('Creator Hub','Creator Works MCP','Creator Project Setup','BANTWORKS MCP'); foreach ($h in @('HKCU:','HKLM:')) { foreach ($n in $names) { if(Test-Path -LiteralPath ($h+'\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\'+$n)) { if($n -notin $expected) { throw ('Unexpected app registration: '+$n) }; $found+=$n } } }; foreach($n in $expected) { if($n -notin $found) { throw ('Missing app registration: '+$n) } }`], { windowsHide: true, encoding: 'utf8', timeout: 15000 });
+}
+function registrationSnapshot() {
+  const bytes = execFileSync('powershell.exe', ['-NoProfile', '-Command',
+    "$ErrorActionPreference='Stop'; $records=@(); foreach($h in @('HKCU:','HKLM:')) { foreach($n in @('Creator Hub','Creator Works MCP','Creator Project Setup','BANTWORKS MCP')) { $p=$h+'\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\'+$n; if(Test-Path -LiteralPath $p) { $key=Get-Item -LiteralPath $p; $values=@(foreach($name in @($key.GetValueNames() | Sort-Object)) { @{name=$name; kind=[string]$key.GetValueKind($name); value=$key.GetValue($name,$null,[Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)} }); $records+=@{hive=$h; name=$n; values=$values} } } }; ConvertTo-Json -InputObject $records -Depth 8 -Compress"],
+    { windowsHide: true, encoding: 'utf8', timeout: 15000, maxBuffer: 65536 });
+  return JSON.parse(bytes);
+}
+async function backendFor(app) {
+  return retry(() => {
+    const value = execFileSync('powershell.exe', ['-NoProfile', '-Command',
+      `$p=@(Get-CimInstance Win32_Process -Filter "ParentProcessId=${child.pid}" | Where-Object { $_.Name -eq '${path.basename(descriptor.modules[app].executable)}' }); if($p.Count -ne 1) { throw 'Expected one private backend' }; $p | Select-Object ProcessId,ExecutablePath | ConvertTo-Json -Compress`], { windowsHide: true, encoding: 'utf8', timeout: 15000 }).trim();
+    return JSON.parse(value);
+  });
+}
+async function backendExited(pid, executable) {
+  await retry(() => {
+    const running = execFileSync('powershell.exe', ['-NoProfile', '-Command',
+      `$p=Get-CimInstance Win32_Process -Filter "ProcessId=${pid}"; if($p -and $p.ExecutablePath -eq '${executable.replaceAll("'", "''")}') { 'running' }`],
+    { windowsHide: true, encoding: 'utf8', timeout: 15000 }).trim();
+    assert.equal(running, '', 'Private backend must exit after a declined start or closed view');
+  }, 15);
+}
+let child, browser, page, protocolClient;
+async function verifyMigratedJsonConnection(entry) {
+  const sdk = require('node:module').createRequire(path.resolve('modules/mcp/package.json'));
+  const { Client } = sdk('@modelcontextprotocol/sdk/client/index.js');
+  const { StdioClientTransport } = sdk('@modelcontextprotocol/sdk/client/stdio.js');
+  const client = new Client({ name: 'installed-migrated-client', version: '1' });
+  const transport = new StdioClientTransport({ command: entry.command, args: entry.args, env: entry.env, stderr: 'pipe' });
+  try {
+    await client.connect(transport, { timeout: 10000 });
+    transport.stderr?.resume();
+    assert.ok((await client.listTools({}, { timeout: 10000 })).tools.length > 0, 'Actual migrated command must expose MCP tools');
+  } finally { await client.close(); }
+}
+async function deferStartupConvergence(page, verifyPreserved) {
+  const supported = await page.evaluate(() => window.CreatorHubNative?.convergencePersistence === true);
+  if (!supported) {
+    verifyPreserved('Startup without Convergence protocol');
+    return { status: 'unsupported', migrationSkipped: true, releaseReady: false };
+  }
+  const status = () => retry(async () => {
+    const result = await page.evaluate(() => window.CreatorHubNative.invoke('convergence_status')
+      .then(value => ({ value }), error => ({ error: String(error) })));
+    if (result.error === 'Another Hub operation is already running.') throw Error(result.error);
+    return result;
+  });
+  const before = await status();
+  assert.ok(before.error || before.value, 'Convergence must return a report or an inspection error');
+  if (before.value) {
+    assert.equal(before.value.enabled, true);
+    assert.equal(typeof before.value.required, 'boolean');
+    assert.equal(before.value.stage, 'review', 'Component smoke must not resume a completed/partial migration');
+    assert.deepEqual(before.value.backups, [], 'Component startup must not prepare migration backups');
+  }
+  const deferred = Boolean(before.error || before.value?.required);
+  const dialog = page.locator('#convergence-dialog');
+  if (deferred) {
+    await dialog.waitFor({ state: 'visible' });
+    verifyPreserved('Before Convergence Later');
+    await page.locator('#convergence-later').click();
+    await dialog.waitFor({ state: 'hidden' });
+  } else assert.equal(await dialog.isVisible(), false, 'Unrequired migration must not block startup');
+  assert.deepEqual(await status(), before, 'Later must not prepare, migrate or retire existing apps');
+  verifyPreserved('After Convergence Later');
+  return { status: deferred ? 'deferred' : 'not-required', migrationSkipped: true, releaseReady: false };
+}
+(async () => {
+  registrations();
+  const settings = path.join(process.env.APPDATA, 'creator-works-mcp', 'launcher-config.json');
+  assert.equal(fs.existsSync(settings), false);
+  const settingsBytes = () => fs.existsSync(settings) ? fs.readFileSync(settings) : null;
+  const retainedStores = [
+    { name: 'inactive legacy MCP settings', path: path.join(process.env.APPDATA, 'banter-mcp', 'launcher-config.json'),
+      bytes: installedMode === 'upgrade' ? Buffer.from('{"legacySetting":"keep separate; current settings win"}') : null },
+    { name: 'Setup Editor locations', path: path.join(process.env.LOCALAPPDATA, 'CreatorProjectSetup', 'editor-roots.json'),
+      bytes: installedMode === 'upgrade' ? Buffer.from(JSON.stringify([path.join(out, 'Existing Editors')])) : null },
+  ];
+  const verifyRetainedStores = phase => {
+    for (const store of retainedStores) {
+      const actual = fs.existsSync(store.path) ? fs.readFileSync(store.path) : null;
+      assert.deepEqual(actual, store.bytes, `${phase}: ${store.name} must stay byte-for-byte unchanged (including absence)`);
+    }
+  };
+  const oldConfig = installedMode === 'fresh' ? null : Buffer.from(JSON.stringify({ channels: [], active_channel_id: null,
+    mcp_server_path: 'C:/old-install/banter-mcp.mjs', auto_start: false, tool_groups: 'full',
+    migrationGuard: 'Preserve unknown fields and exact bytes when opening the built-in view' }));
+  const seed = () => {
+    for (const store of retainedStores) {
+      assert.equal(fs.existsSync(store.path), false, 'Runner must not contain preexisting module settings');
+      if (store.bytes) {
+        fs.mkdirSync(path.dirname(store.path), { recursive: true });
+        fs.writeFileSync(store.path, store.bytes, { flag: 'wx' });
+      }
+    }
+    if (oldConfig) {
+      fs.mkdirSync(path.dirname(settings), { recursive: true });
+      fs.writeFileSync(settings, oldConfig, { flag: 'wx' });
+    }
+    if (installedMode === 'upgrade') {
+      const root = path.join(process.env.LOCALAPPDATA, 'Creator Works MCP', 'server');
+      const node = path.join(root, 'runtime/node.exe');
+      const server = path.join(root, 'creator-works-mcp.mjs');
+      assert.equal(fs.existsSync(node), true); assert.equal(fs.existsSync(server), true);
+      const project = path.join(out, 'Existing-client-project'); fs.mkdirSync(project);
+      const env = { UNITY_PROJECT_PATH: project, CREATOR_WORKS_TOOL_GROUPS: 'read', CUSTOM_SETTING: 'keep' };
+      const entry = { command: node, args: [server], env, timeout: 37 };
+      legacyClients = [
+        { id: 'codex', path: path.join(process.env.USERPROFILE, '.codex/config.toml'), content: `# Keep the existing model and other server\nmodel='keep'\n[mcp_servers.other]\ncommand='keep'\n[mcp_servers.creator-works]\ncommand=${JSON.stringify(node.replaceAll('\\', '/'))}\nargs=[${JSON.stringify(server)}]\ntimeout=37\n[mcp_servers.creator-works.env]\nUNITY_PROJECT_PATH=${JSON.stringify(project)}\nCREATOR_WORKS_TOOL_GROUPS='read'\nCUSTOM_SETTING='keep'\n` },
+        { id: 'claude', path: path.join(process.env.USERPROFILE, '.claude.json'), content: JSON.stringify({ preferences: { keep: true }, mcpServers: { other: { command: 'keep' }, 'creator-works': entry } }) },
+        { id: 'claudeDesktop', path: path.join(process.env.APPDATA, 'Claude', 'claude_desktop_config.json'), content: JSON.stringify({ preferences: { keep: true }, mcpServers: { other: { command: 'keep' }, 'creator-works': entry } }) },
+      ];
+      for (const client of legacyClients) {
+        fs.mkdirSync(path.dirname(client.path), { recursive: true });
+        fs.writeFileSync(client.path, client.content, { flag: 'wx' });
+      }
+    }
+  };
+  if (installedMode) {
+    installed = require('./native-installed-baseline.cjs').install(installedMode, directory, out, seed);
+    directory = installed.directory; expectedRegistrations = installed.expectedRegistrations;
+    hub = path.join(directory, 'creator-hub.exe');
+    report.unbundledHubSha256 = report.hubSha256;
+    report.hubSha256 = crypto.createHash('sha256').update(fs.readFileSync(hub)).digest('hex');
+    verifyStage(path.join(directory, 'modules'), descriptor);
+    registrations();
+    report.checks.push(`${installedMode}: exact candidate installed using real NSIS; expected legacy registrations and binaries preserved`);
+  }
+  else seed();
+  if (installedMode !== 'upgrade') for (const app of ['Creator Works MCP', 'Creator Project Setup']) assert.equal(fs.existsSync(path.join(process.env.LOCALAPPDATA, app)), false);
+  let expectedConfig = oldConfig;
+  assert.deepEqual(settingsBytes(), oldConfig, 'Real installer must preserve existing or absent MCP settings');
+  verifyRetainedStores('Real installer');
+  for (const client of legacyClients) assert.equal(fs.readFileSync(client.path, 'utf8'), client.content, 'Installation must not silently adopt legacy client entries');
+  for (const module of Object.values(descriptor.modules)) {
+    const file = path.join(directory, 'modules', module.executable);
+    const result = require('node:child_process').spawnSync(file, [], { encoding: 'utf8', windowsHide: true, timeout: 15000 });
+    assert.equal(result.status, 2, 'Private backend must not launch a standalone app');
+  }
+  report.checks.push(installedMode === 'upgrade' ? 'Legacy companion installations retained; private modules reject standalone launch' : 'No companion installations; private modules reject standalone launch');
+  const registrationBefore = registrationSnapshot();
+  const convergenceOutputs = [
+    path.join(process.env.LOCALAPPDATA, 'CreatorHub', 'convergence', 'review-v1.json'),
+    path.join(process.env.LOCALAPPDATA, 'CreatorHub', 'convergence', 'legacy-retirement'),
+    path.join(path.dirname(settings), '.creator-hub-settings-backups'),
+    path.join(path.dirname(settings), '.creator-hub-product-settings'),
+    path.join(path.dirname(settings), 'hosted-operation-outcomes.json'),
+    ...retainedStores.map(store => path.join(path.dirname(store.path), '.creator-hub-settings-backups')),
+    managedLocations(process.env.LOCALAPPDATA).active,
+  ];
+  const verifyStartupPreserved = phase => {
+    assert.deepEqual(settingsBytes(), oldConfig, `${phase}: current MCP settings must stay unchanged`);
+    verifyRetainedStores(phase);
+    for (const client of legacyClients) assert.equal(fs.readFileSync(client.path, 'utf8'), client.content, `${phase}: legacy clients must stay unchanged`);
+    registrations();
+    assert.deepEqual(registrationSnapshot(), registrationBefore, `${phase}: installed-app registration values and types must stay unchanged`);
+    for (const file of convergenceOutputs) assert.equal(fs.existsSync(file), false, `${phase}: no prepare/migrate/retire output may be created`);
+  };
+  verifyStartupPreserved('Before Hub startup');
+  webviewPolicy('Enable');
+  child = spawn(hub, [], { windowsHide: true, stdio: 'ignore', env: { ...process.env,
+    WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: '--remote-debugging-port=9238', WEBVIEW2_USER_DATA_FOLDER: path.join(out, 'webview') } });
+  browser = await retry(() => chromium.connectOverCDP('http://127.0.0.1:9238'));
+  page = await retry(() => {
+    const result = browser.contexts().flatMap(context => context.pages()).find(p => p.url().includes('tauri.localhost'));
+    if (!result) throw Error('Hub webview is not ready'); return result;
+  });
+  page.setDefaultTimeout(60000);
+  await page.locator('#usage-terms-checkbox').check();
+  await page.locator('#usage-terms-continue').click();
+  await page.locator('#usage-terms-dialog').waitFor({ state: 'hidden' });
+  report.convergence = await deferStartupConvergence(page, verifyStartupPreserved);
+  report.checks.push(`Convergence ${report.convergence.status}: migration skipped; retained settings, clients and registrations unchanged (component checks only)`);
+  const inventory = await retry(() => page.evaluate(() => window.CreatorHubNative.invoke('app_inventory', { check: true, preview: true })));
+  assert.equal(inventory.supported, true);
+  for (const app of inventory.apps) {
+    assert.equal(app.builtIn, true); assert.equal(app.trusted, true); assert.equal(app.issue, null);
+    assert.equal(app.updateAvailable, false); assert.equal(app.detectedCopies.length, 0);
+    assert.equal(app.availableVersion, descriptor.modules[app.app].version);
+  }
+  report.checks.push('Native inventory trusts packaged modules without companion catalogue or registration');
+  let denied;
+  const installationProbeDeadline = Date.now() + 45000;
+  do {
+    denied = await page.evaluate(() => window.CreatorHubNative.invoke('download_app', { app: 'mcp', version: '2.7.7' }).then(() => 'unexpected allow', String));
+    if (denied !== 'Another Hub operation is already running.') break;
+    assert.ok(Date.now() < installationProbeDeadline, 'Startup must release the operation lease before installation refusal can be checked');
+    await delay(250);
+  } while (true);
+  assert.match(denied, /built into this Hub/);
+  report.checks.push('Separate module installation is rejected natively');
+  await page.locator('#hub-pages [data-view="hub"]').click();
+  for (const app of ['setup', 'mcp']) {
+    await page.locator('#suite-trigger').click();
+    await page.locator(`#suite-menu [data-view="${app}"]`).click();
+    if (app === 'mcp' && descriptor.managedRouting) {
+      const route = managedLocations(process.env.LOCALAPPDATA);
+      assert.equal(fs.existsSync(route.active), false, 'Disposable baseline must not already have a managed route');
+      await retry(() => native(child.pid, hub, 'button', 'Not now'));
+      await retry(async () => assert.equal(await page.locator('#builtin-open').isEnabled(), true));
+      assert.match(await page.locator('#builtin-detail').innerText(), /declined/i);
+      assert.equal(fs.existsSync(route.active), false, 'Declining routing must not activate a generation');
+      assert.deepEqual(settingsBytes(), oldConfig);
+      for (const client of legacyClients) assert.equal(fs.readFileSync(client.path, 'utf8'), client.content);
+      await page.locator('#builtin-open').click();
+      await retry(() => native(child.pid, hub, 'button', 'Enable managed routing'));
+      report.checks.push('Native managed-route refusal preserves settings/client entries; explicit retry approves signed routing before MCP consent');
+    }
+    let { ProcessId: pid, ExecutablePath: executable } = await backendFor(app);
+    assert.equal(Number.isInteger(pid), true);
+    if (app === 'setup') {
+      assert.equal(executable.toLowerCase(), path.join(directory, 'modules', descriptor.modules[app].executable).toLowerCase());
+    } else {
+      const generations = path.join(process.env.LOCALAPPDATA, 'creator-hub', 'runtime-generations', 'windows-x86_64');
+      const generation = path.dirname(path.dirname(executable));
+      assert.equal(path.dirname(generation).toLowerCase(), generations.toLowerCase());
+      assert.match(path.basename(generation), /^[a-f0-9]{64}$/);
+      for (const [name, expected] of Object.entries(descriptor.modules.mcp.files)) {
+        const hash = crypto.createHash('sha256').update(fs.readFileSync(path.join(generation, name))).digest('hex');
+        assert.equal(hash, expected, name);
+      }
+      const node = path.join(generation, 'mcp/server/runtime/node.exe');
+      assert.match(execFileSync(node, ['--version'], { encoding: 'utf8', windowsHide: true, timeout: 15000 }), /^v\d+\./);
+      const packagedServer = path.join(directory, 'modules/mcp/server');
+      const retainedServer = `${packagedServer}.acceptance-old`;
+      assert.equal(fs.existsSync(retainedServer), false);
+      // Only the disposable candidate's files are moved. This proves path
+      // independence, not a signed installer/update or AI-client reconnection.
+      fs.renameSync(packagedServer, retainedServer);
+      try {
+        assert.match(execFileSync(node, ['--version'], { encoding: 'utf8', windowsHide: true, timeout: 15000 }), /^v\d+\./);
+        assert.equal(fs.existsSync(executable), true);
+        const protocol = execFileSync(process.execPath, ['--test', 'test/stdio-connection.test.mjs', 'test/server-shutdown.test.mjs'], {
+          cwd: path.resolve('modules/mcp'), encoding: 'utf8', windowsHide: true, timeout: 60000,
+          env: { ...process.env, MCP_PROTOCOL_NODE: node, MCP_PROTOCOL_ENTRY: path.join(generation, 'mcp/server/creator-works-mcp.mjs'),
+            MCP_SHUTDOWN_NODE: node, MCP_SHUTDOWN_ENTRY: path.join(generation, 'mcp/server/creator-works-mcp.mjs') },
+        });
+        fs.writeFileSync(path.join(out, 'retained-runtime-protocol.txt'), protocol);
+      } finally { fs.renameSync(retainedServer, packagedServer); }
+      report.runtimeGeneration = generation;
+      report.checks.push('Actual MCP backend and Node use a verified generation independent of the replaceable Hub package');
+      report.checks.push('SDK stdio connection, tools, session selection, reconnect, malformed settings and EOF shutdown pass on retained Node/server with packaged server unavailable');
+    }
+    await page.locator('#view-builtin').waitFor({ state: 'visible' });
+    assert.equal(await page.locator('#view-detail').isVisible(), false);
+    assert.match(await page.locator('#builtin-status').innerText(), /^Opening /);
+    assert.match(await page.locator('#builtin-detail').innerText(), /permission prompt/);
+    await page.screenshot({ path: path.join(out, `${app}-opening.png`) });
+    await retry(() => native(pid, executable, 'button', 'Not now'));
+    await retry(async () => assert.equal(await page.locator('#builtin-open').isEnabled(), true));
+    assert.match(await page.locator('#builtin-status').innerText(), /^Could not open /);
+    assert.match(await page.locator('#builtin-detail').innerText(), /declined/i);
+    assert.equal(await page.locator('#view-detail').isVisible(), false);
+    assert.equal(await page.locator(`#${app}-host-frame`).count(), 0);
+    await backendExited(pid, executable);
+    assert.deepEqual(settingsBytes(), oldConfig, 'Declined startup must not change or create MCP settings');
+    await page.screenshot({ path: path.join(out, `${app}-declined.png`) });
+    report.checks.push(`${app}: real native consent decline shows retry, exits the backend and preserves legacy settings`);
+    verifyRetainedStores(`${app} consent declined`);
+    await page.locator('#builtin-open').click();
+    const previousExecutable = executable;
+    ({ ProcessId: pid, ExecutablePath: executable } = await backendFor(app));
+    assert.equal(executable.toLowerCase(), previousExecutable.toLowerCase(), 'Retry must use the same verified module, not an installed companion');
+    const expectedHash = descriptor.modules[app].files[descriptor.modules[app].executable];
+    assert.equal(crypto.createHash('sha256').update(fs.readFileSync(executable)).digest('hex'), expectedHash);
+    backendPids.set(app, { pid, executable });
+    await retry(() => native(pid, executable, 'button', app === 'setup' ? 'Open in Hub' : 'Enable MCP controls'));
+    await page.locator(`#${app}-host-frame`).waitFor();
+    const frame = page.frameLocator(`#${app}-host-frame`);
+    assert.equal(await page.locator('#context-help-open').isVisible(), false, 'Hub Help must not overlap the module Help');
+    await frame.locator('#context-help-open').waitFor({ state: 'visible' });
+    if (app === 'setup') {
+      await frame.locator('#requirements .requirement').first().waitFor();
+      await frame.locator('#project-name').fill('Retained built-in form');
+    } else {
+      await frame.locator('#connection-guide-dialog').waitFor({ state: 'visible' });
+      assert.deepEqual(settingsBytes(), oldConfig, 'First-run connection guide must not change or create settings');
+      await frame.locator('#connection-guide-close').click();
+      report.checks.push('MCP: upgrade connection guide opens and can be dismissed without changing legacy settings');
+      await frame.locator('#setupBtn').waitFor();
+      await frame.locator('#checkUpdatesBtn').waitFor({ state: 'hidden' });
+      assert.match(await frame.locator('#updateStatus').innerText(), /included with Creator Hub/);
+      assert.deepEqual(settingsBytes(), oldConfig, 'Opening built-in MCP must not migrate or create the config');
+      for (const client of legacyClients) {
+        const migrate = () => frame.locator('body').evaluate(async (_element, client) => {
+          const workflow = await window.CreatorRuntime.invoke('begin_ui_operation');
+          try { return await window.CreatorRuntime.invoke('review_existing_client_connection', { client }); }
+          finally { await window.CreatorRuntime.invoke('finish_ui_operation', { id: workflow }); }
+        }, client.id);
+        const cancelled = migrate();
+        void cancelled.catch(() => {});
+        await retry(() => native(pid, executable, 'button', 'Keep existing'));
+        assert.equal((await cancelled).status, 'cancelled');
+        assert.equal(fs.readFileSync(client.path, 'utf8'), client.content);
+        const approved = migrate();
+        void approved.catch(() => {});
+        await retry(() => native(pid, executable, 'button', 'Move connection'));
+        const result = await approved;
+        assert.equal(result.status, 'migrated');
+        assert.equal(fs.readFileSync(result.backupPath, 'utf8'), client.content, 'Native migration must retain exact before-images');
+        const content = fs.readFileSync(client.path, 'utf8');
+        let entry;
+        if (client.id === 'codex') {
+          const decoded = execFileSync('python', ['-c',
+            "import json,sys,tomllib; d=tomllib.load(open(sys.argv[1],'rb')); e=d['mcp_servers']['creator-works']; assert d['model']=='keep' and d['mcp_servers']['other']['command']=='keep'; print(json.dumps(e))", client.path], { windowsHide: true, encoding: 'utf8', timeout: 15000 });
+          entry = JSON.parse(decoded);
+        } else {
+          const parsed = JSON.parse(content);
+          assert.equal(parsed.preferences.keep, true); assert.equal(parsed.mcpServers.other.command, 'keep');
+          entry = parsed.mcpServers['creator-works'];
+        }
+        verifyMigratedTarget(entry, descriptor, report.runtimeGeneration, process.env.LOCALAPPDATA);
+        assert.equal(entry.env.CUSTOM_SETTING, 'keep'); assert.equal(entry.env.CREATOR_WORKS_TOOL_GROUPS, 'read'); assert.equal(entry.timeout, 37);
+        assert.equal(entry.env.UNITY_PROJECT_PATH, path.join(out, 'Existing-client-project'));
+        assert.equal((await migrate()).status, 'unchanged', 'Repeated migration must not rewrite a marked entry');
+        assert.equal(fs.readFileSync(client.path, 'utf8'), content);
+        await verifyMigratedJsonConnection(entry);
+        report.checks.push(`${client.id}: exact migrated command connects and lists tools through the official SDK; not live AI app/model acceptance`);
+        report.checks.push(`${client.id}: real native decline preserves legacy config; approval moves its connection with exact backup and idempotent retry`);
+      }
+      await saveBuiltinSettings(frame, path.join(report.runtimeGeneration, 'mcp/server/creator-works-mcp.mjs'));
+      expectedConfig = fs.readFileSync(settings);
+      if (oldConfig) assert.equal(JSON.parse(expectedConfig).migrationGuard, JSON.parse(oldConfig).migrationGuard);
+      assert.equal(JSON.parse(expectedConfig).auto_start, true);
+      assert.equal(JSON.parse(expectedConfig).tool_groups, 'core');
+      const backups = path.join(path.dirname(settings), '.creator-hub-settings-backups');
+      if (oldConfig) {
+        const beforeImage = fs.readdirSync(backups).find(name => name.startsWith('launcher-config.json.') && name.endsWith('.bak'));
+        assert.ok(beforeImage, 'Explicit built-in save must retain a backup first');
+        assert.deepEqual(fs.readFileSync(path.join(backups, beforeImage)), oldConfig);
+      } else assert.equal(fs.existsSync(backups), false, 'Fresh profile has no invented before-image');
+      report.checks.push(oldConfig ? 'Explicit built-in save preserves unknown fields and exact original bytes' : 'Fresh-profile startup creates no settings before an explicit save');
+    }
+    await retry(async () => assert.equal(await page.locator('#hosted-stop').isEnabled(), true));
+    assert.equal(await helpOcclusion(frame, 'footer .text-button, .footer a'), null, 'Fixed Help must not obscure module footer links');
+    await frame.locator('body').evaluate(() => scrollTo(0, 0));
+    report.checks.push(`${app}: fixed Help leaves footer links accessible while scrolling`);
+    await page.screenshot({ path: path.join(out, `${app}.png`) });
+    const windows = JSON.parse(native(pid, executable, 'snapshot'));
+    assert.equal(windows.filter(w => w.title === (app === 'setup' ? 'Creator Project Setup' : 'Creator Works MCP')).length, 0);
+    report.checks.push(`${app}: approved retry opens actual private backend and embedded interface; no standalone window`);
+    verifyRetainedStores(`${app} embedded operation`);
+  }
+  await page.locator('#suite-trigger').click();
+  await page.locator('#suite-menu [data-view="setup"]').click();
+  assert.equal(await page.frameLocator('#setup-host-frame').locator('#project-name').inputValue(), 'Retained built-in form');
+  report.checks.push('View switching retains the actual Setup form');
+  for (const app of ['setup', 'mcp']) {
+    if (app === 'mcp') { await page.locator('#suite-trigger').click(); await page.locator('#suite-menu [data-view="mcp"]').click(); }
+    await page.locator('#hosted-stop').click();
+    await retry(() => native(child.pid, hub, 'button', 'Close view'));
+    await page.locator(`#${app}-host-frame`).waitFor({ state: 'detached' });
+    const backend = backendPids.get(app);
+    await backendExited(backend.pid, backend.executable);
+  }
+  registrations();
+  assert.deepEqual(fs.readFileSync(settings), expectedConfig, 'Closing built-in MCP must preserve the explicitly saved config');
+  verifyRetainedStores('Closing module views');
+  report.checks.push('Installer, declined consent, embedded operations and closing preserve Setup Editor cache and inactive legacy MCP bytes; fresh profiles remain absent');
+  report.checks.push('Built-in startup preserves legacy settings; closing preserves the explicitly saved settings byte-for-byte');
+  report.checks.push('Graceful module close; no separate product registrations created');
+
+  const sdk = require('node:module').createRequire(path.resolve('modules/mcp/package.json'));
+  const { Client } = sdk('@modelcontextprotocol/sdk/client/index.js');
+  const { StdioClientTransport } = sdk('@modelcontextprotocol/sdk/client/stdio.js');
+  const project = path.join(out, 'recovery-project');
+  fs.mkdirSync(path.join(project, 'Assets'), { recursive: true });
+  fs.mkdirSync(path.join(project, 'ProjectSettings'));
+  const generation = report.runtimeGeneration;
+  protocolClient = new Client({ name: 'native-retained-runtime-recovery', version: '1' });
+  const transport = new StdioClientTransport({ command: path.join(generation, 'mcp/server/runtime/node.exe'),
+    args: [path.join(generation, 'mcp/server/creator-works-mcp.mjs')], cwd: project, stderr: 'pipe',
+    env: { HOME: project, USERPROFILE: project, APPDATA: project, LOCALAPPDATA: project,
+      UNITY_PROJECT_PATH: project, CREATOR_WORKS_TOOL_GROUPS: 'none', CREATOR_WORKS_LAUNCHER_CONFIG: path.join(project, 'absent.json') } });
+  transport.stderr.on('data', () => {});
+  await protocolClient.connect(transport, { timeout: 10000 });
+  const packagedEntry = path.join(directory, 'modules/mcp/server/creator-works-mcp.mjs');
+  const originalEntry = fs.readFileSync(packagedEntry);
+  try {
+    fs.appendFileSync(packagedEntry, '\n// Disposable candidate corruption fixture\n');
+    const blocked = await page.evaluate(() => window.CreatorHubNative.invoke('start_hosted_app', { app: 'mcp' }).then(() => 'unexpected allow', String));
+    assert.match(blocked, /payload changed/);
+    const invalid = await page.evaluate(() => window.CreatorHubNative.invoke('app_inventory', { check: false, preview: true }));
+    const mcp = invalid.apps.find(app => app.app === 'mcp');
+    assert.equal(mcp.trusted, false);
+    assert.match(mcp.issue, /payload changed/);
+    const running = execFileSync('powershell.exe', ['-NoProfile', '-Command',
+      `$p=@(Get-CimInstance Win32_Process -Filter "ParentProcessId=${child.pid}" | Where-Object { $_.Name -eq 'creator-works-mcp-launcher.exe' }); $p.Count`],
+    { windowsHide: true, encoding: 'utf8', timeout: 15000 }).trim();
+    assert.equal(running, '0', 'Invalid candidate must not launch a backend');
+    await protocolClient.ping({ timeout: 10000 });
+    const result = await protocolClient.callTool({ name: 'get_bridge_status', arguments: {} }, undefined, { timeout: 10000 });
+    assert.equal(JSON.parse(result.content[0].text).project.path, project);
+    assert.deepEqual(fs.readFileSync(settings), expectedConfig);
+  } finally { fs.writeFileSync(packagedEntry, originalEntry); }
+  verifyStage(path.join(directory, 'modules'), descriptor);
+  await page.locator('#builtin-open').click();
+  const recovered = await backendFor('mcp');
+  assert.equal(recovered.ExecutablePath.toLowerCase(), backendPids.get('mcp').executable.toLowerCase());
+  await retry(() => native(recovered.ProcessId, recovered.ExecutablePath, 'button', 'Enable MCP controls'));
+  await page.locator('#mcp-host-frame').waitFor();
+  await retry(async () => assert.equal(await page.locator('#hosted-stop').isEnabled(), true));
+  await protocolClient.ping({ timeout: 10000 });
+  await page.locator('#hosted-stop').click();
+  await retry(() => native(child.pid, hub, 'button', 'Close view'));
+  await page.locator('#mcp-host-frame').waitFor({ state: 'detached' });
+  await backendExited(recovered.ProcessId, recovered.ExecutablePath);
+  await protocolClient.close();
+  protocolClient = null;
+  assert.deepEqual(fs.readFileSync(settings), expectedConfig);
+  verifyRetainedStores('Failed payload and recovered retry');
+  report.checks.push('Corrupt packaged candidate refuses startup without changing settings or disrupting an active SDK stdio client on the retained generation');
+  report.checks.push('Restoring exact candidate bytes permits a successful embedded retry on the same retained generation; active stdio client remains usable. This is failure recovery, not signed-update acceptance');
+  if (installedMode === 'fresh') {
+    await page.waitForFunction(() => !document.querySelector('#check-updates').disabled);
+    native(child.pid, hub, 'close');
+    await retry(() => assert.equal(child.exitCode, 0), 15);
+    await browser.close(); browser = null;
+    child = spawn(hub, [], { windowsHide: true, stdio: 'ignore', env: { ...process.env,
+      WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: '--remote-debugging-port=9238', WEBVIEW2_USER_DATA_FOLDER: path.join(out, 'webview') } });
+    browser = await retry(() => chromium.connectOverCDP('http://127.0.0.1:9238'));
+    page = await retry(() => {
+      const found = browser.contexts().flatMap(context => context.pages()).find(p => p.url().includes('tauri.localhost'));
+      assert.ok(found); return found;
+    });
+    await page.waitForFunction(() => window.CreatorHubNative?.convergencePersistence === true);
+    const repeat = await page.evaluate(() => window.CreatorHubNative.invoke('convergence_status'));
+    report.repeatFreshLaunch = { required: repeat.required, stage: repeat.stage, legacyApps: repeat.legacyApps,
+      settings: repeat.settings, message: repeat.message };
+    assert.deepEqual(fs.readFileSync(settings), expectedConfig, 'Repeat startup must preserve the explicit Hub save');
+    registrations(); verifyRetainedStores('Repeat fresh Hub launch');
+    await page.screenshot({ path: path.join(out, 'repeat-fresh-launch.png') });
+    assert.equal(repeat.required, false, 'An already configured fresh Hub must not ask to migrate its own settings on every launch');
+    report.checks.push('Actual repeat fresh-profile launch preserves saved settings without presenting legacy migration');
+  }
+  report.passed = true;
+})().catch(error => {
+  report.error = String(error.stack || error);
+  report.exitCode = error.status ?? null;
+  report.errorCode = error.code ?? null;
+  report.signal = error.signal ?? null;
+  process.exitCode = 1;
+})
+  .finally(async () => {
+    try { await protocolClient?.close(); }
+    catch (error) { report.protocolCleanupError = String(error); report.passed = false; process.exitCode = 1; }
+    fs.writeFileSync(path.join(out, 'report.json'), JSON.stringify(report, null, 2));
+    if (child && child.exitCode === null) {
+      try {
+        for (const backend of backendPids.values()) {
+          try { native(backend.pid, backend.executable, 'button', 'Keep existing'); } catch { /* No pending owned migration review. */ }
+        }
+        // An unanswered view-close prompt blocks normal window close. Cancel only
+        // that known test-owned prompt before requesting a graceful Hub exit.
+        try { native(child.pid, hub, 'button', 'Keep open'); } catch { /* No pending close prompt. */ }
+        native(child.pid, hub, 'close'); await retry(() => assert.notEqual(child.exitCode, null), 15);
+      } catch (error) { report.cleanupError = String(error); report.passed = false; process.exitCode = 1; }
+      finally { child.unref(); }
+    }
+    try {
+      if (browser) await Promise.race([browser.close(), new Promise((_, reject) => {
+        const timer = setTimeout(() => reject(Error('Browser transport cleanup exceeded 10 seconds.')), 10000);
+        timer.unref();
+      })]);
+    } catch (error) { report.browserCleanupError = String(error); report.passed = false; process.exitCode = 1; }
+    try { if (fs.existsSync(policy)) webviewPolicy('Restore'); }
+    catch (error) { report.policyCleanupError = String(error); report.passed = false; process.exitCode = 1; }
+    fs.writeFileSync(path.join(out, 'report.json'), JSON.stringify(report, null, 2));
+    console.log(`Native component smoke ${report.passed ? 'passed' : 'failed'}; Convergence ${report.convergence?.status || 'unchecked'}; releaseReady=false. Report: ${path.join(out, 'report.json')}`);
+    clearTimeout(watchdog);
+    process.exit(process.exitCode || 0);
+  });

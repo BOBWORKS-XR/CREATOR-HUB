@@ -1,0 +1,9 @@
+Package: creator-project-setup
+Version: 0.3.7
+Architecture: amd64
+Installed-Size: 20484
+Maintainer: Creator Works
+Priority: optional
+Depends: libwebkit2gtk-4.1-0, libgtk-3-0
+Description: Create and validate SideQuest Creator SDK Unity projects
+ Portable setup wizard for a pinned Unity, URP, build-module, and SideQuest Creator SDK project recipe

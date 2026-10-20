@@ -86,9 +86,16 @@ foreach ($window in $windows) {
                     'Disconnect MCP' = @('Disconnect MCP for update')
                     'Add menu' = @('Add Unity menu'); 'Update menu' = @('Update Unity menu')
                     'Enable MCP controls' = @('Open MCP in Creator Hub?'); 'Open read-only preview' = @('Open MCP in Creator Hub?')
-                    'Open in Hub' = @('Open Setup in Creator Hub?'); 'Not now' = @('Open MCP in Creator Hub?', 'Open Setup in Creator Hub?', 'Update Creator Hub')
+                    'Open in Hub' = @('Open Setup in Creator Hub?'); 'Not now' = @('Open MCP in Creator Hub?', 'Open Setup in Creator Hub?', 'Update Creator Hub', 'Enable managed MCP routing')
+                    'Enable managed routing' = @('Enable managed MCP routing')
                     'Update Hub' = @('Update Creator Hub')
                     'Close view' = @('Close hosted app?'); 'Keep open' = @('Close hosted app?')
+                    'Move connection' = @('Review existing MCP connection')
+                    'Keep existing' = @('Review existing MCP connection', 'Review existing MCP connections', 'Keep MCP settings working in Hub', 'Move to unified Creator Hub', 'Retire standalone Creator apps')
+                    'Back up and continue' = @('Move to unified Creator Hub')
+                    'Move selected connections' = @('Review existing MCP connections')
+                    'Move server path' = @('Keep MCP settings working in Hub')
+                    'Finish migration' = @('Retire standalone Creator apps')
                 }
                 if (-not $titles.ContainsKey($Value) -or $window.Current.Name -cnotin $titles[$Value]) { throw 'Requested task dialog title does not match the expected action.' }
                 if ([NativeTestWindows]::Class($dialog) -ne '#32770' -or [NativeTestWindows]::ProcessId($dialog) -ne $TargetPid -or $button.Current.ProcessId -ne $TargetPid) { throw 'Requested task dialog does not belong to the expected process.' }

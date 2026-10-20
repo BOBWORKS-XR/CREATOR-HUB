@@ -118,6 +118,24 @@ impl<G> SessionOperation<G> {
     pub fn busy(&self) -> bool {
         self.guard.is_some()
     }
+
+    #[cfg(any(test, feature = "integrated-features"))]
+    pub fn can_review_close(&self) -> bool {
+        self.guard.is_some() && self.active.is_none()
+    }
+
+    /// Only after native approval and independent proof that the actual worker
+    /// returned. This abandons the UI workflow, not its durable outcome record.
+    #[cfg(any(test, feature = "integrated-features"))]
+    pub fn close_returned_workflow(&mut self) -> Result<(), String> {
+        if !self.can_review_close() {
+            return Err("An MCP operation is still running. Wait for it to return.".into());
+        }
+        self.draining = true;
+        self.workflow = None;
+        self.guard.take();
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -223,5 +241,28 @@ mod tests {
             .begin("read", &json!({}), || Err("other app is busy".into()))
             .is_err());
         assert!(!op.busy());
+    }
+
+    #[test]
+    fn reviewed_ui_close_never_releases_an_active_worker_and_never_enables_replay() {
+        let count = Arc::new(AtomicUsize::new(0));
+        let mut op = SessionOperation::default();
+        op.begin("begin_ui_operation", &json!({}), || reserve(&count))
+            .unwrap();
+        assert!(!op.can_review_close());
+        assert!(op.close_returned_workflow().is_err());
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+        op.complete(&Ok(json!(7))).unwrap();
+        op.begin("save_config", &json!({}), || panic!()).unwrap();
+        assert!(!op.can_review_close());
+        assert!(op.close_returned_workflow().is_err());
+        op.complete(&Err("Outcome persistence failed".into()))
+            .unwrap();
+        assert!(op.can_review_close() && op.busy());
+        op.close_returned_workflow().unwrap();
+        assert_eq!(count.load(Ordering::SeqCst), 0);
+        assert!(!op.busy());
+        assert!(op.begin("save_config", &json!({}), || panic!()).is_err());
+        assert!(op.close_returned_workflow().is_err());
     }
 }

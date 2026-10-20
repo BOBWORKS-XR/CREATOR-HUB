@@ -1,0 +1,43 @@
+name: Linux sealed package privilege handoff (disposable mechanism only)
+on:
+  push:
+    branches: [validation/linux-sealed-update-014]
+    paths: ['.github/workflows/linux-sealed-update-014.yml']
+permissions:
+  contents: read
+jobs:
+  sealed-package:
+    if: github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.repository_id == '1364807512' && github.ref == 'refs/heads/validation/linux-sealed-update-014'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    env:
+      CREATOR_LINUX_SEALED_UPDATE_PROBE: '1'
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Pure and native kernel fixture preflight
+        run: python3 -B scripts/linux-sealed-update-probe.test.py
+      - name: Test the actual standalone Root Linux updater source without compiling Hub
+        run: |
+          cargo test --locked --manifest-path native/linux-update-check/Cargo.toml
+          cargo clippy --locked --manifest-path native/linux-update-check/Cargo.toml --all-targets -- -D warnings
+          node --test scripts/linux-update.test.cjs
+      # Ubuntu 22.04 has polkit 0.105: the probe uses its documented action XML,
+      # not newer JavaScript rules. The temporary no-auth action is test-only.
+      # Action readiness binds the exact original 0.105 native output, not exit 0.
+      - name: Provision Ubuntu authorization for a test-only action, no app or Rust build
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends policykit-1
+          sudo systemctl start polkit
+      - name: Observe the exact native action, then install one sealed fixture through pkexec
+        run: python3 -B scripts/linux-sealed-update-probe.py
+      - name: Retain original result, including failures and false full-flow gates
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-sealed-update-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: ${{ runner.temp }}/linux-sealed-update-probe/result.json

@@ -1,0 +1,1219 @@
+"""Pure/temp execution contracts only; never installs or opens a native app."""
+import ast
+import copy
+import importlib.util
+import io
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tempfile
+import unittest
+from contextlib import ExitStack, contextmanager
+from unittest.mock import Mock, patch
+from types import SimpleNamespace
+
+sys.dont_write_bytecode = True
+HERE = Path(__file__).resolve().parent
+spec = importlib.util.spec_from_file_location("migration016", HERE / "native-linux-production-016-migration.py")
+M = importlib.util.module_from_spec(spec); sys.modules[spec.name] = M; spec.loader.exec_module(M)
+
+
+def environment(scenario=None):
+    return {"GITHUB_ACTIONS": "true", "GITHUB_REPOSITORY": "BOBWORKS-XR/CREATOR-HUB", "GITHUB_REPOSITORY_ID": "1364807512",
+            "GITHUB_REF": M.BRANCH, "GITHUB_EVENT_NAME": "workflow_dispatch", "GITHUB_WORKFLOW_REF": M.WORKFLOW,
+            "GITHUB_SHA": "f" * 40, "RUNNER_ENVIRONMENT": "github-hosted", "RUNNER_OS": "Linux", "RUNNER_ARCH": "X64",
+            "CREATOR_NATIVE_LINUX_PRODUCTION_016": "1", "CREATOR_MIGRATION_016_EXECUTE": "true",
+            "CREATOR_MIGRATION_016_SCENARIO": scenario or M.SCENARIOS[0]}
+
+
+def binding():
+    pins = {key: {"size": 64, "sha256": "a" * 64} for key in M.P.PINS}
+    profile = {"schemaVersion": 1, "cohort": M.P.COHORT, "mode": "pages", "pins": pins,
+               "assembly": {"sourceCommit": "b" * 40, "sourceTree": "c" * 40, "runId": 1, "runAttempt": 1,
+                            "jobId": 2, "artifactId": 3, "zipBytes": 64, "zipSha256": "d" * 64}}
+    api = {"schemaVersion": 1, "cohort": M.P.COHORT, "harnessSource": "f" * 40, "assembly": profile["assembly"],
+           "privatePayload": dict(M.P.PRIVATE), "privateSourcePaths": {key: "9" * 40 for key in M.P.PRIVATE_PATHS}, "legacy": [], **M.P.FLAGS}
+    for product, repo, tag, name in (("mcp", "CREATOR-WORKS-UNITY-MCP", "v2.7.7", "Creator.Works.MCP_2.7.7_amd64.deb"),
+                                    ("setup", "CREATOR-PROJECT-SETUP", "v0.3.7", "Creator.Project.Setup_0.3.7_amd64.deb")):
+        size, sha = M.P.S.LEGACY[product]
+        api["legacy"].append({"product": product, "repo": repo, "tag": tag, "name": name, "size": size, "sha256": sha, "assetId": 1, "releaseId": 2})
+    contract = {"protocolVersion": 2, "cohort": "creator-hub-deb-retirement-016-v1", "mode": "production",
+                "mcpVersion": M.MCP_VERSION, "setupVersion": M.SETUP_VERSION, "nativeAcceptance": False, "externalQualificationRequired": True}
+    proof = {"cohort": M.P.COHORT, "sourceCommit": profile["assembly"]["sourceCommit"], "sourceTree": profile["assembly"]["sourceTree"],
+             "compiledFeatures": list(M.P.FEATURES), "rawHub": pins["rawHub"], "hub": pins["hub"], "productionContract": contract,
+             "rawToPackaged": "exact-tauri-bundle-marker-deb", **M.P.FLAGS}
+    return {"schemaVersion": 1, "cohort": M.P.COHORT, "inspectionOnly": True, "profile": profile, "api": api,
+            "productionProof": proof, "packageFiles": {M.P.S.DEB_MEMBERS[name]: {**pins[name], "mode": mode} for name, mode in
+                                                       (("hub", 0o755), ("helper", 0o755), ("policy", 0o644), ("service", 0o644))},
+            "resourceFiles": {"mcp/server/creator-works-mcp.mjs": "8" * 64}, **M.P.FLAGS}
+
+
+def records(session, commands, ids):
+    return [{"session": session * 64, "id": number, "command": name, "outcome": "returned-ok"} for name, number in zip(commands, ids)]
+
+
+@contextmanager
+def hardening_fixture(uid=0):
+    with tempfile.TemporaryDirectory() as temporary, ExitStack() as stack:
+        root = Path(temporary).resolve()
+        env = {**environment(), "GITHUB_WORKSPACE": str(HERE.parent)}
+        paths = {str(q) for name in M.CI_SHARED_DIRECTORIES for q in (M.PurePosixPath(name), *M.PurePosixPath(name).parents)}
+        def info(inode, mode=0o755):
+            return SimpleNamespace(st_mode=M.stat.S_IFDIR | mode, st_uid=0, st_gid=0, st_dev=1, st_ino=inode, st_nlink=3)
+        fixture = SimpleNamespace(root=root, env=env, directories={name: info(i + 1, 0o777 if name in M.CI_SHARED_DIRECTORIES else 0o755)
+                                  for i, name in enumerate(sorted(paths))}, base=info(100), fds={}, changes=[], race=None, raced=False)
+        real_lstat, real_stat = os.lstat, os.stat
+        def copied(meta):
+            return SimpleNamespace(**vars(meta))
+        def lstat(path, *args, **kwargs):
+            if str(path) == str(root): return copied(fixture.base)
+            if str(path) in fixture.directories: return copied(fixture.directories[str(path)])
+            return real_lstat(path, *args, **kwargs)
+        def name(part, fd=None):
+            return "/" if fd is None else str(M.PurePosixPath(fixture.fds[fd][0]) / part)
+        def opened(part, flags, *, dir_fd=None):
+            self_path = name(part, dir_fd)
+            assert flags & M.os.O_DIRECTORY and flags & M.os.O_NOFOLLOW and flags & M.os.O_CLOEXEC
+            meta = fixture.directories[self_path]
+            if not M.stat.S_ISDIR(meta.st_mode): raise OSError(40, "Synthetic alias or non-directory")
+            fd = 10000 + len(fixture.fds)
+            fixture.fds[fd] = (self_path, meta)
+            return fd
+        def named(part, *, dir_fd=None, follow_symlinks=True):
+            if dir_fd is None:
+                return lstat(part) if str(part) == str(root) or str(part) in fixture.directories else real_stat(part, follow_symlinks=follow_symlinks)
+            assert follow_symlinks is False
+            self_path = name(part, dir_fd)
+            if self_path == fixture.race and not fixture.raced:
+                replacement = copied(fixture.directories[self_path]); replacement.st_ino += 1000
+                fixture.directories[self_path] = replacement; fixture.raced = True
+            return copied(fixture.directories[self_path])
+        def changed(fd, mode):
+            self_path, meta = fixture.fds[fd]
+            assert self_path in M.CI_SHARED_DIRECTORIES and mode == 0o755
+            assert (root / "fixture-directory-hardening-before.json").is_file()
+            fixture.changes.append(self_path); meta.st_mode = M.stat.S_IFDIR | mode
+        for attr, value in (("BASE", root),): stack.enter_context(patch.object(M, attr, value))
+        stack.enter_context(patch.object(M.sys, "platform", "linux"))
+        stack.enter_context(patch.multiple(M.os, getuid=Mock(return_value=uid), geteuid=Mock(return_value=uid),
+                                          getgid=Mock(return_value=uid), getegid=Mock(return_value=uid), create=True))
+        stack.enter_context(patch.multiple(M.os, O_DIRECTORY=0x10000, O_NOFOLLOW=0x20000, O_CLOEXEC=0x40000, create=True))
+        raw = json.dumps(binding()).encode()
+        request = M.execution_request(env, raw)
+        proofs = {str(root / "binding.json"): raw, str(root / "execution-request.json"): json.dumps(request).encode(),
+                  str(root / "source-binding.json"): json.dumps({"harnessSource": env["GITHUB_SHA"], "files": dict.fromkeys(M.SOURCES, {})}).encode()}
+        stack.enter_context(patch.object(M, "read_file", side_effect=lambda path, *a, **k: proofs[str(path)]))
+        for attr, value in (("lstat", lstat), ("stat", named), ("open", opened),
+                            ("fstat", lambda fd: copied(fixture.fds[fd][1])), ("fchmod", changed),
+                            ("close", lambda fd: fixture.fds.pop(fd))):
+            stack.enter_context(patch.object(M.os, attr, value, create=True))
+        yield fixture
+
+
+@contextmanager
+def metadata_fixture(*, diversions=None, overrides=None):
+    if diversions is None:
+        diversions = b"/usr/share/dict/words\n/usr/share/dict/words.pre-dictionaries-common\ndictionaries-common\n"
+    if overrides is None:
+        overrides = b"root root 4755 /unrelated/bin/tool\n"
+    fixture = SimpleNamespace(nodes={}, bodies={}, links={}, fds={}, reads=[], opened=[], counter=100000,
+                              on_read=None, on_stat=None, on_link=None, on_open=None)
+    def put(path, kind=M.stat.S_IFDIR, mode=0o755, uid=0, gid=0, body=b"", target=None):
+        fixture.nodes[path] = SimpleNamespace(st_dev=1, st_ino=len(fixture.nodes) + 1, st_mode=kind | mode,
+                                             st_uid=uid, st_gid=gid, st_nlink=2 if kind == M.stat.S_IFDIR else 1,
+                                             st_size=len(body), st_mtime_ns=2, st_ctime_ns=3)
+        if kind == M.stat.S_IFREG:
+            fixture.bodies[path] = body
+        if target is not None:
+            fixture.links[path] = target
+        return fixture.nodes[path]
+    fixture.put = put
+    for path in ("/", "/var", "/var/lib", "/var/lib/dpkg", "/usr", "/usr/share", "/usr/share/dict",
+                 "/unrelated", "/unrelated/bin"):
+        put(path, mode=0o777 if path == "/usr/share/dict" else 0o755)
+    put("/unrelated/bin/tool", M.stat.S_IFREG, 0o4755)
+    for path, body in zip(M.METADATA_DATABASES, (diversions, overrides)):
+        if body is not None:
+            put(path, M.stat.S_IFREG, 0o644, body=body)
+    def path_for(name, parent):
+        return str(name) if parent is None else str(M.PurePosixPath(fixture.fds[parent][0]) / name)
+    def named(name, *, dir_fd=None, follow_symlinks=False):
+        assert not follow_symlinks
+        path = path_for(name, dir_fd)
+        if fixture.on_stat:
+            fixture.on_stat(path)
+        if path not in fixture.nodes:
+            raise FileNotFoundError(2, "Synthetic absent metadata endpoint", path)
+        return copy.copy(fixture.nodes[path])
+    def opened(name, flags, *, dir_fd=None):
+        path = path_for(name, dir_fd)
+        assert flags & M.os.O_NOFOLLOW and flags & M.os.O_CLOEXEC and flags & M.os.O_NONBLOCK
+        info = named(name, dir_fd=dir_fd)
+        if M.stat.S_ISLNK(info.st_mode) or (flags & M.os.O_DIRECTORY and not M.stat.S_ISDIR(info.st_mode)):
+            raise OSError(40, "Synthetic no-follow/type refusal", path)
+        assert M.stat.S_ISDIR(info.st_mode) or path in M.METADATA_DATABASES, "No non-database file may be opened"
+        fixture.counter += 1
+        fd = fixture.counter
+        fixture.fds[fd] = [path, fixture.nodes[path], fixture.bodies.get(path), 0]
+        fixture.opened.append(path)
+        if fixture.on_open:
+            fixture.on_open(path)
+        return fd
+    def read(fd, count):
+        path, _, body, offset = fixture.fds[fd]
+        assert path in M.METADATA_DATABASES and 0 < count <= 65536
+        fixture.reads.append(path)
+        if fixture.on_read:
+            fixture.on_read(path)
+        result = body[offset:offset + count]
+        fixture.fds[fd][3] += len(result)
+        return result
+    def readlink(name, *, dir_fd):
+        path = path_for(name, dir_fd)
+        result = fixture.links[path]
+        if fixture.on_link:
+            fixture.on_link(path)
+        return result
+    with ExitStack() as stack:
+        stack.enter_context(patch.multiple(M.os, O_PATH=0x100000, O_DIRECTORY=0x200000, O_NOFOLLOW=0x400000,
+                                          O_CLOEXEC=0x800000, O_NONBLOCK=0x1000000, create=True))
+        for key, callback in (("open", opened), ("stat", named), ("lstat", named), ("read", read), ("readlink", readlink),
+                              ("fstat", lambda fd: copy.copy(fixture.fds[fd][1])), ("close", lambda fd: fixture.fds.pop(fd))):
+            stack.enter_context(patch.object(M.os, key, callback))
+        for key in ("scandir", "listdir", "walk", "chmod", "fchmod"):
+            stack.enter_context(patch.object(M.os, key, side_effect=AssertionError("No scan or permission changes"), create=True))
+        stack.enter_context(patch.object(M.subprocess, "run", side_effect=AssertionError("No command execution")))
+        stack.enter_context(patch.object(M, "read_file", side_effect=AssertionError("Only fixed database FD reads")))
+        yield fixture
+        assert not fixture.fds, "Diagnostic leaked an FD"
+
+
+class MetadataTests(unittest.TestCase):
+    def test_all_record_paths_capture_unrelated_unsafe_parents_without_validation_authority(self):
+        with metadata_fixture() as f:
+            before = {name: M.metadata_stamp(info) for name, info in f.nodes.items()}
+            graph = M.helper_metadata()
+            self.assertEqual(before, {name: M.metadata_stamp(info) for name, info in f.nodes.items()})
+            self.assertEqual(set(f.reads), set(M.METADATA_DATABASES))
+            self.assertEqual(set(f.opened) - set(M.METADATA_DATABASES), {"/", "/var", "/var/lib", "/var/lib/dpkg",
+                                                                 "/usr", "/usr/share", "/usr/share/dict", "/unrelated", "/unrelated/bin"})
+        self.assertTrue(graph["complete"])
+        self.assertFalse(graph["validationAuthority"])
+        self.assertTrue(graph["readOnly"])
+        self.assertEqual(len(graph["records"]), 3)
+        self.assertTrue(all(row["complete"] for row in graph["records"]))
+        nodes = {row["path"]: row for row in graph["nodes"]}
+        self.assertFalse(nodes["/usr/share/dict"]["parentPredicateMatches"])
+        self.assertEqual(nodes["/usr/share/dict"]["mode"], 0o777)
+        self.assertTrue(nodes["/usr/share/dict/words"]["absentFinal"])
+        self.assertNotIn("parentPredicateMatches", nodes["/unrelated/bin/tool"])
+        for row in graph["databases"]:
+            self.assertEqual(row["sha256"], M.digest(f.bodies[row["path"]]))
+        self.assertLess(len(json.dumps(graph).encode()), M.METADATA_GRAPH_BYTES)
+
+    def test_relative_absolute_and_dotdot_aliases_are_explicit_bounded_graph_edges(self):
+        with metadata_fixture(diversions=b"/alias/relative/words\n/absolute/other\nfixture\n") as f:
+            f.put("/alias", M.stat.S_IFLNK, 0o777, target="usr/share")
+            f.put("/usr/share/relative", M.stat.S_IFLNK, 0o777, target="./dict/../dict")
+            f.put("/absolute", M.stat.S_IFLNK, 0o777, target="//usr/share/dict")
+            graph = M.helper_metadata()
+        self.assertTrue(graph["complete"], graph["issues"])
+        self.assertEqual([row["resolved"] for row in graph["records"][:2]], ["/usr/share/dict/words", "/usr/share/dict/other"])
+        aliases = {row["path"]: row["target"] for row in graph["nodes"] if "alias" in row["roles"]}
+        self.assertEqual(aliases, {"/alias": "usr/share", "/usr/share/relative": "./dict/../dict", "/absolute": "//usr/share/dict"})
+
+    def test_unresolved_looping_untrusted_and_changed_aliases_are_incomplete(self):
+        for kind in ("missing", "loop", "foreign", "race", "control", "nonutf8"):
+            with self.subTest(kind=kind), metadata_fixture(diversions=b"/alias/words\n/usr/share/dict/other\nfixture\n") as f:
+                if kind != "missing":
+                    f.put("/alias", M.stat.S_IFLNK, 0o777, uid=1 if kind == "foreign" else 0,
+                          target={"loop": "alias", "control": "bad\nname", "nonutf8": "bad\udcff"}.get(kind, "/usr/share/dict"))
+                if kind == "race":
+                    def changed(path):
+                        f.nodes[path] = copy.copy(f.nodes[path]); f.nodes[path].st_ino += 1
+                    f.on_link = changed
+                graph = M.helper_metadata()
+                self.assertFalse(graph["complete"])
+                self.assertFalse(graph["validationAuthority"])
+                self.assertTrue(graph["issues"])
+                self.assertFalse(graph["records"][0]["complete"])
+                self.assertTrue(graph["records"][1]["complete"])
+
+    def test_missing_fixed_database_is_observed_but_appearance_is_incomplete(self):
+        with metadata_fixture() as f:
+            del f.nodes[M.METADATA_DATABASES[0]]
+            graph = M.helper_metadata()
+            self.assertTrue(graph["complete"])
+            self.assertTrue(graph["databases"][0]["absent"])
+        with metadata_fixture() as f:
+            missing = M.METADATA_DATABASES[0]
+            original = f.nodes.pop(missing)
+            def appeared(path):
+                if path == "/unrelated/bin/tool":
+                    f.nodes[missing] = original
+            f.on_stat = appeared
+            graph = M.helper_metadata()
+            self.assertFalse(graph["complete"])
+            self.assertTrue(any("appeared" in row["reason"] for row in graph["issues"]))
+
+    def test_database_replacement_disappearance_and_namespace_alias_refuse_content_reads(self):
+        for kind in ("before", "vanished-on-open", "during", "after", "disappeared", "parent-alias", "oversize", "special"):
+            with self.subTest(kind=kind), metadata_fixture() as f:
+                source = M.METADATA_DATABASES[0]
+                def replace(path):
+                    if path == source:
+                        f.nodes[path] = copy.copy(f.nodes[path]); f.nodes[path].st_ino += 1
+                if kind == "before":
+                    f.on_open = replace
+                elif kind == "vanished-on-open":
+                    f.on_open = lambda path: f.nodes.pop(path, None) if path == source else None
+                elif kind == "during":
+                    f.on_read = replace
+                elif kind == "after":
+                    f.on_stat = lambda path: replace(source) if path == "/usr/share/dict" else None
+                elif kind == "disappeared":
+                    f.on_read = lambda path: f.nodes.pop(path, None) if path == source else None
+                elif kind == "parent-alias":
+                    f.put("/var/lib/dpkg", M.stat.S_IFLNK, 0o777, target="/elsewhere")
+                elif kind == "oversize":
+                    f.nodes[source].st_size = M.METADATA_BYTES + 1
+                else:
+                    f.nodes[source].st_mode = M.stat.S_IFIFO | 0o644
+                graph = M.helper_metadata()
+                self.assertFalse(graph["complete"])
+                self.assertFalse(graph["validationAuthority"])
+                self.assertTrue(graph["issues"])
+                if kind in ("before", "vanished-on-open", "parent-alias", "oversize", "special"):
+                    self.assertNotIn(source, f.reads)
+
+    def test_database_read_growth_and_path_graph_limits_return_bounded_incomplete_receipts(self):
+        with metadata_fixture() as f:
+            f.nodes[M.METADATA_DATABASES[0]].st_size = 0
+            graph = M.helper_metadata()
+            self.assertFalse(graph["complete"])
+        with metadata_fixture() as f:
+            path = M.METADATA_DATABASES[0]
+            f.bodies[path] = b"x" * (M.METADATA_BYTES + 1)
+            f.nodes[path].st_size = M.METADATA_BYTES
+            graph = M.helper_metadata()
+            self.assertFalse(graph["complete"])
+            self.assertTrue(any("read limit" in row["reason"] for row in graph["issues"]))
+        rows = b"".join(f"/different-{i}/a\n/different-{i}/b\nfixture\n".encode() for i in range(40))
+        with metadata_fixture(diversions=rows, overrides=b"") as f, patch.object(M, "METADATA_GRAPH_BYTES", 8192):
+            for i in range(40):
+                f.put("/different-" + str(i))
+            graph = M.helper_metadata()
+            self.assertFalse(graph["complete"])
+            self.assertLessEqual(len(json.dumps(graph, ensure_ascii=False, allow_nan=False).encode()), 8192)
+            self.assertTrue(any(row["type"] == "MetadataCaptureLimit" for row in graph["issues"]))
+
+    def test_overlong_alias_and_source_per_record_step_bound_are_incomplete(self):
+        for target in ("x" * 4096, "/" + "../" * 1025 + "words"):
+            with metadata_fixture(diversions=b"/alias/words\n/usr/share/dict/other\nfixture\n") as f:
+                f.put("/alias", M.stat.S_IFLNK, 0o777, target=target)
+                graph = M.helper_metadata()
+                self.assertFalse(graph["complete"])
+                self.assertFalse(graph["records"][0]["complete"])
+                self.assertTrue(graph["records"][1]["complete"])
+
+    def test_source_bound_parser_rejects_malformed_truncated_oversize_and_noncanonical_records(self):
+        for raw in (b"/a\n/b\nfixture", b"/a\n", b"/a\n/b\nA_BAD_PACKAGE\n", b"/a//b\n/c\nfixture\n",
+                    b"/a/../b\n/c\nfixture\n", b"/a\n/b\nfixture\x00\n", b"\xff\n/b\nfixture\n", b"x" * (M.METADATA_BYTES + 1)):
+            with self.subTest(raw=raw[:40]), self.assertRaises((RuntimeError, UnicodeError)):
+                list(M.metadata_paths(M.METADATA_DATABASES[0], raw))
+        for raw in (b"root root 755\n", b"#01 root 755 /x\n", b"#4294967295 root 755 /x\n", b"root root 888 /x\n",
+                    b"root root 755 relative\n", b"root root 755 /a\tb\n"):
+            with self.subTest(raw=raw), self.assertRaises(RuntimeError):
+                list(M.metadata_paths(M.METADATA_DATABASES[1], raw))
+        self.assertEqual(list(M.metadata_paths(M.METADATA_DATABASES[1], b"#0 _chrony 0755 /path with spaces\n"))[0]["path"], "/path with spaces")
+        with self.assertRaises(RuntimeError):
+            list(M.metadata_paths("/etc/other", b""))
+
+    def test_fixed_database_list_and_parser_match_source_fixtures_without_nss_or_execution(self):
+        root = HERE.parent / "native/linux-deb-retirement"
+        source = (root / "src/linux/metadata.rs").read_text()
+        declaration = re.search(r"const DATABASES:.*?= \[(.*?)\];", source).group(1)
+        self.assertEqual(tuple(re.findall(r'"([^"]+)"', declaration)), M.METADATA_DATABASES)
+        parsed = []
+        for database, suffix in zip(M.METADATA_DATABASES, ("diversions", "statoverride")):
+            raw = (root / "tests/fixtures" / ("38655921324." + suffix)).read_bytes()
+            parsed.extend(M.metadata_paths(database, raw))
+        self.assertTrue(any(row["path"] == "/usr/share/dict/words" for row in parsed))
+        self.assertEqual(len(parsed), 30)
+
+
+@contextmanager
+def permission_capture_fixture(*, statuses=None, starts=("12345", "12345"), failure=None):
+    uid = f"Uid:\t{M.UID}\t{M.UID}\t{M.UID}\t{M.UID}\n".encode()
+    gid = f"Gid:\t{M.UID}\t{M.UID}\t{M.UID}\t{M.UID}\n".encode()
+    fixture = SimpleNamespace(opened=[], reads=[], fds={}, phase=0, helper=M.load("native-unix-window"))
+    status = list(statuses or (b"Name:\tDO_NOT_RETAIN\n" + uid + gid,) * 2)
+    directory = SimpleNamespace(st_dev=1, st_ino=5152, st_mode=M.stat.S_IFDIR | 0o555, st_uid=M.UID, st_gid=M.UID,
+                                st_nlink=9, st_size=0, st_mtime_ns=2, st_ctime_ns=3)
+    regular = SimpleNamespace(**{**vars(directory), "st_ino": 600, "st_mode": M.stat.S_IFREG | 0o444, "st_nlink": 1})
+    def info(leaf):
+        if leaf == "stat" and failure == "symlink":
+            return SimpleNamespace(**{**vars(regular), "st_mode": M.stat.S_IFLNK | 0o777})
+        if leaf == "stat" and failure == "hardlink":
+            return SimpleNamespace(**{**vars(regular), "st_nlink": 2})
+        return copy.copy(regular)
+    def opened(path, flags, *, dir_fd=None):
+        assert flags & M.os.O_NOFOLLOW and flags & M.os.O_CLOEXEC and flags & M.os.O_NONBLOCK
+        if dir_fd is None:
+            assert path.as_posix() == "/proc/5152" and flags & M.os.O_DIRECTORY
+            fd, path = 90, path.as_posix()
+        else:
+            assert dir_fd == 90 and path in ("stat", "status")
+            fd = 100 + len(fixture.opened)
+        fixture.opened.append(str(path)); fixture.fds[fd] = str(path)
+        return fd
+    def named(path, *, dir_fd=None, follow_symlinks=False):
+        assert follow_symlinks is False
+        assert (dir_fd is None and path.as_posix() == "/proc/5152") or (dir_fd == 90 and path in ("stat", "status"))
+        value = copy.copy(directory) if dir_fd is None else info(path)
+        if (dir_fd is None and failure == "dir-replaced") or (path == "stat" and failure == "path-replaced" and path in fixture.reads):
+            value.st_ino += 1
+        return value
+    def fstat(fd):
+        if fd == 90:
+            return copy.copy(directory)
+        value = info(fixture.fds[fd])
+        if failure == "fd-replaced": value.st_ino += 1
+        return value
+    def fdopen(fd, mode):
+        assert mode == "rb"
+        leaf = fixture.fds[fd]
+        if leaf == "stat":
+            raw = ("5152 (DO_NOT_RETAIN) " + " ".join(["S", "4000", *["0"] * 17, starts[fixture.phase]])).encode()
+        else:
+            raw = status[fixture.phase]; fixture.phase += 1
+            if failure == "oversized": raw += b"x" * 16385
+            if failure == "missing-uid": raw = gid
+        class Stream(io.BytesIO):
+            def fileno(self): return fd
+            def read(self, limit=-1):
+                assert limit == (4097 if leaf == "stat" else 16385)
+                fixture.reads.append(leaf); return super().read(limit)
+            def close(self):
+                fixture.fds.pop(fd, None); super().close()
+        return Stream(raw)
+    with ExitStack() as stack:
+        stack.enter_context(patch.multiple(M.os, O_DIRECTORY=0x10000, O_NOFOLLOW=0x20000, O_CLOEXEC=0x40000, O_NONBLOCK=0x80000, create=True))
+        for name, value in (("open", opened), ("stat", named), ("lstat", named), ("fstat", fstat), ("fdopen", fdopen),
+                            ("close", lambda fd: fixture.fds.pop(fd))):
+            stack.enter_context(patch.object(M.os, name, value))
+        stack.enter_context(patch.object(M.subprocess, "run", side_effect=AssertionError("No command execution")))
+        yield fixture
+        assert not fixture.fds, "Permission diagnostic leaked an FD"
+
+
+class PermissionCaptureTests(unittest.TestCase):
+    def test_only_exact_failed_pid_is_read_and_only_parsed_kernel_identity_is_exported(self):
+        with permission_capture_fixture() as f:
+            result = M.inventory_permission_capture(PermissionError(13, "synthetic", "/proc/5152/exe"), f.helper)
+            self.assertEqual(f.opened, ["/proc/5152", "stat", "status", "stat", "status"])
+            self.assertEqual(f.reads, ["stat", "status", "stat", "status"])
+        self.assertEqual(result["pid"], 5152)
+        self.assertEqual(result["errno"], 13)
+        self.assertTrue(result["readOnly"])
+        self.assertTrue(result["stable"])
+        self.assertEqual(result["before"], result["after"])
+        self.assertEqual(result["before"]["Uid"], [M.UID] * 4)
+        self.assertEqual(result["before"]["Gid"], [M.UID] * 4)
+        self.assertEqual(result["before"]["startTime"], "12345")
+        self.assertEqual(result["before"]["parentPid"], 4000)
+        self.assertEqual(result["before"]["procDirectory"]["uid"], M.UID)
+        self.assertNotIn("DO_NOT_RETAIN", json.dumps(result))
+        self.assertLess(len(json.dumps(result).encode()), 4096)
+
+    def test_mixed_credentials_are_captured_but_changes_or_reused_pid_are_not_stable(self):
+        mixed = f"Uid:\t{M.UID}\t0\t0\t0\nGid:\t{M.UID}\t0\t0\t0\n".encode()
+        same = f"Uid:\t{M.UID}\t{M.UID}\t{M.UID}\t{M.UID}\nGid:\t{M.UID}\t{M.UID}\t{M.UID}\t{M.UID}\n".encode()
+        for statuses, starts, stable in (((mixed, mixed), ("12345", "12345"), True),
+                                        ((same, mixed), ("12345", "12345"), False),
+                                        ((same, same), ("12345", "54321"), False)):
+            with permission_capture_fixture(statuses=statuses, starts=starts) as f:
+                result = M.inventory_permission_capture(PermissionError(13, "synthetic", "/proc/5152/exe"), f.helper)
+            self.assertIs(result["stable"], stable)
+            self.assertIsNotNone(result["before"]); self.assertIsNotNone(result["after"])
+
+    def test_redirects_changed_fds_oversize_or_missing_fields_only_make_capture_unavailable(self):
+        for failure in ("symlink", "hardlink", "fd-replaced", "dir-replaced", "path-replaced", "oversized", "missing-uid"):
+            with self.subTest(failure=failure), permission_capture_fixture(failure=failure) as f:
+                result = M.inventory_permission_capture(PermissionError(13, "synthetic", "/proc/5152/exe"), f.helper)
+                self.assertFalse(result["stable"])
+                self.assertEqual(result["unavailable"], "RuntimeError")
+                self.assertNotIn("DO_NOT_RETAIN", json.dumps(result))
+                if failure in ("symlink", "hardlink", "fd-replaced", "dir-replaced"):
+                    self.assertFalse(f.reads)
+
+    def test_nonexact_failure_paths_do_not_trigger_any_proc_reads(self):
+        for path in (None, "/proc/0/exe", "/proc/../5152/exe", "/proc/5152/cmdline", "/proc/5152/exe (deleted)", "/tmp/5152/exe"):
+            with self.subTest(path=path), patch.object(M.os, "open") as opened:
+                result = M.inventory_permission_capture(PermissionError(13, "synthetic", path), Mock())
+                self.assertFalse(result["stable"])
+                self.assertIn("unavailable", result)
+                opened.assert_not_called()
+
+    def test_startup_always_retains_capture_and_reraises_the_identical_inventory_exception(self):
+        for capture in ({"stable": True, "pid": 5152}, {"stable": False, "pid": 5152}, RuntimeError("capture failed")):
+            with self.subTest(capture=capture), tempfile.TemporaryDirectory() as temporary:
+                original = PermissionError(13, "synthetic", "/proc/5152/exe")
+                log = Mock(); log.metadata.return_value = {"stderr": {"truncated": False}}
+                def start(session):
+                    session.logs, session.helper = log, Mock()
+                    session.driver_identity, session.owned = {"pid": 11}, {"pid": 13}
+                    session.child = Mock(pid=11); session.child.poll.return_value = None
+                    session.native = SimpleNamespace(native_process=lambda pid, helper: session.driver_identity if pid == 11 else session.owned)
+                    session.pages = SimpleNamespace(listener=lambda *args: True)
+                    session.backend_guard = lambda: None
+                    session.evidence["root"] = session.owned
+                    session.process_guard()
+                options = {"side_effect": capture} if isinstance(capture, Exception) else {"return_value": capture}
+                with patch.object(M.Session, "start", start), patch.object(M, "native_process_inventory", side_effect=original), \
+                     patch.object(M, "inventory_permission_capture", **options), self.assertRaises(PermissionError) as raised:
+                    M.Session(Path(temporary).resolve(), binding())
+                self.assertIs(raised.exception, original)
+                file = Path(temporary) / "session.json"
+                receipt = json.loads(file.read_bytes())
+                self.assertEqual(receipt["startupRefused"]["type"], "PermissionError")
+                self.assertEqual(receipt["root"], {"pid": 13})
+                if isinstance(capture, Exception):
+                    self.assertEqual(receipt["processInventoryRefusal"]["unavailable"], "RuntimeError")
+                else:
+                    self.assertEqual(receipt["processInventoryRefusal"], capture)
+                self.assertFalse(receipt["normalCloseObserved"])
+                self.assertLess(file.stat().st_size, 4096)
+
+
+class ControllerTests(unittest.TestCase):
+    def test_ci_directory_allowlist_is_exactly_fourteen_with_only_retained_graph_additions_outer_first(self):
+        original = ("/usr/share/applications", "/usr/share/icons", "/usr/share/icons/hicolor",
+                    "/usr/share/icons/hicolor/128x128", "/usr/share/icons/hicolor/128x128/apps",
+                    "/usr/share/icons/hicolor/32x32", "/usr/share/icons/hicolor/32x32/apps")
+        # Run 39357255499: both complete 30-record graphs captured exactly these additional unsafe parents.
+        retained_graph_parents = ("/usr/share/dict", "/usr/share/man", "/usr/share/man/man1",
+                                  "/usr/share/vim", "/usr/share/vim/vim82", "/usr/share/vim/vim82/doc", "/usr/share/aclocal")
+        self.assertEqual(M.CI_SHARED_DIRECTORIES, original + retained_graph_parents)
+        self.assertEqual(len(set(M.CI_SHARED_DIRECTORIES)), 14)
+        for index, path in enumerate(M.CI_SHARED_DIRECTORIES):
+            for parent in M.PurePosixPath(path).parents:
+                if str(parent) in M.CI_SHARED_DIRECTORIES:
+                    self.assertLess(M.CI_SHARED_DIRECTORIES.index(str(parent)), index)
+
+    def test_fixed_ci_directory_hardening_is_fd_bound_outer_first_with_bounded_pre_post_proofs(self):
+        with hardening_fixture() as f:
+            f.directories[M.CI_SHARED_DIRECTORIES[0]].st_mode = M.stat.S_IFDIR | 0o755
+            inodes = {path: row.st_ino for path, row in f.directories.items()}
+            M.harden_fixture_directories(f.env)
+            self.assertEqual(f.changes, list(M.CI_SHARED_DIRECTORIES[1:]))
+            self.assertFalse(f.fds)
+            self.assertEqual(inodes, {path: row.st_ino for path, row in f.directories.items()})
+            for phase in ("before", "after"):
+                file = f.root / ("fixture-directory-hardening-" + phase + ".json")
+                proof = json.loads(file.read_bytes())
+                self.assertEqual([row["path"] for row in proof["directories"]], list(M.CI_SHARED_DIRECTORIES))
+                self.assertTrue(all(proof[key] is False for key in M.FLAGS))
+                self.assertLess(file.stat().st_size, 16384)
+            after = json.loads((f.root / "fixture-directory-hardening-after.json").read_bytes())
+            self.assertTrue(after["completed"])
+            self.assertTrue(all(row["mode"] == 0o755 for row in after["directories"]))
+
+    def test_ci_directory_hardening_rejects_unexpected_owner_modes_and_redirects_without_chmod(self):
+        for failure in ("owner", "group", "mode", "symlink", "ancestor"):
+            with self.subTest(failure=failure), hardening_fixture() as f:
+                first = f.directories[M.CI_SHARED_DIRECTORIES[0]]
+                if failure == "owner": first.st_uid = 1001
+                if failure == "group": first.st_gid = 1001
+                if failure == "mode": first.st_mode = M.stat.S_IFDIR | 0o775
+                if failure == "symlink": first.st_mode = M.stat.S_IFLNK | 0o777
+                if failure == "ancestor": f.directories["/usr/share"].st_mode = M.stat.S_IFLNK | 0o777
+                with self.assertRaises((RuntimeError, OSError)):
+                    M.harden_fixture_directories(f.env)
+                self.assertEqual(f.changes, []); self.assertFalse(f.fds)
+                self.assertFalse(json.loads((f.root / "fixture-directory-hardening-after.json").read_bytes())["completed"])
+
+    def test_ci_directory_hardening_rejects_changed_path_inode_and_retains_original_fd_identity(self):
+        with hardening_fixture() as f:
+            f.race = M.CI_SHARED_DIRECTORIES[0]
+            with self.assertRaises(RuntimeError): M.harden_fixture_directories(f.env)
+            self.assertTrue(f.raced); self.assertEqual(f.changes, []); self.assertFalse(f.fds)
+            before = json.loads((f.root / "fixture-directory-hardening-before.json").read_bytes())
+            after = json.loads((f.root / "fixture-directory-hardening-after.json").read_bytes())
+            self.assertNotEqual(before["directories"][0]["ino"], after["directories"][0]["ino"])
+            self.assertFalse(after["completed"])
+
+    def test_ci_directory_hardening_refuses_other_roles_phases_and_extra_paths_before_permission_changes(self):
+        for failure in ("nonroot", "push", "reused", "extra-path", "unobserved-metadata-parent"):
+            with self.subTest(failure=failure), hardening_fixture(uid=M.UID if failure == "nonroot" else 0) as f:
+                kwargs = {}
+                if failure == "push": f.env["GITHUB_EVENT_NAME"] = "push"
+                if failure == "reused": (f.root / "fixture-directory-hardening-before.json").write_bytes(b"original")
+                if failure == "extra-path": kwargs["paths"] = (*M.CI_SHARED_DIRECTORIES, "/home/runner")
+                if failure == "unobserved-metadata-parent": kwargs["paths"] = (*M.CI_SHARED_DIRECTORIES, "/usr/share/man/man2")
+                with self.assertRaises(RuntimeError): M.harden_fixture_directories(f.env, **kwargs)
+                self.assertEqual(f.changes, []); self.assertFalse(f.fds)
+                self.assertFalse((f.root / "fixture-directory-hardening-after.json").exists())
+
+    def test_ci_hardening_is_before_any_original_deb_install_and_exports_only_two_fixed_proofs(self):
+        source = ast.parse((HERE / "native-linux-production-016-migration.py").read_text())
+        install = next(node for node in source.body if isinstance(node, ast.FunctionDef) and node.name == "install_fixture")
+        calls = [node for node in ast.walk(install) if isinstance(node, ast.Call)]
+        harden = next(node.lineno for node in calls if isinstance(node.func, ast.Name) and node.func.id == "harden_fixture_directories")
+        dpkg = next(node.lineno for node in calls if isinstance(node.func, ast.Name) and node.func.id == "tool" and isinstance(node.args[0], ast.List)
+                    and [getattr(value, "value", None) for value in node.args[0].elts[:2]] == ["/usr/bin/dpkg", "--install"])
+        self.assertLess(harden, dpkg)
+        workflow = (HERE.parent / ".github/workflows/native-linux-production-016-migration.yml").read_text()
+        assignment = next(line.strip() for line in workflow.splitlines() if line.lstrip().startswith("names = ["))
+        names = ast.literal_eval(assignment.partition(" = ")[2])
+        self.assertEqual([name for name in names if "directory-hardening" in name],
+                         ["fixture-directory-hardening-before.json", "fixture-directory-hardening-after.json"])
+
+    def test_helper_namespace_is_the_exact_compiled_inspection_files_and_their_finite_parents(self):
+        rust = HERE.parent / "native/linux-deb-retirement/src"
+        mcp = re.findall(r'pin!\(\s*"([^"]+)"', (rust / "pins.rs").read_text())
+        setup = re.findall(r'path: "([^"]+)"', (rust / "setup.rs").read_text())
+        system = {"/usr/bin/dpkg", "/usr/bin/dpkg-query", "/var/lib/dpkg/diversions", "/var/lib/dpkg/statoverride",
+                  "/var/lib/dpkg/info/creator-works-mcp.list", "/var/lib/dpkg/info/creator-works-mcp.md5sums",
+                  "/var/lib/dpkg/info/creator-project-setup.list", "/var/lib/dpkg/info/creator-project-setup.md5sums"}
+        self.assertEqual(set(M.HELPER_INSPECTION_FILES), {"/" + name for name in mcp + setup} | system)
+        self.assertEqual(set(M.HELPER_INSPECTION_DIRS), {"/var/lib/dpkg/info", "/var/lib/dpkg/updates",
+                         "/var/lib/creator-hub-deb-retirement", "/var/lib/creator-hub-deb-retirement-setup"})
+        expected = set()
+        for leaf in (*M.HELPER_INSPECTION_FILES, *M.HELPER_INSPECTION_DIRS):
+            path = M.PurePosixPath(leaf)
+            expected.update(map(str, (path, *path.parents)))
+        calls = []
+        def lstat(path):
+            calls.append(path)
+            if path.endswith("statoverride"):
+                raise FileNotFoundError(2, "synthetic absent metadata")
+            kind = M.stat.S_IFREG if path == "/usr/bin/dpkg" else M.stat.S_IFLNK if path == "/usr/bin/dpkg-query" else M.stat.S_IFDIR
+            return SimpleNamespace(st_uid=0, st_gid=7 if path == "/usr/share" else 0, st_nlink=3,
+                                   st_mode=kind | (0o777 if path == "/usr/share" else 0o755),
+                                   st_size=4096, st_dev=1, st_ino=2, st_mtime_ns=3, st_ctime_ns=4)
+        with patch.object(M.os, "lstat", side_effect=lstat), patch.object(M.os, "scandir", side_effect=AssertionError("No scan")), \
+             patch.object(M, "read_file", side_effect=AssertionError("No file-content reads")):
+            snapshot = M.helper_namespace()
+        self.assertEqual(calls, sorted(expected))
+        self.assertLessEqual(len(calls), 96)
+        rows = {row["path"]: row for row in snapshot["entries"]}
+        self.assertEqual(rows["/usr/share"]["mode"], 0o777)
+        self.assertEqual(rows["/usr/share"]["modeOctal"], "0777")
+        self.assertEqual(rows["/usr/share"]["gid"], 7)
+        self.assertEqual(rows["/usr/share"]["type"], "directory")
+        self.assertEqual(rows["/usr/bin/dpkg"]["type"], "file")
+        self.assertEqual(rows["/usr/bin/dpkg"]["nlink"], 3)
+        self.assertEqual(rows["/usr/bin/dpkg-query"]["type"], "symlink")
+        self.assertEqual(rows["/var/lib/dpkg/statoverride"], {"path": "/var/lib/dpkg/statoverride", "error": "FileNotFoundError", "errno": 2})
+
+    def test_helper_namespace_snapshots_surround_execution_before_reason_or_image_read(self):
+        events = []
+        snapshots = iter(({"entries": [{"path": "/usr/share", "mode": 0o755}]},
+                          {"entries": [{"path": "/usr/share", "mode": 0o777}]}))
+        metadata = iter(({"complete": True, "validationAuthority": False}, {"complete": False, "validationAuthority": False}))
+        def snapshot():
+            events.append("stat"); return next(snapshots)
+        def graph():
+            events.append("metadata"); return next(metadata)
+        def execute(*args, **kwargs):
+            events.append("helper"); return subprocess.CompletedProcess(args[0], 2, b'{"reason":"synthetic"}', b"")
+        parse = M.P.parse
+        def reason(raw):
+            events.append("reason"); return parse(raw)
+        def image():
+            events.append("image"); return {"path": M.HELPER}
+        with tempfile.TemporaryDirectory() as temporary, patch.object(M, "BASE", Path(temporary).resolve()) as root, \
+             patch.object(M, "helper_namespace", side_effect=snapshot), patch.object(M.subprocess, "run", side_effect=execute), \
+             patch.object(M, "helper_metadata", side_effect=graph), \
+             patch.object(M.P, "parse", side_effect=reason), patch.object(M, "helper_identity", side_effect=image), \
+             patch.multiple(M.os, getuid=Mock(return_value=0), geteuid=Mock(return_value=0),
+                            getgid=Mock(return_value=0), getegid=Mock(return_value=0), create=True):
+            with self.assertRaises(RuntimeError):
+                M.tool([M.HELPER, "inspect"], helper_pin={"size": 64, "sha256": "a" * 64})
+            receipt = json.loads((root / "helper-inspection-failure.json").read_bytes())
+        self.assertEqual(events, ["stat", "metadata", "helper", "stat", "metadata", "reason", "image"])
+        self.assertEqual(receipt["namespaceBefore"]["entries"][0]["mode"], 0o755)
+        self.assertEqual(receipt["namespaceAfter"]["entries"][0]["mode"], 0o777)
+        self.assertTrue(receipt["metadataBefore"]["complete"])
+        self.assertFalse(receipt["metadataAfter"]["complete"])
+        self.assertEqual(receipt["reasonExcerpt"], "synthetic")
+
+    def test_helper_inspection_failure_is_saved_before_throw_even_before_user_creation(self):
+        actions = ("inspect", "inspect-retained-mcp-2.7.7", "inspect-setup-0.3.7", "inspect-retained-setup-0.3.7")
+        pin = {"size": 64, "sha256": "a" * 64}
+        actual = {"path": M.HELPER, **pin, "mode": 0o755, "uid": 0, "gid": 0, "dev": 1, "ino": 2, "nlink": 1}
+        stdout = json.dumps({"status": "refused", "reason": "r" * 6000}).encode()
+        stderr = b"synthetic native diagnostic\n" * 1000
+        for uid in (0, M.UID):
+            for action in actions:
+                with self.subTest(uid=uid, action=action), tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary).resolve()
+                    if uid:
+                        (root / "result").mkdir()
+                    destination = root / ("result/helper-inspection-failure.json" if uid else "helper-inspection-failure.json")
+                    result = subprocess.CompletedProcess([M.HELPER, action], 2, stdout, stderr)
+                    with patch.object(M, "BASE", root), patch.object(M, "helper_identity", return_value=actual), \
+                         patch.object(M, "helper_namespace", return_value={"entries": []}), \
+                         patch.object(M, "helper_metadata", return_value={"complete": False, "validationAuthority": False}), \
+                         patch.multiple(M.os, getuid=Mock(return_value=uid), geteuid=Mock(return_value=uid),
+                                        getgid=Mock(return_value=uid), getegid=Mock(return_value=uid), create=True), \
+                         patch.object(M.subprocess, "run", return_value=result) as run:
+                        with self.assertRaisesRegex(RuntimeError, "Finite native inspection refused; no retry"):
+                            M.tool([M.HELPER, action], helper_pin=pin)
+                    self.assertTrue(destination.is_file())
+                    receipt = json.loads(destination.read_bytes())
+                    self.assertEqual(receipt["argv"], [M.HELPER, action])
+                    self.assertEqual(receipt["exitCode"], 2)
+                    self.assertEqual(receipt["caller"], dict(uid=uid, euid=uid, gid=uid, egid=uid))
+                    self.assertEqual(receipt["helperExpected"], {"path": M.HELPER, **pin, "mode": 0o755, "uid": 0, "gid": 0})
+                    self.assertEqual(receipt["helperActual"], actual)
+                    self.assertEqual(receipt["reasonExcerpt"], "r" * 1024)
+                    for name, raw in (("stdout", stdout), ("stderr", stderr)):
+                        self.assertEqual(receipt[name], {"bytes": len(raw), "sha256": M.digest(raw),
+                                         "excerpt": raw[:2048].decode(), "truncated": True})
+                    self.assertLess(destination.stat().st_size, 16384)
+                    run.assert_called_once_with([M.HELPER, action], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                                stderr=subprocess.PIPE, env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LANG": "C", "LC_ALL": "C"}, check=False)
+                    if not uid:
+                        self.assertFalse((root / "result").exists(), "Pre-user evidence must not need a synthetic home/result directory")
+
+    def test_helper_inspection_diagnostics_never_admit_unknown_actions_or_exit_codes(self):
+        pin = {"size": 64, "sha256": "a" * 64}
+        for args, kwargs in (([M.HELPER, "retire-mcp-2.7.7"], {"helper_pin": pin}),
+                             ([M.HELPER, "inspect", "extra"], {"helper_pin": pin}),
+                             ([M.HELPER], {"helper_pin": pin}), ([M.HELPER, "inspect"], {}),
+                             ([M.HELPER, "inspect"], {"helper_pin": pin, "allowed": (0, 2)})):
+            with self.subTest(args=args, kwargs=kwargs), patch.object(M.subprocess, "run") as run, \
+                 patch.object(M, "helper_identity") as identity, patch.object(M, "helper_namespace") as namespace, \
+                 patch.object(M, "helper_metadata") as metadata, self.assertRaises(RuntimeError):
+                M.tool(args, **kwargs)
+            run.assert_not_called(); identity.assert_not_called(); namespace.assert_not_called(); metadata.assert_not_called()
+
+    def test_successful_helper_inspections_remain_read_only_and_oversized_output_still_refuses(self):
+        pin = {"size": 64, "sha256": "a" * 64}
+        for action in ("inspect", "inspect-retained-mcp-2.7.7", "inspect-setup-0.3.7", "inspect-retained-setup-0.3.7"):
+            with patch.object(M.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, b"{}", b"")) as run, \
+                 patch.object(M, "save") as save, patch.object(M, "helper_namespace", return_value={"entries": []}), \
+                 patch.object(M, "helper_metadata", return_value={"complete": False, "validationAuthority": False}):
+                self.assertEqual(M.tool([M.HELPER, action], helper_pin=pin), b"{}")
+                run.assert_called_once(); save.assert_not_called()
+        with tempfile.TemporaryDirectory() as temporary, patch.object(M, "BASE", Path(temporary).resolve()) as root, \
+             patch.object(M, "helper_identity", return_value={"unavailable": "OSError"}), \
+             patch.object(M, "helper_namespace", return_value={"entries": []}), \
+             patch.object(M, "helper_metadata", return_value={"complete": False, "validationAuthority": False}), \
+             patch.multiple(M.os, getuid=Mock(return_value=0), geteuid=Mock(return_value=0),
+                            getgid=Mock(return_value=0), getegid=Mock(return_value=0), create=True), \
+             patch.object(M.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, b"x" * 262145, b"")):
+            with self.assertRaises(RuntimeError):
+                M.tool([M.HELPER, "inspect"], helper_pin=pin)
+            receipt = json.loads((root / "helper-inspection-failure.json").read_bytes())
+            self.assertEqual(receipt["stdout"]["bytes"], 262145)
+            self.assertEqual(len(receipt["stdout"]["excerpt"]), 2048)
+            self.assertEqual(receipt["helperActual"], {"unavailable": "OSError"})
+
+    def test_two_maximum_graph_budgets_preserve_original_reason_inside_existing_export_limit(self):
+        graph = {"complete": False, "validationAuthority": False, "evidence": "x" * (M.METADATA_GRAPH_BYTES - 256)}
+        with tempfile.TemporaryDirectory() as temporary, patch.object(M, "BASE", Path(temporary).resolve()) as root, \
+             patch.object(M, "helper_identity", return_value={"path": M.HELPER}), \
+             patch.object(M, "helper_namespace", return_value={"entries": [{"path": "/fixed-" + str(i), "mode": 0o755} for i in range(55)]}), \
+             patch.object(M, "helper_metadata", return_value=graph), \
+             patch.multiple(M.os, getuid=Mock(return_value=0), geteuid=Mock(return_value=0),
+                            getgid=Mock(return_value=0), getegid=Mock(return_value=0), create=True), \
+             patch.object(M.subprocess, "run", return_value=subprocess.CompletedProcess([], 2, b'{"reason":"Original helper refusal"}', b"")):
+            with self.assertRaisesRegex(RuntimeError, "Finite native inspection refused; no retry"):
+                M.tool([M.HELPER, "inspect"], helper_pin={"size": 64, "sha256": "a" * 64})
+            file = root / "helper-inspection-failure.json"
+            receipt = json.loads(file.read_bytes())
+            self.assertLessEqual(file.stat().st_size, 1048576)
+            self.assertEqual(receipt["reasonExcerpt"], "Original helper refusal")
+            self.assertEqual(receipt["metadataBefore"], graph)
+            self.assertEqual(receipt["metadataAfter"], graph)
+
+    def test_helper_identity_is_observed_from_the_fixed_image_not_from_the_expected_pin(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            file = Path(temporary).resolve() / "helper"
+            file.write_bytes(b"synthetic never-executed helper")
+            info = file.stat()
+            with patch.object(M, "HELPER", str(file)):
+                identity = M.helper_identity()
+            self.assertEqual(identity["sha256"], M.digest(file.read_bytes()))
+            self.assertEqual(identity["size"], info.st_size)
+            self.assertEqual(identity["mode"], M.stat.S_IMODE(info.st_mode))
+            self.assertEqual(identity["uid"], info.st_uid)
+            self.assertEqual(identity["gid"], info.st_gid)
+
+    def test_helper_failure_export_is_two_exact_files_without_wildcard_or_directory_capture(self):
+        workflow = (HERE.parent / ".github/workflows/native-linux-production-016-migration.yml").read_text()
+        assignment = next(line.strip() for line in workflow.splitlines() if line.lstrip().startswith("names = ["))
+        names = ast.literal_eval(assignment.partition(" = ")[2])
+        self.assertEqual([name for name in names if "helper-inspection" in name],
+                         ["helper-inspection-failure.json", "result/helper-inspection-failure.json"])
+        self.assertTrue(all("*" not in name and ".." not in Path(name).parts for name in names))
+
+    def test_manual_exact_workflow_optin_is_independent_of_inspection_mode(self):
+        for scenario in M.SCENARIOS:
+            self.assertEqual(M.admission(environment(scenario), system="linux", uid=1001), scenario)
+        for key, value in (("GITHUB_WORKFLOW_REF", M.WORKFLOW.replace("-migration", "")), ("GITHUB_EVENT_NAME", "push"),
+                           ("GITHUB_REF", "refs/heads/main"), ("RUNNER_ENVIRONMENT", "self-hosted"), ("RUNNER_ARCH", "ARM64"),
+                           ("CREATOR_MIGRATION_016_EXECUTE", "false"), ("CREATOR_MIGRATION_016_EXECUTE", "1"),
+                           ("CREATOR_MIGRATION_016_SCENARIO", "migration-cancel"), ("GITHUB_SHA", ""),
+                           ("APPIMAGE", "/tmp/a"), ("LD_PRELOAD", ""), ("PYTHONPATH", ""), ("NODE_OPTIONS", "--inspect")):
+            with self.subTest(key=key), self.assertRaises(RuntimeError):
+                M.admission({**environment(), key: value}, system="linux", uid=1001)
+        with self.assertRaises(RuntimeError):
+            M.admission(environment(), system="win32", uid=1001)
+
+    def test_binding_requires_exact_new_source_features_protocol_and_all_false_inspection_flags(self):
+        value = binding()
+        self.assertEqual(M.validate_binding(value, "f" * 40), value["profile"])
+        mutations = [lambda b: b.update(inspectionOnly=False), lambda b: b.update(migrationAccepted=True),
+                     lambda b: b["productionProof"].update(compiledFeatures=["integrated-features"]),
+                     lambda b: b["productionProof"].update(sourceTree="0" * 40),
+                     lambda b: b["productionProof"]["productionContract"].update(protocolVersion=1),
+                     lambda b: b["productionProof"]["productionContract"].update(protocolVersion=True),
+                     lambda b: b["productionProof"]["productionContract"].update(nativeAcceptance=True),
+                     lambda b: b["productionProof"]["productionContract"].update(externalQualificationRequired=False),
+                     lambda b: b["profile"].update(mode="migration-approve"), lambda b: b["api"].update(harnessSource="e" * 40),
+                     lambda b: b["packageFiles"].update({"../outside": {"size": 1, "sha256": "a" * 64, "mode": 0o644}}),
+                     lambda b: b["packageFiles"][M.P.S.DEB_MEMBERS["helper"]].update(mode=0o777),
+                     lambda b: b["resourceFiles"].update({"/outside": "a" * 64}), lambda b: b.update(exec="/bin/true")]
+        for index, mutate in enumerate(mutations):
+            changed = copy.deepcopy(value); mutate(changed)
+            with self.subTest(index=index), self.assertRaises(RuntimeError):
+                M.validate_binding(changed, "f" * 40)
+
+    def test_execution_request_binds_scenario_source_workflow_and_original_binding_bytes(self):
+        raw = json.dumps(binding()).encode()
+        with patch.object(M.sys, "platform", "linux"), patch.object(M.os, "getuid", return_value=1001, create=True):
+            request = M.execution_request(environment(), raw)
+            self.assertEqual(M.check_request(request, environment(), raw), M.SCENARIOS[0])
+            for key, replacement in (("scenario", M.SCENARIOS[1]), ("workflowRef", "other"), ("bindingSha256", "0" * 64),
+                                     ("harnessSource", "0" * 40), ("schemaVersion", True), ("extra", True)):
+                with self.subTest(key=key), self.assertRaises(RuntimeError):
+                    M.check_request({**request, key: replacement}, environment(), raw)
+            with self.assertRaises(RuntimeError):
+                M.check_request(request, environment(), raw + b" ")
+
+    def test_four_actual_scenario_branches_have_finite_order_and_no_followup_on_uncertain_input(self):
+        expected = [[("consent", False), ("cancel-check",)], [("consent", True), ("review-connections",), ("mcp", False)],
+                    [("consent", True), ("review-connections",), ("mcp", True), ("setup", False)],
+                    [("consent", True), ("review-connections",), ("mcp", True), ("setup", True)]]
+        for scenario, wanted in zip(M.SCENARIOS, expected):
+            events = []
+            M.execute_scenario(scenario, lambda approve: events.append(("consent", approve)),
+                               lambda target, approve: events.append((target, approve)), lambda: events.append(("cancel-check",)),
+                               lambda: events.append(("review-connections",)))
+            self.assertEqual(events, wanted)
+            for failure in range(len(wanted)):
+                events = []
+                def step(value):
+                    events.append(value)
+                    if len(events) == failure + 1:
+                        raise RuntimeError("uncertain action")
+                with self.assertRaises(RuntimeError):
+                    M.execute_scenario(scenario, lambda approve: step(("consent", approve)),
+                                       lambda target, approve: step((target, approve)), lambda: step(("cancel-check",)),
+                                       lambda: step(("review-connections",)))
+                self.assertEqual(events, wanted[:failure + 1])
+
+    def test_unverified_connection_context_binds_exact_clients_beforeimages_and_verified_router(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve(); before = M.fixture(root); home = root / "home"
+            router = home / "verified/router"
+            real_read = M.read_file
+            def reader(file, *args, **kwargs):
+                self.assertEqual(kwargs, {"uid": M.UID, "mode": 0o600})
+                return real_read(file, *args)
+            with patch.object(M, "read_file", side_effect=reader), patch.object(M, "verified_route", return_value=(router, home / "server")) as verified:
+                context = M.connection_review(home, before, binding())
+                details = [f"{name}\nCommand: {M.OLD_NODE}\nServer: {M.OLD_SERVER}\nProject kept: {home / 'current-project'}" for name in ("Codex", "Claude Code")]
+                self.assertEqual(context["question"], "These existing connections could not be publisher-verified:\n\n" + "\n\n".join(details)
+                                 + f"\n\nMove them to the verified Hub router at {router}? Names and ownership markers are not proof. Continue only for your Creator Works connections. Exact backups, client options and other servers are kept. Cancel stops migration before changing any of these clients.")
+                self.assertEqual(context["beforeImages"][".claude.json"]["sha256"], M.digest(before[".claude.json"]))
+                verified.assert_called_once_with(home, binding())
+                for name in (".codex/config.toml", ".claude.json", "config/Claude/claude_desktop_config.json"):
+                    file = home / name; file.write_bytes(b"changed")
+                    with self.assertRaises(RuntimeError): M.connection_review(home, before, binding())
+                    file.write_bytes(before[name])
+                extra = home / ".gemini/config/mcp_config.json"; extra.parent.mkdir(parents=True); extra.write_bytes(b"{}")
+                with self.assertRaises(RuntimeError): M.connection_review(home, before, binding())
+
+    def test_unverified_native_graph_refuses_other_clients_router_text_buttons_owner_and_extra_labels(self):
+        question = "Exact two-client before-images and verified router"
+        graph = [{"reference": [":1.2", str(i)], "parent": [":1.2", "app" if i == 0 else "0"], "pid": 123,
+                  "role": role, "name": name, "ready": True} for i, (role, name) in enumerate(
+                      [(2, "Warning"), (29, question), (43, "Move reviewed connections"), (43, "Keep existing")])]
+        check = lambda value: M.graph_contract(value, pid=123, title="Warning", question=question, connection_review=True)
+        check(graph)
+        for mutate in (lambda g: g[1].update(name=question + "\nExtra client"), lambda g: g[1].update(name="Different router"),
+                       lambda g: g[0].update(name="Information"), lambda g: g[2].update(name="Move to Hub"),
+                       lambda g: g[2].update(pid=999), lambda g: g[2].update(ready=False),
+                       lambda g: g.append({**g[1], "reference": [":1.2", "extra"], "name": "Unexpected text"}),
+                       lambda g: g.append({**g[2], "reference": [":1.2", "extra"], "name": "Extra action"})):
+            bad = copy.deepcopy(graph); mutate(bad)
+            with self.assertRaises(RuntimeError): check(bad)
+
+    def test_connection_review_click_is_exactly_once_and_mismatch_or_uncertainty_never_replays(self):
+        button, action = Mock(), Mock()
+        button.get_action_iface.return_value = action
+        action.get_n_actions.return_value = 1; action.get_action_name.return_value = "click"; action.do_action.return_value = True
+        profile = {"question": "exact synthetic clients", "beforeImages": {"client": "before"}, "router": "/verified/router", "frame": [0, 0, 50, 50]}
+        record = {}; guard = Mock()
+        M.approve_connection_review(Mock(return_value=(button, profile)), guard, record)
+        action.do_action.assert_called_once_with(0); self.assertEqual(guard.call_count, 4)
+        with self.assertRaises(RuntimeError): M.approve_connection_review(Mock(), guard, record)
+        for call in (1, 2):
+            for key in profile:
+                action.do_action.reset_mock()
+                changed = {**profile, key: "changed"}; frames = [copy.deepcopy(profile) for _ in range(3)]; frames[call] = changed
+                with self.assertRaises(RuntimeError):
+                    M.approve_connection_review(Mock(side_effect=[(button, frame) for frame in frames]), Mock(), {})
+                action.do_action.assert_not_called()
+        action.do_action.return_value = False; action.do_action.reset_mock(); uncertain = {}
+        with self.assertRaises(RuntimeError): M.approve_connection_review(Mock(return_value=(button, profile)), Mock(), uncertain)
+        self.assertEqual(uncertain["actionAttempts"], 1)
+        with self.assertRaises(RuntimeError): M.approve_connection_review(Mock(), Mock(), uncertain)
+        action.do_action.assert_called_once_with(0)
+
+    def test_original_authority_and_logind_session_are_revalidated_after_broker_wait_before_any_input(self):
+        native = M.load("native-linux-polkit-probe")
+        for kind in ("cancel", "authenticate"):
+            for changed_peer in ("authority", "parent-session", "agent-session", "root-session"):
+                for replacement_wait in ((0, 1, 3, 5) if kind == "authenticate" else (0, 1, 3)):
+                    with self.subTest(kind=kind, peer=changed_peer, replacement_wait=replacement_wait):
+                        s, sdk = Mock(), Mock(); s.owned = {"pid": 30}; p = s.polkit
+                        endpoint = {"owner": ":1.2", "pid": 20, "uid": M.UID, "authority": {"owner": ":1.1", "pid": 1, "uid": 0}}
+                        original_session = {"object": "/session/original", "Id": "c1", "Leader": 10, "User": [M.UID, "/user"]}
+                        state = {"authority": copy.deepcopy(endpoint["authority"]), "sessions": {pid: copy.deepcopy(original_session) for pid in (10, 20, 30)}}
+                        p.bus_identity.side_effect = lambda _bus, name, _glib: state["authority"] if name == "org.freedesktop.PolicyKit1" else {k: endpoint[k] for k in ("owner", "pid", "uid")}
+                        p.session.side_effect = lambda _bus, pid, _glib: state["sessions"][pid]
+                        a = M.Authorization(s, Mock(), {"pid": 20}, {"pid": 10}, endpoint, Mock(), Mock(), Mock(), "question", [0], sdk, original_session)
+                        def replace():
+                            if changed_peer == "authority": state["authority"] = {**state["authority"], "owner": ":1.99"}
+                            else: state["sessions"][{"parent-session": 10, "agent-session": 20, "root-session": 30}[changed_peer]]["Leader"] = 999
+                        waits = [0]
+                        def waited(_check):
+                            waits[0] += 1
+                            if waits[0] == replacement_wait: replace()
+                        s.pages.wait.side_effect = waited
+                        if replacement_wait == 0: replace()
+                        def proof(*_args, **_kwargs):
+                            return json.dumps({"request": {"index": a.counter[0], "target": "mcp"}, "ok": True, "proof": {"root": s.owned, "target": "mcp"}}).encode()
+                        button, password = Mock(), Mock()
+                        password.get_editable_text_iface.return_value.set_text_contents.return_value = True
+                        profile = Mock(return_value=((password, button), {"selectedIdentityVerified": True, "selectedIdentity": M.USER}) if kind == "authenticate" else (button, {}))
+                        record = {"mode": kind}
+                        with patch.dict(M.os.environ, {"CREATOR_MIGRATION_016_SCENARIO": M.SCENARIOS[3]}), patch.object(M, "publish") as publish, patch.object(M, "read_file", side_effect=proof):
+                            with self.assertRaises(RuntimeError):
+                                if kind == "authenticate": native.authenticate_once(profile, lambda: a.input_guard("mcp", record), record, bytearray(b"a" * 64))
+                                else: native.cancel_once(profile, lambda: a.input_guard("mcp", record), record)
+                        if replacement_wait <= 1: profile.assert_not_called()
+                        button.get_action_iface.assert_not_called()
+                        # A replacement after the valid password write must
+                        # still prevent the later Authenticate input.
+                        self.assertEqual(password.get_editable_text_iface.return_value.set_text_contents.call_count,
+                                         1 if kind == "authenticate" and replacement_wait == 5 else 0)
+                        self.assertEqual(publish.call_count, replacement_wait)
+                        p.own_agent.assert_called()  # The held agent itself never changed.
+
+    def test_each_successful_authentication_guard_rechecks_both_sides_of_the_kernel_proof_wait(self):
+        native = M.load("native-linux-polkit-probe")
+        s, sdk = Mock(), Mock(); s.owned = {"pid": 30}; p = s.polkit
+        endpoint = {"owner": ":1.2", "pid": 20, "uid": M.UID, "authority": {"owner": ":1.1", "pid": 1, "uid": 0}}
+        original = {"object": "/session/original", "Leader": 10}
+        p.bus_identity.side_effect = lambda _bus, name, _glib: endpoint["authority"] if name == "org.freedesktop.PolicyKit1" else {k: endpoint[k] for k in ("owner", "pid", "uid")}
+        p.session.return_value = original
+        a = M.Authorization(s, Mock(), {"pid": 20}, {"pid": 10}, endpoint, Mock(), Mock(), Mock(), "question", [0], sdk, original)
+        def proof(*_args, **_kwargs):
+            return json.dumps({"request": {"index": a.counter[0], "target": "mcp"}, "ok": True, "proof": {"root": s.owned, "target": "mcp"}}).encode()
+        password, button, action = Mock(), Mock(), Mock()
+        password.get_editable_text_iface.return_value.set_text_contents.return_value = True
+        button.get_action_iface.return_value = action
+        action.get_n_actions.return_value = 1; action.get_action_name.return_value = "click"; action.do_action.return_value = True
+        profile = Mock(return_value=((password, button), {"selectedIdentityVerified": True, "selectedIdentity": M.USER}))
+        with patch.dict(M.os.environ, {"CREATOR_MIGRATION_016_SCENARIO": M.SCENARIOS[3]}), patch.object(M, "publish") as publish, patch.object(M, "read_file", side_effect=proof):
+            native.authenticate_once(profile, lambda: a.input_guard("mcp", {}), {"mode": "authenticate"}, bytearray(b"a" * 64))
+        self.assertEqual(publish.call_count, 5)
+        self.assertEqual(sum(call.args[1] == "org.freedesktop.PolicyKit1" for call in p.bus_identity.call_args_list), 10)
+        self.assertEqual(p.session.call_count, 30)
+        password.get_editable_text_iface.return_value.set_text_contents.assert_called_once(); action.do_action.assert_called_once_with(0)
+
+    def test_guide_cancel_allows_only_two_completed_reads_per_new_root_and_preserves_prefix(self):
+        empty = {"revision": 1, "records": []}
+        first = {"revision": 1, "records": records("a", ["load_config", "discover_unity_projects"], [3, 4])}
+        second = {"revision": 1, "records": first["records"] + records("b", ["load_config", "discover_unity_projects"], [3, 4])}
+        M.journal_delta(empty, first); M.journal_delta(first, second)
+        mutations = [lambda v: v["records"].pop(), lambda v: v["records"].append(dict(v["records"][-1])),
+                     lambda v: v["records"][0].update(command="apply_client_config"),
+                     lambda v: v["records"][0].update(outcome="unknown"), lambda v: v["records"][0].update(id=True),
+                     lambda v: v["records"][1].update(id=5), lambda v: v["records"][1].update(session="b" * 64),
+                     lambda v: v.update(revision=True), lambda v: v.update(extra=1)]
+        for mutate in mutations:
+            bad = copy.deepcopy(first); mutate(bad)
+            with self.assertRaises(RuntimeError): M.journal_delta(empty, bad)
+        bad = copy.deepcopy(second); bad["records"][0]["outcome"] = "returned-error"
+        with self.assertRaises(RuntimeError): M.journal_delta(first, bad)
+        repeated = {"revision": 1, "records": first["records"] * 2}
+        with self.assertRaises(RuntimeError): M.journal_delta(first, repeated)
+
+    def test_transfer_journal_has_only_source_defined_completed_commands_then_exact_reopen_reads(self):
+        names = ["review_existing_client_connections", "review_convergence_server", "load_config", "discover_unity_projects"]
+        first = {"revision": 1, "records": records("a", names, [2, 3, 7, 8])}
+        M.journal_delta({"revision": 1, "records": []}, first, transferred=True)
+        second = {"revision": 1, "records": first["records"] + records("b", names[-2:], [3, 4])}
+        M.journal_delta(first, second)
+        for index in range(4):
+            bad = copy.deepcopy(first); bad["records"][index]["command"] = "unexpected"
+            with self.assertRaises(RuntimeError): M.journal_delta({"revision": 1, "records": []}, bad, transferred=True)
+
+    def test_scenario_package_states_do_not_treat_partial_cleanup_as_rollback_or_completion(self):
+        self.assertEqual([M.retention_state(s) for s in M.SCENARIOS], [(False, False), (False, False), (True, False), (True, True)])
+        with self.assertRaises(RuntimeError): M.retention_state("all")
+
+    def test_inspections_require_production_protocol_exact_types_counts_and_target(self):
+        for target in ("mcp", "setup"):
+            for retained in (False, True):
+                other = "setup" if target == "mcp" else "mcp"
+                value = {"protocolVersion": 2, "cohort": "creator-hub-deb-retirement-016-v1", "mode": "production",
+                         "status": "inspected-retained-read-only" if retained else "inspected-read-only", "nativeAcceptance": False,
+                         "externalQualificationRequired": True, "product": target,
+                         "package": "creator-works-mcp" if target == "mcp" else "creator-project-setup",
+                         "packageState": "compatibility" if retained else "original",
+                         "version": (M.MCP_VERSION if target == "mcp" else M.SETUP_VERSION) if retained else ("2.7.7" if target == "mcp" else "0.3.7"),
+                         "readOnly": True, "baselineMatches": not retained, "compatibilityMatches": retained,
+                         "snapshotAuthoritative": False, "packageTransactionStarted": False,
+                         "retainedFilesVerified": 9 if retained and target == "mcp" else 0,
+                         "tombstoneFilesVerified": 1 if retained and target == "setup" else 0,
+                         "omittedFilesVerified": 5 if retained else 0}
+                M.inspection(value, target, retained)
+                with self.assertRaises(RuntimeError): M.inspection(value, other, retained)
+                for key, bad in (("protocolVersion", 1), ("nativeAcceptance", True), ("packageTransactionStarted", True),
+                                 ("retainedFilesVerified", True), ("omittedFilesVerified", 6), ("extra", False)):
+                    with self.subTest(target=target, retained=retained, key=key), self.assertRaises(RuntimeError):
+                        M.inspection({**value, key: bad}, target, retained)
+
+    def test_route_verifies_actual_minisig_names_generation_and_every_bound_payload(self):
+        home = Path("/synthetic/home")
+        base = home / "data/creator-hub"
+        resource = {"mcp/server/creator-works-mcp.mjs": b"synthetic server", "mcp/server/runtime/node": b"synthetic node"}
+        module = {"executable": "mcp/creator-works-mcp-launcher", "version": "2.7.7",
+                  "files": {name: M.digest(raw) for name, raw in resource.items()}}
+        generation = M.digest(json.dumps({**module, "files": dict(sorted(module["files"].items()))}, separators=(",", ":")).encode())
+        runtime = json.dumps({"module": module}).encode()
+        resource.update({"routing/runtime.json": runtime, "routing/runtime.minisig": b"synthetic runtime signature",
+                         "routing/router.json": json.dumps({"sha256": M.digest(b"synthetic router")}).encode(),
+                         "routing/router.minisig": b"synthetic router signature"})
+        active = {"schemaVersion": 1, "descriptorSha256": M.digest(runtime), "generation": generation}
+        route = base / "mcp-route-v1/linux-x86_64"
+        files = {route / "active.json": json.dumps(active).encode(),
+                 route / "router-v1/creator-hub-mcp-router": b"synthetic router"}
+        for name, raw in resource.items():
+            destination = (route / "descriptors" / active["descriptorSha256"] / name.removeprefix("routing/") if name.startswith("routing/runtime") else
+                           route / "router-v1" / name.removeprefix("routing/") if name.startswith("routing/router") else
+                           base / "runtime-generations/linux-x86_64" / generation / name)
+            files[destination] = raw
+        pins = {"resourceFiles": {name: M.digest(raw) for name, raw in resource.items()}}
+        def reader(file, *_args, **_kwargs):
+            return files[file]
+        with patch.object(M, "read_file", side_effect=reader):
+            router, server = M.verified_route(home, pins)
+            self.assertEqual(router, route / "router-v1/creator-hub-mcp-router")
+            self.assertEqual(server, base / "runtime-generations/linux-x86_64" / generation / "mcp/server/creator-works-mcp.mjs")
+            for name in list(files):
+                if name.name == "active.json": continue
+                original = files[name]; files[name] = b"changed"
+                with self.subTest(path=str(name)), self.assertRaises((RuntimeError, ValueError)):
+                    M.verified_route(home, pins)
+                files[name] = original
+
+    def test_pending_kernel_request_is_target_specific_not_historical_sealed_dpkg(self):
+        for target, argument in (("mcp", "retire-mcp-2.7.7"), ("setup", "retire-setup-0.3.7")):
+            raw = b"\0".join(v.encode() for v in ("/usr/bin/pkexec", "--disable-internal-agent", M.HELPER, argument)) + b"\0"
+            M.pending_command(raw, target)
+            for bad in (raw + b"extra\0", raw.replace(b"--disable-internal-agent\0", b""), raw.replace(argument.encode(), b"inspect"),
+                        b"/usr/bin/pkexec\0--disable-internal-agent\0/usr/bin/dpkg\0--install\0/proc/self/fd/0\0"):
+                with self.assertRaises(RuntimeError): M.pending_command(bad, target)
+        with self.assertRaises(RuntimeError): M.proof_request({"index": 1, "target": "mcp"}, M.SCENARIOS[0])
+        with self.assertRaises(RuntimeError): M.proof_request({"index": 1, "target": "setup"}, M.SCENARIOS[1])
+        for value in ({"index": True, "target": "mcp"}, {"index": 49, "target": "mcp"}, {"index": 1, "target": "mcp", "command": "other"}):
+            with self.assertRaises(RuntimeError): M.proof_request(value, M.SCENARIOS[3])
+
+    def test_policy_remains_uncached_admin_and_fixed_helper(self):
+        raw = (HERE.parent / "packaging/linux/com.creatorworks.hub.deb-retirement.production-016.policy").read_bytes()
+        self.assertIn("user settings and Unity projects will be kept", M.policy_question(raw))
+        for bad in (raw.replace(b"auth_admin", b"yes"), raw.replace(b"auth_admin", b"auth_admin_keep"), raw.replace(M.HELPER.encode(), b"/bin/sh")):
+            with self.assertRaises(RuntimeError): M.policy_question(bad)
+
+    def test_native_guide_graph_requires_source_question_owner_buttons_and_readiness(self):
+        question = M.GUIDE + M.GUIDE_SUMMARY + M.GUIDE_END
+        graph = [{"reference": [":1.2", str(i)], "parent": [":1.2", "app" if i == 0 else "0"], "pid": 123,
+                  "role": role, "name": name, "ready": True} for i, (role, name) in enumerate(
+                      [(2, "Information"), (29, question), (43, "Move to Hub"), (43, "Not now")])]
+        M.graph_contract(graph, pid=123, title="Information", question=question)
+        for mutate in (lambda v: v[1].update(pid=999), lambda v: v[1].update(name="wrong question"),
+                       lambda v: v[2].update(name="Install"), lambda v: v[2].update(ready=False),
+                       lambda v: v[1].update(parent=[":other", "/outside"]), lambda v: v[1].update(role=40),
+                       lambda v: v[2].update(reference=v[1]["reference"])):
+            bad = copy.deepcopy(graph); mutate(bad)
+            with self.assertRaises(RuntimeError): M.graph_contract(bad, pid=123, title="Information", question=question)
+        for bounds in ((-1, 0, 1, 1), (0, 0, 0, 10), (1, 1, 1000, 10), (False, 0, 1, 1)):
+            with self.assertRaises(RuntimeError): M.inside(bounds, (0, 0, 100, 100))
+
+    def test_pre_map_empty_inventory_is_not_an_error_or_an_ownership_bypass(self):
+        self.assertEqual(M.startup_inventory(None), [])
+        self.assertEqual(M.startup_inventory((33, 32, [])), [])
+        self.assertEqual(M.startup_inventory((33, 32, [42])), [42])
+        for value in ((33, 32, [42, 43]), (1, 32, [42]), (33, 8, [42]), (33, 32, [True]), (33, 32, [0]), []):
+            with self.assertRaises(RuntimeError): M.startup_inventory(value)
+
+    def test_native_process_guard_rejects_legacy_gui_and_host_backend_but_allows_private_node(self):
+        for image, command in ((M.OLD_NODE, [M.OLD_NODE, M.OLD_SERVER]),
+                               ("/usr/bin/creator-hub", ["/usr/bin/creator-hub"]),
+                               ("/memfd:creator-node (deleted)", ["node", "/proc/self/fd/9"])):
+            M.no_legacy_backend({"executable": image}, b"\0".join(value.encode() for value in command) + b"\0")
+        for image, command in (("/usr/bin/creator-works-mcp-launcher", b"launcher\0"),
+                               ("/usr/bin/creator-project-setup", b"setup\0"),
+                               ("/memfd:creator-works-mcp-launcher (deleted)", b"module\0"),
+                               ("/memfd:module (deleted)", b"module\0--creator-hub-host\0"),
+                               (M.OLD_NODE, b"node\0--creator-hub-host\0")):
+            with self.subTest(image=image), self.assertRaises(RuntimeError):
+                M.no_legacy_backend({"executable": image}, command)
+        for command in (b"", b"unterminated", b"x" * 8192 + b"\0"):
+            with self.assertRaises(RuntimeError): M.no_legacy_backend({"executable": M.OLD_NODE}, command)
+
+    def test_actual_home_observation_requires_linux_version_dense_projects_selection_and_bridge_fields(self):
+        home, values = Path("/synthetic/home"), {}
+        for selector, text in (("#platform-status", "Linux"), (".footer-version", "0.1.16"), ("#page-title", "CREATOR HUB"),
+                               ("#projects-home-title", "Projects"), ("#unified-home-updater #hub-update-title", "Creator Hub update")):
+            values[selector, "text"] = text
+        for selector, shown in (("#platform-status", True), (".footer-version", True), ("#view-projects", True),
+                                ("#projects-home-title", True), ("#unified-home-updater", True), ("#view-hub", False),
+                                ("#view-hosted", False), ("#view-native-features", False)):
+            values[selector, "displayed"] = shown
+        values["#view-projects", "attribute/aria-busy"] = "false"
+        for selected, name, y in ((True, "current-project", 100), (False, "missing-project", 220)):
+            row = '#project-list .project-row[data-mcp-selected="' + str(selected).lower() + '"]'
+            values.update({(row, "displayed"): True, (row + " .project-info small", "text"): str(home / name),
+                           (row + " .project-bridge-warning", "text"): "MCP bridge not installed",
+                           (row + " .project-bridge-warning", "displayed"): True,
+                           (row + " .project-selected", "text"): "Selected for MCP", (row + " .project-selected", "displayed"): True,
+                           (row, "css/display"): "flex", (row, "css/padding-top"): "14px", (row, "css/padding-bottom"): "14px",
+                           (row + " .project-tags", "css/font-size"): "11px", (row, "rect"): {"x": 24, "y": y, "width": 892, "height": 100}})
+        d = Mock()
+        d.read.side_effect = lambda selector, endpoint="text": values[selector, endpoint]
+        d.elements.side_effect = lambda selector: ["a", "b"] if selector == "#project-list .project-row" else [] if selector == "iframe,object,embed" else ["a"]
+        d.call.return_value = ["one-native-root"]
+        result = M.home_observation(d, home)
+        self.assertEqual(result["platform"], "Linux"); self.assertEqual(result["version"], "0.1.16")
+        self.assertTrue(result["rows"][0]["selected"])
+        for key, bad in ((("#platform-status", "text"), "Windows"), ((".footer-version", "text"), "0.1.14"),
+                         (("#view-hosted", "displayed"), True), (("#view-projects", "attribute/aria-busy"), "true"),
+                         (("#platform-status", "displayed"), False)):
+            old = values[key]; values[key] = bad
+            with self.subTest(key=key), self.assertRaises(RuntimeError): M.home_observation(d, home)
+            values[key] = old
+        row = '#project-list .project-row[data-mcp-selected="true"]'
+        for endpoint, bad in (("css/display", "grid"), ("css/padding-top", "40px"), ("rect", {"x": 24, "y": 210, "width": 892, "height": 100})):
+            old = values[row, endpoint]; values[row, endpoint] = bad
+            with self.assertRaises(RuntimeError): M.home_observation(d, home)
+            values[row, endpoint] = old
+        key = row + " .project-bridge-warning", "text"
+        values[key] = "MCP bridge not checked"
+        with self.assertRaises(RuntimeError): M.home_observation(d, home)
+
+    def test_guide_cancel_preserves_settings_but_not_blanket_ignores_root_journal(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            before = M.fixture(root)
+            home = root / "home"
+            M.preserved(home, before, transferred=False)
+            (home / M.JOURNAL).write_text(json.dumps({"revision": 1, "records": records("a", ["load_config", "discover_unity_projects"], [3, 4])}))
+            M.journal_delta(M.P.parse(before[M.JOURNAL]), M.P.parse(M.read_file(home / M.JOURNAL)))
+            M.preserved(home, before, transferred=False)
+            target = home / M.CONFIG; target.write_text("changed")
+            with self.assertRaises(RuntimeError): M.preserved(home, before, transferred=False)
+
+    def test_stable_file_reader_rejects_links_sizes_and_descriptor_replacement(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            file = Path(temporary).resolve() / "record.json"
+            file.write_bytes(b"original")
+            self.assertEqual(M.read_file(file), b"original")
+            with self.assertRaises(RuntimeError): M.read_file(file, limit=7)
+            with self.assertRaises(RuntimeError): M.read_file(file.parent)
+            before = file.stat()
+            changed = Mock(**{k: getattr(before, k) for k in dir(before) if k.startswith("st_")})
+            changed.st_ino += 1
+            with patch.object(M.os, "fstat", return_value=changed), self.assertRaises(RuntimeError):
+                M.read_file(file)
+            hardlink = file.with_name("hardlink")
+            os.link(file, hardlink)
+            with self.assertRaises(RuntimeError): M.read_file(file)
+
+    def test_tool_disposal_accepts_proven_tool_exit_and_never_signals_product(self):
+        s = M.Session.__new__(M.Session)
+        s.child, s.native, s.helper, s.pages = Mock(), Mock(), Mock(), Mock()
+        s.child.pid = 11
+        s.driver_identity, s.backend = {"pid": 11}, {"pid": 12}
+        s.child.poll.return_value = 0
+        with patch.object(M.select, "select", return_value=([99], [], [])), patch.object(M.signal, "pidfd_send_signal", create=True) as send:
+            s.dispose_tools(99)
+            s.native.native_process.assert_not_called()
+            s.child.terminate.assert_not_called(); send.assert_not_called()
+        s.child.poll.return_value = None
+        s.native.native_process.side_effect = [s.driver_identity, s.backend]
+        with patch.object(M.select, "select", return_value=([], [], [])), patch.object(M.signal, "pidfd_send_signal", create=True) as send:
+            s.dispose_tools(99)
+            s.child.terminate.assert_called_once()
+            send.assert_called_once_with(99, M.signal.SIGTERM)
+            self.assertEqual(s.native.native_process.call_args_list[0].args[0], 11)
+            self.assertEqual(s.native.native_process.call_args_list[1].args[0], 12)
+        s.child.terminate.reset_mock()
+        s.native.native_process.side_effect = None
+        s.native.native_process.return_value = {"pid": 500}
+        with patch.object(M.signal, "pidfd_send_signal", create=True) as send, self.assertRaises(RuntimeError):
+            s.dispose_tools(99)
+        s.child.terminate.assert_not_called(); send.assert_not_called()
+
+    def test_startup_failure_keeps_bounded_refusal_and_existing_driver_evidence(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            log = Mock()
+            log.metadata.return_value = {"stderr": {"truncated": False}}
+            def start(session):
+                session.evidence["root"] = {"pid": 16, "kernelImageSha256": "a" * 64}
+                session.logs = log
+                raise RuntimeError("Root mapping refused")
+            with patch.object(M.Session, "start", start), self.assertRaisesRegex(RuntimeError, "Root mapping refused"):
+                M.Session(root, binding())
+            receipt = M.P.parse(M.read_file(root / "session.json"))
+            self.assertFalse(receipt["normalCloseObserved"])
+            self.assertEqual(receipt["root"]["pid"], 16)
+            self.assertEqual(receipt["startupRefused"], {"type": "RuntimeError", "message": "Root mapping refused"})
+            log.pump.assert_called_once(); log.close.assert_called_once()
+
+    def test_syntax_sdk_uses_locked_library_and_has_no_signal_based_transport_close(self):
+        source = (HERE / "native-linux-production-016-migration.py").read_text()
+        ast.parse(source, feature_version=(3, 10))
+        subprocess.run(["node", "--check", "--input-type=commonjs"], input=M.SDK_JS.encode(), check=True, capture_output=True)
+        self.assertIn("@modelcontextprotocol/sdk/client/index.js", M.SDK_JS)
+        self.assertIn("stdin.end()", M.SDK_JS)
+        for token in ("process.kill", ".kill(", "StdioClientTransport", "eval("):
+            self.assertNotIn(token, M.SDK_JS)
+        self.assertEqual(M.FLAGS["releaseReady"], False)
+        self.assertNotIn("request_restart", source)
+
+    def test_sdk_pin_is_the_actual_linux_checkout_lock_not_windows_crlf_bytes(self):
+        lock = (HERE.parent / "modules/mcp/package-lock.json").read_bytes()
+        self.assertEqual(M.digest(lock.replace(b"\r\n", b"\n")), M.SDK_LOCK)
+        workflow = (HERE.parent / ".github/workflows/native-linux-production-016-migration.yml").read_text()
+        self.assertIn("= " + M.SDK_LOCK, workflow)
+        self.assertIn('digest(read_file(source / "package-lock.json", 2 * 1024 * 1024)) == SDK_LOCK',
+                      (HERE / "native-linux-production-016-migration.py").read_text())
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

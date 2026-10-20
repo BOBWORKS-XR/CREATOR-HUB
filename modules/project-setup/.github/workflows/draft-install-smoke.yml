@@ -1,0 +1,210 @@
+name: Draft Windows install smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Exact draft release tag to test
+        required: true
+        type: string
+
+permissions:
+  # GitHub's workflow token cannot enumerate draft releases with read-only access.
+  contents: write
+
+jobs:
+  install:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        baseline: [clean, '0.3.6']
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Install exact draft on disposable Windows
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_TAG: ${{ inputs.tag }}
+          BASELINE: ${{ matrix.baseline }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:RUNNER_ENVIRONMENT -ne 'github-hosted' -or $env:RUNNER_OS -ne 'Windows') {
+            throw 'A disposable GitHub-hosted Windows runner is required.'
+          }
+          if ($env:CANDIDATE_TAG -cnotmatch '^v(?<version>[0-9]+\.[0-9]+\.[0-9]+)$') {
+            throw 'Use an exact stable-channel draft tag.'
+          }
+          $version = $Matches.version
+          $repo = 'BOBWORKS-XR/CREATOR-PROJECT-SETUP'
+          $exeName = 'creator-project-setup.exe'
+          $root = Join-Path $env:RUNNER_TEMP 'setup-draft-install-smoke'
+          New-Item -ItemType Directory -Force -Path $root | Out-Null
+          $report = [ordered]@{ schemaVersion = 1; candidate = $env:CANDIDATE_TAG; baseline = $env:BASELINE; passed = $false; checks = @() }
+
+          function Get-ReleaseInstaller([string]$tag, [string]$expectedVersion, [string]$folder, [bool]$requireDraft) {
+            $releaseText = gh release view $tag --repo $repo --json tagName,isDraft,isPrerelease,assets
+            if ($LASTEXITCODE -ne 0) { throw "Could not inspect release $tag." }
+            $release = $releaseText | ConvertFrom-Json
+            if ($release.tagName -cne $tag -or [bool]$release.isDraft -ne $requireDraft -or $release.isPrerelease) {
+              throw "Release channel or tag does not match $tag."
+            }
+            $name = "Creator.Project.Setup_${expectedVersion}_x64-setup.exe"
+            $asset = @($release.assets | Where-Object { $_.name -ceq $name })
+            if ($asset.Count -ne 1 -or $asset[0].digest -cnotmatch '^sha256:[0-9a-f]{64}$') {
+              throw "Release $tag does not have one digest-verified Windows installer."
+            }
+            New-Item -ItemType Directory -Force -Path $folder | Out-Null
+            gh release download $tag --repo $repo --pattern $name --dir $folder
+            if ($LASTEXITCODE -ne 0) { throw "Could not download installer for $tag." }
+            $installer = Join-Path $folder $name
+            if ((Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant() -cne $asset[0].digest.Substring(7)) {
+              throw "Installer digest does not match release $tag."
+            }
+            return $installer
+          }
+
+          function Get-InstallEntries {
+            foreach ($registryRoot in @(
+              'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall',
+              'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall',
+              'HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall'
+            )) {
+              Get-ChildItem -LiteralPath $registryRoot -ErrorAction SilentlyContinue | ForEach-Object {
+                $entry = Get-ItemProperty -LiteralPath $_.PSPath -ErrorAction SilentlyContinue
+                if ($entry.DisplayName -ceq 'Creator Project Setup') { $entry }
+              }
+            }
+          }
+
+          function Confirm-Installed([string]$expectedVersion, [string]$expectedHash, [bool]$checkIdentity) {
+            $entries = @(Get-InstallEntries)
+            if ($entries.Count -ne 1 -or -not $entries[0].InstallLocation) {
+              throw 'Expected exactly one registered Creator Project Setup installation.'
+            }
+            $installLocation = ([string]$entries[0].InstallLocation).Trim().Trim('"')
+            $installed = Join-Path $installLocation $exeName
+            if (-not (Test-Path -LiteralPath $installed -PathType Leaf)) { throw 'Installed executable is missing.' }
+            if ((Get-FileHash -LiteralPath $installed -Algorithm SHA256).Hash.ToLowerInvariant() -cne $expectedHash) {
+              throw 'Installed executable differs from the exact installer payload.'
+            }
+            if ($checkIdentity) {
+              $identityDir = Join-Path $root 'identity-probe'
+              New-Item -ItemType Directory -Force -Path $identityDir | Out-Null
+              node -e "require('./scripts/verify-windows-candidate.cjs').probe(process.argv[1], process.argv[2], undefined, process.argv[3])" $installed $expectedVersion $identityDir
+              if ($LASTEXITCODE -ne 0) { throw 'Installed executable rejected read-only Hub identity.' }
+            }
+          }
+
+          try {
+            if (@(Get-InstallEntries).Count -ne 0) { throw 'Runner was not clean before testing.' }
+            if ($env:BASELINE -ceq '0.3.6') {
+              $previous = Get-ReleaseInstaller 'v0.3.6' '0.3.6' (Join-Path $root 'baseline') $false
+              $baselinePayload = Join-Path $root 'baseline-payload'
+              & 7z.exe x $previous "-o$baselinePayload" $exeName '-y' | Out-Null
+              if ($LASTEXITCODE -ne 0) { throw 'Could not extract the baseline executable.' }
+              $baselineHash = (Get-FileHash -LiteralPath (Join-Path $baselinePayload $exeName) -Algorithm SHA256).Hash.ToLowerInvariant()
+              $baselineProcess = Start-Process -FilePath $previous -ArgumentList '/S' -PassThru -Wait -WindowStyle Hidden
+              if ($baselineProcess.ExitCode -ne 0) { throw 'Baseline installation failed.' }
+              Confirm-Installed '0.3.6' $baselineHash $false
+              $report.checks += 'public-baseline-installed'
+            } elseif ($env:BASELINE -cne 'clean') {
+              throw 'Unknown baseline.'
+            }
+
+            $candidate = Get-ReleaseInstaller $env:CANDIDATE_TAG $version (Join-Path $root 'candidate') $true
+            $payload = Join-Path $root 'payload'
+            & 7z.exe x $candidate "-o$payload" $exeName '-y' | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw 'Could not extract the candidate executable.' }
+            $payloadExe = Join-Path $payload $exeName
+            if (-not (Test-Path -LiteralPath $payloadExe -PathType Leaf)) { throw 'Installer payload is missing its executable.' }
+            $expectedHash = (Get-FileHash -LiteralPath $payloadExe -Algorithm SHA256).Hash.ToLowerInvariant()
+            $report.installerSha256 = (Get-FileHash -LiteralPath $candidate -Algorithm SHA256).Hash.ToLowerInvariant()
+            $report.executableSha256 = $expectedHash
+            $report.checks += 'draft-digest-and-payload'
+
+            $sentinel = Join-Path $env:APPDATA 'com.creatorworks.projectsetup\release-smoke-sentinel.txt'
+            if ($env:BASELINE -ceq '0.3.6') {
+              New-Item -ItemType Directory -Force -Path (Split-Path -Parent $sentinel) | Out-Null
+              [System.IO.File]::WriteAllText($sentinel, 'preserve-user-data')
+            }
+            $candidateProcess = Start-Process -FilePath $candidate -ArgumentList '/S' -PassThru -Wait -WindowStyle Hidden
+            if ($candidateProcess.ExitCode -ne 0) { throw "Candidate installer exited $($candidateProcess.ExitCode)." }
+            Confirm-Installed $version $expectedHash $true
+            $report.checks += 'installed-hash-and-identity'
+            if ($env:BASELINE -ceq '0.3.6') {
+              if (-not (Test-Path -LiteralPath $sentinel) -or (Get-Content -LiteralPath $sentinel -Raw) -cne 'preserve-user-data') {
+                throw 'Unrelated user data was not preserved through the upgrade.'
+              }
+              $report.checks += 'user-data-preserved'
+            }
+            $report.passed = $true
+          } catch {
+            $report.error = $_.Exception.Message
+            throw
+          } finally {
+            $report | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $root 'report.json') -Encoding utf8
+          }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: setup-draft-install-smoke-${{ matrix.baseline }}
+          path: ${{ runner.temp }}/setup-draft-install-smoke/report.json
+          if-no-files-found: error
+
+  mac-package:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            asset_arch: aarch64
+            binary_arch: arm64
+          - os: macos-15-intel
+            asset_arch: x64
+            binary_arch: x86_64
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Verify exact draft DMG signature and architecture
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_TAG: ${{ inputs.tag }}
+          ASSET_ARCH: ${{ matrix.asset_arch }}
+          BINARY_ARCH: ${{ matrix.binary_arch }}
+        run: |
+          set -euo pipefail
+          [[ "$CANDIDATE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'Invalid draft tag' >&2; exit 1; }
+          release=$(gh release view "$CANDIDATE_TAG" --json tagName,isDraft,isPrerelease,assets)
+          [[ $(jq -r '.isDraft' <<<"$release") == true ]] || { echo 'Release is not a draft' >&2; exit 1; }
+          [[ $(jq -r '.isPrerelease' <<<"$release") == false ]] || { echo 'Expected stable-channel draft' >&2; exit 1; }
+          version=${CANDIDATE_TAG#v}
+          asset="Creator.Project.Setup_${version}_${ASSET_ARCH}.dmg"
+          digest=$(jq -r --arg name "$asset" '.assets[] | select(.name == $name) | .digest' <<<"$release")
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo 'Missing DMG digest' >&2; exit 1; }
+          folder="$RUNNER_TEMP/setup-draft-dmg"
+          mkdir -p "$folder" "$folder/mounted"
+          gh release download "$CANDIDATE_TAG" --pattern "$asset" --dir "$folder"
+          actual=$(shasum -a 256 "$folder/$asset" | awk '{print $1}')
+          [[ "$actual" == "${digest#sha256:}" ]] || { echo 'DMG digest mismatch' >&2; exit 1; }
+          hdiutil attach -readonly -nobrowse -mountpoint "$folder/mounted" "$folder/$asset"
+          trap 'hdiutil detach "$folder/mounted"' EXIT
+          app=$(find "$folder/mounted" -maxdepth 1 -type d -name '*.app' -print -quit)
+          [[ -n "$app" ]] || { echo 'DMG has no app bundle' >&2; exit 1; }
+          codesign --verify --deep --strict --verbose=2 "$app"
+          executable=$(plutil -extract CFBundleExecutable raw -o - "$app/Contents/Info.plist")
+          architectures=$(lipo -archs "$app/Contents/MacOS/$executable")
+          [[ " $architectures " == *" $BINARY_ARCH "* ]] || { echo "Unexpected executable architecture: $architectures" >&2; exit 1; }
+          printf 'Verified %s: %s, %s, code signature valid\n' "$asset" "$actual" "$architectures"

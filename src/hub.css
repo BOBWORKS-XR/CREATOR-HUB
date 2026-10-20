@@ -24,6 +24,9 @@ main { padding-top: 10px; }
 .project-filters :focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
 .project-row { display: flex; align-items: center; gap: 16px; padding: 14px 8px; border-bottom: 1px solid #20282d; border-radius: 4px; }
 .project-row:hover { background: #14191d; }
+.project-row[data-mcp-selected="true"] { border-left: 2px solid var(--cyan); background: #111b1f; }
+.project-selected, .project-bridge-current { color: #38c976; }
+.project-bridge-warning { color: var(--amber); }
 .project-info { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .project-info strong, .project-info small { display: block; }
 .project-info small { color: var(--muted); font-size: 11px; margin-top: 5px; }
@@ -88,6 +91,11 @@ button.app-row:hover { background: #181d21; }
 .tool-heading > div { min-width: 0; }
 .tool-heading h2 { font-size: 17px; }
 .tool-heading p { margin-top: 6px; color: var(--muted); line-height: 1.5; font-size: 12px; }
+.builtin-opening { padding: 12px 0 24px; }
+.builtin-opening h2 { margin: 24px 0 16px; font-size: 17px; }
+.builtin-opening p { margin: 8px 0; font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
+#builtin-detail { color: var(--muted); }
+#builtin-open { display: inline-flex; align-items: center; gap: 8px; margin-top: 16px; }
 .tool-mark { flex-basis: 42px; width: 42px; height: 42px; }
 .tool-mark img { width: 40px; height: 40px; }
 .tool-facts { margin: 0; }
@@ -110,10 +118,13 @@ button.app-row:hover { background: #181d21; }
 /* The installed app owns this persistent viewport; navigation only hides it. */
 .hosting-app main { padding: 0; display: flex; flex-direction: column; }
 .hosting-app > footer { display: none; }
+.hosting-app > .context-help-open { display: none; }
 #view-hosted { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .hosted-toolbar { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 0 24px; min-height: 28px; font-size: 11px; color: #9ba7af; }
 #hosted-content { flex: 1; min-height: 360px; display: flex; }
 #hosted-content iframe { border: 0; width: 100%; min-width: 0; flex: 1; min-height: calc(100vh - 106px); background: #090b0d; }
+#view-native-features { min-width: 0; }
+#hub-help-content[hidden], #feature-help-content[hidden] { display: none !important; }
 .hosting-app #action-error, .hosting-app #operation-progress { margin: 8px 24px; }
 /* Compatibility remains separate from installation and preview availability. */
 .compatibility-note { border-left: 2px solid #00cce8; padding: 8px 12px; margin: 16px 0; }
@@ -126,6 +137,24 @@ button.app-row:hover { background: #181d21; }
 @media (max-width: 480px) { .detected-copy { align-items: flex-start; flex-direction: column; } }
 .hub-update { margin-top: 18px; padding-top: 12px; border-top: 1px solid #293137; }
 .hub-update p { overflow-wrap: anywhere; }
+.native-support-mode #suite-shell, .native-support-mode #suite-dismiss,
+.native-support-mode footer .footer-links,
+.native-support-mode main > :not(#native-support-page) { display: none !important; }
+#native-support-page { max-width: 660px; margin: 20px auto; }
+#native-support-page [hidden] { display: none !important; }
+#native-support-page h2 { font-size: 20px; }
+#native-support-page p, #native-support-page li { line-height: 1.6; overflow-wrap: anywhere; }
+#native-support-page ul { padding-left: 20px; }
+.native-support-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 20px; }
+.integrated-home #unified-home-updater { margin-bottom: 20px; padding-bottom: 14px; border-bottom: 1px solid var(--line); }
+.integrated-home .hub-update { margin-top: 0; padding-top: 0; border-top: 0; }
+.integrated-home .hub-update .page-heading { flex-wrap: wrap; gap: 8px 16px; }
+.integrated-home #hub-update-title { margin-right: auto; font-size: 15px; }
+.integrated-home #hub-update-status { color: var(--muted); font-size: 12px; line-height: 1.5; }
+.integrated-home #update-settings { margin-top: 10px; color: var(--muted); font-size: 12px; }
+.integrated-home #update-settings summary { cursor: pointer; width: fit-content; }
+.integrated-home #update-settings .update-preferences { margin-top: 10px; }
+.integrated-home #projects-home-title { font-size: 15px; font-weight: 600; }
 body:has(#view-plugins:not(.hidden)) > main,
 body:has(#view-plugins:not(.hidden)) > footer { padding-left: 76px; }
 @media (max-width: 560px) {

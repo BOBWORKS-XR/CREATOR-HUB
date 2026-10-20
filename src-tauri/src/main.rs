@@ -1,18 +1,77 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod builtin;
 mod catalog;
 mod community;
 mod community_project;
+mod convergence;
+use convergence::stores::storage as settings_backup;
+#[allow(dead_code)]
+mod convergence_dependencies;
+#[cfg(all(target_os = "linux", feature = "experimental-linux-migration"))]
+mod convergence_linux;
+#[allow(dead_code)]
+#[path = "../../modules/mcp/launcher/src-tauri/src/migration_recovery.rs"]
+mod convergence_recovery;
+mod features;
+#[cfg(all(
+    target_os = "linux",
+    any(
+        feature = "experimental-flatpak-host",
+        feature = "experimental-flatpak-ui"
+    )
+))]
+#[allow(dead_code)]
+mod flatpak_bootstrap;
+#[cfg(any(all(target_os = "linux", feature = "experimental-flatpak-host"), test))]
+#[allow(dead_code)]
+mod flatpak_rpc;
+#[cfg(all(target_os = "macos", test))]
+#[allow(dead_code)]
+#[path = "../../native/host_parent_macos.rs"]
+mod host_parent_macos;
 mod hosted;
 mod hosted_operation;
 mod hosted_restore;
+#[cfg(any(unix, test))]
+mod installation_identity;
 mod installer_preflight;
 mod launch;
+#[cfg(any(windows, test))]
+#[allow(dead_code)]
+mod legacy_removal_windows;
+#[cfg(windows)]
+#[allow(dead_code)]
+mod legacy_retirement_windows;
+#[cfg(windows)]
+#[allow(dead_code)]
+mod legacy_shortcut_native_windows;
+#[cfg(windows)]
+#[allow(dead_code)]
+mod legacy_shortcuts_windows;
+#[cfg(all(target_os = "linux", feature = "experimental-linux-portable-host"))]
+mod linux_portable_host;
+#[cfg(all(target_os = "linux", feature = "experimental-linux-migration"))]
+mod linux_retirement;
+#[cfg(any(target_os = "linux", test))]
+mod linux_update;
+#[cfg(any(target_os = "macos", test))]
+mod mac_update;
 mod manager;
 mod mcp_runtime;
+mod native_support;
 mod platform;
+#[path = "../../native/plugins_retirement.rs"]
+mod plugins_retirement;
+#[cfg(all(target_os = "linux", feature = "experimental-linux-portable-update"))]
+mod portable_package;
+#[cfg(all(target_os = "linux", feature = "experimental-linux-portable-update"))]
+mod portable_update;
+mod preferences;
 mod projects;
 mod self_update;
+mod update_target;
+mod usage_terms;
 use catalog::AppId;
 use tauri::{Emitter, Manager as _};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
@@ -135,6 +194,9 @@ async fn app_inventory(
     preview: bool,
 ) -> Result<manager::Snapshot, String> {
     tauri::async_runtime::spawn_blocking(move || {
+        if let Some(snapshot) = builtin::inventory(&app)? {
+            return Ok(snapshot);
+        }
         app.state::<manager::Manager>().snapshot(check, preview)
     })
     .await
@@ -240,6 +302,7 @@ fn resource_url(resource: &str) -> Option<&'static str> {
         "hub-plan" => Some("https://github.com/BOBWORKS-XR/CREATOR-PROJECT-SETUP/blob/master/docs/CREATOR-HUB-PLAN.md"),
         "github" => Some("https://github.com/BOBWORKS-XR/CREATOR-HUB"),
         "sdk-source" => Some("https://greenfield-registry.sdq.st/-/web/detail/com.sidequest.creator-sdk"),
+        "unity-cli-docs" => Some("https://docs.unity.com/en-us/unity-cli/unity-pipeline/unity-pipeline-package"),
         _ => None,
     }
 }
@@ -273,8 +336,26 @@ fn open_resource(resource: String) -> Result<(), String> {
         .map_err(|error| format!("Could not open the browser: {error}"))
 }
 
-fn shell_initialization(shell_key: &str) -> String {
-    format!("if(window === window.top) {{ Object.defineProperty(window, '__CREATOR_SHELL_KEY__', {{value: '{}', configurable: true}}); Object.defineProperty(window, '__CREATOR_HUB_VERSION__', {{value: '{}'}}); }}", shell_key, env!("CARGO_PKG_VERSION"))
+fn shell_initialization(shell_key: &str, bootstrap: bool) -> String {
+    let recovery = if !bootstrap
+        && cfg!(all(
+            target_os = "linux",
+            feature = "experimental-linux-portable-update"
+        )) {
+        " Object.defineProperty(window, '__CREATOR_HUB_UPDATE_RECOVERY_PROTOCOL__', {value: 1});"
+    } else {
+        ""
+    };
+    let support = if bootstrap
+        && cfg!(all(
+            target_os = "linux",
+            feature = "experimental-linux-portable-update"
+        )) {
+        " Object.defineProperty(window, '__CREATOR_HUB_NATIVE_SUPPORT_PROTOCOL__', {value: 1});"
+    } else {
+        ""
+    };
+    format!("if(window === window.top) {{ Object.defineProperty(window, '__CREATOR_SHELL_KEY__', {{value: '{}', configurable: true}}); Object.defineProperty(window, '__CREATOR_HUB_VERSION__', {{value: '{}'}}); Object.defineProperty(window, '__CREATOR_HUB_TERMS_PROTOCOL__', {{value: 1}}); Object.defineProperty(window, '__CREATOR_HUB_PREFERENCES_PROTOCOL__', {{value: 1}}); Object.defineProperty(window, '__CREATOR_HUB_CONVERGENCE_PROTOCOL__', {{value: {}}}); Object.defineProperty(window, '__CREATOR_HUB_FEATURE_PROTOCOL__', {{value: {}}});{}{} }}", shell_key, env!("CARGO_PKG_VERSION"), u8::from(builtin::enabled()), u8::from(cfg!(feature = "integrated-features")), recovery, support)
 }
 
 #[cfg(target_os = "linux")]
@@ -298,20 +379,57 @@ fn configure_linux_webkit() {
 }
 
 fn main() {
+    #[cfg(all(target_os = "linux", feature = "experimental-linux-portable-host"))]
+    if let Err(message) = linux_portable_host::admit_startup() {
+        eprintln!("{message}");
+        std::process::exit(2);
+    }
     #[cfg(target_os = "linux")]
     configure_linux_webkit();
     if let Some(wait) = installer_preflight::mode(std::env::args_os().skip(1)) {
         std::process::exit(installer_preflight::run(wait));
     }
-    let initial_view = match launch::parse(std::env::args_os().skip(1)) {
+    let arguments: Vec<_> = std::env::args_os().skip(1).take(4).collect();
+    #[cfg(all(target_os = "linux", feature = "experimental-linux-portable-update"))]
+    let automatic_bootstrap = launch::automatic_native_support(
+        (std::env::consts::OS, std::env::consts::ARCH),
+        cfg!(feature = "experimental-linux-portable-update"),
+        &arguments,
+        tauri::utils::platform::bundle_type(),
+        std::env::var_os(creator_hub_linux_portable_deployment::HOST_MARKER).is_some(),
+        update_target::flatpak(),
+        std::env::var_os("APPIMAGE").as_deref(),
+    );
+    #[cfg(not(all(target_os = "linux", feature = "experimental-linux-portable-update")))]
+    let automatic_bootstrap = false;
+    let bootstrap = launch::native_support_requested(arguments.clone()) || automatic_bootstrap;
+    let initial_view = match launch::parse(arguments) {
         Ok(view) => view,
         Err(()) => std::process::exit(2),
     };
     let mut random = [0u8; 32];
     getrandom::fill(&mut random).expect("Cannot initialize Hub's private shell authority");
     let shell_key: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
-    let initialize = shell_initialization(&shell_key);
+    let initialize = shell_initialization(&shell_key, bootstrap);
     let commands: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool = tauri::generate_handler![
+        usage_terms::usage_terms_status,
+        usage_terms::accept_usage_terms,
+        native_support::native_support_status,
+        native_support::install_native_support,
+        native_support::review_native_support_recovery,
+        features::feature_status,
+        features::feature_select,
+        features::feature_call,
+        preferences::hub_preferences_status,
+        preferences::set_hub_preference,
+        convergence::convergence_status,
+        convergence::refresh_convergence,
+        convergence::prepare_convergence,
+        convergence::migrate_convergence_connections,
+        convergence::retire_convergence_apps,
+        convergence::move_to_hub,
+        convergence::inspect_convergence_outcome,
+        plugins_retirement::open_plugins_website,
         open_resource,
         community_catalogue,
         community_projects,
@@ -333,6 +451,8 @@ fn main() {
         self_update::hub_update_status,
         self_update::download_hub_update,
         self_update::install_hub_update,
+        self_update::hub_update_recovery_status,
+        self_update::review_retained_hub_update,
         hosted_restore::pending_hosted_restore,
         hosted_restore::restore_hosted_app,
         hosted_restore::complete_hosted_restore,
@@ -347,16 +467,52 @@ fn main() {
         hosted::abort_hosted_app
     ];
     tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, arguments, _cwd| {
-            launch::activate(app, arguments);
+        .plugin(tauri_plugin_single_instance::init(move |app, arguments, _cwd| {
+            if let Some(guidance) = native_support::forwarded_guidance(
+                cfg!(all(target_os = "linux", feature = "experimental-linux-portable-update")),
+                bootstrap,
+                &arguments,
+                std::env::current_exe().ok().as_deref(),
+            ) {
+                let _ = launch::focus(app);
+                app.dialog().message(guidance).title("Creator Hub is already open")
+                    .buttons(MessageDialogButtons::Ok).show(|_| {});
+            }
+            else if bootstrap || (cfg!(all(target_os = "linux", feature = "experimental-linux-portable-update")) && arguments.len() == 1) { let _ = launch::focus(app); }
+            else { launch::activate(app, arguments); }
         }))
         .manage(launch::Launch::new(initial_view))
+        .manage(native_support::NativeSupport::new(bootstrap))
         .manage(ShellKey(shell_key))
         .append_invoke_initialization_script(initialize)
         .manage(manager::Manager::default())
+        .manage(convergence::Convergence::default())
         .manage(community::Community::default())
         .manage(community_project::ProjectImports::default())
         .manage(self_update::SelfUpdate::default())
+        .manage(features::Features::default())
+        .setup(move |app| {
+            #[cfg(all(target_os = "linux", feature = "experimental-linux-portable-update"))]
+            app.manage(portable_update::PortableUpdate::default());
+            if !bootstrap {
+                #[cfg(feature = "integrated-features")]
+                creator_project_setup::service::initialize(app.handle())
+                    .map_err(std::io::Error::other)?;
+                #[cfg(all(target_os = "linux", feature = "experimental-flatpak-host", feature = "integrated-features"))]
+                {
+                    let handle = app.handle().clone();
+                    match flatpak_bootstrap::serve(move || launch::focus(&handle)) {
+                        Ok(service) => { app.manage(service); }
+                        Err(error) => eprintln!("Flatpak activation unavailable: {error}"),
+                    }
+                }
+                #[cfg(unix)]
+                self_update::initialize(app.handle());
+                #[cfg(not(unix))]
+                let _ = app;
+            }
+            Ok(())
+        })
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(hosted::Hosting::default())
         .manage(hosted_restore::Restore::default())
@@ -366,7 +522,9 @@ fn main() {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 if !window.state::<manager::Manager>().allow_close() {
                     api.prevent_close();
-                    let _ = window.emit("close-blocked", "An app operation is running. Cancel the download or finish the installer before closing Hub.");
+                    if !features::review_close(window.app_handle()) {
+                        let _ = window.emit("close-blocked", "A Hub operation is running. Wait for MCP or Project Setup to finish, or cancel the download before closing Hub.");
+                    }
                 }
             }
         })
@@ -377,13 +535,24 @@ fn main() {
                 invoke.resolver.reject("Hub commands are available only to its trusted shell.");
                 return true;
             }
+            if !native_support::command_allowed(bootstrap, invoke.message.command()) {
+                invoke.resolver.reject("Only native support setup and cancellation are available in this window. Close it and open Hub normally for projects, MCP and updates.");
+                return true;
+            }
+            if let Some(error) = plugins_retirement::command_error(invoke.message.command()) {
+                invoke.resolver.reject(error);
+                return true;
+            }
             commands(invoke)
         })
         .build(tauri::generate_context!())
         .expect("Creator Hub could not start")
         .run(|app, event| {
             if let tauri::RunEvent::ExitRequested { api, .. } = event {
-                if !app.state::<manager::Manager>().allow_close() { api.prevent_exit(); }
+                if !app.state::<manager::Manager>().allow_close() {
+                    api.prevent_exit();
+                    features::review_close(app);
+                }
                 else { app.state::<hosted::Hosting>().close_idle(); }
             }
         });
@@ -395,12 +564,53 @@ mod tests {
 
     #[test]
     fn shell_version_comes_from_the_executable() {
-        let script = shell_initialization("test-key");
+        let script = shell_initialization("test-key", false);
         assert!(script.starts_with("if(window === window.top)"));
         assert!(script.contains(&format!(
             "'__CREATOR_HUB_VERSION__', {{value: '{}'}}",
             env!("CARGO_PKG_VERSION")
         )));
+    }
+
+    #[test]
+    fn native_persistence_protocols_keep_top_window_shell_authority() {
+        let script = shell_initialization("test-key", false);
+        assert!(script.starts_with("if(window === window.top) {"));
+        assert!(script.contains("'__CREATOR_SHELL_KEY__', {value: 'test-key', configurable: true}"));
+        for property in [
+            "__CREATOR_HUB_TERMS_PROTOCOL__",
+            "__CREATOR_HUB_PREFERENCES_PROTOCOL__",
+        ] {
+            assert!(script.contains(&format!("'{property}', {{value: 1}}")));
+        }
+        assert!(script.ends_with(" }"));
+    }
+
+    #[test]
+    fn portable_recovery_capability_is_linux_experimental_only() {
+        let script = shell_initialization("test-key", false);
+        assert_eq!(
+            script.contains("'__CREATOR_HUB_UPDATE_RECOVERY_PROTOCOL__', {value: 1}"),
+            cfg!(all(
+                target_os = "linux",
+                feature = "experimental-linux-portable-update"
+            ))
+        );
+    }
+
+    #[test]
+    fn native_support_capability_requires_bootstrap_and_disables_update_recovery() {
+        assert!(!shell_initialization("test-key", false)
+            .contains("__CREATOR_HUB_NATIVE_SUPPORT_PROTOCOL__"));
+        let script = shell_initialization("test-key", true);
+        assert_eq!(
+            script.contains("'__CREATOR_HUB_NATIVE_SUPPORT_PROTOCOL__', {value: 1}"),
+            cfg!(all(
+                target_os = "linux",
+                feature = "experimental-linux-portable-update"
+            ))
+        );
+        assert!(!script.contains("__CREATOR_HUB_UPDATE_RECOVERY_PROTOCOL__"));
     }
 
     #[test]

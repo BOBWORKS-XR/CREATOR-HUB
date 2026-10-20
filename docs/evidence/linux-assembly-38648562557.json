@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "scope": "GTK Setup Linux package compilation and independent byte verification; not migration or update acceptance",
+  "repository": "BOBWORKS-XR/CREATOR-HUB",
+  "repositoryId": 1364807512,
+  "sourceCommit": "4f3744d5707ed5cd26c2e5a1b10a7d45a5e8d10b",
+  "sourceTree": "cfda3105bfa144c05e7b68ccb92a7aa738ee6e52",
+  "runId": 38648562557,
+  "runAttempt": 1,
+  "jobId": 116141491681,
+  "conclusion": "success",
+  "hubVersion": "0.1.14",
+  "platform": "linux",
+  "arch": "x86_64",
+  "rootTests": { "passed": 320, "failed": 0, "ignored": 12 },
+  "artifact": {
+    "id": 11934297227,
+    "name": "signed-unix-hub-linux-38648562557-1",
+    "bytes": 380463271,
+    "sha256": "ce7d02ecd5e72cbce9a0343003726601ab82a103e8e25348cac771d78f0ac881",
+    "originalZipLocallyVerified": true
+  },
+  "files": {
+    "creator-hub": { "bytes": 21411480, "sha256": "b40b823f7e41e8d62b50246053d4887409e18c5daf5db370731c219bcd04f76d" },
+    "builtin-manifest.json": { "bytes": 3663, "sha256": "802b5604e9a8446c96adb73a4408b5bd2c90c0e2303f67c191e0e28332793ff2" },
+    "modules.tar.gz": { "bytes": 55567186, "sha256": "7892f8256102bbfb995852a154fe0350a71642965a2f7f6642f8031cc92ac983" },
+    "signed-unix-assembly.json": { "bytes": 875, "sha256": "b930d76288f00fbd9694f0437852857e9dd77cca5c4371a987463992a47a421b" },
+    "unix-package-integrity.json": { "bytes": 6026, "sha256": "3d68a010025156d5a20eda862360acb09b7b3c19cb1693c36433ecd74a6f88f4" },
+    "modules/routing/creator-hub-mcp-router": { "bytes": 786256, "sha256": "3b0c316d0b62d970c951ff653913139c20505e1d808dab47343c3cb467e81c93" }
+  },
+  "packagesLocallyRehashed": [
+    { "format": "deb", "bytes": 61510742, "sha256": "f95718e41af6b05f3206af503f310a57b300fafe4b9e7da5d48ae050a9a2a6d7",
+      "installedHubBytes": 21411480, "installedHubSha256": "524e7bc9505f7de4f22e29818ad6ba59b1fb4decf3b7bb2655b362f9240ba968",
+      "actualDebExecutableMemberLocallyVerified": true },
+    { "format": "rpm", "bytes": 61511689, "sha256": "9867bb031b27ee44439618919970191d81b605103694c4fefe796c9b4ef59411",
+      "installedHubSha256": "540d9b651c0abe79de74c4c36cdda372d224c9ab122ceb340f0f3a037170139a" },
+    { "format": "appimage", "bytes": 141265400, "sha256": "d98405e589ba4ae2a5812ad2bda036a9d92c2c27adf95b83c55b337036ec09ea",
+      "installedHubSha256": "1ca1412b7300de7807f07251df198760e616438bfbab4dc35aa5caedf94d018e" }
+  ],
+  "privateSource": { "sourceCommit": "77367ae881413d6868e484f77e12a48c5aa58b00", "runId": 38647206970, "runAttempt": 1 },
+  "handoffSha256": "75cab0f78bb373c0a6d65a13b3c145b168e1b05439fd257e76991ad14d7295ae",
+  "privateModulesRecompiled": false,
+  "privateModulesResigned": false,
+  "routerFixB154e36Included": false,
+  "nativeGuiAccepted": false,
+  "migrationAccepted": false,
+  "signedUpdateAccepted": false,
+  "flatpakHostIntegrationAccepted": false,
+  "releaseReady": false
+}

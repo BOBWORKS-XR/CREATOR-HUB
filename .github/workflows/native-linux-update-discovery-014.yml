@@ -1,0 +1,256 @@
+name: Native Linux 14 signed15 discovery and native cancellation
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [validation/linux-installed-candidate-014]
+    paths:
+      - scripts/native-linux-update-discovery.py
+      - scripts/native-linux-update-discovery.test.py
+      - .github/workflows/native-linux-update-discovery-014.yml
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  CREATOR_LINUX_UPDATE_DISCOVERY: '1'
+  CREATOR_LINUX_COMPONENTS_PROBE: '1'
+  CREATOR_LINUX_ROOT_PROBE: '1'
+  CREATOR_UNIX_WINDOW_TEST: '1'
+  CREATOR_LINUX_ROOT_CANDIDATE: retirement-534465a
+
+jobs:
+  stage-input:
+    if: >-
+      github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.repository_id == '1364807512' &&
+      github.ref == 'refs/heads/validation/linux-installed-candidate-014' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    # Draft binary reads need this permission. This job makes no GitHub writes,
+    # generates no TLS material, installs nothing and never launches the app.
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24.17.0
+      - name: Pure contracts and YAML Bash Python JavaScript preflight before input download
+        run: |
+          npm ci --ignore-scripts
+          python3 -B scripts/native-linux-update-discovery.test.py
+          node --test scripts/linux-update-lab-feed.test.cjs
+      - name: Select exact current14 and target15 independent pins
+        run: python3 -B scripts/native-linux-update-discovery.py pins > "$RUNNER_TEMP/linux-discovery-reviewed-pins.json"
+      - name: Read exact original archives and signed metadata without changing the private draft
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto');
+            assert.equal(`${context.repo.owner}/${context.repo.repo}`,'BOBWORKS-XR/CREATOR-HUB');
+            assert.equal(process.env.GITHUB_REPOSITORY_ID,'1364807512');
+            assert.equal(process.env.GITHUB_REF,'refs/heads/validation/linux-installed-candidate-014');
+            assert.ok(['push','workflow_dispatch'].includes(process.env.GITHUB_EVENT_NAME));
+            assert.equal(process.env.RUNNER_ENVIRONMENT,'github-hosted');assert.equal(process.env.RUNNER_OS,'Linux');assert.equal(process.env.RUNNER_ARCH,'X64');
+            const repo=context.repo,temp=fs.realpathSync(process.env.RUNNER_TEMP),workspace=fs.realpathSync(process.env.GITHUB_WORKSPACE);
+            const bytes=fs.readFileSync(path.join(temp,'linux-discovery-reviewed-pins.json'));assert.ok(bytes.length<=16384);
+            const pins=JSON.parse(bytes.toString('utf8')),r=pins.root,t=pins.target;
+            assert.equal(r.candidate,'retirement-534465a');assert.equal(r.SOURCE,'534465a86554e95b909bf9c7decbbb29cbca5267');
+            assert.equal(r.PRIVATE_SOURCE,'f66d37fae372ad975daaae4ef392089c6d8f784b');assert.equal(r.PRIVATE_RUN,39041386789);
+            assert.equal(r.HANDOFF_SHA,'1c8218184c49870acecef5335687e3702af3686e4a50427355a1f7bad416b71a');
+            assert.equal(t.source,'eef90658c4d9e6743c6c25f67e00ad36c783ca6e');assert.equal(t.artifact,12127943519);
+            for(const [name,sha] of Object.entries(pins.testHelpers)) {
+              assert.match(name,/^[a-z0-9.-]+$/);assert.match(sha,/^[a-f0-9]{64}$/);
+              assert.equal(crypto.createHash('sha256').update(fs.readFileSync(path.join(workspace,'scripts',name))).digest('hex'),sha);
+            }
+            const dest=path.join(temp,'linux-discovery-input');fs.mkdirSync(dest,{mode:0o700});
+            function write(name,value) {fs.writeFileSync(path.join(dest,name),value,{flag:'wx',mode:0o600});}
+            function json(name,value,max=196608) {const s=JSON.stringify(value,null,2)+'\n';assert.ok(Buffer.byteLength(s)<=max);write(name,s);}
+            async function producer(p,current) {
+              const runId=current?p.RUN:p.run,attempt=current?p.ATTEMPT:p.attempt,sha=current?p.SOURCE:p.source,tree=current?p.TREE:p.tree;
+              const artifactId=current?p.ARTIFACT:p.artifact,size=current?p.ZIP_SIZE:p.zipBytes,digest=current?p.ZIP_SHA:p.zipSha256;
+              const {data:run}=await github.rest.actions.getWorkflowRun({...repo,run_id:runId});
+              assert.equal(run.id,runId);assert.equal(run.run_attempt,attempt);assert.equal(run.head_sha,sha);
+              assert.equal(run.repository.id,1364807512);assert.equal(run.status,'completed');assert.equal(run.conclusion,'success');
+              assert.equal(run.event,current?'workflow_dispatch':'push');
+              assert.equal(run.head_branch,current?'validation/linux-retirement-candidate-014':'validation/linux-outer-update-fixture-014');
+              assert.equal(run.path,current?'.github/workflows/unix-managed-assembly.yml':'.github/workflows/linux-outer-update-fixture-014.yml');
+              const {data:artifact}=await github.rest.actions.getArtifact({...repo,artifact_id:artifactId});
+              assert.equal(artifact.id,artifactId);assert.equal(artifact.name,current?p.ARTIFACT_NAME:p.name);
+              assert.equal(artifact.expired,false);assert.equal(artifact.size_in_bytes,size);assert.equal(artifact.digest,`sha256:${digest}`);
+              assert.equal(artifact.workflow_run.id,runId);assert.equal(artifact.workflow_run.head_sha,sha);
+              assert.equal(artifact.workflow_run.repository_id,1364807512);assert.equal(artifact.workflow_run.head_repository_id,1364807512);
+              const {data:page}=await github.rest.actions.listJobsForWorkflowRunAttempt({...repo,run_id:runId,attempt_number:attempt,per_page:100});
+              assert.ok(page.jobs.length<=16&&page.total_count===page.jobs.length);
+              const jobs=page.jobs.filter(j=>current?j.name.startsWith('assembly (linux,'):j.name==='target');assert.equal(jobs.length,1);
+              const job=jobs[0];assert.equal(job.id,current?p.JOB:p.job);assert.equal(job.run_id,runId);assert.equal(job.run_attempt,attempt);assert.equal(job.conclusion,'success');
+              const {data:commit}=await github.rest.git.getCommit({...repo,commit_sha:sha});
+              assert.equal(commit.sha,sha);assert.equal(commit.tree.sha,tree);
+              const binding={run:{id:run.id,run_attempt:run.run_attempt,head_sha:run.head_sha,status:run.status,conclusion:run.conclusion,
+                repository:{id:run.repository.id},event:run.event,head_branch:run.head_branch,path:run.path},
+                artifact:{id:artifact.id,name:artifact.name,expired:artifact.expired,size_in_bytes:artifact.size_in_bytes,digest:artifact.digest,workflow_run:artifact.workflow_run},
+                job:{id:job.id,run_id:job.run_id,run_attempt:job.run_attempt,conclusion:job.conclusion,name:job.name},
+                commit:{sha:commit.sha,tree:{sha:commit.tree.sha}}};
+              const {data}=await github.rest.actions.downloadArtifact({...repo,artifact_id:artifactId,archive_format:'zip'});
+              assert.ok(Buffer.isBuffer(data)||data instanceof ArrayBuffer,'Original ZIP bytes required');
+              const zip=Buffer.from(data);assert.equal(zip.length,size);assert.equal(crypto.createHash('sha256').update(zip).digest('hex'),digest);
+              write(current?'linux-root-input.zip':'linux-discovery-target-original.zip',zip);
+              return binding;
+            }
+            const root=await producer(r,true);
+            async function source(file) {
+              const {data}=await github.rest.repos.getContent({...repo,path:file,ref:r.SOURCE});
+              assert.equal(data.encoding,'base64');assert.ok(typeof data.content==='string'&&data.content.length<=131072);
+              const raw=Buffer.from(data.content,'base64');assert.ok(raw.length>0&&raw.length<=65536);return JSON.parse(raw.toString('utf8'));
+            }
+            root.package=await source('package.json');root.tauri=await source('src-tauri/tauri.conf.json');
+            assert.equal(root.package.name,'creator-hub');assert.equal(root.package.version,'0.1.14');assert.equal(root.tauri.version,'0.1.14');
+            assert.equal(root.tauri.productName,'Creator Hub');assert.equal(root.tauri.identifier,'com.creatorworks.hub');
+            assert.equal(root.tauri.app.windows[0].title,'Creator Hub - Development Preview');
+            json('linux-root-source-binding.json',root);
+            const target=await producer(t,false);
+            const {data:release}=await github.rest.repos.getRelease({...repo,release_id:411494394});
+            assert.equal(release.id,411494394);assert.equal(release.tag_name,'v0.1.13-validation');assert.equal(release.draft,true);
+            assert.ok(release.assets.length<=32);target.draft={id:release.id,tag_name:release.tag_name,draft:release.draft};target.assets=[];
+            for(const [local,[id,size,sha,name]] of Object.entries(pins.metadata)) {
+              assert.match(local,/^(creator-hub-linux-x86_64-deb\.json(?:\.minisig)?|latest\.json)$/);
+              const members=release.assets.filter(a=>a.id===id);assert.equal(members.length,1);
+              const {data:asset}=await github.rest.repos.getReleaseAsset({...repo,asset_id:id});
+              for(const a of [members[0],asset]) {
+                assert.equal(a.id,id);assert.equal(a.name,name);assert.equal(a.size,size);assert.equal(a.digest,`sha256:${sha}`);assert.equal(a.state,'uploaded');
+                assert.equal(a.url,`https://api.github.com/repos/BOBWORKS-XR/CREATOR-HUB/releases/assets/${id}`);
+              }
+              const {data}=await github.rest.repos.getReleaseAsset({...repo,asset_id:id,headers:{accept:'application/octet-stream'}});
+              assert.ok(Buffer.isBuffer(data)||data instanceof ArrayBuffer,'Exact binary asset bytes required');
+              const raw=Buffer.from(data);assert.equal(raw.length,size);assert.equal(crypto.createHash('sha256').update(raw).digest('hex'),sha);
+              write('linux-discovery-'+local,raw);target.assets.push({id,name,size,digest:asset.digest,state:asset.state});
+            }
+            const {data:after}=await github.rest.repos.getRelease({...repo,release_id:411494394});
+            assert.equal(after.id,release.id);assert.equal(after.tag_name,release.tag_name);assert.equal(after.draft,true);
+            json('linux-discovery-target-binding.json',target,32768);
+            write('linux-discovery-reviewed-pins.json',bytes);
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-linux-discovery-input-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 3
+          compression-level: 0
+          if-no-files-found: error
+          path: ${{ runner.temp }}/linux-discovery-input/*
+
+  native:
+    needs: stage-input
+    if: >-
+      github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.repository_id == '1364807512' &&
+      github.ref == 'refs/heads/validation/linux-installed-candidate-014' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-22.04
+    timeout-minutes: 12
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24.17.0
+      - uses: actions/download-artifact@v4
+        with:
+          name: native-linux-discovery-input-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}
+      - name: Recheck helper handoff and stage only immutable14 and acceptance-only15 inputs
+        run: |
+          python3 -B - <<'PY'
+          import hashlib, json, os
+          from pathlib import Path
+          pins = json.loads((Path(os.environ['RUNNER_TEMP']) / 'linux-discovery-reviewed-pins.json').read_text())
+          for name, digest in pins['testHelpers'].items():
+              assert Path(name).name == name
+              assert hashlib.sha256((Path('scripts') / name).read_bytes()).hexdigest() == digest
+          PY
+          python3 -B scripts/native-linux-update-discovery.py stage
+      - name: Provision only native GUI and TLS runtime on disposable Linux
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-0 libayatana-appindicator3-1 \
+            libxdo3 librsvg2-2 python3-gi gir1.2-gtk-3.0 gir1.2-atspi-2.0 at-spi2-core \
+            libx11-6 libxres1 dbus-x11 xvfb xauth openbox openssl ca-certificates
+      - name: Secure exact hosted-runner policy ancestry only
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true && test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$GITHUB_REPOSITORY_ID" = 1364807512 && test "$RUNNER_OS" = Linux
+          test "$GITHUB_REF" = refs/heads/validation/linux-installed-candidate-014
+          /usr/bin/python3 -B - <<'PY'
+          import json, os, stat, subprocess
+          from pathlib import Path
+          # Same scope as the current native components probe. No recursive
+          # mode changes, application repairs or authentication policy override.
+          paths = tuple(map(Path, ('/usr/share', '/usr/share/polkit-1', '/usr/share/polkit-1/actions')))
+          for parent in (Path('/usr'), Path('/')):
+              before = parent.lstat()
+              assert stat.S_ISDIR(before.st_mode) and before.st_uid == before.st_gid == 0 and not before.st_mode & 0o7022
+          original = {}
+          for target in paths:
+              assert target.resolve(strict=True) == target
+              before = target.lstat()
+              assert stat.S_ISDIR(before.st_mode) and before.st_uid == before.st_gid == 0
+              mode = stat.S_IMODE(before.st_mode)
+              assert mode in (0o755, 0o777), f'Unreviewed directory state: {target} {mode:04o}'
+              original[target] = before
+          entries = []
+          for target in paths:
+              before = original[target]
+              if stat.S_IMODE(before.st_mode) == 0o777:
+                  subprocess.run(['/usr/bin/sudo', '-n', '/usr/bin/chmod', '0755', str(target)], check=True)
+              after = target.lstat()
+              assert (after.st_dev, after.st_ino, after.st_uid, after.st_gid) == (before.st_dev, before.st_ino, 0, 0)
+              assert stat.S_IMODE(after.st_mode) == 0o755 and target.resolve(strict=True) == target
+              entries.append({'path': str(target), 'beforeMode': stat.S_IMODE(before.st_mode), 'afterMode': 0o755, 'sameDirectory': True})
+          output = Path(os.environ['RUNNER_TEMP']) / 'linux-runner-polkit-directory.json'
+          with output.open('x') as stream:
+              json.dump({'scope': 'disposable-runner-environment-only', 'directories': entries,
+                         'recursiveChange': False, 'applicationRepair': False, 'authenticationAccepted': False}, stream)
+          PY
+      - name: Install only frozen current14 in this empty runner
+        run: python3 -B scripts/native-linux-update-discovery.py install14
+      - name: Native signed discovery then exact GTK cancellation without installation approval
+        env:
+          GDK_BACKEND: x11
+          NO_AT_BRIDGE: '0'
+        run: |
+          set -euo pipefail
+          temp=$(python3 -B -c 'import os; print(os.path.realpath(os.environ["RUNNER_TEMP"]))')
+          mkdir -m 700 "$temp/linux-discovery-session"
+          mkdir -m 700 "$temp/linux-discovery-session/runtime" "$temp/linux-discovery-session/home"
+          export XDG_RUNTIME_DIR="$temp/linux-discovery-session/runtime"
+          export HOME="$temp/linux-discovery-session/home"
+          export CREATOR_DISCOVERY_NODE="$(node -p 'process.execPath')"
+          dbus-run-session -- xvfb-run -a --server-args='-screen 0 1280x800x24' sh -eu -c '
+            openbox --sm-disable >"$RUNNER_TEMP/linux-discovery-session/openbox.log" 2>&1 & manager=$!
+            trap '\''openbox --exit; wait "$manager"'\'' EXIT
+            /usr/bin/python3 -B "$GITHUB_WORKSPACE/scripts/native-linux-update-discovery.py" cancel-probe
+          '
+      - name: Retain bounded contracts and source binding only (never ephemeral TLS private material)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-linux-discovery-capture-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/linux-discovery-reviewed-pins.json
+            ${{ runner.temp }}/linux-root-source-binding.json
+            ${{ runner.temp }}/linux-discovery-target-binding.json
+            ${{ runner.temp }}/linux-runner-polkit-directory.json
+            ${{ runner.temp }}/linux-root-probe/*.json
+            ${{ runner.temp }}/linux-root-probe/*.stdout
+            ${{ runner.temp }}/linux-root-probe/*.stderr
+            ${{ runner.temp }}/creator-linux-update-lab/transport-report.json
+            ${{ runner.temp }}/linux-discovery-session/openbox.log

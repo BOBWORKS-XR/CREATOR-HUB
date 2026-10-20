@@ -18,10 +18,18 @@ those checks can pass while the installed 0.1.2 updater cannot discover it.
    The tagged-release workflow now runs this same check after packaging and
    checksum assembly, so a green package matrix cannot be mistaken for a
    discoverable in-app update.
-4. Publish with `node scripts/publish-hub-draft.cjs VERSION`, not an unguarded
-   `gh release edit --draft=false`. The command repeats that preflight before
-   writing, verifies the public feed afterwards, and does not mark latest or
+4. For the qualified Windows 0.1.14 package, publish with
+   `node scripts/publish-hub-draft.cjs 0.1.14 --platform windows-x86_64 --receipt packaging/windows/0.1.14-qualification.json`, not an unguarded
+   `gh release edit --draft=false`. The command first repeats the unified source
+   and readiness gate before any GitHub read/write, then repeats the feed
+   preflight before writing, verifies the public feed afterwards, and does not mark latest or
    report readiness. Failure is a release blocker, not permission to bypass it.
+   The finite qualification binds the actual accepted candidate, five successful
+   native evidence roles and six exact draft assets. It does not authorize a
+   future version or another platform. Create the final tag while this release
+   is still a draft so the no-rebuild tag workflow can validate it before
+   publication. Never publish the private 0.1.13-validation release or the
+   acceptance-only 0.1.15 fixture.
 5. Update the source/target versions and exact hashes in
    `scripts/native-self-update-smoke.cjs`, then run **Public Hub self-update
    acceptance**. It must match the intended package version and the previous

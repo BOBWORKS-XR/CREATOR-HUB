@@ -1,0 +1,136 @@
+name: Private portable016 opaque byte carrier (not qualification)
+
+on:
+  # Registration only; both jobs refuse push execution.
+  push:
+    branches: [validation/private-portable-016-carrier]
+  workflow_dispatch:
+    inputs:
+      transport_input:
+        description: Canonical JSON {schemaVersion:1,assetId,zip:{size,sha256},files:{exact thirteen external size/SHA pins},planSha256}. Fixed private draft and asset name; no defaults or policy overrides.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  stage-input:
+    if: >-
+      github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.repository_id == '1364807512' &&
+      github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/validation/private-portable-016-carrier'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    # Draft access only. No checkout, archive decoding or candidate/tool execution with this token.
+    permissions:
+      contents: write
+    steps:
+      - name: Download only the exact externally pinned private ZIP without decoding it
+        uses: actions/github-script@v8
+        env:
+          TRANSPORT_INPUT: ${{ inputs.transport_input }}
+        with:
+          script: |
+            const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto');
+            assert.equal(context.repo.owner,'BOBWORKS-XR');assert.equal(context.repo.repo,'CREATOR-HUB');assert.equal(context.eventName,'workflow_dispatch');
+            assert.equal(context.ref,'refs/heads/validation/private-portable-016-carrier');assert.equal(process.env.GITHUB_REPOSITORY_ID,'1364807512');
+            assert.equal(process.env.RUNNER_ENVIRONMENT,'github-hosted');assert.equal(process.env.RUNNER_OS,'Linux');assert.equal(process.env.RUNNER_ARCH,'X64');
+            const text=process.env.TRANSPORT_INPUT;assert.ok(typeof text==='string'&&Buffer.byteLength(text)>0&&Buffer.byteLength(text)<=32768);
+            const v=JSON.parse(text),keys=(o,n)=>{assert.ok(o&&typeof o==='object'&&!Array.isArray(o));assert.deepEqual(Object.keys(o).sort(),[...n].sort());};
+            const names=['package-receipt.json','Creator Hub_0.1.16_amd64.AppImage','Creator.Hub.Native.Support_0.1.16_amd64.AppImage','creator-hub-linux-x86_64-0.1.16.portable-manifest.json','creator-hub-linux-x86_64-0.1.16.appdir.tar.gz','appdir-original-inventory.json','appdir-flattened-inventory.json','plan.json','fresh-api.json','creator-hub-linux-x86_64-portable.json','creator-hub-linux-x86_64-0.1.16.portable-manifest.json.minisig','creator-hub-linux-x86_64-portable.json.minisig','private-qualification-receipt.json'];
+            const signed=['creator-hub-linux-x86_64-0.1.16.portable-manifest.json','creator-hub-linux-x86_64-portable.json'];
+            const pin=(p,max)=>{keys(p,['size','sha256']);assert.ok(Number.isSafeInteger(p.size)&&p.size>0&&p.size<=max);assert.ok(typeof p.sha256==='string'&&/^[a-f0-9]{64}$/.test(p.sha256));};
+            keys(v,['schemaVersion','assetId','zip','files','planSha256']);assert.equal(v.schemaVersion,1);assert.ok(Number.isSafeInteger(v.assetId)&&v.assetId>0);assert.equal(text,JSON.stringify(v,null,2));
+            pin(v.zip,768*1024*1024);keys(v.files,names);
+            for(const name of names)pin(v.files[name],name.endsWith('.minisig')?4096:name==='plan.json'||signed.includes(name)?128*1024:name.endsWith('.json')?2*1024*1024:256*1024*1024);
+            assert.ok(names.reduce((n,name)=>n+v.files[name].size,0)<=768*1024*1024);assert.equal(v.planSha256,v.files['plan.json'].sha256);
+            const {data:release}=await github.rest.repos.getRelease({...context.repo,release_id:411494394});
+            assert.equal(release.id,411494394);assert.equal(release.tag_name,'v0.1.13-validation');assert.equal(release.draft,true);
+            const {data:assets}=await github.rest.repos.listReleaseAssets({...context.repo,release_id:411494394,per_page:100,page:1});
+            assert.ok(Array.isArray(assets)&&assets.length<100);const selected=assets.filter(a=>a.id===v.assetId);assert.equal(selected.length,1);const asset=selected[0];
+            assert.equal(asset.name,'signed-private-portable016-carrier-39352300183.zip');assert.equal(asset.state,'uploaded');assert.equal(asset.size,v.zip.size);assert.equal(asset.digest,`sha256:${v.zip.sha256}`);
+            const {data}=await github.rest.repos.getReleaseAsset({...context.repo,asset_id:v.assetId,headers:{accept:'application/octet-stream'}});
+            assert.ok(Buffer.isBuffer(data)||data instanceof ArrayBuffer);const bytes=Buffer.from(data);
+            assert.equal(bytes.length,v.zip.size);assert.equal(crypto.createHash('sha256').update(bytes).digest('hex'),v.zip.sha256);
+            const temp=fs.realpathSync(process.env.RUNNER_TEMP);
+            fs.writeFileSync(path.join(temp,'private-portable016.zip'),bytes,{flag:'wx',mode:0o600});fs.writeFileSync(path.join(temp,'transport-input.json'),text,{flag:'wx',mode:0o600});
+      - uses: actions/upload-artifact@v4
+        with:
+          name: private-portable-016-download-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: error
+          compression-level: 0
+          path: |
+            ${{ runner.temp }}/private-portable016.zip
+            ${{ runner.temp }}/transport-input.json
+  stage:
+    needs: stage-input
+    if: >-
+      github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.repository_id == '1364807512' &&
+      github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/validation/private-portable-016-carrier'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24.17.0
+      - uses: actions/download-artifact@v4
+        with:
+          name: private-portable-016-download-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/private-portable016-download
+      - name: Stage only externally pinned opaque bytes with the standard-library decoder
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/private-portable-016-carrier.cjs stage \
+            "$RUNNER_TEMP/private-portable016-download" "$RUNNER_TEMP/private-portable016-staged"
+      - name: Retain exact flat thirteen-file carrier without adding a receipt to its inventory
+        uses: actions/upload-artifact@v4
+        with:
+          name: private-portable-016-carrier-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: error
+          compression-level: 0
+          path: |
+            ${{ runner.temp }}/private-portable016-staged/all/package-receipt.json
+            ${{ runner.temp }}/private-portable016-staged/all/Creator Hub_0.1.16_amd64.AppImage
+            ${{ runner.temp }}/private-portable016-staged/all/Creator.Hub.Native.Support_0.1.16_amd64.AppImage
+            ${{ runner.temp }}/private-portable016-staged/all/creator-hub-linux-x86_64-0.1.16.portable-manifest.json
+            ${{ runner.temp }}/private-portable016-staged/all/creator-hub-linux-x86_64-0.1.16.appdir.tar.gz
+            ${{ runner.temp }}/private-portable016-staged/all/appdir-original-inventory.json
+            ${{ runner.temp }}/private-portable016-staged/all/appdir-flattened-inventory.json
+            ${{ runner.temp }}/private-portable016-staged/all/plan.json
+            ${{ runner.temp }}/private-portable016-staged/all/fresh-api.json
+            ${{ runner.temp }}/private-portable016-staged/all/creator-hub-linux-x86_64-portable.json
+            ${{ runner.temp }}/private-portable016-staged/all/creator-hub-linux-x86_64-0.1.16.portable-manifest.json.minisig
+            ${{ runner.temp }}/private-portable016-staged/all/creator-hub-linux-x86_64-portable.json.minisig
+            ${{ runner.temp }}/private-portable016-staged/all/private-qualification-receipt.json
+      - name: Retain the separate exact four-file metadata carrier for Flatpak
+        uses: actions/upload-artifact@v4
+        with:
+          name: private-portable-016-metadata-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: error
+          compression-level: 0
+          path: |
+            ${{ runner.temp }}/private-portable016-staged/metadata/creator-hub-linux-x86_64-portable.json
+            ${{ runner.temp }}/private-portable016-staged/metadata/creator-hub-linux-x86_64-portable.json.minisig
+            ${{ runner.temp }}/private-portable016-staged/metadata/creator-hub-linux-x86_64-0.1.16.portable-manifest.json
+            ${{ runner.temp }}/private-portable016-staged/metadata/creator-hub-linux-x86_64-0.1.16.portable-manifest.json.minisig
+      - name: Retain bounded transport-only evidence separately
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: private-portable-016-transport-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/private-portable016-staged/transport-receipt.json
+            ${{ runner.temp }}/private-portable016-staged/transport-refusal.json

@@ -1,0 +1,30 @@
+{
+  "app-id": "com.creatorworks.hub",
+  "branch": "flatpak-test",
+  "runtime": "org.gnome.Platform",
+  "runtime-version": "50",
+  "sdk": "org.gnome.Sdk",
+  "command": "creator-hub",
+  "appstream-compose": false,
+  "build-options": { "strip": false, "no-debuginfo": true },
+  "finish-args": [
+    "--socket=wayland",
+    "--socket=fallback-x11",
+    "--device=dri",
+    "--share=ipc"
+  ],
+  "modules": [{
+    "name": "creator-hub-reviewed-input",
+    "buildsystem": "simple",
+    "sources": [{ "type": "dir", "path": "flatpak-input" }],
+    "build-commands": [
+      "install -Dm755 bin/creator-hub /app/bin/creator-hub",
+      "install -Dm644 'lib/Creator Hub/modules.tar.gz' '/app/lib/Creator Hub/modules.tar.gz'",
+      "install -Dm644 share/applications/com.creatorworks.hub.desktop /app/share/applications/com.creatorworks.hub.desktop",
+      "install -Dm644 share/icons/hicolor/128x128/apps/com.creatorworks.hub.png /app/share/icons/hicolor/128x128/apps/com.creatorworks.hub.png",
+      "install -Dm644 share/appdata/com.creatorworks.hub.appdata.xml /app/share/appdata/com.creatorworks.hub.appdata.xml",
+      "install -Dm644 share/licenses/com.creatorworks.hub/LICENSE /app/share/licenses/com.creatorworks.hub/LICENSE",
+      "if test -f libexec/creator-hub-mcp-router; then install -Dm755 libexec/creator-hub-mcp-router /app/libexec/creator-hub-mcp-router; fi"
+    ]
+  }]
+}

@@ -1,0 +1,41 @@
+use creator_hub_linux_deb_retirement::{pins, INSTALL_REFUSAL};
+use std::process::Command;
+
+#[test]
+fn default_refuses_and_feature_build_still_requires_the_trusted_installed_image() {
+    let binary = env!("CARGO_BIN_EXE_creator-hub-linux-deb-retirement");
+    assert_ne!(
+        std::path::Path::new(binary),
+        std::path::Path::new(pins::HELPER)
+    );
+    for action in ["retire-mcp-2.7.7", "retire-setup-0.3.7"] {
+        let output = Command::new(binary).arg(action).output().unwrap();
+        assert_eq!(output.status.code(), Some(2));
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(report["status"], "refused");
+        assert_eq!(report["packageTransactionStarted"], false);
+        assert_eq!(report["manualRepairRequired"], false);
+        assert_eq!(report["nativeAcceptance"], false);
+        if cfg!(feature = "production-transaction") {
+            assert_eq!(report["protocolVersion"], 2);
+            assert_eq!(report["cohort"], "creator-hub-deb-retirement-016-v1");
+            assert_eq!(report["mode"], "production");
+            assert_eq!(report["externalQualificationRequired"], true);
+            assert!(report.get("experimentalTransactionCompiled").is_none());
+            assert!(report.get("installationEnabled").is_none());
+        } else {
+            assert_eq!(
+                report["experimentalTransactionCompiled"],
+                cfg!(feature = "experimental-transaction")
+            );
+        }
+        if cfg!(any(
+            feature = "experimental-transaction",
+            feature = "production-transaction"
+        )) {
+            assert_ne!(report["reason"], INSTALL_REFUSAL);
+        } else {
+            assert_eq!(report["reason"], INSTALL_REFUSAL);
+        }
+    }
+}

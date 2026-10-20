@@ -1,0 +1,191 @@
+name: Pinned Linux 14 GTK components (not migration acceptance)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [validation/linux-components-014, validation/linux-current-components-014]
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  components:
+    if: github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.repository_id == '1364807512'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 12
+    env:
+      CREATOR_LINUX_COMPONENTS_PROBE: '1'
+      CREATOR_LINUX_ROOT_CANDIDATE: ${{ github.ref == 'refs/heads/validation/linux-current-components-014' && 'retirement-534465a' || 'setup-gtk3-77367ae' }}
+      CREATOR_LINUX_ROOT_PROBE: '1'
+      CREATOR_UNIX_WINDOW_TEST: '1'
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Test probe contracts without launching an application
+        env:
+          CREATOR_LINUX_ROOT_CANDIDATE: original-5bb05a2
+        run: |
+          python3 -B scripts/native-linux-root-probe.test.py
+          python3 -B scripts/native-linux-components-probe.test.py
+          python3 -B scripts/native-unix-window.test.py
+          python3 -B scripts/native-unix-window-fixture.test.py
+          node --test scripts/linux-dialog-backend.test.cjs
+      - name: Refuse staging until complete reviewed GTK3 outer assembly pins are available
+        run: python3 -B scripts/native-linux-components-probe.py candidate-pins > "$RUNNER_TEMP/linux-components-reviewed-pins.json"
+      - name: Verify exact successful native assembly and source before downloading original ZIP
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto');
+            assert.equal(`${context.repo.owner}/${context.repo.repo}`,'BOBWORKS-XR/CREATOR-HUB');
+            assert.equal(process.env.GITHUB_REPOSITORY_ID,'1364807512');
+            assert.equal(process.env.RUNNER_ENVIRONMENT,'github-hosted');assert.equal(process.env.RUNNER_OS,'Linux');assert.equal(process.env.RUNNER_ARCH,'X64');
+            const temp=fs.realpathSync(process.env.RUNNER_TEMP);
+            const pinBytes=fs.readFileSync(path.join(temp,'linux-components-reviewed-pins.json'));assert.ok(pinBytes.length<=16384);
+            const pins=JSON.parse(pinBytes.toString('utf8'));
+            const current=process.env.CREATOR_LINUX_ROOT_CANDIDATE==='retirement-534465a';
+            assert.equal(pins.candidate,process.env.CREATOR_LINUX_ROOT_CANDIDATE);
+            assert.equal(pins.PRIVATE_SOURCE,current?'f66d37fae372ad975daaae4ef392089c6d8f784b':'77367ae881413d6868e484f77e12a48c5aa58b00');
+            assert.equal(pins.PRIVATE_RUN,current?39041386789:38647206970);
+            assert.equal(pins.HANDOFF_SHA,current?'1c8218184c49870acecef5335687e3702af3686e4a50427355a1f7bad416b71a':'75cab0f78bb373c0a6d65a13b3c145b168e1b05439fd257e76991ad14d7295ae');
+            assert.equal(crypto.createHash('sha256').update(fs.readFileSync(path.join(process.env.GITHUB_WORKSPACE,'scripts/native-linux-root-probe.py'))).digest('hex'),pins.helperSha256);
+            const repo=context.repo,sha=pins.SOURCE,tree=pins.TREE;
+            const runId=pins.RUN,artifactId=pins.ARTIFACT,zipSize=pins.ZIP_SIZE,zipSha=pins.ZIP_SHA;
+            const {data:run}=await github.rest.actions.getWorkflowRun({...repo,run_id:runId});
+            assert.equal(run.id,runId);assert.equal(run.run_attempt,pins.ATTEMPT);assert.equal(run.head_sha,sha);
+            assert.equal(run.repository.id,1364807512);assert.equal(run.status,'completed');assert.equal(run.conclusion,'success');
+            assert.equal(run.event,current?'workflow_dispatch':'push');
+            assert.equal(run.head_branch,current?'validation/linux-retirement-candidate-014':'validation/unix-assembly-014');
+            assert.equal(run.path,'.github/workflows/unix-managed-assembly.yml');
+            const {data:artifact}=await github.rest.actions.getArtifact({...repo,artifact_id:artifactId});
+            assert.equal(artifact.id,artifactId);assert.equal(artifact.name,pins.ARTIFACT_NAME);
+            assert.equal(artifact.expired,false);assert.equal(artifact.size_in_bytes,zipSize);assert.equal(artifact.digest,`sha256:${zipSha}`);
+            assert.equal(artifact.workflow_run.id,runId);assert.equal(artifact.workflow_run.head_sha,sha);
+            assert.equal(artifact.workflow_run.repository_id,1364807512);assert.equal(artifact.workflow_run.head_repository_id,1364807512);
+            const {data:page}=await github.rest.actions.listJobsForWorkflowRunAttempt({...repo,run_id:runId,attempt_number:pins.ATTEMPT,per_page:100});
+            assert.ok(page.jobs.length<=16&&page.total_count===page.jobs.length);
+            const jobs=page.jobs.filter(j=>j.name.startsWith('assembly (linux,'));assert.equal(jobs.length,1);
+            const job=jobs[0];assert.equal(job.id,pins.JOB);assert.equal(job.run_id,runId);assert.equal(job.run_attempt,pins.ATTEMPT);assert.equal(job.conclusion,'success');
+            const {data:commit}=await github.rest.git.getCommit({...repo,commit_sha:sha});
+            assert.equal(commit.sha,sha);assert.equal(commit.tree.sha,tree);
+            async function source(file) {
+              const {data}=await github.rest.repos.getContent({...repo,path:file,ref:sha});
+              assert.equal(data.encoding,'base64');assert.ok(typeof data.content==='string'&&data.content.length<=131072);
+              const bytes=Buffer.from(data.content,'base64');assert.ok(bytes.length>0&&bytes.length<=65536);
+              return JSON.parse(bytes.toString('utf8'));
+            }
+            const packageJson=await source('package.json'),tauri=await source('src-tauri/tauri.conf.json');
+            assert.equal(packageJson.name,'creator-hub');assert.equal(packageJson.version,'0.1.14');
+            assert.equal(tauri.version,'0.1.14');assert.equal(tauri.productName,'Creator Hub');assert.equal(tauri.identifier,'com.creatorworks.hub');
+            assert.equal(tauri.app.windows[0].title,'Creator Hub - Development Preview');
+            const binding={run:{id:run.id,run_attempt:run.run_attempt,head_sha:run.head_sha,status:run.status,conclusion:run.conclusion,
+              repository:{id:run.repository.id},event:run.event,head_branch:run.head_branch,path:run.path},
+              artifact:{id:artifact.id,name:artifact.name,expired:artifact.expired,size_in_bytes:artifact.size_in_bytes,digest:artifact.digest,workflow_run:artifact.workflow_run},
+              job:{id:job.id,run_id:job.run_id,run_attempt:job.run_attempt,conclusion:job.conclusion,name:job.name},
+              commit:{sha:commit.sha,tree:{sha:commit.tree.sha}},package:packageJson,tauri};
+            const root=fs.realpathSync(process.env.RUNNER_TEMP);
+            const originalBinding=JSON.stringify(binding,null,2)+'\n';assert.ok(Buffer.byteLength(originalBinding)<=196608);
+            fs.writeFileSync(path.join(root,'linux-root-source-binding.json'),originalBinding,{flag:'wx',mode:0o600});
+            const {data}=await github.rest.actions.downloadArtifact({...repo,artifact_id:artifactId,archive_format:'zip'});
+            assert.ok(Buffer.isBuffer(data)||data instanceof ArrayBuffer,'Native Octokit ZIP bytes required');
+            const bytes=Buffer.from(data);assert.equal(bytes.length,zipSize);assert.equal(crypto.createHash('sha256').update(bytes).digest('hex'),zipSha);
+            fs.writeFileSync(path.join(root,'linux-root-input.zip'),bytes,{flag:'wx',mode:0o600});
+      - name: Verify exact original DEB, assembly receipts and every payload resource/mode
+        run: python3 -B scripts/native-linux-root-probe.py stage
+      - name: Provision native GUI runtime only on this disposable runner
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-0 libayatana-appindicator3-1 \
+            libxdo3 librsvg2-2 python3-gi gir1.2-gtk-3.0 gir1.2-atspi-2.0 at-spi2-core \
+            libx11-6 libxres1 dbus-x11 xvfb xauth openbox
+      - name: Secure the hosted-runner policy ancestry only (not an app repair)
+        if: github.ref == 'refs/heads/validation/linux-current-components-014'
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true && test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$GITHUB_REPOSITORY_ID" = 1364807512 && test "$RUNNER_OS" = Linux
+          test "$GITHUB_REF" = refs/heads/validation/linux-current-components-014
+          /usr/bin/python3 -B - <<'PY'
+          import json, os, stat, subprocess
+          from pathlib import Path
+          # Primary image provisioning recursively makes /usr/share writable:
+          # https://github.com/actions/runner-images/blob/main/images/ubuntu/scripts/build/configure-system.sh
+          # Secure only these three directories, never the tree or auth policy.
+          paths = tuple(map(Path, ('/usr/share', '/usr/share/polkit-1', '/usr/share/polkit-1/actions')))
+          for parent in (Path('/usr'), Path('/')):
+              before = parent.lstat()
+              assert stat.S_ISDIR(before.st_mode) and before.st_uid == before.st_gid == 0 and not before.st_mode & 0o7022
+          original = {}
+          for target in paths:
+              assert target.resolve(strict=True) == target
+              before = target.lstat()
+              assert stat.S_ISDIR(before.st_mode) and before.st_uid == before.st_gid == 0
+              mode = stat.S_IMODE(before.st_mode)
+              assert mode in (0o755, 0o777), f'Unreviewed directory state: {target} {mode:04o}'
+              original[target] = before
+          entries = []
+          for target in paths:
+              before = original[target]
+              if stat.S_IMODE(before.st_mode) == 0o777:
+                  subprocess.run(['/usr/bin/sudo', '-n', '/usr/bin/chmod', '0755', str(target)], check=True)
+              after = target.lstat()
+              assert (after.st_dev, after.st_ino, after.st_uid, after.st_gid) == (before.st_dev, before.st_ino, 0, 0)
+              assert stat.S_IMODE(after.st_mode) == 0o755 and target.resolve(strict=True) == target
+              entries.append({'path': str(target), 'beforeMode': stat.S_IMODE(before.st_mode), 'afterMode': 0o755, 'sameDirectory': True})
+          record = {'scope': 'disposable-runner-environment-only', 'directories': entries,
+                    'recursiveChange': False, 'applicationRepair': False, 'authenticationAccepted': False}
+          output = Path(os.environ['RUNNER_TEMP']) / 'linux-runner-polkit-directory.json'
+          with output.open('x') as stream:
+              json.dump(record, stream)
+          PY
+      - name: Inspect control metadata and install only the exact fresh DEB on this disposable runner
+        run: python3 -B scripts/native-linux-root-probe.py install
+      # 38711448824 proved a producer/client Paragraph enum mismatch. Read-only
+      # collection now recognizes the pinned WebKit paragraph contract; same input gates.
+      - name: Native components probe with reviewed WebKit text collection (fixed immutable package)
+        env:
+          GDK_BACKEND: x11
+          NO_AT_BRIDGE: '0'
+        run: |
+          set -euo pipefail
+          temp=$(python3 -B -c 'import os; print(os.path.realpath(os.environ["RUNNER_TEMP"]))')
+          mkdir -m 700 "$temp/linux-components-session"
+          mkdir -m 700 "$temp/linux-components-session/runtime" "$temp/linux-components-session/home"
+          export XDG_RUNTIME_DIR="$temp/linux-components-session/runtime"
+          export HOME="$temp/linux-components-session/home"
+          dbus-run-session -- xvfb-run -a --server-args='-screen 0 1280x800x24' sh -eu -c '
+            openbox --sm-disable >"$RUNNER_TEMP/linux-components-session/openbox.log" 2>&1 & manager=$!
+            trap '\''openbox --exit; wait "$manager"'\'' EXIT
+            /usr/bin/python3 -B "$GITHUB_WORKSPACE/scripts/native-linux-components-probe.py" probe
+          '
+      - name: Retain compact owned capture first without the original input ZIP
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-linux-components-capture-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/linux-root-source-binding.json
+            ${{ runner.temp }}/linux-components-reviewed-pins.json
+            ${{ runner.temp }}/linux-runner-polkit-directory.json
+            ${{ runner.temp }}/linux-root-probe/*.json
+            ${{ runner.temp }}/linux-root-probe/*.stdout
+            ${{ runner.temp }}/linux-root-probe/*.stderr
+            ${{ runner.temp }}/linux-root-probe/root-window.png
+            ${{ runner.temp }}/linux-components-session/openbox.log
+      - name: Retain original immutable package evidence separately
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-linux-components-source-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/linux-root-input.zip
+            ${{ runner.temp }}/linux-root-source-binding.json
+            ${{ runner.temp }}/linux-root-probe/input/builtin-manifest.json
+            ${{ runner.temp }}/linux-root-probe/input/signed-unix-assembly.json
+            ${{ runner.temp }}/linux-root-probe/input/unix-package-integrity.json

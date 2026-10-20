@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "scope": "linux-source-integration-and-pure-native-regressions-only",
+  "runId": 38747253729,
+  "runAttempt": 1,
+  "sourceCommit": "ba04ab2a3d780279b6854510c17965c52af90ff8",
+  "workflow": ".github/workflows/linux-migration-preflight-014.yml",
+  "jobId": 116464034877,
+  "runner": "ubuntu-22.04",
+  "rustToolchain": "1.99.0",
+  "conclusion": "success",
+  "experimentalFeature": "experimental-linux-migration",
+  "rootAllTargetsCheckPassed": true,
+  "rootMigrationAndDependencyTestsPassed": 138,
+  "rootHelperClientTestsPassed": 6,
+  "packageInstalled": false,
+  "helperSystemAuthorizationTested": false,
+  "migrationAccepted": false,
+  "signedUpdateRestartAccepted": false,
+  "flatpakHostIntegrationAccepted": false,
+  "releaseReady": false,
+  "publishedWindowsOrLocalInstallChanged": false,
+  "notes": [
+    "The production/default feature set still refuses legacy Linux removal.",
+    "The preceding source 321e6d8 failed Linux compilation with E0282/E0283; its result is not acceptance.",
+    "No Root or module package was built, installed, signed, uploaded or published by this workflow."
+  ]
+}

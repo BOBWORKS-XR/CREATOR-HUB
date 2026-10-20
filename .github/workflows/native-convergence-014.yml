@@ -1,0 +1,88 @@
+name: Guarded Hub update and live-connection migration restart (not release)
+on:
+  push:
+    branches: [validation/convergence-014]
+    paths: ['.github/workflows/native-convergence-014.yml']
+permissions:
+  contents: read
+jobs:
+  stage-input:
+    permissions:
+      contents: write
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - name: Read the exact private validation asset without executing it
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          New-Item -ItemType Directory -Path convergence-input | Out-Null
+          $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = 'application/vnd.github+json'; 'X-GitHub-Api-Version' = '2026-03-10' }
+          $release = Invoke-RestMethod -Uri 'https://api.github.com/repos/BOBWORKS-XR/CREATOR-HUB/releases/411494394' -Headers $headers
+          if ($release.draft -ne $true -or $release.tag_name -ne 'v0.1.13-validation') { throw 'Unexpected private validation release.' }
+          $assets = @($release.assets | Where-Object name -CEQ 'unified-windows-b05-db86273-20261015.zip')
+          if ($assets.Count -ne 1 -or $assets[0].id -ne 642095693 -or $assets[0].state -ne 'uploaded' -or $assets[0].size -ne 86746913 -or $assets[0].digest -ne 'sha256:d18872d804196c4606f9908597c8fd0587ab769d9cbcd701edd490b757bbe3a2') { throw 'Exact convergence input is not available.' }
+          $headers.Accept = 'application/octet-stream'
+          Invoke-WebRequest -Uri ("https://api.github.com/repos/BOBWORKS-XR/CREATOR-HUB/releases/assets/" + $assets[0].id) -Headers $headers -OutFile convergence-input/candidate.zip -MaximumRedirection 5 -TimeoutSec 300
+          if ((Get-FileHash convergence-input/candidate.zip).Hash.ToLowerInvariant() -ne 'd18872d804196c4606f9908597c8fd0587ab769d9cbcd701edd490b757bbe3a2') { throw 'Candidate archive differs.' }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: convergence-signed-input
+          path: convergence-input/candidate.zip
+          retention-days: 7
+          if-no-files-found: error
+  native-guide:
+    needs: stage-input
+    runs-on: windows-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: [upgrade-guide, fresh-components, hub-only-upgrade]
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - run: npm ci
+      - run: npm --prefix modules/mcp ci
+      - run: npx playwright install chromium
+      - uses: actions/download-artifact@v4
+        with:
+          name: convergence-signed-input
+          path: artifacts/convergence-input
+      - name: Bind the immutable candidate separately from harness source
+        shell: pwsh
+        run: |
+          $zip = 'artifacts/convergence-input/candidate.zip'
+          if ((Get-FileHash $zip).Hash.ToLowerInvariant() -ne 'd18872d804196c4606f9908597c8fd0587ab769d9cbcd701edd490b757bbe3a2') { throw 'Candidate archive differs.' }
+          Expand-Archive -LiteralPath $zip -DestinationPath artifacts/convergence-input/candidate
+          $proof = Get-Content artifacts/convergence-input/candidate/candidate-source.json -Raw | ConvertFrom-Json
+          if ($proof.sourceRevision -ne 'db862739d01088ba9be335d0522f8f129222a48b' -or $proof.version -ne '0.1.14' -or $proof.acceptanceOnly -ne $true -or $proof.releaseReady -ne $false -or $proof.privateKeyIncluded -ne $false) { throw 'Candidate proof differs.' }
+          "CREATOR_CANDIDATE_SOURCE=$($proof.sourceRevision)" >> $env:GITHUB_ENV
+      - run: node --test scripts/native-convergence-smoke.test.cjs scripts/native-installed-baseline.test.cjs scripts/command-permissions.test.cjs scripts/native-hub-only-upgrade.test.cjs scripts/native-builtin-convergence.test.cjs
+      - name: Exercise real installer and production migration guide
+        if: matrix.lane == 'upgrade-guide'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CREATOR_CONVERGENCE_NATIVE_TEST: '1'
+        run: node scripts/native-convergence-smoke.cjs artifacts/convergence-input/candidate
+      - name: Exercise fresh installation and both built-in module views
+        if: matrix.lane == 'fresh-components'
+        run: node scripts/native-builtin-smoke.cjs artifacts/convergence-input/candidate fresh
+      - name: Qualify the guarded Hub update independently of legacy installer bootstrap
+        if: matrix.lane == 'hub-only-upgrade'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CREATOR_HUB_ONLY_UPGRADE_TEST: '1'
+        run: node scripts/native-hub-only-upgrade.cjs artifacts/convergence-input/candidate
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-convergence-${{ matrix.lane }}-${{ github.sha }}
+          path: artifacts/native-suite-*/
+          retention-days: 7
+          if-no-files-found: warn

@@ -1,0 +1,1481 @@
+"""Pinned Root 14 DEB: disposable native terms acceptance and normal close.
+
+Only the disposable hosted lane may stage or launch. Probe-local action authority
+is limited to the two exact Root terms controls and normal Root WM close. The
+generic helper and its single-PID policy are unchanged. No module is opened.
+
+Primary bitmap contract (obscured/off-screen pixels are undefined):
+https://docs.gtk.org/gdk3/func.pixbuf_get_from_window.html
+https://docs.gtk.org/gdk3-x11/ctor.X11Window.foreign_new_for_display.html
+Peer PID is diagnostic, not authorization:
+https://docs.gtk.org/atspi2/method.Accessible.get_process_id.html
+WebKit joins UI/web-process AX trees; this does not authorize arbitrary peers:
+https://bugs.webkit.org/show_bug.cgi?id=230255
+Exact 2.50.4 Action names are check/uncheck and press, not GTK's click:
+https://github.com/WebKit/WebKit/blob/webkitgtk-2.50.4/Source/WebCore/accessibility/AccessibilityObject.cpp
+https://github.com/WebKit/WebKit/blob/webkitgtk-2.50.4/Source/WebCore/accessibility/atspi/AccessibilityObjectActionAtspi.cpp
+"""
+import ctypes as C
+import copy
+import hashlib
+import importlib.util
+import io
+import json
+import os
+from pathlib import Path
+import platform
+import re
+import selectors
+import stat
+import subprocess
+import sys
+import tarfile
+import time
+import zipfile
+from email.parser import Parser
+
+sys.dont_write_bytecode = True
+REPOSITORY = "BOBWORKS-XR/CREATOR-HUB"
+REPOSITORY_ID = 1364807512
+SOURCE = "5bb05a21d73c0fc3b2839cbcbd4322832b24aead"
+TREE = "f91c61a8e29da84e0dbdbfa642d201cd4c6a3279"
+RUN, ATTEMPT, JOB = 38630742955, 1, 116081506373
+ARTIFACT = 11927495507
+ARTIFACT_NAME = "signed-unix-hub-linux-38630742955-1"
+ZIP_SIZE = 386824719
+ZIP_SHA = "42c5e1a95605158ab084c4cad1db1a6fb5b49f6fe225db9cea868148cccda725"
+PINS = {
+    "creator-hub": (21364752, "2a09016d9721157afc62ea7163979c75b0c986b05cf0264afda97291b51b3689", 0o755),
+    "builtin-manifest.json": (3663, "44de6e0e25890ac2cb20f7f2b16eb3ac151e6b4edb1104c974a9544f291f6fd7", 0o644),
+    "modules.tar.gz": (56842646, "c2cffb6f886225d8c841e78497e92c6ede96896e0c5a28c89346254e5fc4a77a", 0o644),
+    "signed-unix-assembly.json": (888, "a58370b7a92e4e5ab3400be3765ea289a6a52538d3c4bedb9de98e92b01007a0", 0o644),
+}
+# Original successful artifact and native DEB members, never CLI input.
+DEB_NAME = "Creator Hub_0.1.14_amd64.deb"
+DEB_PIN = (62780196, "f0297e74c6ce918b54c248b222af7ac64c3c96c270d281a17a017fb90a7714ec", 0o644)
+INSTALLED_HUB_PIN = (21364752, "efca8d6ca5949e787f10c124e26b91202587b34803f65c7cc5c3e9ffb93fdbf9", 0o755)
+INTEGRITY_PIN = (6026, "fba483967ad294fbbfe36e448ded73ffa78dc9ca27507e20297605358d34ec05", 0o644)
+PRIVATE_SOURCE = "a3118106086516751b78a58b5dbd684cff4c63a7"
+PRIVATE_RUN, PRIVATE_ATTEMPT = 38621563945, 1
+HANDOFF_SHA = "77bf64dcf8c82d4e9ad5e4112445a59639425e6315d4723f910bd8058c9a1a62"
+COMPONENT_PINS = {
+    "setup": (20868880, "35bef3b90848f64748da5bc9a5a7a632bac75b9c4a4e65f6eb78c8ee1c07729b"),
+    "mcp": (17328424, "30da4a6adbbce992ebaad1d4589628016ca31d5e49cd62090bdd12537c00095f"),
+}
+# Original authority above stays independently selectable and byte-exact.
+ORIGINAL_CANDIDATE = "original-5bb05a2"
+GTK3_CANDIDATE = "setup-gtk3-77367ae"
+PIN_FIELDS = ("SOURCE", "TREE", "RUN", "ATTEMPT", "JOB", "ARTIFACT", "ARTIFACT_NAME", "ZIP_SIZE", "ZIP_SHA",
+              "PINS", "DEB_NAME", "DEB_PIN", "INSTALLED_HUB_PIN", "INTEGRITY_PIN", "PRIVATE_SOURCE", "PRIVATE_RUN",
+              "PRIVATE_ATTEMPT", "HANDOFF_SHA", "COMPONENT_PINS")
+ORIGINAL_REVIEWED_PINS = {key: copy.deepcopy(globals()[key]) for key in PIN_FIELDS}
+GTK3_PREPARATION = {
+    "source": "77367ae881413d6868e484f77e12a48c5aa58b00", "tree": "013e360eccb7474744f5e6cd0a6b719748d867e5",
+    "run": 38647206970, "attempt": 1, "artifact": 11933471423, "zipSize": 53940332,
+    "zipSha256": "31228e87a6516e85b8e84dc01107b8057c5b8b5f86c93da809f04be3a0b82250",
+    "handoffSha256": "75cab0f78bb373c0a6d65a13b3c145b168e1b05439fd257e76991ad14d7295ae",
+    "components": {
+        "setup": (16554072, "c960edfdd2f86d1ef994ef639b0d3e1b35041acb78935bf5d61dd7f69f32978c"),
+        "mcp": COMPONENT_PINS["mcp"],
+    },
+}
+# Populate ONLY from the new successful outer assembly's API, original ZIP,
+# native DEB and original receipts. Preparation alone cannot authorize staging.
+GTK3_REVIEWED_PINS = {
+    "SOURCE": "4f3744d5707ed5cd26c2e5a1b10a7d45a5e8d10b", "TREE": "cfda3105bfa144c05e7b68ccb92a7aa738ee6e52",
+    "RUN": 38648562557, "ATTEMPT": 1, "JOB": 116141491681,
+    "ARTIFACT": 11934297227, "ARTIFACT_NAME": "signed-unix-hub-linux-38648562557-1",
+    "ZIP_SIZE": 380463271, "ZIP_SHA": "ce7d02ecd5e72cbce9a0343003726601ab82a103e8e25348cac771d78f0ac881",
+    "PINS": {
+        "creator-hub": (21411480, "b40b823f7e41e8d62b50246053d4887409e18c5daf5db370731c219bcd04f76d", 0o755),
+        "builtin-manifest.json": (3663, "802b5604e9a8446c96adb73a4408b5bd2c90c0e2303f67c191e0e28332793ff2", 0o644),
+        "modules.tar.gz": (55567186, "7892f8256102bbfb995852a154fe0350a71642965a2f7f6642f8031cc92ac983", 0o644),
+        "signed-unix-assembly.json": (875, "b930d76288f00fbd9694f0437852857e9dd77cca5c4371a987463992a47a421b", 0o644),
+    },
+    "DEB_NAME": "Creator Hub_0.1.14_amd64.deb",
+    "DEB_PIN": (61510742, "f95718e41af6b05f3206af503f310a57b300fafe4b9e7da5d48ae050a9a2a6d7", 0o644),
+    "INSTALLED_HUB_PIN": (21411480, "524e7bc9505f7de4f22e29818ad6ba59b1fb4decf3b7bb2655b362f9240ba968", 0o755),
+    "INTEGRITY_PIN": (6026, "3d68a010025156d5a20eda862360acb09b7b3c19cb1693c36433ecd74a6f88f4", 0o644),
+    "PRIVATE_SOURCE": "77367ae881413d6868e484f77e12a48c5aa58b00", "PRIVATE_RUN": 38647206970, "PRIVATE_ATTEMPT": 1,
+    "HANDOFF_SHA": "75cab0f78bb373c0a6d65a13b3c145b168e1b05439fd257e76991ad14d7295ae",
+    "COMPONENT_PINS": copy.deepcopy(GTK3_PREPARATION["components"]),
+}
+CURRENT_CANDIDATE = "retirement-534465a"
+CURRENT_PREPARATION = {
+    "source": "f66d37fae372ad975daaae4ef392089c6d8f784b", "tree": "5c49486ae727f2591fe80695bc22ea62b7699c03",
+    "run": 39041386789, "attempt": 1,
+    "handoffSha256": "1c8218184c49870acecef5335687e3702af3686e4a50427355a1f7bad416b71a",
+    "components": {
+        "mcp": (17328424, "3de059ab73f8e25946ce667df11b34fdb10db1039b05be9fcabd2a18aae96267"),
+        "setup": (16554072, "c960edfdd2f86d1ef994ef639b0d3e1b35041acb78935bf5d61dd7f69f32978c"),
+    },
+}
+CURRENT_REVIEWED_PINS = {
+    "SOURCE": "534465a86554e95b909bf9c7decbbb29cbca5267", "TREE": "db8c7b091d22f598bc789ac97d8d0153c391c8ec",
+    "RUN": 39042746816, "ATTEMPT": 1, "JOB": 117425377351,
+    "ARTIFACT": 12104548664, "ARTIFACT_NAME": "signed-unix-hub-linux-39042746816-1",
+    "ZIP_SIZE": 179416917, "ZIP_SHA": "904b51a0192027ba667702feb4a00721ad2d392fe473540b1f87121c6cacb3de",
+    "PINS": {
+        "creator-hub": (22058224, "178cd9b2623c14cac7c6d7cc475c816ddc1f9f3f5bcf5bb9fb3467cc7a795414", 0o755),
+        "builtin-manifest.json": (3663, "9202a9522fd7a34d101684dc1d8316c99f7f92de4e9f56555d4065145f3acfac", 0o644),
+        "modules.tar.gz": (55567201, "5b4f1fe031752cf14e8354e79f299891dee943a4be0be2034187fda242d3a9bb", 0o644),
+        "signed-unix-assembly.json": (875, "31821db48a13fab5551b231d6b5b769549620e4067015040b808bc95bbe567ec", 0o644),
+    },
+    "DEB_NAME": "Creator Hub_0.1.14_amd64.deb",
+    "DEB_PIN": (62215944, "06beb134dd2be9fbf08dadbb1a49e97a07ff4e591c56967b8d2cc5b8b844b14f", 0o644),
+    "INSTALLED_HUB_PIN": (22058224, "3357f024e3caff3e7563e702838b7e15e08bb8effd7915413e25c444d485ea7d", 0o755),
+    "INTEGRITY_PIN": (2151, "287ad1555c213f43cbfbaf420129f083d4c5417ee416eb21839b722f266a3ea6", 0o644),
+    "PRIVATE_SOURCE": CURRENT_PREPARATION["source"], "PRIVATE_RUN": 39041386789, "PRIVATE_ATTEMPT": 1,
+    "HANDOFF_SHA": CURRENT_PREPARATION["handoffSha256"], "COMPONENT_PINS": copy.deepcopy(CURRENT_PREPARATION["components"]),
+}
+RETIREMENT_FILES = {
+    "/usr/libexec/creator-hub-deb-retirement-helper": (1155128, "b3e4603af16c4c0f7b1962af8466e19b70d646f9b93dd35d82ec5c06639dc813", 0o755),
+    "/usr/share/polkit-1/actions/com.creatorworks.hub.deb-retirement.policy": (889, "5eb715286ff8d8cda8e612f8dc9d28d396068b2cdd470a5f3d92d7355e3e37c9", 0o644),
+}
+SELECTED_CANDIDATE = ORIGINAL_CANDIDATE
+_candidate_configured = False
+TITLE = "Creator Hub - Development Preview"
+TERMS = "Terms of use and risk acknowledgement"
+TERMS_CHECKBOX = "I have read and agree to these terms, including the risk assumption and liability limitations above."
+TERMS_ACCEPT = "Accept and continue"
+POLICY = "2026-09-28-v1"
+# Observed native system image in run 38634063716, not a same-name peer rule.
+WEBKIT = "/usr/lib/x86_64-linux-gnu/webkit2gtk-4.1/WebKitWebProcess"
+WEBKIT_SHA = "5375925828be8acc2c0e905cae0d4654da0519ce1b83f2f724a43eae346bd78e"
+WEBKIT_PACKAGE = "libwebkit2gtk-4.1-0:amd64"
+WEBKIT_VERSION = "2.50.4-0ubuntu0.22.04.1"
+SCOPE = "native-deb-root-terms-and-normal-close-only"
+MAX_LOG, MAX_JSON = 262144, 196608
+MAX_IMAGE = 1920 * 1080
+FLAGS = {key: False for key in ("nativeGuiAccepted", "installationAccepted", "mcpAccepted",
+                               "hostIntegrationAccepted", "migrationAccepted", "signedUpdateAccepted", "releaseReady")}
+HELPER = Path(__file__).with_name("native-unix-window.py")
+
+
+def require(value, message):
+    if not value:
+        raise RuntimeError(message)
+
+
+def validate_candidate_pins(pins):
+    require(type(pins) is dict and set(pins) == set(PIN_FIELDS), "Complete reviewed outer-assembly pin set required; no partial merge")
+    for key in ("SOURCE", "TREE", "PRIVATE_SOURCE"):
+        require(type(pins[key]) is str and re.fullmatch(r"[0-9a-f]{40}", pins[key]), "Invalid reviewed source/tree pin: " + key)
+    for key in ("ZIP_SHA", "HANDOFF_SHA"):
+        require(type(pins[key]) is str and re.fullmatch(r"[0-9a-f]{64}", pins[key]), "Invalid reviewed digest: " + key)
+    for key in ("RUN", "ATTEMPT", "JOB", "ARTIFACT", "ZIP_SIZE", "PRIVATE_RUN", "PRIVATE_ATTEMPT"):
+        require(type(pins[key]) is int and 0 < pins[key] <= 2**53 - 1, "Invalid canonical reviewed integer: " + key)
+    require(pins["ARTIFACT_NAME"] == f'signed-unix-hub-linux-{pins["RUN"]}-{pins["ATTEMPT"]}'
+            and pins["DEB_NAME"] == DEB_NAME, "Reviewed artifact/package name differs")
+    require(type(pins["PINS"]) is dict and set(pins["PINS"]) == set(ORIGINAL_REVIEWED_PINS["PINS"]),
+            "Complete fixed input inventory required")
+    def file_pin(value, mode):
+        require(type(value) is tuple and len(value) == 3 and type(value[0]) is int and 0 < value[0] <= 512 * 1024 * 1024
+                and type(value[1]) is str and re.fullmatch(r"[0-9a-f]{64}", value[1])
+                and type(value[2]) is int and value[2] == mode, "Invalid reviewed file hash/size/mode")
+    for name, pin in pins["PINS"].items():
+        file_pin(pin, 0o755 if name == "creator-hub" else 0o644)
+    for key, mode in (("DEB_PIN", 0o644), ("INSTALLED_HUB_PIN", 0o755), ("INTEGRITY_PIN", 0o644)):
+        file_pin(pins[key], mode)
+    preparation = CURRENT_PREPARATION if pins["SOURCE"] == CURRENT_REVIEWED_PINS["SOURCE"] else GTK3_PREPARATION
+    require(pins["PRIVATE_SOURCE"] == preparation["source"]
+            and pins["PRIVATE_RUN"] == preparation["run"] and pins["PRIVATE_ATTEMPT"] == preparation["attempt"]
+            and pins["HANDOFF_SHA"] == preparation["handoffSha256"]
+            and pins["COMPONENT_PINS"] == preparation["components"], "GTK3 private preparation binding differs")
+    require(pins["SOURCE"] != ORIGINAL_REVIEWED_PINS["SOURCE"] and pins["RUN"] != ORIGINAL_REVIEWED_PINS["RUN"]
+            and pins["ARTIFACT"] != ORIGINAL_REVIEWED_PINS["ARTIFACT"] and pins["ZIP_SHA"] != ORIGINAL_REVIEWED_PINS["ZIP_SHA"],
+            "Original product cannot be relabeled as the GTK3 assembly")
+
+
+def configure_candidate(name):
+    global SELECTED_CANDIDATE, _candidate_configured
+    require(name in (ORIGINAL_CANDIDATE, GTK3_CANDIDATE, CURRENT_CANDIDATE), "Unknown reviewed candidate; paths/URLs/overrides are not accepted")
+    require(not _candidate_configured or SELECTED_CANDIDATE == name, "Candidate switching within one process refused")
+    if name == CURRENT_CANDIDATE:
+        validate_candidate_pins(CURRENT_REVIEWED_PINS)
+        selected = CURRENT_REVIEWED_PINS
+    elif name == GTK3_CANDIDATE:
+        require(GTK3_REVIEWED_PINS is not None, "GTK3 outer assembly pins unavailable; signed preparation is not an assembled DEB")
+        validate_candidate_pins(GTK3_REVIEWED_PINS)
+        selected = GTK3_REVIEWED_PINS
+    else:
+        selected = ORIGINAL_REVIEWED_PINS
+    # Only fixed, fully reviewed source constants enter this isolated module.
+    # Never overlay a caller dictionary or partially reuse another artifact.
+    globals().update(copy.deepcopy(selected))
+    SELECTED_CANDIDATE, _candidate_configured = name, True
+    return {"candidate": name, **{key: copy.deepcopy(globals()[key]) for key in PIN_FIELDS}}
+
+
+def admission(env, system, machine):
+    require(system == "linux" and machine == "x86_64", "Native Linux x86_64 required")
+    require(all(env.get(k) == v for k, v in {
+        "GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted", "RUNNER_OS": "Linux",
+        "RUNNER_ARCH": "X64", "GITHUB_REPOSITORY": REPOSITORY, "GITHUB_REPOSITORY_ID": str(REPOSITORY_ID),
+        "CREATOR_LINUX_ROOT_PROBE": "1", "CREATOR_UNIX_WINDOW_TEST": "1",
+    }.items()), "Exact opted-in disposable repository runner required")
+    require(not env.get("FLATPAK_ID") and not env.get("APPIMAGE") and not env.get("APPDIR"),
+            "Flatpak/AppImage environment refused for native DEB capture")
+
+
+def unique_json(data):
+    def pairs(items):
+        result = {}
+        for key, value in items:
+            require(key not in result, "Duplicate JSON key")
+            result[key] = value
+        return result
+    return json.loads(data, object_pairs_hook=pairs)
+
+
+def validate_source(binding):
+    run, artifact, job, commit = (binding[k] for k in ("run", "artifact", "job", "commit"))
+    require(all(type(v) is int for v in (run["id"], run["run_attempt"], run["repository"]["id"],
+                                        artifact["id"], artifact["size_in_bytes"], job["id"], job["run_id"], job["run_attempt"])),
+            "Canonical source integers required")
+    event, branch = (("workflow_dispatch", "validation/linux-retirement-candidate-014")
+                     if SELECTED_CANDIDATE == CURRENT_CANDIDATE else ("push", "validation/unix-assembly-014"))
+    require(run["id"] == RUN and run["run_attempt"] == ATTEMPT and run["head_sha"] == SOURCE
+            and run["status"] == "completed" and run["conclusion"] == "success"
+            and run["repository"]["id"] == REPOSITORY_ID and run["event"] == event
+            and run["head_branch"] == branch
+            and run["path"] == ".github/workflows/unix-managed-assembly.yml", "Assembly run binding differs")
+    require(artifact["id"] == ARTIFACT and artifact["name"] == ARTIFACT_NAME and artifact["expired"] is False
+            and artifact["size_in_bytes"] == ZIP_SIZE and artifact["digest"] == "sha256:" + ZIP_SHA,
+            "Original artifact identity differs")
+    arun = artifact["workflow_run"]
+    require(arun["id"] == RUN and arun["head_sha"] == SOURCE and arun["repository_id"] == REPOSITORY_ID
+            and arun["head_repository_id"] == REPOSITORY_ID, "Artifact source differs")
+    require(job["id"] == JOB and job["run_id"] == RUN and job["run_attempt"] == ATTEMPT
+            and job["conclusion"] == "success" and job["name"].startswith("assembly (linux,"),
+            "Successful native Linux assembly job required")
+    require(commit["sha"] == SOURCE and commit["tree"]["sha"] == TREE, "Original source tree differs")
+    package, tauri = binding["package"], binding["tauri"]
+    require(package["name"] == "creator-hub" and package["version"] == tauri["version"] == "0.1.14"
+            and tauri["productName"] == "Creator Hub" and tauri["identifier"] == "com.creatorworks.hub"
+            and tauri["app"]["windows"][0]["title"] == TITLE, "Source version/window differs")
+
+
+def ordinary(path):
+    path = Path(path)
+    require(path.is_absolute() and str(path) == os.path.normpath(str(path)) and path.resolve() == path,
+            "Exact unredirected absolute path required")
+    return path
+
+
+def file_record(path, limit, expected_mode=None):
+    path = ordinary(path)
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+                 | getattr(os, "O_BINARY", 0))
+    try:
+        before = os.fstat(fd)
+        require(stat.S_ISREG(before.st_mode) and before.st_nlink == 1 and 0 < before.st_size <= limit,
+                "Ordinary single-link bounded file required")
+        if expected_mode is not None:
+            require(stat.S_IMODE(before.st_mode) == expected_mode, "File mode differs")
+        h, total = hashlib.sha256(), 0
+        while chunk := os.read(fd, 65536):
+            total += len(chunk)
+            require(total <= limit, "File grew beyond bound")
+            h.update(chunk)
+        after = os.fstat(fd)
+        keys = ("st_dev", "st_ino", "st_size", "st_mode", "st_nlink", "st_mtime_ns", "st_ctime_ns")
+        pathname = path.stat()
+        changed = [k for k in keys if getattr(before, k) != getattr(after, k)]
+        # Windows pure fixtures: CPython stat/fstat disagree on deprecated ctime.
+        # Linux retains full FD/path ctime comparison; Windows also pins birthtime.
+        path_keys = keys if os.name != "nt" else keys[:-1] + ("st_birthtime_ns",)
+        changed += [k for k in path_keys if getattr(before, k) != getattr(pathname, k)]
+        require(not changed, "File identity changed while hashing: " + ",".join(changed))
+        require(total == before.st_size, "File size changed")
+        return {"size": total, "sha256": h.hexdigest(), "mode": stat.S_IMODE(before.st_mode),
+                "device": str(before.st_dev), "inode": str(before.st_ino)}
+    finally:
+        os.close(fd)
+
+
+def pinned(path, pin, mode=None):
+    record = file_record(path, pin[0], mode)
+    require((record["size"], record["sha256"]) == pin[:2], "Reviewed file bytes differ: " + Path(path).name)
+    return record
+
+
+def bounded_read(path, limit):
+    before = file_record(path, limit)
+    with Path(path).open("rb") as stream:
+        data = stream.read(limit + 1)
+    require(0 < len(data) <= limit and len(data) == before["size"]
+            and hashlib.sha256(data).hexdigest() == before["sha256"] and file_record(path, limit) == before,
+            "Read exceeds bound or file changed")
+    return data
+
+
+def verify_archive(path, manifest):
+    require(manifest["platform"] == "linux" and manifest["arch"] == "x86_64", "Native Linux manifest required")
+    binding = manifest["payloadArchive"]
+    require(binding["file"] == "modules.tar.gz" and binding["schemaVersion"] == 1, "Archive contract differs")
+    expected = {}
+    executable = {"routing/creator-hub-mcp-router", "mcp/server/runtime/node"}
+    for module in manifest["modules"].values():
+        require(not set(expected).intersection(module["files"]), "Duplicate module path")
+        expected.update(module["files"])
+        executable.add(module["executable"])
+    require(not set(expected).intersection(manifest["managedRouting"]["files"]), "Duplicate routing path")
+    expected.update(manifest["managedRouting"]["files"])
+    require(set(binding["files"]) == set(expected) and 0 < len(expected) <= 64, "Archive manifest inventory differs")
+    before = pinned(path, (binding["size"], binding["sha256"]))
+    seen, total, records = set(), 0, {}
+    with tarfile.open(path, "r|gz") as archive:
+        for member in archive:
+            name = member.name
+            require(name in expected and name not in seen and member.isfile() and not member.linkname
+                    and not member.pax_headers, "Unexpected/duplicate/linked archive entry")
+            mode = 0o755 if name in executable else 0o644
+            entry = binding["files"][name]
+            require(member.mode == entry["mode"] == mode and member.size == entry["size"]
+                    and 0 < member.size <= 256 * 1024 * 1024, "Archive entry size/mode differs")
+            h, count = hashlib.sha256(), 0
+            with archive.extractfile(member) as stream:
+                while chunk := stream.read(65536):
+                    count += len(chunk)
+                    require(count <= member.size, "Archive entry exceeds bound")
+                    h.update(chunk)
+            require(count == member.size and h.hexdigest() == expected[name], "Archive resource hash differs")
+            total += count
+            require(total <= binding["unpackedSize"] <= 256 * 1024 * 1024, "Unpacked archive exceeds bound")
+            seen.add(name)
+            records[name] = {"size": count, "mode": mode, "sha256": h.hexdigest()}
+    require(seen == set(expected) and total == binding["unpackedSize"], "Incomplete archive inventory")
+    require(pinned(path, (binding["size"], binding["sha256"])) == before, "Archive changed during resource verification")
+    return records
+
+
+def paths(root):
+    return {"creator-hub": Path("/usr/bin/creator-hub"),
+            "modules.tar.gz": Path("/usr/lib/Creator Hub/modules.tar.gz"),
+            "builtin-manifest.json": root / "input/builtin-manifest.json",
+            "signed-unix-assembly.json": root / "input/signed-unix-assembly.json"}
+
+
+def reviewed_package():
+    require(isinstance(DEB_NAME, str) and re.fullmatch(r"[^/\\\x00-\x1f]+\.deb", DEB_NAME)
+            and all(isinstance(pin, tuple) and len(pin) == 3 for pin in (DEB_PIN, INSTALLED_HUB_PIN, INTEGRITY_PIN)),
+            "Fresh successful assembly DEB pins have not been reviewed")
+
+
+def input_pins():
+    reviewed_package()
+    return {**PINS, "unix-package-integrity.json": INTEGRITY_PIN, "native-packages/" + DEB_NAME: DEB_PIN}
+
+
+def input_path(root, name):
+    require(name in input_pins(), "Unknown fixed package input")
+    return root / "input" / Path(name).name
+
+
+def write_new(path, data, mode=0o600):
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), mode)
+    with os.fdopen(fd, "wb") as stream:
+        stream.write(data)
+    os.chmod(path, mode)
+
+
+def save_json(path, value):
+    data = (json.dumps(value, ensure_ascii=True, indent=2) + "\n").encode()
+    require(len(data) <= 1048576, "Report exceeds bound")
+    write_new(path, data)
+
+
+def stage(temp):
+    reviewed_package()
+    binding_bytes = bounded_read(temp / "linux-root-source-binding.json", MAX_JSON)
+    binding = unique_json(binding_bytes)
+    validate_source(binding)
+    archive = temp / "linux-root-input.zip"
+    original_zip = pinned(archive, (ZIP_SIZE, ZIP_SHA))
+    root = temp / "linux-root-probe"
+    root.mkdir(mode=0o700)
+    report = {"scope": SCOPE, **FLAGS, "phase": "stage"}
+    try:
+        (root / "input").mkdir(mode=0o700)
+        with zipfile.ZipFile(archive) as z:
+            entries = z.infolist()
+            require(len(entries) <= 128 and len({e.filename for e in entries}) == len(entries), "Ambiguous ZIP inventory")
+            for name, pin in input_pins().items():
+                entry = z.getinfo(name)
+                require(not entry.is_dir() and not entry.flag_bits & 1 and entry.file_size == pin[0]
+                        and stat.S_ISREG(entry.external_attr >> 16)
+                        and stat.S_IMODE(entry.external_attr >> 16) == pin[2], "Original ZIP entry mode/size differs")
+                data = z.read(entry)
+                require(len(data) == pin[0] and hashlib.sha256(data).hexdigest() == pin[1], "Original ZIP entry hash differs")
+                write_new(input_path(root, name), data, pin[2])
+        require(pinned(archive, (ZIP_SIZE, ZIP_SHA)) == original_zip, "Original ZIP changed while staging")
+        write_new(root / "source-binding.json", binding_bytes)
+        report.update(verify_inputs(root, full=True))
+        report["phase"] = "verified-deb-not-installed"
+    except Exception as error:
+        report["error"] = str(error)[:1000]
+        raise
+    finally:
+        save_json(root / "stage-report.json", report)
+    return report
+
+
+def verify_inputs(root, full=False):
+    require(stat.S_IMODE(ordinary(root).stat().st_mode) == 0o700, "Private probe directory required")
+    binding = unique_json(bounded_read(root / "source-binding.json", MAX_JSON))
+    validate_source(binding)
+    files = {name: pinned(input_path(root, name), pin, pin[2]) for name, pin in input_pins().items()}
+    receipt = unique_json(bounded_read(input_path(root, "signed-unix-assembly.json"), 8192))
+    require(receipt["assemblyCommit"] == SOURCE and receipt["hubVersion"] == "0.1.14"
+            and receipt["schemaVersion"] == 1 and receipt["product"] == "com.creatorworks.hub.unix-signed-assembly"
+            and receipt["platform"] == "linux" and receipt["arch"] == "x86_64" and receipt["mcpMode"] == "writable"
+            and receipt["privateSource"]["runId"] == PRIVATE_RUN and receipt["privateSource"]["runAttempt"] == PRIVATE_ATTEMPT
+            and receipt["privateSource"]["sourceCommit"] == PRIVATE_SOURCE
+            and receipt["privateSource"]["buildCommit"] == PRIVATE_SOURCE and receipt["handoffSha256"] == HANDOFF_SHA
+            and receipt["privateModulesRecompiled"] is False and receipt["privateModulesResigned"] is False
+            and receipt["nativeGuiAccepted"] is False and receipt["releaseReady"] is False, "Original assembly receipt differs")
+    if SELECTED_CANDIDATE in (GTK3_CANDIDATE, CURRENT_CANDIDATE):
+        preparation = CURRENT_PREPARATION if SELECTED_CANDIDATE == CURRENT_CANDIDATE else GTK3_PREPARATION
+        require(receipt["privateSource"]["sourceTree"] == preparation["tree"], "GTK3 preparation source tree differs")
+    with input_path(root, "creator-hub").open("rb") as stream:
+        elf = stream.read(20)
+    require(elf[:7] == b"\x7fELF\x02\x01\x01" and elf[18:20] == b"\x3e\x00", "Exact native x86_64 ELF required")
+    result = {"candidate": SELECTED_CANDIDATE, "sourceCommit": SOURCE, "sourceTree": TREE, "runId": RUN, "runAttempt": ATTEMPT,
+              "assemblyJobId": JOB, "artifactId": ARTIFACT, "artifactSha256": ZIP_SHA,
+              "files": files, "originalAssembly": receipt, "layout": "/usr/bin + /usr/lib/Creator Hub",
+              "debInstalled": False, "resourceLookupProof": "native package layout; not runtime module-load acceptance"}
+    manifest = unique_json(bounded_read(input_path(root, "builtin-manifest.json"), 65536))
+    integrity = unique_json(bounded_read(input_path(root, "unix-package-integrity.json"), 65536))
+    validate_integrity(integrity, manifest)
+    result["originalPackageIntegrity"] = integrity
+    if full:
+        result["resources"] = verify_archive(input_path(root, "modules.tar.gz"), manifest)
+    return result
+
+
+def validate_integrity(integrity, manifest):
+    require(integrity["schemaVersion"] == 1 and integrity["platform"] == "linux" and integrity["arch"] == "x86_64"
+            and integrity["experimental"] is True and integrity["mcpMode"] == "writable"
+            and integrity["integrityPassed"] is True and integrity["writableGuiAccepted"] is False
+            and integrity["releaseReady"] is False, "Original native package integrity refused")
+    packages = integrity["packages"]
+    formats = ["deb"] if SELECTED_CANDIDATE == CURRENT_CANDIDATE else ["deb", "rpm", "appimage"]
+    require([v["format"] for v in packages] == formats, "Complete native format integrity required")
+    expected = {**manifest["modules"]["mcp"]["files"], **manifest["modules"]["setup"]["files"],
+                **manifest["managedRouting"]["files"]}
+    require(all(v["files"] == expected for v in packages), "Native package resource inventory differs")
+    require(packages[0]["path"] == "native-packages/" + DEB_NAME and packages[0]["sha256"] == DEB_PIN[1]
+            and packages[0]["hubSha256"] == INSTALLED_HUB_PIN[1], "Original DEB/ELF package pins differ")
+
+
+def verify_deb_marker(raw, installed):
+    token = b"__TAURI_BUNDLE_TYPE_VAR_UNK"
+    require(raw.count(token) == 1, "Expected one original Tauri bundle marker")
+    expected = raw.replace(token, token[:-3] + b"DEB", 1)
+    require(installed == expected, "DEB image differs beyond exact source-proven Tauri marker")
+
+
+def verify_stage(root, full=False):
+    result = verify_inputs(root, full)
+    actual = {}
+    for name, pin in (("creator-hub", INSTALLED_HUB_PIN), ("modules.tar.gz", PINS["modules.tar.gz"])):
+        path = paths(root)[name]
+        require(path.stat().st_uid == 0, "Installed package file is not root-owned")
+        actual[name] = pinned(path, pin, pin[2])
+    verify_deb_marker(bounded_read(input_path(root, "creator-hub"), PINS["creator-hub"][0]),
+                      bounded_read(paths(root)["creator-hub"], INSTALLED_HUB_PIN[0]))
+    state = unique_json(bounded_read(root / "installed-package.json", 8192))
+    require(state["packageState"] == "creator-hub\t0.1.14\tamd64\tinstalled\n"
+            and state["debSha256"] == DEB_PIN[1] and state["sourceCommit"] == SOURCE,
+            "Actual dpkg installation receipt differs; bytes are independently rechecked")
+    if SELECTED_CANDIDATE == CURRENT_CANDIDATE:
+        result["installedRetirementFiles"] = verify_retirement_files()
+    result.update(debInstalled=True, installedFiles=actual, packageState=state["packageState"])
+    return result
+
+
+def verify_retirement_files():
+    result = {}
+    for name, pin in RETIREMENT_FILES.items():
+        path = Path(name)
+        for ancestor in (path, *path.parents):
+            info = ancestor.lstat()
+            require(info.st_uid == info.st_gid == 0 and not info.st_mode & 0o7022
+                    and not ancestor.is_symlink(), "Installed privileged path is not root-protected: "
+                    + str(ancestor) + f" uid={info.st_uid} gid={info.st_gid} mode={stat.S_IMODE(info.st_mode):04o}")
+        result[name] = pinned(path, pin, pin[2])
+    return result
+
+
+def load_helper():
+    spec = importlib.util.spec_from_file_location("creator_existing_window_helper", HELPER)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def check_process(child, start, executable, helper, parent_pid=None):
+    require(child.poll() is None, "Owned Root already exited")
+    proc = helper.Proc()
+    record = proc.stat(child.pid)
+    actual = helper.parse_start(record, child.pid)
+    require(start is None or start == actual, "Owned Root start changed")
+    require(int(record[record.rfind(")") + 2:].split()[1]) == (parent_pid or os.getpid()), "Root is not a direct owned child")
+    request = helper.Request("snapshot", child.pid, actual, str(executable), INSTALLED_HUB_PIN[1], 1, TITLE, "FRAME")
+    helper.identity(request, proc)
+    return actual
+
+
+def child_env(env, root):
+    allowed = ("DISPLAY", "XAUTHORITY", "DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR", "LANG", "LC_ALL",
+               "GITHUB_ACTIONS", "RUNNER_ENVIRONMENT", "RUNNER_OS", "RUNNER_ARCH", "GITHUB_REPOSITORY",
+               "GITHUB_REPOSITORY_ID", "RUNNER_TEMP", "CREATOR_LINUX_ROOT_PROBE", "CREATOR_UNIX_WINDOW_TEST")
+    result = {k: env[k] for k in allowed if k in env}
+    result.update(CREATOR_LINUX_ROOT_CANDIDATE=SELECTED_CANDIDATE,
+                  PATH="/usr/bin:/bin", GDK_BACKEND="x11", NO_AT_BRIDGE="0", HOME=str(root / "home"),
+                  XDG_CONFIG_HOME=str(root / "home/config"), XDG_DATA_HOME=str(root / "home/data"),
+                  XDG_CACHE_HOME=str(root / "home/cache"), TMPDIR=str(root / "tmp"))
+    return result
+
+
+class Capture:
+    """Drain pipes without blocking the parent or retaining unbounded child output."""
+    def __init__(self, child, root, label):
+        self.child, self.selector, self.items = child, selectors.DefaultSelector(), {}
+        for name, stream in (("stdout", child.stdout), ("stderr", child.stderr)):
+            os.set_blocking(stream.fileno(), False)
+            item = {"bytes": 0, "eof": False, "kept": bytearray(), "file": (root / f"{label}.{name}").open("xb")}
+            self.items[name] = item
+            self.selector.register(stream, selectors.EVENT_READ, (name, item))
+
+    def pump(self, wait=0):
+        for key, _event in self.selector.select(wait):
+            _name, item = key.data
+            data = os.read(key.fd, 65536)
+            if not data:
+                item["eof"] = True
+                self.selector.unregister(key.fileobj)
+                continue
+            item["bytes"] += len(data)
+            keep = data[:max(0, MAX_LOG - len(item["kept"]))]
+            item["kept"].extend(keep)
+            item["file"].write(keep)
+            item["file"].flush()
+
+    def metadata(self):
+        return {name: {"bytes": item["bytes"], "retainedBytes": len(item["kept"]), "eof": item["eof"],
+                       "truncated": item["bytes"] > MAX_LOG} for name, item in self.items.items()}
+
+    def close(self):
+        self.selector.close()
+        for item in self.items.values():
+            item["file"].close()
+        self.child.stdout.close()
+        self.child.stderr.close()
+
+
+def run_tool(root, label, command, allowed=(0,), timeout=15):
+    """Fixed native package tools only; no generic shell or inherited auth/env."""
+    begin = time.monotonic()
+    child = subprocess.Popen(command, cwd=root, env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8"},
+                             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    capture = Capture(child, root, label)
+    record = {"command": command, "pid": child.pid, "exitCode": None}
+    try:
+        deadline = begin + timeout
+        while time.monotonic() < deadline:
+            capture.pump(0.02)
+            if child.poll() is not None and all(v["eof"] for v in capture.items.values()):
+                break
+        record.update(exitCode=child.poll(), elapsedMs=round((time.monotonic() - begin) * 1000), **capture.metadata())
+        require(record["exitCode"] is not None, "Native package tool deadline; no signal sent; disposable teardown required")
+        child.wait(timeout=0)
+        require(record["exitCode"] in allowed and all(v["eof"] and not v["truncated"] for v in capture.metadata().values()),
+                "Native package tool failed or exceeded bounded EOF: " + label)
+        return record["exitCode"], bytes(capture.items["stdout"]["kept"])
+    finally:
+        capture.close()
+        save_json(root / (label + ".json"), record)
+
+
+def deb_control(data):
+    require(0 < len(data) <= MAX_LOG, "DEB control archive exceeds bound")
+    entries, control = {}, None
+    with tarfile.open(fileobj=io.BytesIO(data), mode="r:") as archive:
+        for entry in archive:
+            name = entry.name[2:] if entry.name.startswith("./") else entry.name
+            if name in ("", ".") and entry.isdir():
+                continue
+            require(name in ("control", "md5sums") and name not in entries and entry.isfile()
+                    and not entry.linkname and 0 < entry.size <= 65536,
+                    "Unreviewed DEB control member or maintainer script refused")
+            body = archive.extractfile(entry).read(65537)
+            require(len(body) == entry.size, "DEB control member changed")
+            entries[name] = {"sha256": hashlib.sha256(body).hexdigest(), "size": len(body)}
+            if name == "control":
+                control = Parser().parsestr(body.decode("utf8"))
+    require(control is not None and not control.defects and not control.get_payload().strip(), "Malformed DEB control stanza")
+    require(all(len(control.get_all(key, [])) == 1 for key in control.keys()), "Duplicate DEB control field")
+    require(control.get("Package") == "creator-hub" and control.get("Version") == "0.1.14"
+            and control.get("Architecture") == "amd64", "Actual native DEB identity differs")
+    return {"package": control["Package"], "version": control["Version"], "architecture": control["Architecture"],
+            "depends": control.get("Depends", ""), "members": entries, "maintainerScriptsPresent": False}
+
+
+STATE_FORMAT = "${Package}\t${Version}\t${Architecture}\t${db:Status-Status}\n"
+
+
+def installed_state(root, label):
+    _status, output = run_tool(root, label, ["/usr/bin/dpkg-query", "-W", "-f=" + STATE_FORMAT, "creator-hub"])
+    require(output == b"creator-hub\t0.1.14\tamd64\tinstalled\n", "Native dpkg package state differs")
+    return output.decode("ascii")
+
+
+def install(root):
+    report = {"scope": SCOPE, **FLAGS, "phase": "preinstall", "debInstalled": False}
+    try:
+        report["package"] = verify_inputs(root, full=True)
+        require(not os.path.lexists("/usr/bin/creator-hub") and not os.path.lexists("/usr/lib/Creator Hub"),
+                "Existing native Hub paths refused; no replacement/removal is authorized")
+        status, output = run_tool(root, "preinstall-state", ["/usr/bin/dpkg-query", "-W", "-f=" + STATE_FORMAT, "creator-hub"], allowed=(0, 1))
+        require(status == 1 and not output, "Existing package registration refused")
+        deb = input_path(root, "native-packages/" + DEB_NAME)
+        before = pinned(deb, DEB_PIN, DEB_PIN[2])
+        _status, control = run_tool(root, "deb-control", ["/usr/bin/dpkg-deb", "--ctrl-tarfile", str(deb)])
+        report["control"] = deb_control(control)
+        require(pinned(deb, DEB_PIN, DEB_PIN[2]) == before, "DEB changed during control review")
+        report["phase"] = "dpkg-install"
+        run_tool(root, "dpkg-install", ["/usr/bin/sudo", "-n", "/usr/bin/env", "-i", "PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LANG=C.UTF-8",
+                                       "/usr/bin/dpkg", "--install", "--", str(deb)], timeout=90)
+        state = installed_state(root, "postinstall-state")
+        save_json(root / "installed-package.json", {"packageState": state, "debSha256": DEB_PIN[1], "sourceCommit": SOURCE})
+        report["installed"] = verify_stage(root, full=True)
+        report.update(debInstalled=True, phase="actual-deb-installed-not-launched")
+    except Exception as error:
+        report["error"] = str(error)[:1000]
+        raise
+    finally:
+        save_json(root / "installation-report.json", report)
+    return report
+
+
+def run_worker(root, env, action, pid, start, xid, root_capture, records):
+    begin = time.monotonic()
+    child = subprocess.Popen(["/usr/bin/python3", "-B", str(Path(__file__).resolve()), "worker", action,
+                              str(pid), start, str(xid)], cwd=root, env=env,
+                             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    record = {"action": action, "pid": child.pid, "exitCode": None, "elapsedMs": 0}
+    records.append(record)
+    capture = None
+    try:
+        capture = Capture(child, root, action)
+        deadline = begin + (23 if action in ("discover", "snapshot") else 15)
+        while time.monotonic() < deadline:
+            capture.pump(0.02)
+            root_capture.pump()
+            if child.poll() is not None and all(item["eof"] for item in capture.items.values()):
+                break
+        status = child.poll()
+        record.update(exitCode=status, elapsedMs=round((time.monotonic() - begin) * 1000), **capture.metadata())
+        require(status is not None, "Read-only/action worker deadline reached; no signal sent, disposable teardown required")
+        child.wait(timeout=0)
+        require(all(v["eof"] and not v["truncated"] for v in capture.metadata().values()), "Worker output did not reach bounded EOF")
+        raw = bytes(capture.items["stdout"]["kept"])
+        require(0 < len(raw) <= MAX_JSON, "Worker result size differs")
+        value = unique_json(raw)
+        record["result"] = value
+        require(status == 0 and not value.get("error"), "Worker refused: " + str(value.get("error", status))[:1000])
+        return value
+    finally:
+        record["exitCode"] = child.poll()
+        if capture is not None:
+            capture.close()
+
+
+def client_ids(x11):
+    root = x11.x.XDefaultRootWindow(x11.display)
+    value = x11.property(root, "_NET_CLIENT_LIST_STACKING")
+    require(value and value[:2] == (33, 32) and 0 < len(value[2]) <= 32
+            and len(set(value[2])) == len(value[2]), "Bounded exact WM client inventory unavailable")
+    return value[2]
+
+
+def discover(request, helper, x11):
+    matches, refused = [], []
+    for xid in client_ids(x11):
+        # A claim filters inventory only. XRes, never this property, grants binding.
+        claim = x11.property(xid, "_NET_WM_PID")
+        if not claim or claim[:2] != (6, 32) or claim[2] != [request.pid]:
+            continue
+        info = x11.inspect(xid)
+        if info["pid"] != request.pid:
+            refused.append({"window": str(xid), **info})
+        elif info["title"] == TITLE and info["mapped"]:
+            matches.append((xid, info))
+    require(not refused, "Claimed Root window has foreign XRes PID: " + json.dumps(refused)[:1000])
+    require(len(matches) <= 1, "Ambiguous owned Root X window")
+    if not matches:
+        return None
+    helper.identity(request, helper.Proc())
+    xid, info = matches[0]
+    return {"window": xid, "properties": info, "title": TITLE, "role": "FRAME"}
+
+
+def peer_record(pid, helper):
+    result = {"pid": pid, "authorization": False, "diagnosticOnly": True}
+    if type(pid) is not int or pid <= 1:
+        return result
+    try:
+        proc = helper.Proc()
+        record = proc.stat(pid)
+        start = helper.parse_start(record, pid)
+        executable = proc.executable(pid)
+        image_hash = proc.digest(pid)
+        require(proc.executable(pid) == executable and helper.parse_start(proc.stat(pid), pid) == start,
+                "Observed peer identity changed")
+        result.update(startTime=start, parentPid=int(record[record.rfind(")") + 2:].split()[1]),
+                      executable=executable, kernelImageSha256=image_hash)
+    except Exception as error:
+        result["error"] = str(error)[:300]
+    return result
+
+
+def process_uids(pid):
+    with open(f"/proc/{pid}/status", "rb") as stream:
+        body = stream.read(16385)
+    require(len(body) <= 16384, "Process status exceeds bound")
+    matches = re.findall(rb"^Uid:\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s*$", body, re.M)
+    require(len(matches) == 1, "Exact process UID tuple unavailable")
+    return [int(v) for v in matches[0]]
+
+
+def image_identity(path):
+    value = os.stat(path)
+    require(stat.S_ISREG(value.st_mode) and 0 < value.st_size <= 256 * 1024 * 1024,
+            "Ordinary bounded kernel image required")
+    return {key: str(getattr(value, key)) for key in
+            ("st_dev", "st_ino", "st_size", "st_mode", "st_uid", "st_gid", "st_mtime_ns", "st_ctime_ns")}
+
+
+def native_process(pid, helper, full=True):
+    proc = helper.Proc()
+    first = proc.stat(pid)
+    start = helper.parse_start(first, pid)
+    uids, executable = process_uids(pid), proc.executable(pid)
+    image = image_identity(f"/proc/{pid}/exe")
+    result = {"pid": pid, "startTime": start, "parentPid": int(first[first.rfind(")") + 2:].split()[1]),
+              "uids": uids, "executable": executable, "image": image}
+    if full:
+        result["kernelImageSha256"] = proc.digest(pid)
+    last = proc.stat(pid)
+    require(helper.parse_start(last, pid) == start and last[last.rfind(")") + 2:].split()[1]
+            == first[first.rfind(")") + 2:].split()[1] and process_uids(pid) == uids
+            and proc.executable(pid) == executable and image_identity(f"/proc/{pid}/exe") == image,
+            "Process identity changed during capture")
+    return result
+
+
+def verify_system_webkit():
+    path = ordinary(WEBKIT)
+    for entry in [path, *path.parents]:
+        value = entry.stat()
+        require(value.st_uid == 0 and not value.st_mode & 0o022, "System WebKit path is not protected root-owned content")
+    image = file_record(path, 256 * 1024 * 1024, 0o755)
+    require(image["sha256"] == WEBKIT_SHA, "System WebKit image differs from measured native runner; no peer adopted")
+    return image
+
+
+def system_webkit_provenance(root):
+    image = verify_system_webkit()
+    _status, owner = run_tool(root, "webkit-owner", ["/usr/bin/dpkg-query", "-S", WEBKIT])
+    _status, package = run_tool(root, "webkit-package", ["/usr/bin/dpkg-query", "-W", "-f=" + STATE_FORMAT, WEBKIT_PACKAGE])
+    require(owner == (WEBKIT_PACKAGE + ": " + WEBKIT + "\n").encode(), "System WebKit package owner differs")
+    require(package == ("libwebkit2gtk-4.1-0\t" + WEBKIT_VERSION + "\tamd64\tinstalled\n").encode(),
+            "Measured native WebKit package version/state differs")
+    require(verify_system_webkit() == image, "System WebKit image changed during package attribution")
+    return {"path": WEBKIT, "sha256": WEBKIT_SHA, "package": WEBKIT_PACKAGE, "version": WEBKIT_VERSION, "file": image}
+
+
+def validate_peer(peer, root):
+    require(type(peer["pid"]) is int and peer["pid"] > 1 and peer["pid"] != root["pid"]
+            and peer["parentPid"] == root["pid"], "WebKit peer is not a direct Root child")
+    require(peer["uids"] == root["uids"], "WebKit peer UID differs")
+    require(peer["executable"] == WEBKIT and peer["kernelImageSha256"] == WEBKIT_SHA,
+            "Foreign WebKit peer path/image refused")
+    require(int(peer["startTime"]) >= int(root["startTime"]), "WebKit peer predates Root")
+
+
+class AxReferences:
+    """Canonical AX wire identity, not Python proxy equality or PID-only equality.
+
+    WebKit AccessibilityAtspi.cpp registerRoot uses m_busName (well-known);
+    AccessibilityRootAtspi.cpp reference/parentReference use uniqueName().
+    Both names must resolve to the same unique owner AND exact object path.
+    https://github.com/WebKit/WebKit/blob/webkitgtk-2.50.4/Source/WebCore/accessibility/atspi/AccessibilityAtspi.cpp
+    """
+    def __init__(self, resolve, aliases=None, window=None):
+        self.resolve = resolve
+        self.aliases, self.window = dict(aliases or {}), window
+        require(len(self.aliases) <= 8, "AX bus alias inventory exceeds bound")
+
+    def identity(self, node, ownership):
+        require(node is not None, "Missing AX wire reference")
+        name, path = node.app.bus_name, node.path
+        # D-Bus names allow 255 ASCII bytes; observed sandboxed WebKit names
+        # include both the app hash and process UUID and exceed 128.
+        # https://dbus.freedesktop.org/doc/dbus-specification.html#message-protocol-names
+        require(isinstance(name, str) and len(name) <= 255 and re.fullmatch(r"(?::[0-9]+\.[0-9]+|org\.[A-Za-z0-9_.-]+)", name)
+                and isinstance(path, str) and len(path) <= 256 and re.fullmatch(r"/org/a11y/(?:[A-Za-z0-9_]+/)*[A-Za-z0-9_]+", path),
+                "Invalid bounded native AX bus/object reference: " + json.dumps({
+                    "bus": name[:255] if isinstance(name, str) else None, "busType": type(name).__name__,
+                    "path": path[:256] if isinstance(path, str) else None, "pathType": type(path).__name__}))
+        if name not in self.aliases:
+            require(len(self.aliases) < 8, "AX bus alias inventory exceeds bound")
+            peer = self.resolve(name)
+            require(re.fullmatch(r":[0-9]+\.[0-9]+", peer["owner"]), "Unique AX bus owner required")
+            self.aliases[name] = peer
+        peer = self.aliases[name]
+        allowed = [ownership.root] + ([ownership.renderer] if ownership.renderer is not None else [])
+        require(any(peer["pid"] == item["pid"] and peer["uid"] == item["uids"][1] for item in allowed)
+                and peer["pid"] == node.get_process_id(), "AX bus owner is not the bound Root/renderer")
+        return [peer["owner"], path]
+
+    def recheck(self):
+        for name, expected in self.aliases.items():
+            require(self.resolve(name) == expected, "AX bus unique owner/PID/UID changed")
+
+
+def native_ax_references(saved=None):
+    from gi.repository import Gio, GLib
+    session = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+    address = session.call_sync("org.a11y.Bus", "/org/a11y/bus", "org.a11y.Bus", "GetAddress", None,
+                                GLib.VariantType.new("(s)"), Gio.DBusCallFlags.NONE, 3000, None).unpack()[0]
+    require(isinstance(address, str) and 0 < len(address) <= 1024 and address.startswith("unix:")
+            and ";" not in address and "\x00" not in address, "One local native AX bus required; no network fallback")
+    bus = Gio.DBusConnection.new_for_address_sync(address, Gio.DBusConnectionFlags.AUTHENTICATION_CLIENT
+                                                 | Gio.DBusConnectionFlags.MESSAGE_BUS_CONNECTION, None, None)
+
+    def resolve(name):
+        def query(method, target, signature):
+            return bus.call_sync("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", method,
+                GLib.Variant("(s)", (target,)), GLib.VariantType.new(signature), Gio.DBusCallFlags.NONE, 3000, None).unpack()[0]
+        owner = query("GetNameOwner", name, "(s)")
+        pid, uid = query("GetConnectionUnixProcessID", owner, "(u)"), query("GetConnectionUnixUser", owner, "(u)")
+        require(query("GetNameOwner", name, "(s)") == owner, "AX bus owner changed during native attribution")
+        return {"owner": owner, "pid": pid, "uid": uid}
+
+    try:
+        references = AxReferences(resolve, (saved or {}).get("aliases"), (saved or {}).get("window"))
+        references.recheck()
+        return references, bus
+    except Exception:
+        bus.close_sync(None)
+        raise
+
+
+class RootOwnership:
+    """One pinned Root/XRes frame plus one pinned native renderer, never all peers."""
+    def __init__(self, request, helper, x11, root_record, xres, system_file, renderer=None,
+                 reader=None, system_check=None, references=None):
+        self.request, self.helper, self.x11 = request, helper, x11
+        self.root, self.xres, self.system_file, self.renderer = root_record, xres, system_file, renderer
+        self.reader = reader or (lambda pid, full: native_process(pid, helper, full))
+        self.system_check = system_check or verify_system_webkit
+        self.references = references
+        self.close_parent_containment = None
+        require(references is not None, "Native AX reference binding required")
+        require(root_record["pid"] == request.pid and root_record["startTime"] == request.start
+                and root_record["executable"] == request.executable
+                and root_record["kernelImageSha256"] == request.sha256, "Root binding differs from native request")
+        if renderer is not None:
+            validate_peer(renderer, root_record)
+        self.recheck(full=True)
+
+    def recheck(self, full=False):
+        for expected in [self.root] + ([self.renderer] if self.renderer is not None else []):
+            actual = self.reader(expected["pid"], full)
+            require(all(expected.get(k) == v for k, v in actual.items()), "Bound Root/renderer identity changed")
+        require(self.helper.bound_window(self.request, self.x11) == self.xres, "Bound Root XRes window changed")
+        if full:
+            require(self.system_check() == self.system_file, "Bound system WebKit provenance changed")
+            self.references.recheck()
+
+    def node(self, node):
+        self.recheck()
+        pid = node.get_process_id()
+        require(type(pid) is int and pid > 1, "Invalid AX process identity")
+        if pid != self.root["pid"]:
+            if self.renderer is None:
+                candidate = self.reader(pid, True)
+                validate_peer(candidate, self.root)
+                require(self.system_check() == self.system_file, "System WebKit changed before child binding")
+                self.renderer = candidate
+            require(pid == self.renderer["pid"], "Additional foreign AX peer refused")
+        self.recheck()
+
+    def evidence(self):
+        return {"root": self.root, "xres": self.xres, "renderer": self.renderer,
+                "axReferences": {"aliases": dict(self.references.aliases), "window": self.references.window},
+                "wmCloseParentContainment": self.close_parent_containment,
+                "policy": "one-native-direct-child-WebKit-in-exact-Root-frame"}
+
+    def same_node(self, a, b):
+        return a is not None and b is not None and self.references.identity(a, self) == self.references.identity(b, self)
+
+
+def owned_walk(window, ownership, atspi, wm_close=False):
+    helper, request = ownership.helper, ownership.request
+    require(window.get_process_id() == request.pid and window.get_role() == atspi.Role.FRAME
+            and window.get_name() == request.title, "Foreign AX window refused")
+    nodes, seen, parent_refs, mismatches, pending = [], set(), [], [], [(window, None, 0)]
+    window_ref = ownership.references.identity(window, ownership)
+    if ownership.references.window is None:
+        ownership.references.window = window_ref
+    require(window_ref == ownership.references.window, "Bound Root AX window wire identity changed")
+    ownership.recheck(full=True)
+    while pending:
+        node, parent, depth = pending.pop()
+        require(node is not None and len(nodes) < helper.MAX_NODES and depth < helper.MAX_DEPTH,
+                "Owned AX tree exceeds bounds")
+        ownership.node(node)
+        if parent is not None:
+            # AT-SPI get_parent may use a local cache. Read the live Parent
+            # property before deciding; a null/foreign parent still refuses.
+            # https://docs.gtk.org/atspi2/method.Accessible.clear_cache.html
+            node.clear_cache()
+            actual_parent = node.get_parent()
+            same_parent = ownership.same_node(actual_parent, parent)
+            detail = {
+                "depth": depth, "pid": node.get_process_id(), "role": int(node.get_role()),
+                "expectedParentRef": ownership.references.identity(parent, ownership),
+                "actualParentRef": ownership.references.identity(actual_parent, ownership) if actual_parent is not None else None,
+                "expectedParentPid": parent.get_process_id(), "expectedParentRole": int(parent.get_role()),
+                "actualParentPid": actual_parent.get_process_id() if actual_parent is not None else None,
+                "actualParentRole": int(actual_parent.get_role()) if actual_parent is not None else None}
+            if wm_close:
+                # WM close targets the bound XRes frame, not an HTML control.
+                # A semantic parent may differ from the GetChildren edge, but
+                # must independently occur in this SAME fully owned AX subtree.
+                # EWMH 4.1: https://specifications.freedesktop.org/wm/latest/ar01s04.html
+                require(actual_parent is not None, "WM-close AX parent is absent")
+                parent_refs.append(tuple(detail["actualParentRef"]))
+                if not same_parent:
+                    mismatches.append(detail)
+            else:
+                require(same_parent, "AX subtree escaped the bound Root window: " + json.dumps(detail))
+            require(node.get_role() not in (atspi.Role.FRAME, atspi.Role.WINDOW, atspi.Role.APPLICATION),
+                    "Foreign/nested AX window refused")
+        reference = tuple(ownership.references.identity(node, ownership))
+        require(reference not in seen, "Cyclic/duplicate AX subtree refused")
+        seen.add(reference)
+        nodes.append(node)
+        budget = min(helper.MAX_CHILDREN, helper.MAX_NODES - len(nodes) - len(pending))
+        pending.extend((child, node, depth + 1) for child in reversed(helper.children(node, budget)))
+    ownership.recheck(full=True)
+    if wm_close:
+        require(all(ref in seen for ref in parent_refs), "WM-close AX parent escaped the fully verified Root subtree")
+        ownership.close_parent_containment = {"checkedParents": len(parent_refs), "semanticEdges": len(mismatches),
+                                               "examples": mismatches[:4]}
+    require(ownership.same_node(helper.select_window(request, atspi), window), "Owned AX window changed during traversal")
+    return nodes
+
+
+def snapshot_owned(request, helper, atspi, ownership):
+    window = helper.select_window(request, atspi)
+    nodes = owned_walk(window, ownership, atspi)
+    result = {"action": "snapshot", "actionCount": 0, "nodes": [
+        {"pid": n.get_process_id(), "role": int(n.get_role()), "name": (n.get_name() or "")[:256],
+         **{s.lower(): n.get_state_set().contains(getattr(atspi.StateType, s))
+            for s in ("SHOWING", "ENABLED", "SENSITIVE", "DEFUNCT", "BUSY", "CHECKED")}} for n in nodes],
+        "controls": control_metadata(nodes, helper, atspi), "ownership": ownership.evidence()}
+    ownership.recheck(full=True)
+    require(ownership.same_node(helper.select_window(request, atspi), window), "Owned AX window changed during snapshot")
+    return result
+
+
+def routing_diagnostic(request, helper, atspi):
+    window = helper.select_window(request, atspi)
+    nodes, pending = [], [(window, 0)]
+    while pending:
+        node, depth = pending.pop()
+        require(node is not None and len(nodes) < helper.MAX_NODES and depth < helper.MAX_DEPTH, "Diagnostic tree exceeds bounds")
+        pid = node.get_process_id()
+        entry = {"pid": pid, "role": int(node.get_role()), "name": (node.get_name() or "")[:256], "depth": depth}
+        nodes.append(entry)
+        if pid != request.pid:
+            return {"diagnosticOnly": True, "authorization": False, "nodesBeforeRefusal": nodes,
+                    "foreignSubtreeRefused": True, "firstForeignPeer": peer_record(pid, helper)}
+        budget = min(helper.MAX_CHILDREN, helper.MAX_NODES - len(nodes) - len(pending))
+        pending.extend((child, depth + 1) for child in reversed(helper.children(node, budget)))
+    return {"diagnosticOnly": True, "authorization": False, "nodesBeforeRefusal": nodes, "foreignSubtreeRefused": False}
+
+
+def snapshot_ready(request, helper, atspi, proc, x11, ownership):
+    """Poll absence/loading only; any identity, ambiguity or foreign tree refuses."""
+    deadline, last = time.monotonic() + 20, None
+    while time.monotonic() < deadline:
+        helper.identity(request, proc)
+        helper.bound_window(request, x11)
+        roots = [app for app in helper.children(atspi.get_desktop(0), 128) if app.get_process_id() == request.pid]
+        require(len(roots) <= 1, "Ambiguous Root accessibility applications")
+        windows = [] if not roots else [n for n in helper.children(roots[0], 32)
+                                        if n.get_name() == request.title and n.get_role() == atspi.Role.FRAME]
+        require(len(windows) <= 1, "Ambiguous Root accessibility frames")
+        if windows:
+            require(windows[0].get_process_id() == request.pid, "Foreign accessibility frame refused")
+            # A loading frame is not yet a snapshot. Never retry a foreign subtree.
+            states = windows[0].get_state_set()
+            if all(states.contains(getattr(atspi.StateType, k)) for k in ("SHOWING", "ENABLED", "SENSITIVE")) \
+                    and not any(states.contains(getattr(atspi.StateType, k)) for k in ("DEFUNCT", "BUSY")):
+                last = snapshot_owned(request, helper, atspi, ownership)
+                if any(n["name"] == TERMS and n["showing"] for n in last["nodes"]):
+                    return last
+        time.sleep(0.05)
+    require(last is not None, "Owned Root accessibility readiness deadline")
+    return last
+
+
+def control_metadata(nodes, helper, atspi):
+    controls = []
+    roles = {getattr(atspi.Role, key) for key in ("PUSH_BUTTON", "CHECK_BOX", "TOGGLE_BUTTON", "RADIO_BUTTON", "PAGE_TAB", "LINK", "COMBO_BOX")}
+    for node in nodes:
+        if node.get_role() not in roles:
+            continue
+        interface = node.get_action_iface()
+        count = interface.get_n_actions() if interface else 0
+        require(0 <= count <= 4, "Native control action count exceeds bound")
+        if not count:
+            continue
+        names = [interface.get_action_name(i) for i in range(count)]
+        require(all(isinstance(v, str) and len(v.encode("utf8")) <= 64 for v in names), "Native action metadata exceeds bound")
+        states = node.get_state_set()
+        controls.append({"pid": node.get_process_id(), "name": (node.get_name() or "")[:256],
+                         "role": int(node.get_role()), "roleName": node.get_role_name(), "actions": names,
+                         **{key.lower(): states.contains(getattr(atspi.StateType, key))
+                            for key in ("CHECKED", "SELECTED", "SHOWING", "ENABLED", "SENSITIVE")}})
+    return controls
+
+
+def terms_control(nodes, action, helper, atspi):
+    require(action in ("check-terms", "accept-terms"), "Non-terms native action refused")
+    require(any(n.get_name() == TERMS and n.get_state_set().contains(atspi.StateType.SHOWING) for n in nodes),
+            "Visible exact Root terms heading required")
+    checks = [n for n in nodes if n.get_name() == TERMS_CHECKBOX and n.get_role() == atspi.Role.CHECK_BOX]
+    accepts = [n for n in nodes if n.get_name() == TERMS_ACCEPT and n.get_role() == atspi.Role.PUSH_BUTTON]
+    require(len(checks) == len(accepts) == 1, "Exact unique terms checkbox/button required")
+    checked = checks[0].get_state_set().contains(atspi.StateType.CHECKED)
+    require(checked == (action == "accept-terms"), "Terms checkbox precondition differs; never retry/toggle blindly")
+    node, verb = (checks[0], "check") if action == "check-terms" else (accepts[0], "press")
+    helper.ready(node, atspi)
+    if action == "check-terms":
+        require(not accepts[0].get_state_set().contains(atspi.StateType.ENABLED), "Terms accept unexpectedly enabled before agreement")
+    interface = node.get_action_iface()
+    require(interface and interface.get_n_actions() == 1 and interface.get_action_name(0) == verb,
+            "Exact source-proven WebKit terms action required: " + verb)
+    return node, interface, verb
+
+
+def perform_owned(action, request, helper, atspi, ownership):
+    require(action in ("check-terms", "accept-terms", "close"), "Unreviewed native action refused")
+    if action == "close":
+        # EWMH targets the native client XID, not any document/control. Semantic
+        # DOM Parent links must not authorize or prevent closing that owned frame.
+        # https://specifications.freedesktop.org/wm/latest/ar01s04.html
+        require(request is ownership.request, "Normal close request differs from its native binding")
+        ownership.recheck(full=True)
+        ownership.x11.check_close(request.window)
+        ownership.recheck(full=True)
+        try:
+            ownership.x11.close_window(request.window, ownership.xres)
+            return {"action": action, "actionCount": 1, "verb": "WM_DELETE_WINDOW",
+                    "ownership": ownership.evidence(), "normalExitVerified": False,
+                    "termsVisibleBeforeAction": None, "axTreeUsedForClose": False}
+        except Exception as error:
+            raise helper.ActionError(str(error)) from error
+    window = helper.select_window(request, atspi)
+    nodes = owned_walk(window, ownership, atspi)
+    selected = terms_control(nodes, action, helper, atspi)[0]
+    ownership.recheck(full=True)
+    require(ownership.same_node(helper.select_window(request, atspi), window), "AX frame changed before native action")
+    current_nodes = owned_walk(window, ownership, atspi)
+    current, interface, verb = terms_control(current_nodes, action, helper, atspi)
+    require(ownership.renderer is not None and ownership.same_node(current, selected)
+            and current.get_process_id() == ownership.renderer["pid"],
+            "Terms control changed or is not in the bound WebKit child")
+    terms_visible = any(n.get_name() == TERMS and n.get_state_set().contains(atspi.StateType.SHOWING) for n in current_nodes)
+    ownership.recheck(full=True)
+    # One terminal input boundary. Failures after this line never authorize retry.
+    try:
+        require(interface.do_action(0), "Native terms action refused; no retry")
+        return {"action": action, "actionCount": 1, "verb": verb,
+                "ownership": ownership.evidence(), "normalExitVerified": False,
+                "termsVisibleBeforeAction": terms_visible}
+    except Exception as error:
+        raise helper.ActionError(str(error)) from error
+
+
+def acknowledgement(root, earliest_ms):
+    path = root / "home/data/CreatorHub/consent/hub-usage-terms.json"
+    body = bounded_read(path, 2048)
+    value = unique_json(body)
+    require(set(value) == {"schemaVersion", "policyVersion", "acceptedAtMs"}
+            and type(value["schemaVersion"]) is int and value["schemaVersion"] == 1
+            and value["policyVersion"] == POLICY and type(value["acceptedAtMs"]) is int
+            and earliest_ms <= value["acceptedAtMs"] <= time.time_ns() // 1000000,
+            "Saved native terms acknowledgement differs or predates actual input")
+    return {"record": value, "file": file_record(path, 2048), "seeded": False}
+
+
+def accept_terms(root, environment, child, start, xid, capture, report):
+    path = root / "home/data/CreatorHub/consent/hub-usage-terms.json"
+    require(not os.path.lexists(path), "Terms acknowledgement must be absent before native input")
+    earliest = time.time_ns() // 1000000
+    report["termsAcknowledgementAbsentBefore"] = True
+    for action in ("check-terms", "accept-terms"):
+        report["phase"] = action
+        value = run_worker(root, environment, action, child.pid, start, xid, capture, report["workers"])
+        require(value["action"] == action and value["actionCount"] == 1, "Exact native terms action receipt required")
+        report[action] = value
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline and not os.path.lexists(path):
+        capture.pump(0.02)
+    report["termsAcknowledgement"] = acknowledgement(root, earliest)
+    write_new(root / "native-terms-acknowledgement.json", bounded_read(path, 2048))
+    require(file_record(root / "native-terms-acknowledgement.json", 2048)["sha256"]
+            == report["termsAcknowledgement"]["file"]["sha256"], "Retained native acknowledgement copy differs")
+    report["termsAcceptanceVerified"] = True
+
+
+def intersects(a, b):
+    return a[0] < b[0] + b[2] and b[0] < a[0] + a[2] and a[1] < b[1] + b[3] and b[1] < a[1] + a[3]
+
+
+def visible_rectangle(request, helper, x11):
+    require(client_ids(x11) == [request.window], "Other managed windows present; bitmap refused")
+    x = x11.x
+    x.XQueryTree.argtypes = [C.c_void_p, C.c_ulong, C.POINTER(C.c_ulong), C.POINTER(C.c_ulong),
+                            C.POINTER(C.POINTER(C.c_ulong)), C.POINTER(C.c_uint)]
+    x.XQueryTree.restype = C.c_int
+    x.XTranslateCoordinates.argtypes = [C.c_void_p, C.c_ulong, C.c_ulong, C.c_int, C.c_int,
+                                       C.POINTER(C.c_int), C.POINTER(C.c_int), C.POINTER(C.c_ulong)]
+    x.XTranslateCoordinates.restype = C.c_int
+    root = x.XDefaultRootWindow(x11.display)
+
+    def tree(xid):
+        r, parent, count, items = C.c_ulong(), C.c_ulong(), C.c_uint(), C.POINTER(C.c_ulong)()
+        try:
+            require(x.XQueryTree(x11.display, xid, C.byref(r), C.byref(parent), C.byref(items), C.byref(count)), "X tree unavailable")
+            x11.sync()
+            require(r.value == root and count.value <= 256, "X tree exceeds local bound")
+            return parent.value, list(items[:count.value]) if items else []
+        finally:
+            if items:
+                x.XFree(items)
+
+    def attrs(xid):
+        value = helper.WindowAttributes()
+        require(x.XGetWindowAttributes(x11.display, xid, C.byref(value)), "X geometry unavailable")
+        x11.sync()
+        return value
+
+    a, screen = attrs(request.window), attrs(root)
+    ox, oy, child = C.c_int(), C.c_int(), C.c_ulong()
+    require(x.XTranslateCoordinates(x11.display, request.window, root, 0, 0, C.byref(ox), C.byref(oy), C.byref(child)), "Window origin unavailable")
+    x11.sync()
+    rect = (ox.value, oy.value, a.width, a.height)
+    require(a.map_state == 2 and not a.override_redirect and 560 <= a.width <= 1920 and 480 <= a.height <= 1080
+            and a.width * a.height <= MAX_IMAGE and ox.value >= 0 and oy.value >= 0
+            and ox.value + a.width <= screen.width and oy.value + a.height <= screen.height,
+            "Owned window is not wholly on-screen within pixel bounds")
+    ancestor = request.window
+    for _ in range(8):
+        parent, _children = tree(ancestor)
+        if parent == root:
+            break
+        require(parent > 0, "Owned WM ancestor unavailable")
+        ancestor = parent
+    else:
+        raise RuntimeError("Owned WM ancestry exceeds bound")
+    _parent, stack = tree(root)
+    require(stack.count(ancestor) == 1, "Owned WM ancestor absent/ambiguous")
+    for other in stack[stack.index(ancestor) + 1:]:
+        geometry = attrs(other)
+        if geometry.map_state == 2 and geometry.class_ == 1:
+            require(not intersects(rect, (geometry.x - geometry.border, geometry.y - geometry.border,
+                                         geometry.width + 2 * geometry.border, geometry.height + 2 * geometry.border)),
+                    "Another mapped drawable obscures owned bitmap; capture refused")
+    return rect
+
+
+def pixel_metrics(pixels, width, height, stride, channels):
+    require(0 < width <= 1920 and 0 < height <= 1080 and width * height <= MAX_IMAGE and channels in (3, 4)
+            and width * channels <= stride <= width * channels + 64
+            and (height - 1) * stride + width * channels <= len(pixels) <= height * stride,
+            "Pixel buffer exceeds contract")
+    colors, low, high, changed, first = set(), 255, 0, 0, tuple(pixels[:3])
+    for y in range(height):
+        for x in range(width):
+            offset = y * stride + x * channels
+            color = tuple(pixels[offset:offset + 3])
+            if len(colors) < 256:
+                colors.add(color)
+            low, high = min(low, *color), max(high, *color)
+            changed += color != first
+    require(len(colors) >= 16 and high - low >= 32 and changed >= 100, "Owned bitmap is blank/insufficiently varied")
+    return {"width": width, "height": height, "colorsAtLeast": len(colors), "channelRange": high - low,
+            "pixelsDifferentFromFirst": changed, "nonblank": True}
+
+
+def bitmap(request, root, helper, x11):
+    import gi
+    gi.require_version("Gdk", "3.0")
+    gi.require_version("GdkX11", "3.0")
+    from gi.repository import Gdk, GdkX11
+    proc = helper.Proc()
+    helper.identity(request, proc)
+    bound = helper.bound_window(request, x11)
+    rectangle = visible_rectangle(request, helper, x11)
+    display = Gdk.Display.get_default()
+    require(display is not None, "GDK X11 display unavailable")
+    window = GdkX11.X11Window.foreign_new_for_display(display, request.window)
+    require(window is not None and window.get_xid() == request.window and window.get_scale_factor() == 1, "Exact unscaled X11 drawable unavailable")
+    # Primary GDK docs: obscured/off-screen pixels are undefined. Refuse either.
+    pixbuf = Gdk.pixbuf_get_from_window(window, 0, 0, rectangle[2], rectangle[3])
+    require(pixbuf is not None and pixbuf.get_width() == rectangle[2] and pixbuf.get_height() == rectangle[3]
+            and pixbuf.get_bits_per_sample() == 8, "Owned drawable copy failed")
+    metrics = pixel_metrics(pixbuf.get_pixels(), pixbuf.get_width(), pixbuf.get_height(), pixbuf.get_rowstride(), pixbuf.get_n_channels())
+    helper.identity(request, proc)
+    require(helper.bound_window(request, x11) == bound and visible_rectangle(request, helper, x11) == rectangle,
+            "Owned drawable changed during capture")
+    ok, data = pixbuf.save_to_bufferv("png", [], [])
+    require(ok and 0 < len(data) <= 16 * 1024 * 1024 and bytes(data[:8]) == b"\x89PNG\r\n\x1a\n", "Bounded PNG encoding failed")
+    helper.identity(request, proc)
+    require(helper.bound_window(request, x11) == bound, "Owned XRes identity changed before PNG retention")
+    write_new(root / "root-window.png", data)
+    return {"diagnosticOnly": True, "windowOnly": True, "xid": request.window, "xres": bound,
+            "rectangle": rectangle, **metrics, "image": file_record(root / "root-window.png", 16 * 1024 * 1024)}
+
+
+def worker(root, args):
+    require(len(args) == 4 and args[0] in ("discover", "snapshot", "diagnose", "bitmap", "check-terms", "accept-terms", "close"),
+            "Invalid worker request")
+    action, pid, start, xid = args
+    verify_stage(root)
+    helper = load_helper()
+    helper.ensure_runner(os.environ, sys.platform, platform.machine())
+    request = helper.Request.parse(["snapshot", pid, start, str(paths(root)["creator-hub"]), INSTALLED_HUB_PIN[1], xid, TITLE, "FRAME"])
+    proc, x11, ax_bus = helper.Proc(), None, None
+    helper.identity(request, proc)
+    record = proc.stat(request.pid)
+    require(int(record[record.rfind(")") + 2:].split()[1]) == os.getppid(), "Worker target is not its parent's Root child")
+    try:
+        if action == "bitmap":
+            import gi
+            gi.require_version("Gdk", "3.0")
+            gi.require_version("GdkX11", "3.0")
+            from gi.repository import Gdk
+            # Initialize GDK before the helper installs its scoped Xlib handler.
+            Gdk.init([])
+        x11 = helper.X11()
+        if action == "discover":
+            deadline, last = time.monotonic() + 20, None
+            while time.monotonic() < deadline:
+                helper.identity(request, proc)
+                try:
+                    value = discover(request, helper, x11)
+                    if value:
+                        return value
+                except RuntimeError as error:
+                    last = str(error)
+                    # Only an absent WM inventory is transient, never identity/foreign refusal.
+                    if last != "Bounded exact WM client inventory unavailable":
+                        raise
+                time.sleep(0.05)
+            raise RuntimeError("Owned Root X window readiness deadline: " + str(last))
+        helper.bound_window(request, x11)
+        if action == "bitmap":
+            return bitmap(request, root, helper, x11)
+        import gi
+        gi.require_version("Atspi", "2.0")
+        from gi.repository import Atspi
+        Atspi.set_timeout(3000, 3000)
+        if action == "diagnose":
+            value = routing_diagnostic(request, helper, Atspi)
+            helper.identity(request, proc)
+            helper.bound_window(request, x11)
+            return value
+        saved = unique_json(bounded_read(root / "root-ownership.json", 16384))
+        require(saved["root"]["uids"] == [os.getuid()] * 4 and saved["root"]["parentPid"] == os.getppid()
+                and saved["window"] == request.window, "Root UID/parent/window binding differs")
+        require(saved["systemWebKit"]["path"] == WEBKIT and saved["systemWebKit"]["sha256"] == WEBKIT_SHA
+                and saved["systemWebKit"]["package"] == WEBKIT_PACKAGE and saved["systemWebKit"]["version"] == WEBKIT_VERSION,
+                "Exact measured system WebKit provenance required")
+        renderer_path = root / "renderer-ownership.json"
+        renderer = unique_json(bounded_read(renderer_path, 8192)) if renderer_path.exists() else None
+        require(action == "snapshot" or renderer is not None, "Native input requires a completed owned renderer snapshot")
+        refs_saved = None if renderer is None else unique_json(bounded_read(root / "ax-ownership.json", 8192))
+        references, ax_bus = native_ax_references(refs_saved)
+        ownership = RootOwnership(request, helper, x11, saved["root"], saved["xres"], saved["systemWebKit"]["file"], renderer,
+                                  references=references)
+        if action == "snapshot":
+            value = snapshot_ready(request, helper, Atspi, proc, x11, ownership)
+            require(ownership.renderer is not None, "Root snapshot has no verified native WebKit child")
+            require(renderer is None, "Initial owned snapshot cannot replace an existing renderer binding")
+            save_json(renderer_path, ownership.renderer)
+            save_json(root / "ax-ownership.json", {"aliases": references.aliases, "window": references.window})
+            return value
+        return perform_owned(action, request, helper, Atspi, ownership)
+    finally:
+        if ax_bus is not None:
+            ax_bus.close_sync(None)
+        if x11 is not None:
+            x11.dispose()
+
+
+def normal_close(root, environment, child, start, xid, capture, report, helper):
+    report["normalCloseAttempted"] = True
+    closed = run_worker(root, environment, "close", child.pid, start, xid, capture, report["workers"])
+    require(closed["action"] == "close" and closed["actionCount"] == 1, "Exact owned native normal-close receipt required")
+    report["close"] = closed
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline and (child.poll() is None or not all(i["eof"] for i in capture.items.values())):
+        capture.pump(0.02)
+    require(child.poll() == 0, "Root normal exit was not reaped as zero; no signal sent")
+    child.wait(timeout=0)
+    require(not helper.Proc().exists(child.pid), "Reaped Root PID still exists")
+    require(all(i["eof"] and not i["truncated"] for i in capture.metadata().values()), "Root output failed bounded EOF")
+    report["normalExitVerified"] = True
+
+
+def probe(root, env):
+    report = {"scope": SCOPE, **FLAGS, "phase": "verify", "termsAcceptanceVerified": False,
+              "readOnlyCaptureCompleted": False, "normalExitVerified": False, "workers": []}
+    child, capture, start, request_xid = None, None, None, None
+    failure = None
+    try:
+        report["package"] = verify_stage(root, full=True)
+        report["actualDpkgState"] = installed_state(root, "probe-installed-state")
+        report["systemWebKit"] = system_webkit_provenance(root)
+        for directory in (root / "home", root / "home/config", root / "home/data", root / "home/cache", root / "tmp"):
+            directory.mkdir(mode=0o700)
+        environment = child_env(env, root)
+        require(re.fullmatch(r":[0-9]{1,5}(?:\.[0-9]{1,2})?", environment.get("DISPLAY", ""))
+                and environment.get("DBUS_SESSION_BUS_ADDRESS", "").startswith("unix:"), "Private local X11/dbus session required")
+        helper = load_helper()
+        executable = paths(root)["creator-hub"]
+        report["phase"] = "launch"
+        child = subprocess.Popen([str(executable)], cwd=root, env=environment, stdin=subprocess.DEVNULL,
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        report["root"] = {"pid": child.pid, "parentPid": os.getpid(), "executable": str(executable)}
+        capture = Capture(child, root, "root")
+        start = check_process(child, None, executable, helper)
+        report["root"] = {"pid": child.pid, "startTime": start, "parentPid": os.getpid(),
+                          "executable": str(executable), "kernelImageSha256": INSTALLED_HUB_PIN[1]}
+        report["phase"] = "discover"
+        found = run_worker(root, environment, "discover", child.pid, start, 1, capture, report["workers"])
+        request_xid = found["window"]
+        report["window"] = found
+        check_process(child, start, executable, helper)
+        identity = native_process(child.pid, helper)
+        require(identity["uids"] == [os.getuid()] * 4 and identity["parentPid"] == os.getpid()
+                and identity["startTime"] == start and identity["kernelImageSha256"] == INSTALLED_HUB_PIN[1],
+                "Captured Root native identity differs")
+        save_json(root / "root-ownership.json", {"root": identity, "window": request_xid,
+                                               "xres": found["properties"], "systemWebKit": report["systemWebKit"]})
+        report["root"] = identity
+        report["phase"] = "snapshot"
+        try:
+            snapshot = run_worker(root, environment, "snapshot", child.pid, start, request_xid, capture, report["workers"])
+            require(snapshot["action"] == "snapshot" and snapshot["actionCount"] == 0, "Unexpected helper action")
+            report["snapshot"] = snapshot
+            report["termsObservedInOwnedSnapshot"] = any(n["name"] == TERMS and n["showing"] for n in snapshot["nodes"])
+        except Exception as error:
+            failure = error
+            report["snapshotRefusal"] = str(error)[:1000]
+            report["normalCloseSkippedReason"] = "Snapshot ownership/readiness refused; no native action authorized"
+            # This read-only diagnostic stops at the first foreign node; never adopts it.
+            try:
+                report["accessibilityDiagnostic"] = run_worker(root, environment, "diagnose", child.pid, start,
+                                                               request_xid, capture, report["workers"])
+            except Exception as diagnostic:
+                report["diagnosticRefusal"] = str(diagnostic)[:1000]
+        report["phase"] = "bitmap"
+        report["bitmap"] = run_worker(root, environment, "bitmap", child.pid, start, request_xid, capture, report["workers"])
+        check_process(child, start, executable, helper)
+        require(failure is None, "Original snapshot refusal preserved: " + str(failure))
+        require(report["termsObservedInOwnedSnapshot"], "Actual terms node was not observed; no terms acceptance inferred")
+        accept_terms(root, environment, child, start, request_xid, capture, report)
+        report["phase"] = "normal-close"
+        normal_close(root, environment, child, start, request_xid, capture, report, helper)
+        saved_ack = report["termsAcknowledgement"]
+        require(acknowledgement(root, saved_ack["record"]["acceptedAtMs"]) == saved_ack,
+                "Native terms acknowledgement changed after normal Root exit")
+        require(report["close"]["termsVisibleBeforeAction"] is False, "Terms modal remained visible after native acceptance")
+        report.update(readOnlyCaptureCompleted=True, termsAcknowledgementRetainedAfterExit=True,
+                      phase="native-terms-accepted-and-normally-reaped")
+    except Exception as error:
+        failure = error
+        report["error"] = str(error)[:1000]
+    finally:
+        # One fresh, full ownership traversal must still pass for cleanup close.
+        # Never retry a close or send a signal after a native input/worker timeout.
+        if child is not None and capture is not None and child.poll() is None and report.get("snapshot") \
+                and not report.get("normalCloseAttempted") and all(w["exitCode"] is not None for w in report["workers"]):
+            report["cleanupNormalCloseAttempted"] = True
+            try:
+                normal_close(root, environment, child, start, request_xid, capture, report, helper)
+            except Exception as cleanup:
+                report["cleanupRefusal"] = str(cleanup)[:1000]
+                if failure is None:
+                    failure = cleanup
+                    report["error"] = str(cleanup)[:1000]
+        if capture is not None:
+            try:
+                capture.pump()
+                report["rootOutput"] = capture.metadata()
+                capture.close()
+            except Exception as cleanup:
+                report["captureCleanupError"] = str(cleanup)[:1000]
+                if failure is None:
+                    failure = cleanup
+                    report["error"] = str(cleanup)[:1000]
+                report["readOnlyCaptureCompleted"] = False
+        if child is not None:
+            report["rootExitCode"] = child.poll()
+            report["disposableSessionTeardownRequired"] = child.poll() is None
+        save_json(root / "report.json", report)
+    require(failure is None, str(failure))
+    return report
+
+
+def main():
+    admission(os.environ, sys.platform, platform.machine())
+    configure_candidate(os.environ.get("CREATOR_LINUX_ROOT_CANDIDATE", ORIGINAL_CANDIDATE))
+    temp = ordinary(os.environ["RUNNER_TEMP"])
+    args = sys.argv[1:]
+    require(bool(args), "Use stage, install, probe, or internal worker")
+    if args == ["stage"]:
+        result = stage(temp)
+    elif args == ["install"]:
+        result = install(temp / "linux-root-probe")
+    elif args == ["probe"]:
+        result = probe(temp / "linux-root-probe", os.environ)
+    elif args[0] == "worker":
+        result = worker(temp / "linux-root-probe", args[1:])
+    else:
+        raise RuntimeError("Unknown bounded probe command")
+    output = json.dumps(result, ensure_ascii=True)
+    require(len(output.encode()) <= (MAX_JSON if args[0] == "worker" else 1048576), "Result exceeds output bound")
+    print(output if args[0] == "worker" else json.dumps({"phase": result.get("phase"), **FLAGS}))
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as error:
+        # Workers emit one bounded machine-readable refusal; parent retains both pipes.
+        print(json.dumps({"error": f"{type(error).__name__}: {str(error)[:1000]}",
+                          "actionMayHaveRun": bool(getattr(error, "action_may_have_run", False)), **FLAGS}))
+        sys.exit(1)

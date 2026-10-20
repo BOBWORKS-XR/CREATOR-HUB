@@ -1,0 +1,136 @@
+name: Linux outgoing updater target 15 (acceptance only, never publish)
+on:
+  push:
+    branches: [validation/linux-outer-update-fixture-014]
+    paths:
+      - .github/workflows/linux-outer-update-fixture-014.yml
+      - scripts/linux-outer-update-fixture.cjs
+      - scripts/linux-outer-update-fixture.test.cjs
+permissions:
+  contents: read
+  actions: read
+jobs:
+  metadata:
+    if: github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.repository_id == '1364807512'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    # GitHub refuses draft-release reads with contents:read (39105308246).
+    # Keep this unavoidable capability in an input-only job with no product execution.
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - name: Verify successful immutable14 source and independently signed15 metadata
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto');
+            const sha=b=>crypto.createHash('sha256').update(b).digest('hex'),repo=context.repo;
+            assert.equal(`${repo.owner}/${repo.repo}`,'BOBWORKS-XR/CREATOR-HUB');
+            assert.equal(process.env.GITHUB_REPOSITORY_ID,'1364807512');
+            const {data:run}=await github.rest.actions.getWorkflowRun({...repo,run_id:39042746816});
+            assert.equal(run.head_sha,'534465a86554e95b909bf9c7decbbb29cbca5267');
+            assert.equal(run.conclusion,'success');assert.equal(run.status,'completed');assert.equal(run.run_attempt,1);
+            assert.equal(run.event,'workflow_dispatch');assert.equal(run.head_branch,'validation/linux-retirement-candidate-014');
+            assert.equal(run.path,'.github/workflows/unix-managed-assembly.yml');assert.equal(run.repository.id,1364807512);
+            const {data:artifact}=await github.rest.actions.getArtifact({...repo,artifact_id:12104548664});
+            assert.equal(artifact.expired,false);assert.equal(artifact.workflow_run.id,39042746816);
+            assert.equal(artifact.workflow_run.head_sha,run.head_sha);assert.equal(artifact.name,'signed-unix-hub-linux-39042746816-1');
+            assert.equal(artifact.size_in_bytes,179416917);
+            assert.equal(artifact.digest,'sha256:904b51a0192027ba667702feb4a00721ad2d392fe473540b1f87121c6cacb3de');
+            const {data:job}=await github.rest.actions.getJobForWorkflowRun({...repo,job_id:117425377351});
+            assert.equal(job.run_id,run.id);assert.equal(job.conclusion,'success');assert.ok(job.name.startsWith('assembly (linux,'));
+            const {data:commit}=await github.rest.git.getCommit({...repo,commit_sha:run.head_sha});
+            assert.equal(commit.tree.sha,'db8c7b091d22f598bc789ac97d8d0153c391c8ec');
+            const {data:release}=await github.rest.repos.getRelease({...repo,release_id:411494394});
+            assert.equal(release.draft,true);assert.equal(release.tag_name,'v0.1.13-validation');
+            const directory=path.join(fs.realpathSync(process.env.RUNNER_TEMP),'linux15-runtime');fs.mkdirSync(directory,{mode:0o700});
+            const inputs=[['runtime15.json',652718513,1133,'5c1b49117de12f78a1cddb980818e9a167ec31c4bc85cbba97314650bf197c08'],
+              ['runtime15.minisig',652718516,299,'4e1381e7a978c646af21d873efdafbccf0b6afcb81464ea6e180695992979058']];
+            for(const [name,id,size,digest] of inputs){
+              const {data:asset}=await github.rest.repos.getReleaseAsset({...repo,asset_id:id});
+              assert.equal(asset.name,name);assert.equal(asset.size,size);assert.equal(asset.digest,`sha256:${digest}`);
+              assert.equal(asset.url,`https://api.github.com/repos/${repo.owner}/${repo.repo}/releases/assets/${id}`);
+              const {data}=await github.rest.repos.getReleaseAsset({...repo,asset_id:id,headers:{accept:'application/octet-stream'}});
+              const bytes=Buffer.from(data);assert.equal(bytes.length,size);assert.equal(sha(bytes),digest);
+              fs.writeFileSync(path.join(directory,name),bytes,{flag:'wx',mode:0o644});
+            }
+            fs.writeFileSync(path.join(process.env.RUNNER_TEMP,'linux15-source-binding.json'),JSON.stringify({
+              source:run.head_sha,tree:commit.tree.sha,runId:run.id,jobId:job.id,artifactId:artifact.id,artifactDigest:artifact.digest,
+              runtimeInputs:inputs,acceptanceOnly:true,releaseReady:false},null,2),{flag:'wx',mode:0o600});
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux15-runtime-input
+          retention-days: 7
+          if-no-files-found: error
+          path: |
+            ${{ runner.temp }}/linux15-runtime/*
+            ${{ runner.temp }}/linux15-source-binding.json
+  target:
+    needs: metadata
+    if: github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.repository_id == '1364807512'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 35
+    env:
+      CREATOR_LINUX_OUTER_UPDATE_FIXTURE: '1'
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24.17.0
+      - name: Finite source and workflow preflight before native downloads
+        run: |
+          set -euo pipefail
+          npm ci --ignore-scripts --no-audit --no-fund
+          node --test scripts/linux-outer-update-fixture.test.cjs
+          node --check scripts/linux-outer-update-fixture.cjs
+          node -e 'require("./scripts/linux-outer-update-fixture.cjs").nativeAdmission(process.env,process.platform,process.arch)'
+      - uses: actions/download-artifact@v5
+        with:
+          name: linux15-runtime-input
+          path: ${{ runner.temp }}
+      - uses: actions/download-artifact@v5
+        with:
+          artifact-ids: '12104548664'
+          run-id: '39042746816'
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/linux15-baseline
+          merge-multiple: true
+      - name: Recheck all15 fixed payload hashes before compilation
+        run: |
+          set -euo pipefail
+          node -e 'require("./scripts/linux-outer-update-fixture.cjs").baseline(process.env.RUNNER_TEMP+"/linux15-baseline")'
+      - uses: actions/checkout@v6
+        with:
+          ref: 534465a86554e95b909bf9c7decbbb29cbca5267
+          path: product
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.99.0
+      - name: Install native build dependencies on this disposable Linux runner only
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libayatana-appindicator3-dev \
+            libxdo-dev librsvg2-dev patchelf libssl-dev build-essential pkg-config
+          npm ci --prefix product --ignore-scripts --no-audit --no-fund
+      - name: Verify signed runtime, change only4 Root versions and build only outer15 DEB
+        run: |
+          set -euo pipefail
+          node scripts/linux-outer-update-fixture.cjs build "$GITHUB_WORKSPACE/product" \
+            "$RUNNER_TEMP/linux15-baseline" "$RUNNER_TEMP/linux15-runtime"
+      - name: Keep acceptance-only target and original diagnostics, never publish or install
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-outer-update-target15-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/linux15-source-binding.json
+            product/artifacts/linux-outer-update-15/fixture-receipt.json
+            product/artifacts/linux-outer-update-15/unix-package-integrity.json
+            product/artifacts/linux-outer-update-15/builtin-manifest.json
+            product/artifacts/linux-outer-update-15/creator-hub
+            product/artifacts/linux-outer-update-15/native-packages/*.deb

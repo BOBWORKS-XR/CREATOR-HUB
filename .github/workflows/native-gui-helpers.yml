@@ -1,0 +1,97 @@
+name: Native owned GUI helpers (not product acceptance)
+on:
+  workflow_dispatch:
+  push:
+    branches: [validation/owned-gui-014]
+    paths: ['scripts/native-macos-window*', 'scripts/native-unix-window*', '.github/workflows/native-gui-helpers.yml']
+  pull_request:
+    paths:
+      - 'scripts/native-macos-window*'
+      - 'scripts/native-unix-window*'
+      - '.github/workflows/native-gui-helpers.yml'
+permissions:
+  contents: read
+jobs:
+  helper:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24.17.0
+      - name: Compile both Swift branches and test pure ownership/refusal cases
+        if: runner.os == 'macOS'
+        env:
+          CREATOR_MACOS_OWNED_GUI_TEST: '1'
+        run: |
+          set -euo pipefail
+          node --test scripts/native-macos-window.test.cjs | tee "$RUNNER_TEMP/native-macos-window-tests-$RUNNER_ARCH.tap"
+      - name: Record actual AX availability without granting permissions or inspecting apps
+        if: runner.os == 'macOS'
+        env:
+          CREATOR_MACOS_OWNED_GUI_TEST: '1'
+        run: |
+          set -euo pipefail
+          /usr/bin/swiftc scripts/native-macos-window.swift -o "$RUNNER_TEMP/native-macos-window"
+          "$RUNNER_TEMP/native-macos-window" availability > "$RUNNER_TEMP/native-macos-window-availability-$RUNNER_ARCH.json"
+          shasum -a 256 "$RUNNER_TEMP/native-macos-window" > "$RUNNER_TEMP/native-macos-window-$RUNNER_ARCH.sha256"
+          printf 'source=%s\narchitecture=%s\n' "$GITHUB_SHA" "$RUNNER_ARCH" > "$RUNNER_TEMP/native-macos-window-$RUNNER_ARCH-source.txt"
+      - name: Retain only the Mac helper probe and test reports
+        if: always() && runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: mac-owned-availability-${{ runner.arch }}-${{ github.sha }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/native-macos-window-tests-${{ runner.arch }}.tap
+            ${{ runner.temp }}/native-macos-window-availability-${{ runner.arch }}.json
+            ${{ runner.temp }}/native-macos-window-${{ runner.arch }}.sha256
+            ${{ runner.temp }}/native-macos-window-${{ runner.arch }}-source.txt
+      - name: Test Linux ownership/refusal and the actual sealed-kernel fixture
+        if: runner.os == 'Linux'
+        env:
+          CREATOR_UNIX_WINDOW_KERNEL_TEST: '1'
+        run: |
+          python3 scripts/native-unix-window.test.py
+          python3 scripts/native-unix-window-fixture.test.py
+      - name: Install disposable GTK/X11 fixture prerequisites
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends python3-gi gir1.2-gtk-3.0 \
+            gir1.2-atspi-2.0 at-spi2-core libx11-6 libxres1 dbus-x11 xvfb xauth openbox
+      - name: Exercise real synthetic GTK dialogs and normal owned closure (not product acceptance)
+        if: runner.os == 'Linux'
+        env:
+          CREATOR_UNIX_WINDOW_TEST: '1'
+          CREATOR_UNIX_WINDOW_FIXTURE: '1'
+          GDK_BACKEND: x11
+          NO_AT_BRIDGE: '0'
+        run: |
+          set -euo pipefail
+          export XDG_RUNTIME_DIR="$RUNNER_TEMP/gtk-runtime"
+          mkdir -m 700 "$XDG_RUNTIME_DIR"
+          dbus-run-session -- xvfb-run -a --server-args='-screen 0 1280x800x24' sh -eu -c '
+            openbox --sm-disable >"$RUNNER_TEMP/gtk-openbox.log" 2>&1 &
+            manager=$!
+            trap '\''openbox --exit; wait "$manager"'\'' EXIT
+            /usr/bin/python3 scripts/native-unix-window-fixture.py --output "$RUNNER_TEMP/gtk-abi-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          '
+      - name: Retain only owned synthetic fixture evidence
+        if: always() && runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-owned-gtk-${{ github.sha }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/gtk-abi-${{ github.run_id }}-${{ github.run_attempt }}/
+            ${{ runner.temp }}/gtk-openbox.log

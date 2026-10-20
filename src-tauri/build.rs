@@ -1,11 +1,55 @@
 fn main() {
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") {
+        // linuxdeploy sets this exact RUNPATH. Emit it at link time so the
+        // packaged Hub stays identical beyond Tauri's bundle marker.
+        println!(
+            "cargo:rustc-link-arg-bin=creator-hub=-Wl,--enable-new-dtags,-rpath,$ORIGIN/../lib"
+        );
+    }
+    println!("cargo:rerun-if-env-changed=CREATOR_BUILTIN_MANIFEST");
+    let manifest = match std::env::var_os("CREATOR_BUILTIN_MANIFEST") {
+        Some(path) => {
+            let path = std::path::PathBuf::from(path);
+            assert!(
+                path.is_absolute(),
+                "Built-in descriptor must have an absolute path"
+            );
+            println!("cargo:rerun-if-changed={}", path.display());
+            std::fs::read(path).expect("Cannot read built-in descriptor")
+        }
+        None => b"null".to_vec(),
+    };
+    std::fs::write(
+        std::path::PathBuf::from(std::env::var_os("OUT_DIR").unwrap())
+            .join("builtin-manifest.json"),
+        manifest,
+    )
+    .expect("Cannot bind built-in descriptor to Hub");
     println!("cargo:rerun-if-env-changed=CREATOR_SETUP_HOST_SHA256");
     println!("cargo:rerun-if-env-changed=CREATOR_MCP_HOST_SHA256");
     println!("cargo:rerun-if-env-changed=CREATOR_MCP_HOST_READONLY_EVENTS");
     println!("cargo:rerun-if-env-changed=CREATOR_MCP_HOST_WRITABLE");
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(
         tauri_build::AppManifest::new().commands(&[
+            "usage_terms_status",
+            "accept_usage_terms",
+            "native_support_status",
+            "install_native_support",
+            "review_native_support_recovery",
+            "feature_status",
+            "feature_select",
+            "feature_call",
+            "hub_preferences_status",
+            "set_hub_preference",
+            "convergence_status",
+            "prepare_convergence",
+            "migrate_convergence_connections",
+            "refresh_convergence",
+            "retire_convergence_apps",
+            "move_to_hub",
+            "inspect_convergence_outcome",
             "open_resource",
+            "open_plugins_website",
             "community_catalogue",
             "open_community_link",
             "download_community_package",
@@ -23,6 +67,8 @@ fn main() {
             "hub_update_status",
             "download_hub_update",
             "install_hub_update",
+            "hub_update_recovery_status",
+            "review_retained_hub_update",
             "pending_hosted_restore",
             "restore_hosted_app",
             "complete_hosted_restore",

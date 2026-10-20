@@ -1,0 +1,99 @@
+name: Same-version Root 14 Flatpak replacement and private fixture check (not acceptance)
+on:
+  push:
+    branches: [validation/flatpak-package-014]
+    paths: ['.github/workflows/flatpak-package-014.yml']
+permissions:
+  contents: read
+  actions: read
+jobs:
+  package:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Refuse incompatible historical pins before downloads or tool setup
+        run: node scripts/flatpak-replacement-source.cjs --preflight
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24.17.0
+      - uses: dtolnay/rust-toolchain@1.99.0
+      - run: npm ci --ignore-scripts
+      - name: Check bounded staging and sandbox contracts
+        run: node --test scripts/flatpak-package.test.cjs scripts/flatpak-retention.test.cjs scripts/flatpak-replacement-source.test.cjs
+      - name: Verify both exact successful Root 14 Linux assemblies before download
+        uses: actions/github-script@v8
+        env:
+          CREATOR_FLATPAK_PACKAGE_TEST: '1'
+        with:
+          script: |
+            await require('./scripts/flatpak-replacement-source.cjs').downloadInputs(github,context);
+      - name: Extract both exact bounded inputs and preserve original assembly receipts
+        run: |
+          python3 -B - <<'PY'
+          import hashlib,json,os,pathlib,stat,zipfile
+          root=pathlib.Path(os.path.realpath(os.environ['RUNNER_TEMP']))
+          plan=json.loads(pathlib.Path('packaging/flatpak/replacement-014-inputs.json').read_text())
+          for label in ['baseline','replacement']:
+              expected=plan[label];archive=root/f'flatpak-{label}-input.zip'
+              assert archive.stat().st_size==expected['artifactSize']
+              assert hashlib.sha256(archive.read_bytes()).hexdigest()==expected['pins']['inputArtifactSha256']
+              out=root/f'flatpak-{label}-source';out.mkdir(mode=0o700)
+              files={**expected['pins']['files'],'signed-unix-assembly.json':expected['assemblyReceipt']}
+              with zipfile.ZipFile(archive) as z:
+                  members=z.infolist();assert len(members)<=128 and len({m.filename for m in members})==len(members)
+                  for name,pin in files.items():
+                      e=z.getinfo(name)
+                      assert not e.is_dir() and not stat.S_ISLNK(e.external_attr>>16) and not e.flag_bits&1
+                      assert 0<e.file_size==pin['size']<=(65536 if name.endswith('.json') else 268435456)
+                      body=z.read(e);assert len(body)==e.file_size and hashlib.sha256(body).hexdigest()==pin['sha256']
+                      with (out/name).open('xb') as stream:stream.write(body)
+                      (out/name).chmod(0o755 if name=='creator-hub' else 0o600)
+          PY
+      - name: Stage exact bytes and build the trusted bounded archive decoder
+        env:
+          CREATOR_FLATPAK_PACKAGE_TEST: '1'
+        run: |
+          set -euo pipefail
+          temp=$(python3 -B -c 'import os; print(os.path.realpath(os.environ["RUNNER_TEMP"]))')
+          node scripts/flatpak-replacement-source.cjs
+          cargo build --locked --release --manifest-path native/module-archive/Cargo.toml --target-dir "$temp/flatpak-decoder-target"
+      - name: Provision only public runtime/build dependencies on this disposable runner
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends flatpak flatpak-builder appstream desktop-file-utils
+          sudo flatpak remote-add --system --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+          sudo flatpak install --system --noninteractive --assumeyes --no-related flathub org.gnome.Platform/x86_64/50 org.gnome.Sdk/x86_64/50
+      - name: Replace older actual Root 14 with current actual Root 14 and verify app-private fixture
+        env:
+          CREATOR_FLATPAK_PACKAGE_TEST: '1'
+        run: |
+          set -euo pipefail
+          temp=$(python3 -B -c 'import os; print(os.path.realpath(os.environ["RUNNER_TEMP"]))')
+          decoder="$temp/flatpak-decoder-target/release/creator-hub-module-archive"
+          digest=$(sha256sum "$decoder" | cut -d ' ' -f1)
+          node scripts/flatpak-disposable.cjs "$temp/flatpak-baseline-stage" "$decoder" "$digest" "$temp/flatpak-replacement-stage"
+      - name: Retain package-only evidence and original failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: flatpak-package-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/flatpak-*-binding.json
+            ${{ runner.temp }}/flatpak-*-pins.json
+            ${{ runner.temp }}/flatpak-replacement-plan.json
+            ${{ runner.temp }}/flatpak-*-input.zip
+            ${{ runner.temp }}/flatpak-*-stage/flatpak-stage.json
+            ${{ runner.temp }}/flatpak-*-stage/signed-unix-assembly.json
+            ${{ runner.temp }}/flatpak-*-source/signed-unix-assembly.json
+            ${{ runner.temp }}/creator-flatpak-*/flatpak-report.json
+            ${{ runner.temp }}/creator-flatpak-*/build-*/metadata
+            ${{ runner.temp }}/creator-flatpak-*/build-*/manifest.json
+            ${{ runner.temp }}/creator-flatpak-*/build-*/files/manifest.json
+            ${{ runner.temp }}/creator-flatpak-*/build-*/files/share/appdata/*.xml
+            ${{ runner.temp }}/creator-flatpak-*/*.flatpak

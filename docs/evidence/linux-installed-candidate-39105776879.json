@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "scope": "disposable-dpkg-install-only",
+  "runId": 39105776879,
+  "runAttempt": 1,
+  "testSource": "acf05abcd7568d76fcb763c06abf21ca3b247662",
+  "productSource": "534465a86554e95b909bf9c7decbbb29cbca5267",
+  "productTree": "db8c7b091d22f598bc789ac97d8d0153c391c8ec",
+  "productRun": 39042746816,
+  "productArtifact": 12104548664,
+  "container": "ubuntu:22.04@sha256:08ea48a03a3e78ebc7cd526e6a275053223aadd88bfc09cc49b06d5281525fde",
+  "candidate": {
+    "version": "0.1.14",
+    "bytes": 62215944,
+    "sha256": "06beb134dd2be9fbf08dadbb1a49e97a07ff4e591c56967b8d2cc5b8b844b14f",
+    "installedExecutableSha256": "3357f024e3caff3e7563e702838b7e15e08bb8effd7915413e25c444d485ea7d",
+    "installedHelperSha256": "b3e4603af16c4c0f7b1962af8466e19b70d646f9b93dd35d82ec5c06639dc813",
+    "installedPolicySha256": "5eb715286ff8d8cda8e612f8dc9d28d396068b2cdd470a5f3d92d7355e3e37c9",
+    "rootOwned": true,
+    "executableMode": 493,
+    "policyMode": 420
+  },
+  "baseline": {
+    "version": "0.1.12",
+    "assetId": 608099582,
+    "bytes": 5911218,
+    "sha256": "a1d20fb23544356d90ab2314b6d430b274220e97d9129815eea731ac39c7ffd2"
+  },
+  "freshInstallAccepted": true,
+  "manualPreviousPublicUpgradeAccepted": true,
+  "dpkgVerifyPassed": true,
+  "settingsFixturesPreserved": true,
+  "fixtureScope": "Synthetic MCP/legacy settings, Setup roots, Hub preferences/terms, Codex/Claude configs, retained runtime, content-addressed backup, cache and Unity project sentinels. No application or AI client was launched.",
+  "authenticationAccepted": false,
+  "nativeGuiAccepted": false,
+  "migrationAccepted": false,
+  "signedUpdateAccepted": false,
+  "restartAccepted": false,
+  "viewsRestored": false,
+  "flatpakAccepted": false,
+  "releaseReady": false
+}

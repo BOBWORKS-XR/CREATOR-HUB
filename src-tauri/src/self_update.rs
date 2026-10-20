@@ -2,6 +2,7 @@ use crate::{
     catalog::{self, Release},
     manager::{self, Manager},
     platform,
+    update_target::Target,
 };
 use base64::Engine;
 use semver::Version;
@@ -20,32 +21,72 @@ const REPO: &str = "CREATOR-HUB";
 const APP_ID: &str = "creator-hub";
 
 #[derive(Default)]
-pub struct SelfUpdate(Mutex<Option<Release>>);
+pub struct SelfUpdate(
+    Mutex<Option<Release>>,
+    #[cfg(unix)] Mutex<Option<Result<crate::installation_identity::Identity, String>>>,
+);
+
+#[cfg(unix)]
+pub fn initialize(handle: &tauri::AppHandle) {
+    #[cfg(all(target_os = "linux", feature = "experimental-linux-portable-update"))]
+    {
+        crate::portable_update::initialize(handle);
+        if crate::portable_update::handles(handle) {
+            return;
+        }
+    }
+    let identity = raw_installed_location(handle).and_then(|target| {
+        let exe = tauri::utils::platform::current_exe()
+            .map_err(|_| "Cannot check the running Hub image.")?;
+        crate::installation_identity::Identity::capture(&target, &exe)
+    });
+    if let Ok(mut state) = handle.state::<SelfUpdate>().1.lock() {
+        *state = Some(identity);
+    }
+}
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct State {
-    current_version: &'static str,
-    available_version: Option<String>,
-    downloaded: bool,
-    install_blocked: Option<String>,
-    warning: Option<String>,
+    pub(super) current_version: &'static str,
+    pub(super) available_version: Option<String>,
+    pub(super) downloaded: bool,
+    pub(super) install_blocked: Option<String>,
+    pub(super) warning: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) preview_supported: Option<bool>,
 }
 
 #[derive(Clone, Serialize)]
-struct Progress {
-    message: String,
-    received: u64,
-    total: u64,
-    cancellable: bool,
+pub(super) struct Progress {
+    pub(super) message: String,
+    pub(super) received: u64,
+    pub(super) total: u64,
+    pub(super) cancellable: bool,
 }
 
 fn current() -> Version {
     Version::parse(env!("CARGO_PKG_VERSION")).unwrap()
 }
 
+fn view_notice(views: &[crate::hosted_restore::View], restore_views: bool) -> String {
+    if views.is_empty() {
+        return String::new();
+    }
+    let reopening = if restore_views {
+        "They will reopen after Hub restarts. The apps may ask for permission when reopening."
+    } else {
+        "Automatic reopening is turned off. You can open them again from Hub."
+    };
+    format!("\n\nHub will close these idle views: {}. Unsaved form entries will be discarded. {reopening} Standalone apps and MCP connections will stay open.", views.iter().map(|v| v.app.name()).collect::<Vec<_>>().join(", "))
+}
+
 fn cache_path(release: &Release) -> Result<PathBuf, String> {
-    Ok(manager::child_dir("downloads")?.join(format!("hub-{}.exe", release.sha256)))
+    Ok(manager::child_dir("downloads")?.join(format!(
+        "hub-{}{}",
+        release.sha256,
+        Target::native()?.extension
+    )))
 }
 
 fn cached(release: &Release) -> bool {
@@ -56,7 +97,11 @@ fn cached(release: &Release) -> bool {
 }
 
 fn validate(release: &Release, preview: bool) -> Result<(), String> {
-    let version = release.validate_id(APP_ID, preview)?;
+    validate_for(release, preview, Target::native()?)
+}
+
+fn validate_for(release: &Release, preview: bool, target: Target) -> Result<(), String> {
+    let version = release.validate_target(APP_ID, preview, target)?;
     if version <= current() {
         return Err("Hub is already using this version or a newer one.".into());
     }
@@ -69,47 +114,117 @@ fn validate(release: &Release, preview: bool) -> Result<(), String> {
     Ok(())
 }
 
-fn installed_location() -> Result<PathBuf, String> {
-    if !platform::managed_installs_supported() {
-        return Err("Hub updates currently support Windows x64.".into());
+fn installed_location(_handle: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let path = raw_installed_location(_handle)?;
+    #[cfg(unix)]
+    {
+        let state = _handle.state::<SelfUpdate>();
+        let identity = state
+            .1
+            .lock()
+            .map_err(|_| "The original Hub installation identity is unavailable.")?;
+        match identity.as_ref().ok_or(
+            "Hub startup identity is unavailable. Restart the installed app before updating.",
+        )? {
+            Ok(identity) => identity.verify(&path)?,
+            Err(error) => return Err(error.clone()),
+        }
     }
-    let exe = std::env::current_exe().map_err(|_| "Cannot check this Hub copy.")?;
-    let expected = dirs::data_local_dir()
-        .ok_or("Local app data is unavailable.")?
-        .join("Creator Hub")
-        .join("creator-hub.exe");
-    platform::reject_links(&exe)?;
-    if !platform::same_path(&exe, &expected) {
-        return Err(
+    Ok(path)
+}
+
+fn raw_installed_location(_handle: &tauri::AppHandle) -> Result<PathBuf, String> {
+    Target::native()?;
+    #[cfg(windows)]
+    {
+        let exe = std::env::current_exe().map_err(|_| "Cannot check this Hub copy.")?;
+        let expected = dirs::data_local_dir()
+            .ok_or("Local app data is unavailable.")?
+            .join("Creator Hub")
+            .join("creator-hub.exe");
+        platform::reject_links(&exe)?;
+        if !platform::same_path(&exe, &expected) {
+            return Err(
             "This is a portable test copy. Install Creator Hub first to enable in-app upgrades."
                 .into(),
         );
-    }
-    #[cfg(windows)]
-    {
-        use winreg::{enums::HKEY_CURRENT_USER, RegKey};
-        let key = RegKey::predef(HKEY_CURRENT_USER)
-            .open_subkey("Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Creator Hub")
-            .map_err(|_| {
-                "Hub's installation record is missing. Run the Hub installer to repair it."
-            })?;
-        let location: String = key
-            .get_value("InstallLocation")
-            .map_err(|_| "Hub's installation folder could not be checked.")?;
-        let version: String = key
-            .get_value("DisplayVersion")
-            .map_err(|_| "Hub's installed version could not be checked.")?;
-        if version != env!("CARGO_PKG_VERSION")
-            || !platform::same_path(
-                &exe,
-                &PathBuf::from(location.trim_matches('"')).join("creator-hub.exe"),
-            )
-        {
-            return Err("Another Hub copy is installed. Open that copy before updating.".into());
         }
+        #[cfg(windows)]
+        {
+            use winreg::{enums::HKEY_CURRENT_USER, RegKey};
+            let key = RegKey::predef(HKEY_CURRENT_USER)
+                .open_subkey("Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Creator Hub")
+                .map_err(|_| {
+                    "Hub's installation record is missing. Run the Hub installer to repair it."
+                })?;
+            let location: String = key
+                .get_value("InstallLocation")
+                .map_err(|_| "Hub's installation folder could not be checked.")?;
+            let version: String = key
+                .get_value("DisplayVersion")
+                .map_err(|_| "Hub's installed version could not be checked.")?;
+            if version != env!("CARGO_PKG_VERSION")
+                || !platform::same_path(
+                    &exe,
+                    &PathBuf::from(location.trim_matches('"')).join("creator-hub.exe"),
+                )
+            {
+                return Err(
+                    "Another Hub copy is installed. Open that copy before updating.".into(),
+                );
+            }
+        }
+        platform::verify_nsis_update_target("Creator Hub", &exe)?;
+        Ok(exe)
     }
-    platform::verify_nsis_update_target("Creator Hub", &exe)?;
-    Ok(exe)
+    #[cfg(target_os = "macos")]
+    {
+        let exe =
+            tauri::utils::platform::current_exe().map_err(|_| "Cannot check this Hub app.")?;
+        platform::reject_links(&exe)?;
+        crate::update_target::mac_application(
+            &exe,
+            &dirs::home_dir().ok_or("Cannot check Applications.")?,
+        )?;
+        Ok(exe)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let exe =
+            tauri::utils::platform::current_exe().map_err(|_| "Cannot check this Hub package.")?;
+        let target = Target::native()?;
+        crate::linux_update::preflight(target.package)?;
+        let location = if target.package == "appimage" {
+            let env = _handle.env();
+            let appdir = PathBuf::from(
+                env.appdir
+                    .as_ref()
+                    .ok_or("Cannot identify the AppImage mount.")?,
+            );
+            let image = PathBuf::from(
+                env.appimage
+                    .as_ref()
+                    .ok_or("Cannot identify the original AppImage file.")?,
+            );
+            crate::update_target::appimage_location(&exe, &appdir, &image)?
+        } else {
+            if exe != std::path::Path::new("/usr/bin/creator-hub") {
+                return Err("Open the installed Hub package before updating.".into());
+            }
+            exe
+        };
+        platform::reject_links(&location)?;
+        if !fs::metadata(&location).is_ok_and(|m| m.is_file()) {
+            return Err("The installed Hub package is unavailable.".into());
+        }
+        let restart = tauri::process::current_binary(&_handle.env())
+            .map_err(|_| "Cannot verify Hub's restart target.")?;
+        platform::reject_links(&restart)?;
+        crate::update_target::verify_restart_target(&location, &restart)?;
+        Ok(location)
+    }
+    #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
+    Err("This platform does not have an accepted Hub updater.".into())
 }
 
 fn selected(handle: &tauri::AppHandle, expected: &str) -> Result<Release, String> {
@@ -128,12 +243,25 @@ fn selected(handle: &tauri::AppHandle, expected: &str) -> Result<Release, String
 }
 
 fn check(handle: &tauri::AppHandle, online: bool, preview: bool) -> Result<State, String> {
+    #[cfg(all(target_os = "linux", feature = "experimental-linux-portable-update"))]
+    if crate::portable_update::handles(handle) {
+        return crate::portable_update::check(handle, online);
+    }
     let _operation = handle.state::<Manager>().begin()?;
+    let target = Target::native()?;
     let dir = manager::child_dir("hub-updates")?;
+    let dir = if target.platform == "windows" {
+        dir
+    } else {
+        dir.join(target.updater_key())
+    };
+    platform::reject_links(&dir)?;
+    fs::create_dir_all(&dir).map_err(|_| "Cannot prepare Hub update records.")?;
     let mut warning = None;
     if online {
-        let result = catalog::client()
-            .and_then(|client| catalog::discover_from(&client, REPO, APP_ID, preview, &current()));
+        let result = catalog::client().and_then(|client| {
+            catalog::discover_target(&client, REPO, APP_ID, preview, &current(), target)
+        });
         match result {
             Ok(Some((release, bytes, signature))) => {
                 let path = dir.join(format!("{}.json", release.version));
@@ -167,7 +295,9 @@ fn check(handle: &tauri::AppHandle, online: bool, preview: bool) -> Result<State
             manager::bounded_read(&entry.path(), catalog::MAX_METADATA),
             manager::bounded_read(&entry.path().with_extension("minisig"), 4096),
         ) {
-            if let Ok(release) = catalog::verify_signed_id(APP_ID, &data, &signature, preview) {
+            if let Ok(release) =
+                catalog::verify_signed_target(APP_ID, &data, &signature, preview, target)
+            {
                 if Version::parse(&release.version).is_ok_and(|v| v > current()) {
                     releases.push(release);
                 }
@@ -184,9 +314,10 @@ fn check(handle: &tauri::AppHandle, online: bool, preview: bool) -> Result<State
         install_blocked: release.as_ref().and_then(|r| {
             validate(r, preview)
                 .err()
-                .or_else(|| installed_location().err())
+                .or_else(|| installed_location(handle).err())
         }),
         warning,
+        preview_supported: None,
     };
     *handle
         .state::<SelfUpdate>()
@@ -236,6 +367,48 @@ fn download(handle: &tauri::AppHandle, release: &Release) -> Result<PathBuf, Str
 }
 
 #[tauri::command]
+pub async fn hub_update_recovery_status(
+    handle: tauri::AppHandle,
+) -> Result<serde_json::Value, String> {
+    #[cfg(all(target_os = "linux", feature = "experimental-linux-portable-update"))]
+    {
+        tauri::async_runtime::spawn_blocking(move || {
+            serde_json::to_value(crate::portable_update::recovery_status(&handle)?)
+                .map_err(|_| "Cannot read retained update state.".into())
+        })
+        .await
+        .map_err(|_| "Retained update status worker stopped.")?
+    }
+    #[cfg(not(all(target_os = "linux", feature = "experimental-linux-portable-update")))]
+    {
+        let _ = handle;
+        Err("Portable update recovery is not enabled in this build.".into())
+    }
+}
+
+#[tauri::command]
+pub async fn review_retained_hub_update(
+    handle: tauri::AppHandle,
+) -> Result<serde_json::Value, String> {
+    #[cfg(all(target_os = "linux", feature = "experimental-linux-portable-update"))]
+    {
+        tauri::async_runtime::spawn_blocking(move || {
+            serde_json::to_value(crate::portable_update::review_retained(&handle)?)
+                .map_err(|_| "Cannot report retained update review.".into())
+        })
+        .await
+        .map_err(|_| {
+            "Retained update review worker stopped. Recheck its state before closing Hub."
+        })?
+    }
+    #[cfg(not(all(target_os = "linux", feature = "experimental-linux-portable-update")))]
+    {
+        let _ = handle;
+        Err("Portable update recovery is not enabled in this build.".into())
+    }
+}
+
+#[tauri::command]
 pub async fn hub_update_status(
     handle: tauri::AppHandle,
     online: bool,
@@ -252,6 +425,10 @@ pub async fn download_hub_update(
     version: String,
 ) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
+        #[cfg(all(target_os = "linux", feature = "experimental-linux-portable-update"))]
+        if crate::portable_update::handles(&handle) {
+            return crate::portable_update::download(&handle, &version);
+        }
         let _operation = handle.state::<Manager>().begin()?;
         let release = selected(&handle, &version)?;
         download(&handle, &release)?;
@@ -268,13 +445,16 @@ pub async fn install_hub_update(
     restore_views: bool,
 ) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
+        #[cfg(all(target_os = "linux", feature = "experimental-linux-portable-update"))]
+        if crate::portable_update::handles(&handle) {
+            return crate::portable_update::install(&handle, &version, restore_views);
+        }
         let _operation = handle.state::<Manager>().begin()?;
         let release = selected(&handle, &version)?;
-        let installed = installed_location()?;
-        let views = handle.state::<crate::hosted::Hosting>().update_views()?;
-        let view_notice = if views.is_empty() { String::new() } else {
-            format!("\n\nHub will close and reopen these idle views: {}. Unsaved form entries will be discarded. The apps may ask for permission when reopening. Standalone apps and MCP connections will stay open.", views.iter().map(|v| v.app.name()).collect::<Vec<_>>().join(", "))
-        };
+        let installed = installed_location(&handle)?;
+        let mut views = handle.state::<crate::hosted::Hosting>().update_views()?;
+        views.extend(crate::features::update_views(&handle)?);
+        let view_notice = view_notice(&views, restore_views);
         let approved = handle.dialog().message(format!("Update Creator Hub to {}?\n\nHub will close and reopen. Your projects, apps and settings will stay in place.{}", release.version, view_notice))
             .title("Update Creator Hub").buttons(MessageDialogButtons::OkCancelCustom("Update Hub".into(), "Not now".into())).blocking_show();
         if !approved { return Ok("Hub update cancelled. Nothing was installed.".into()); }
@@ -286,7 +466,7 @@ pub async fn install_hub_update(
             return Err("The Hub download changed. Download it again.".into());
         }
         // The version, installer URL and bytes are bound to our signed catalog.
-        // Tauri owns the Windows installer handoff and application restart.
+        // Tauri owns package installation; Unix requires an explicit restart.
         let endpoint = catalog::release_url(REPO, &release.version, "latest.json");
         let updater = handle.updater_builder()
             // The default callback destroys the UI before ShellExecute succeeds.
@@ -297,9 +477,12 @@ pub async fn install_hub_update(
             .map_err(|_| "Cannot prepare the Hub update.")?
             .timeout(Duration::from_secs(30))
             .pubkey(base64::engine::general_purpose::STANDARD.encode(include_bytes!("catalog-key.pub")))
-            .installer_arg("/NS")
-            .installer_arg(format!("/D={}", installed.parent().ok_or("Invalid Hub folder.")?.display()))
-            .build().map_err(|_| "Cannot prepare the Hub installer.")?;
+            .target(Target::native()?.updater_key())
+            .executable_path(&installed);
+        #[cfg(windows)]
+        let updater = updater.installer_arg("/NS")
+            .installer_arg(format!("/D={}", installed.parent().ok_or("Invalid Hub folder.")?.display()));
+        let updater = updater.build().map_err(|_| "Cannot prepare the Hub installer.")?;
         let update = tauri::async_runtime::block_on(updater.check())
             .map_err(|_| "The Hub restart information could not be downloaded. Try again.")?
             .ok_or("Hub is already up to date.")?;
@@ -314,7 +497,8 @@ pub async fn install_hub_update(
         let key = minisign_verify::PublicKey::decode(include_str!("catalog-key.pub")).map_err(|_| "Invalid Hub update key.")?;
         let signature = minisign_verify::Signature::decode(signature).map_err(|_| "Invalid Hub installer signature.")?;
         key.verify(&bytes, &signature, false).map_err(|_| "Hub installer signature verification failed.")?;
-        installed_location()?;
+        let rechecked = installed_location(&handle)?;
+        if rechecked != installed { return Err("The running Hub installation changed. Restart Hub before updating.".into()); }
         if handle.state::<Manager>().cancellation().load(Ordering::SeqCst) { return Err("Hub update cancelled.".into()); }
         if !views.is_empty() {
             if restore_views {
@@ -327,7 +511,17 @@ pub async fn install_hub_update(
             })?;
         }
         let _ = handle.emit("app-progress", Progress { message: "Restarting Hub to install the update...".into(), received: 0, total: 0, cancellable: false });
-        update.install(bytes).map_err(|_| "Hub could not start its installer. Nothing was installed.")?;
+        installed_location(&handle)?;
+        #[cfg(target_os = "macos")]
+        crate::mac_update::install(&bytes, &installed, &release.executable_sha256, || installed_location(&handle).map(|_| ()))?;
+        #[cfg(target_os = "linux")]
+        if crate::linux_update::install(&bytes, release.byte_length, &release.sha256, Target::native()?.package)? == crate::linux_update::Outcome::Cancelled {
+            return Ok("Hub update cancelled at system authorization. Nothing was installed. Your settings and retained MCP connections were kept; closed app views can be reopened from Hub.".into());
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        update.install(bytes).map_err(|_| "Hub could not complete its update. Retry from the installed app; your settings and runtime generations were retained.")?;
+        #[cfg(unix)]
+        handle.request_restart();
         Ok("Hub update started.".into())
     }).await.map_err(|_| "Hub update could not start.")?
 }
@@ -335,6 +529,54 @@ pub async fn install_hub_update(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn stable_only_capability_is_explicit_without_changing_native_update_payloads() {
+        let mut state = State {
+            current_version: "0.1.16",
+            available_version: None,
+            downloaded: false,
+            install_blocked: None,
+            warning: None,
+            preview_supported: None,
+        };
+        let original = serde_json::to_value(&state).unwrap();
+        assert_eq!(original.as_object().unwrap().len(), 5);
+        assert!(original.get("previewSupported").is_none());
+        state.preview_supported = Some(false);
+        let portable = serde_json::to_value(&state).unwrap();
+        assert_eq!(portable["previewSupported"], false);
+        assert_eq!(portable.as_object().unwrap().len(), 6);
+        for (name, value) in original.as_object().unwrap() {
+            assert_eq!(&portable[name], value);
+        }
+    }
+
+    #[test]
+    fn update_confirmation_respects_reopen_preference_and_names_each_view() {
+        let views = catalog::AppId::ALL.map(|app| crate::hosted_restore::View {
+            app,
+            path: std::env::temp_dir().join(app.exe()),
+            bundled: true,
+            direct: false,
+        });
+        for restore in [false, true] {
+            assert!(view_notice(&[], restore).is_empty());
+            let notice = view_notice(&views, restore);
+            for app in catalog::AppId::ALL {
+                assert!(notice.contains(app.name()));
+            }
+            assert!(notice.contains("Unsaved form entries will be discarded"));
+            assert!(notice.contains("Standalone apps and MCP connections will stay open"));
+            if restore {
+                assert!(notice.contains("They will reopen after Hub restarts"));
+            } else {
+                assert!(notice.contains("Automatic reopening is turned off"));
+                assert!(!notice.contains("They will reopen"));
+                assert!(!notice.contains("will close and reopen"));
+            }
+        }
+    }
+
     #[test]
     fn packaged_updater_configuration_initializes_with_the_catalog_key() {
         let context: tauri::Context<tauri::Wry> = tauri::generate_context!();
@@ -368,17 +610,55 @@ mod tests {
     }
     #[test]
     fn hub_updates_require_correct_identity_newer_version_and_guarded_installer() {
+        let target = Target::select("windows", "x86_64", None).unwrap();
         let mut r = catalog::bootstrap(catalog::AppId::Setup);
         r.version = "9.0.0-alpha.1".into();
         r.installer_protocol = 1;
-        assert!(validate(&r, true).is_err());
+        assert!(validate_for(&r, true, target).is_err());
         r.app_id = APP_ID.into();
-        assert!(validate(&r, true).is_ok());
-        assert!(validate(&r, false).is_err());
+        assert!(validate_for(&r, true, target).is_ok());
+        assert!(validate_for(&r, false, target).is_err());
         r.installer_protocol = 0;
-        assert!(validate(&r, true).unwrap_err().contains("restart"));
+        assert!(validate_for(&r, true, target)
+            .unwrap_err()
+            .contains("restart"));
         r.installer_protocol = 1;
         r.version = env!("CARGO_PKG_VERSION").into();
-        assert!(validate(&r, true).is_err());
+        assert!(validate_for(&r, true, target).is_err());
+    }
+
+    #[test]
+    fn native_updates_reject_other_architectures_packages_and_unaccepted_installers() {
+        use tauri::utils::config::BundleType;
+        for target in [
+            Target::select("macos", "aarch64", Some(BundleType::App)).unwrap(),
+            Target::select("macos", "x86_64", Some(BundleType::App)).unwrap(),
+            Target::select("linux", "x86_64", Some(BundleType::AppImage)).unwrap(),
+            Target::select("linux", "x86_64", Some(BundleType::Deb)).unwrap(),
+            Target::select("linux", "x86_64", Some(BundleType::Rpm)).unwrap(),
+        ] {
+            let mut release = catalog::bootstrap(catalog::AppId::Setup);
+            release.app_id = APP_ID.into();
+            release.version = "99.0.0".into();
+            release.platform = target.platform.into();
+            release.architecture = target.architecture.into();
+            release.package_type = target.package.into();
+            release.asset_name = format!("Creator-Hub-99.0.0{}", target.extension);
+            assert!(validate_for(&release, false, target)
+                .unwrap_err()
+                .contains("restart"));
+            release.installer_protocol = 1;
+            assert!(validate_for(&release, false, target).is_ok());
+            for field in ["platform", "architecture", "package", "extension"] {
+                let mut wrong = release.clone();
+                match field {
+                    "platform" => wrong.platform = "wrong".into(),
+                    "architecture" => wrong.architecture = "wrong".into(),
+                    "package" => wrong.package_type = "wrong".into(),
+                    _ => wrong.asset_name = "Creator-Hub.dmg".into(),
+                }
+                assert!(validate_for(&wrong, false, target).is_err());
+            }
+        }
     }
 }

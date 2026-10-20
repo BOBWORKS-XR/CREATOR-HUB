@@ -1,0 +1,82 @@
+name: Native Flatpak host transport kernel tests (not integration acceptance)
+
+on:
+  push:
+    branches: [validation/flatpak-host-launch-014]
+    paths:
+      - .github/workflows/flatpak-host-launch-014.yml
+      - native/flatpak-host-launch/**
+      - scripts/flatpak-host-launch.test.cjs
+
+permissions:
+  contents: read
+
+jobs:
+  native-transport:
+    if: >-
+      github.repository == 'BOBWORKS-XR/CREATOR-HUB' &&
+      github.repository_id == '1364807512' &&
+      github.ref == 'refs/heads/validation/flatpak-host-launch-014' &&
+      github.event_name == 'push'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24.17.0
+      - uses: dtolnay/rust-toolchain@1.99.0
+      - name: Check source contracts before compiling or running native fixtures
+        run: |
+          node --test scripts/flatpak-host-launch.test.cjs
+          cargo fmt --manifest-path native/flatpak-host-launch/Cargo.toml --check
+          uname -r
+          test "$(id -u)" -ne 0
+      - name: Fetch only the locked public Rust dependencies
+        run: cargo fetch --locked --manifest-path native/flatpak-host-launch/Cargo.toml
+      - name: Compile and test the actual native transport and default refusals
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/flatpak-host-launch-target
+        run: |
+          set -euo pipefail
+          cargo clippy --locked --offline --manifest-path native/flatpak-host-launch/Cargo.toml --all-targets -- -D warnings
+          cargo test --locked --offline --manifest-path native/flatpak-host-launch/Cargo.toml --lib
+      - name: Exercise kernel credentials, pidfds, bounded refusal and actual echo child
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/flatpak-host-launch-target
+          CREATOR_FLATPAK_LAUNCH_KERNEL_TEST: '1'
+        run: |
+          set -euo pipefail
+          cargo test --locked --offline --manifest-path native/flatpak-host-launch/Cargo.toml --lib linux::transport::tests:: -- --ignored --test-threads=1
+          cargo test --locked --offline --manifest-path native/flatpak-host-launch/Cargo.toml --test echo native_echo_binary_inherits_fd3_completes_protocol_and_exits -- --ignored --test-threads=1
+      - name: Record only the completed mechanism scope
+        env:
+          REPORT: ${{ runner.temp }}/flatpak-host-transport.json
+        run: |
+          python3 -B - <<'PY'
+          import json, os, platform
+          report = {
+              "sourceCommit": os.environ["GITHUB_SHA"],
+              "runId": os.environ["GITHUB_RUN_ID"],
+              "kernel": platform.release(),
+              "nativeKernelTestsPassed": True,
+              "actualEchoChildTestPassed": True,
+              "flatpakDeploymentTested": False,
+              "hostIntegrationAccepted": False,
+              "migrationAccepted": False,
+              "signedUpdateAccepted": False,
+              "releaseReady": False,
+          }
+          with open(os.environ["REPORT"], "x", encoding="ascii") as file:
+              json.dump(report, file, indent=2)
+          print(json.dumps(report))
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: flatpak-host-transport-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/flatpak-host-transport.json
+          retention-days: 7
+          if-no-files-found: warn

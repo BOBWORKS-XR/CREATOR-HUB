@@ -1,0 +1,102 @@
+name: Prepared native Unix payload and previous-server tests (not acceptance)
+
+on:
+  push:
+    branches: [validation/unix-payload-014, validation/unix-payload-016]
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: Native payload target; no key, Hub installer or release is produced
+        type: choice
+        default: all
+        options: [all, linux]
+
+permissions:
+  contents: read
+
+jobs:
+  payload:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 65
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Bind the new Linux route before dependencies or compilation
+        if: github.ref == 'refs/heads/validation/unix-payload-016'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os
+          assert os.environ['GITHUB_REPOSITORY'] == 'BOBWORKS-XR/CREATOR-HUB'
+          assert os.environ['GITHUB_REPOSITORY_ID'] == '1364807512'
+          assert os.environ['RUNNER_OS'] == 'Linux' and os.environ['RUNNER_ARCH'] == 'X64'
+          for path in ('package.json', 'src-tauri/tauri.conf.json'):
+              with open(path, encoding='utf-8') as stream:
+                  assert json.load(stream)['version'] == '0.1.16'
+          PY
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24.17.0
+          cache: npm
+      - uses: dtolnay/rust-toolchain@1.99.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            modules/mcp/launcher/src-tauri
+            modules/project-setup/src-tauri
+            native/mcp-router
+            native/unix-transfer
+          cache-on-failure: true
+      - name: Install native Linux compilation prerequisites on the disposable runner
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev libxdo-dev libssl-dev librsvg2-dev \
+            build-essential file
+      - name: Install locked dependencies
+        run: |
+          npm ci
+          npm --prefix modules/mcp ci
+          npm --prefix modules/project-setup ci
+      - name: Check the source and split-producer controls before compiling
+        run: |
+          npm run check:sources
+          node --test scripts/build-unified.test.cjs scripts/unix-package-payload.test.cjs scripts/unix-managed-payload.test.cjs scripts/linux-dialog-backend.test.cjs
+          cargo tree --locked --manifest-path modules/project-setup/src-tauri/Cargo.toml --target x86_64-unknown-linux-gnu -e features -i rfd
+      - name: Test and build the shared bounded transfer consumer
+        run: |
+          rustc --test --edition=2021 modules/mcp/launcher/src-tauri/build_payload_inputs.rs -o "$RUNNER_TEMP/mcp-build-input-tests"
+          "$RUNNER_TEMP/mcp-build-input-tests"
+          cargo fmt --manifest-path native/unix-transfer/Cargo.toml --check
+          cargo clippy --release --locked --manifest-path native/unix-transfer/Cargo.toml --all-targets -- -D warnings
+          cargo test --release --locked --manifest-path native/unix-transfer/Cargo.toml
+          cargo build --release --locked --manifest-path native/unix-transfer/Cargo.toml
+      - name: Prepare only native private modules and router, without selecting a signing key
+        env:
+          TAURI_CLI_VERBOSITY: '1'
+        run: npm run build:unified -- ci-unsigned-unix-payload --managed --experimental-unix --experimental-unix-writable --prepare-managed-unix
+      - name: Test native product settings after build-bound launcher resources exist
+        run: cargo test --release --locked --manifest-path modules/mcp/launcher/src-tauri/Cargo.toml --features experimental-unix-hosting product_settings -- --quiet
+      - name: Preserve and verify actual native payload bytes and Unix modes
+        run: |
+          set -euo pipefail
+          prepared="$GITHUB_WORKSPACE/artifacts/unified/ci-unsigned-unix-payload"
+          transfer="$RUNNER_TEMP/unix-payload-transfer"
+          tool="$GITHUB_WORKSPACE/native/unix-transfer/target/release/creator-hub-unix-transfer"
+          "$tool" pack "$prepared" "$transfer"
+          "$tool" verify "$transfer/modules.tar.gz" "$transfer/prepared-unix.json" "$transfer/transfer-binding.json"
+      - name: Retain unsigned source-bound inputs, never release attachments
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unsigned-unix-payload-${{ runner.os }}-${{ runner.arch }}-${{ github.sha }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: ${{ runner.temp }}/unix-payload-transfer/

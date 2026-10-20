@@ -1,0 +1,54 @@
+name: Native public Mac standard Trash and exact restore proof
+on:
+  workflow_dispatch:
+  push:
+    branches: [validation/mac-legacy-retirement-014]
+    paths: ['.github/workflows/native-macos-legacy-retirement-probe.yml']
+permissions:
+  contents: read
+jobs:
+  legacy-baseline:
+    if: ${{ false }} # macOS support suspended; preserve historical workflow only.
+    name: legacy baseline (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {target: macos-arm64, os: macos-latest}
+          - {target: macos-intel, os: macos-15-intel}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24.17.0
+      - name: Portable refusal and fixed public package checks
+        run: node --test scripts/native-macos-legacy-retirement-probe.test.cjs native/legacy-retirement-unix-proof.test.cjs
+      - name: Compile the dedicated diagnostic (no production helper or product rebuild)
+        run: swiftc scripts/native-macos-legacy-retirement-probe.swift -o "$RUNNER_TEMP/native-macos-legacy-retirement-probe"
+      - name: Native Cancel then standard Trash, document launch refusal and exact restore
+        env:
+          CREATOR_MACOS_LEGACY_RETIREMENT_PROBE: '1'
+          CREATOR_MACOS_LEGACY_STANDARD_TRASH_EXPERIMENT: '1'
+        run: node scripts/native-macos-legacy-retirement-probe.cjs
+      - name: Retain diagnostic reports and bounded tool outputs, never home or credential archives
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mac-legacy-retirement-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/macos-legacy-retirement-probe/report.json
+            ${{ runner.temp }}/macos-legacy-retirement-probe/setup/*.json
+            ${{ runner.temp }}/macos-legacy-retirement-probe/setup/*.stdout
+            ${{ runner.temp }}/macos-legacy-retirement-probe/setup/*.stderr
+            ${{ runner.temp }}/macos-legacy-retirement-probe/mcp/*.json
+            ${{ runner.temp }}/macos-legacy-retirement-probe/mcp/*.stdout
+            ${{ runner.temp }}/macos-legacy-retirement-probe/mcp/*.stderr
+            ${{ runner.temp }}/macos-legacy-retirement-probe/mcp/standard-trash-experiment/*.json
+            ${{ runner.temp }}/macos-legacy-retirement-probe/mcp/standard-trash-experiment/*.stdout
+            ${{ runner.temp }}/macos-legacy-retirement-probe/mcp/standard-trash-experiment/*.stderr

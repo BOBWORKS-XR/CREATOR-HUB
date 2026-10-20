@@ -6,7 +6,7 @@ if (-not $OutputName) { $OutputName = "Creator-Hub-$version-Windows" }
 if ($OutputName -notmatch '^Creator-Hub-[A-Za-z0-9.-]+$' -or $OutputName.Contains('..')) { throw 'Choose a simple Creator-Hub output name.' }
 $output = Join-Path $root "dist\$OutputName"
 if (Test-Path -LiteralPath $output) { throw 'Installer output already exists. Choose a new name; existing artifacts are immutable.' }
-$variables = @('CREATOR_SETUP_HOST_SHA256', 'CREATOR_MCP_HOST_SHA256', 'CREATOR_MCP_HOST_READONLY_EVENTS', 'CREATOR_MCP_HOST_WRITABLE')
+$variables = @('CREATOR_SETUP_HOST_SHA256', 'CREATOR_MCP_HOST_SHA256', 'CREATOR_MCP_HOST_READONLY_EVENTS', 'CREATOR_MCP_HOST_WRITABLE', 'CREATOR_BUILTIN_MANIFEST')
 $saved = @{}
 $savedTarget = $env:CARGO_TARGET_DIR
 try {

@@ -17,7 +17,14 @@ async function load(page, { openProjects = true } = {}) {
         if (command === 'get_launch_request') return { view: 'hub', revision: 0 };
         if (command === 'app_inventory') return { supported: true, apps: ['mcp', 'setup'].map(app => ({ app, installed: false, availableVersion: '1.0.0', updateAvailable: false })) };
         if (window.failure) throw window.failure;
-        if (command === 'project_inventory') return window.projects;
+        if (command === 'project_inventory') {
+          if (window.holdInventory) {
+            window.holdInventory = false;
+            const held = structuredClone(window.projects);
+            return new Promise(resolve => { window.finishInventory = () => resolve(held); });
+          }
+          return window.projects;
+        }
         if (command === 'add_project_folder') return null;
         if (command === 'remove_project_folder') { window.projects.projects = window.projects.projects.filter(p => p.id !== args.id); return window.projects; }
         if (command === 'open_unity_project') {
@@ -38,6 +45,37 @@ async function load(page, { openProjects = true } = {}) {
 }
 
 const projectNames = page => page.locator('.project-info > strong');
+
+test('a project-opening warning already in the inventory is shown once and keeps the project', async ({ page }) => {
+  await load(page);
+  const warning = 'Current Unity Hub discovery needs the verified Unity helper from Project Setup. Add a project folder manually in the meantime.';
+  await page.evaluate(warning => { window.projects.warnings = [warning, warning]; }, warning);
+  await page.locator('#refresh-projects').click();
+  await expect(page.locator('#project-warnings')).toHaveText(warning);
+  await page.evaluate(warning => { window.failure = warning; }, warning);
+  await page.getByRole('button', { name: 'Open Creator Forest', exact: true }).click();
+  await expect(page.locator('#project-status')).toHaveText(warning);
+  await expect(page.locator('#project-warnings')).toBeHidden();
+  await expect(projectNames(page)).toHaveText(['Creator Forest', 'Banter Playground']);
+});
+
+test('project rows identify the selected MCP project and independently checked bridges', async ({ page }) => {
+  await load(page);
+  await page.evaluate(() => {
+    Object.assign(window.projects.projects[0], { selected: true, bridge: { installed: true, current: true } });
+    Object.assign(window.projects.projects[1], { selected: false, bridge: { installed: true, current: false } });
+  });
+  await page.locator('#refresh-projects').click();
+  const rows = page.locator('.project-row');
+  await expect(rows.nth(0)).toContainText('Selected for MCP');
+  await expect(rows.nth(0)).toContainText('MCP bridge current');
+  await expect(rows.nth(0)).toHaveAttribute('data-mcp-selected', 'true');
+  await expect(rows.nth(1)).toContainText('MCP bridge update available');
+  await expect(rows.nth(1)).not.toContainText('Selected for MCP');
+  await page.evaluate(() => { window.projects.projects[1].bridge = { installed: false, current: true }; });
+  await page.locator('#refresh-projects').click();
+  await expect(rows.nth(1)).toContainText('MCP bridge not checked');
+});
 
 test('Hub opens Apps by default without scanning, opening or modifying a project', async ({ page }) => {
   await load(page, { openProjects: false });
@@ -144,6 +182,52 @@ test('projects are read on demand; filters and navigation preserve the list with
   expect(await page.evaluate(() => window.calls.filter(c => ['install_app', 'open_unity_project'].includes(c.command)))).toEqual([]);
   await page.locator('#suite-trigger').click();
   await expect(page.locator('#suite-menu [data-view="hub"]')).toBeFocused();
+});
+
+test('project invalidation is read-only, coalesces until shown and retries failed reads only when shown', async ({ page }) => {
+  await load(page);
+  await page.locator('#project-search').fill('Forest');
+  await page.evaluate(() => {
+    window.projects.projects[0].selected = true;
+    CreatorProjects.invalidate(); CreatorProjects.invalidate();
+  });
+  expect(await page.evaluate(() => calls.filter(call => call.command === 'project_inventory').length)).toBe(1);
+  await page.evaluate(() => CreatorProjects.show());
+  await expect(page.locator('.project-row[data-mcp-selected="true"]')).toContainText('Creator Forest');
+  await expect(page.locator('#project-search')).toHaveValue('Forest');
+  expect(await page.evaluate(() => calls.filter(call => call.command === 'project_inventory').length)).toBe(2);
+  await page.evaluate(() => { CreatorProjects.show(); window.failure = 'Read unavailable'; CreatorProjects.invalidate(); CreatorProjects.show(); });
+  await expect(page.locator('#project-status')).toHaveText('Read unavailable');
+  await expect(page.locator('.project-row')).toHaveCount(1);
+  expect(await page.evaluate(() => calls.filter(call => call.command === 'project_inventory').length)).toBe(3);
+  await page.evaluate(() => { window.failure = null; window.projects.projects[0].bridge = { installed: true, current: false }; CreatorProjects.show(); });
+  await expect(page.locator('.project-row')).toContainText('MCP bridge update available');
+  expect(await page.evaluate(() => calls.filter(call => call.command === 'project_inventory').length)).toBe(4);
+  expect(await page.evaluate(() => calls.filter(call => /install|save|open_unity/.test(call.command)))).toEqual([]);
+});
+
+for (const failReload of [false, true]) test(`an invalidation during inventory queues one fresh read without retrying failures: ${failReload}`, async ({ page }) => {
+  await load(page);
+  await page.evaluate(() => { window.holdInventory = true; });
+  await page.locator('#refresh-projects').click();
+  await page.waitForFunction(() => window.finishInventory);
+  await page.evaluate(fail => {
+    window.projects.projects[0].selected = true;
+    window.projects.projects[0].bridge = { installed: true, current: true };
+    CreatorProjects.invalidate(); CreatorProjects.show(); CreatorProjects.show();
+    if (fail) window.failure = 'Fresh read unavailable';
+    window.finishInventory();
+  }, failReload);
+  await expect.poll(() => page.evaluate(() => calls.filter(call => call.command === 'project_inventory').length)).toBe(3);
+  if (failReload) {
+    await expect(page.locator('#project-status')).toHaveText('Fresh read unavailable');
+    await expect(page.locator('.project-row[data-mcp-selected="true"]')).toHaveCount(0);
+    await page.evaluate(() => { window.failure = null; CreatorProjects.show(); });
+  }
+  await expect(page.locator('.project-row[data-mcp-selected="true"]')).toContainText('Creator Forest');
+  await expect(page.locator('.project-row[data-mcp-selected="true"]')).toContainText('MCP bridge current');
+  await page.evaluate(() => CreatorProjects.show());
+  expect(await page.evaluate(() => calls.filter(call => call.command === 'project_inventory').length)).toBe(failReload ? 4 : 3);
 });
 
 test('explicit launch sends only a known ID and prevents double clicks', async ({ page }) => {

@@ -1,0 +1,100 @@
+name: B05 signed stable update lab (not public discovery)
+on:
+  push:
+    branches: [validation/unified-update-lab, validation/unified-update-lab-014]
+    paths: ['.github/workflows/signed-update-lab.yml']
+permissions:
+  contents: read
+jobs:
+  stage-input:
+    # Reading a private draft needs push access; no repository/dependency/app
+    # code is executed while this narrowly used token is available.
+    permissions:
+      contents: write
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - name: Get the exact public-signature-only input
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          New-Item -ItemType Directory -Path signed-input | Out-Null
+          $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = 'application/octet-stream'; 'X-GitHub-Api-Version' = '2026-03-10' }
+          $metadataHeaders = @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = 'application/vnd.github+json'; 'X-GitHub-Api-Version' = '2026-03-10' }
+          $release = Invoke-RestMethod -Uri 'https://api.github.com/repos/BOBWORKS-XR/CREATOR-HUB/releases/411494394' -Headers $metadataHeaders
+          if ($release.draft -ne $true -or $release.tag_name -cne 'v0.1.13-validation') { throw 'Private validation draft differs.' }
+          $matches = @($release.assets | Where-Object id -EQ 642121466)
+          if ($matches.Count -ne 1 -or $matches[0].name -cne 'signed-windows-b05-db86273-20261015.zip' -or $matches[0].state -cne 'uploaded' -or $matches[0].size -ne 36504560 -or $matches[0].digest -cne 'sha256:ac2aec6db4a227406be989d46e728bc7322a283444a3a568b01c6273767fceb4') { throw 'Exact signed input is unavailable.' }
+          Invoke-WebRequest -Method Get -Uri 'https://api.github.com/repos/BOBWORKS-XR/CREATOR-HUB/releases/assets/642121466' -Headers $headers -OutFile signed-input/signed-update-input.zip -MaximumRedirection 5 -TimeoutSec 180
+          if ((Get-FileHash signed-input/signed-update-input.zip).Hash.ToLowerInvariant() -ne 'ac2aec6db4a227406be989d46e728bc7322a283444a3a568b01c6273767fceb4') { throw 'Signed input archive differs.' }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: signed-update-lab-input
+          path: signed-input/signed-update-input.zip
+          retention-days: 7
+          if-no-files-found: error
+  update:
+    needs: stage-input
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - run: npm ci
+      - run: npm --prefix modules/mcp ci
+      - run: npx playwright install chromium
+      - uses: actions/download-artifact@v4
+        with:
+          name: signed-update-lab-input
+          path: artifacts/signed-update-lab
+      - name: Validate inputs and stage the unmodified public baseline before proxy setup
+        shell: pwsh
+        run: |
+          $root = Join-Path $PWD artifacts/signed-update-lab
+          $zip = Join-Path $root signed-update-input.zip
+          if ((Get-FileHash $zip).Hash.ToLowerInvariant() -ne 'ac2aec6db4a227406be989d46e728bc7322a283444a3a568b01c6273767fceb4') { throw 'Signed input archive differs.' }
+          $candidate = Join-Path $root candidate
+          Expand-Archive -LiteralPath $zip -DestinationPath $candidate
+          $config = @{ schemaVersion=1; targetVersion='0.1.14'; directory=$candidate; pins=@{
+            descriptor='a72515762bea3ca766e01ecac958308edb9f6e73e4d59b48fa0e1025ea4abdf9'
+            descriptorSignature='d644e0b492cd94404b8e5adc11485bf15693ebd3fecf23fb8b72ee04084b8fe0'
+            installer='284820f92de487e8a0f1bb5b3b99cafe5e073f0402a9350a2ea6e76fa9543157'
+            manifest='889e9afcfd3d43032e99edc35c08626ded570f1a63b7f7e1acc393d8f69a889a'
+            executable='cd5e3fd2829727d06444c0f3266b178798d1b55c63df651be12eb38ac4523a86'
+          }}
+          $config | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $root lab-config.json) -Encoding utf8NoBOM
+          node -e "const fs=require('fs');require('./scripts/self-update-lab-feed.cjs').loadContract(JSON.parse(fs.readFileSync(process.argv[1],'utf8')));console.log('Pinned lab contract accepted; not native update acceptance.')" (Join-Path $root lab-config.json)
+          if ($LASTEXITCODE -ne 0) { throw 'Lab contract refused.' }
+          Invoke-WebRequest -Uri 'https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/download/v0.1.12/Creator.Hub_0.1.12_x64-setup.exe' -OutFile (Join-Path $root baseline.exe) -TimeoutSec 180
+          if ((Get-FileHash (Join-Path $root baseline.exe)).Hash.ToLowerInvariant() -ne '0cd8a4493dd9a5b77fbc5fe160582a2b2698fea43aedd9118b2d5b3bd3c51a18') { throw 'Public baseline differs.' }
+      - name: Unit refusal and lifecycle checks
+        run: node --test scripts/native-self-update-lab.test.cjs scripts/self-update-lab-feed.test.cjs scripts/self-update-lab-target.test.cjs
+      - name: Actual old-app signed update, native cancellation, restart and managed reconnect
+        # Explicit script success exit code must accompany the independent actual app receipt.
+        shell: pwsh
+        run: |
+          ./scripts/native-self-update-lab.ps1 -ContractPath (Join-Path $PWD artifacts/signed-update-lab/lab-config.json) -BaselineInstallerPath (Join-Path $PWD artifacts/signed-update-lab/baseline.exe) -TimeoutSeconds 480 | Tee-Object -FilePath artifacts/signed-update-lab/lifecycle-public-metadata.jsonl
+          if ($LASTEXITCODE -ne 0) { throw 'Signed lab update failed; public/native release readiness is not established.' }
+          $reports = @(Get-ChildItem -LiteralPath artifacts -Directory | Where-Object { $_.Name -like 'native-suite-*' } | ForEach-Object { Get-ChildItem -LiteralPath $_.FullName -File -Filter self-update-report.json })
+          if ($reports.Count -ne 1) { throw 'Expected one actual app update receipt.' }
+          $receipt = Get-Content -LiteralPath $reports[0].FullName -Raw | ConvertFrom-Json
+          if ($receipt.passed -ne $true -or $receipt.selfUpdateTested -ne $true -or $receipt.managedRouteReconnectTested -ne $true -or $receipt.policyRestored -ne $true -or $receipt.publicDiscovery -ne $false -or $receipt.releaseReady -ne $false) { throw 'Actual controlled-feed update receipt is incomplete.' }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: unmodified-stable-signed-update-lab
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            artifacts/native-suite-*/self-update-report.json
+            artifacts/native-suite-*/*.png
+            artifacts/native-suite-*/startup.json
+            artifacts/native-suite-*/dialogs.json
+            artifacts/native-suite-*/webview-policy.json
+            artifacts/signed-update-lab/lifecycle-public-metadata.jsonl
+            artifacts/signed-update-lab/lab-config.json

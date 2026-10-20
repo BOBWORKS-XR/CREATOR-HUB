@@ -1,0 +1,158 @@
+name: Linux DEB helper actual transaction (disposable mechanism only)
+on:
+  push:
+    branches: [validation/linux-deb-helper-transaction-014]
+    paths:
+      - .github/workflows/linux-deb-helper-transaction-014.yml
+      - native/linux-deb-retirement/**
+      - rust-toolchain.toml
+      - scripts/linux-deb-helper-transaction-probe.py
+      - scripts/linux-deb-helper-transaction.test.py
+      - scripts/linux-deb-helper-transaction-sdk.cjs
+      - scripts/linux-deb-helper-transaction-sdk.test.cjs
+      - scripts/linux-setup-helper-transaction-probe.py
+      - scripts/linux-setup-helper-transaction.test.py
+      - scripts/linux-deb-retention-probe.py
+      - scripts/linux-deb-retention-sdk.cjs
+      - scripts/linux-deb-retention-sdk.test.cjs
+      - modules/mcp/package.json
+      - modules/mcp/package-lock.json
+permissions:
+  contents: read
+  actions: read
+jobs:
+  helper-transaction:
+    if: github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.repository_id == '1364807512' && github.ref == 'refs/heads/validation/linux-deb-helper-transaction-014' && github.event_name == 'push'
+    runs-on: ubuntu-22.04
+    container:
+      image: ubuntu:22.04@sha256:08ea48a03a3e78ebc7cd526e6a275053223aadd88bfc09cc49b06d5281525fde
+      options: --cpus 2 --memory 6g
+    timeout-minutes: 25
+    env:
+      CREATOR_LINUX_DEB_HELPER_TRANSACTION: '1'
+      DEBIAN_FRONTEND: noninteractive
+      CREATOR_LINUX_DEB_HELPER_CONTAINER_IMAGE: ubuntu:22.04@sha256:08ea48a03a3e78ebc7cd526e6a275053223aadd88bfc09cc49b06d5281525fde
+      CARGO_HOME: /opt/creator-cargo
+      RUSTUP_HOME: /opt/creator-rustup
+      PATH: /opt/creator-cargo/bin:/opt/creator-node/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+    defaults:
+      run:
+        shell: sudo -H -u fixture -E env PATH=/opt/creator-cargo/bin:/opt/creator-node/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin bash --noprofile --norc -eo pipefail {0}
+    steps:
+      - name: Bootstrap only the pinned disposable container and fixture UID 1001
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(id -u)" = 0 && test -f /.dockerenv
+          test "$GITHUB_REPOSITORY" = BOBWORKS-XR/CREATOR-HUB && test "$GITHUB_REPOSITORY_ID" = 1364807512
+          test "$GITHUB_REF" = refs/heads/validation/linux-deb-helper-transaction-014 && test "$GITHUB_EVENT_NAME" = push
+          test "$GITHUB_ACTIONS" = true && test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = Linux && test "$RUNNER_ARCH" = X64 && test "$(uname -m)" = x86_64
+          . /etc/os-release
+          test "$ID" = ubuntu && test "$VERSION_ID" = 22.04
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates curl git python3 build-essential sudo xz-utils
+          test -z "$(getent passwd 1001)" && test -z "$(getent group 1001)"
+          groupadd --gid 1001 fixture
+          useradd --uid 1001 --gid 1001 --create-home --shell /bin/bash fixture
+          printf 'fixture ALL=(root) NOPASSWD: ALL\n' > /etc/sudoers.d/creator-fixture
+          chmod 0440 /etc/sudoers.d/creator-fixture
+          visudo -cf /etc/sudoers.d/creator-fixture
+          install -d -o 1001 -g 1001 /opt/creator-cargo /opt/creator-rustup
+          tools="$(mktemp -d /tmp/creator-tools.XXXXXX)"
+          curl --fail --silent --show-error --location https://nodejs.org/dist/v24.17.0/node-v24.17.0-linux-x64.tar.xz -o "$tools/node.tar.xz"
+          printf 'ab343a1b747c7cbf3630dfd7dbf818c5423fab2eb4f5ad1afc896f6bd121a917  %s\n' "$tools/node.tar.xz" | sha256sum --check --strict
+          install -d /opt/creator-node
+          tar --extract --xz --file "$tools/node.tar.xz" --strip-components=1 --no-same-owner --directory /opt/creator-node
+          curl --fail --silent --show-error --location https://sh.rustup.rs -o "$tools/rustup-init.sh"
+          chmod 0755 "$tools"
+          sudo -H -u fixture -E env PATH="$PATH" sh "$tools/rustup-init.sh" -y --profile minimal --default-toolchain 1.99.0 --component clippy --component rustfmt --no-modify-path
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Give fixture ownership only of exact resolved ephemeral checkout temp and caches
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import os, subprocess
+          from pathlib import Path
+          targets = (Path(os.environ['GITHUB_WORKSPACE']), Path(os.environ['RUNNER_TEMP']), Path(os.environ['CARGO_HOME']), Path(os.environ['RUSTUP_HOME']))
+          expected = (Path('/__w/CREATOR-HUB/CREATOR-HUB'), Path('/__w/_temp'), Path('/opt/creator-cargo'), Path('/opt/creator-rustup'))
+          assert os.getuid() == 0 and Path('/.dockerenv').is_file()
+          assert targets == expected
+          assert all(path.is_absolute() and path.resolve(strict=True) == path and path.is_dir() for path in targets)
+          subprocess.run(['/usr/bin/chown', '-R', '-P', '--no-dereference', '--', '1001:1001', *map(str, targets)], check=True)
+          PY
+      - name: Pure syntax and regression preflight as fixture before original package download
+        run: |
+          test "$(id -u)" = 1001
+          python3 -B -c "import ast,pathlib; [ast.parse(pathlib.Path(p).read_text(), filename=p) for p in ['scripts/linux-deb-helper-transaction-probe.py','scripts/linux-deb-helper-transaction.test.py','scripts/linux-setup-helper-transaction-probe.py','scripts/linux-setup-helper-transaction.test.py']]"
+          node --check scripts/linux-deb-helper-transaction-sdk.cjs
+          node --check scripts/linux-deb-helper-transaction-sdk.test.cjs
+          node --check scripts/linux-deb-retention-sdk.cjs
+          node --check scripts/linux-deb-retention-sdk.test.cjs
+          python3 -B scripts/linux-deb-helper-transaction.test.py
+          python3 -B scripts/linux-setup-helper-transaction.test.py
+          node --test scripts/linux-deb-helper-transaction-sdk.test.cjs scripts/linux-deb-retention-sdk.test.cjs
+      - name: Record pinned container image and actual dpkg toolchain and environment identity
+        run: python3 -B scripts/linux-deb-helper-transaction-probe.py container-identity
+      - name: Capture fixed parent lstat and installed dpkg version without privilege before Cargo
+        run: python3 -B scripts/linux-deb-helper-transaction-probe.py metadata-diagnostic
+      - name: Read-only native metadata and helper regression gate before package installation
+        # Includes exact root-directory admission used by Setup absence checks.
+        run: |
+          cargo test --locked --manifest-path native/linux-deb-retirement/Cargo.toml
+          cargo test --locked --manifest-path native/linux-deb-retirement/Cargo.toml --features experimental-transaction
+          cargo clippy --locked --manifest-path native/linux-deb-retirement/Cargo.toml --all-targets --all-features -- -D warnings
+          cargo test --locked --manifest-path native/linux-deb-retirement/Cargo.toml --lib linux::metadata::tests::host_metadata_read_only_preflight -- --ignored --exact --nocapture
+          cargo test --locked --manifest-path native/linux-deb-retirement/Cargo.toml --lib linux::tests::disposable_read_only_audit_proves_root_home_warning_and_clean_fixed_environment -- --ignored --exact --nocapture
+      - name: Reuse original public MCP DEB from the pinned earlier retention artifact
+        uses: actions/download-artifact@v5
+        with:
+          artifact-ids: '11929999662'
+          run-id: '38642404016'
+          github-token: ${{ github.token }}
+          merge-multiple: true
+          path: /__w/_temp/linux-deb-helper-transaction-input
+      - name: Download exact published Setup 0.3.7 fixture without installing it
+        run: |
+          stat -c '%u %g %a %n' /__w/_temp/linux-deb-helper-transaction-input
+          directory=/__w/_temp/linux-setup-helper-transaction-input
+          mkdir --mode=0700 "$directory"
+          test "$(stat -c %u "$directory")" = 1001
+          input="$directory/Creator.Project.Setup_0.3.7_amd64.deb"
+          test ! -e "$input" && test ! -L "$input"
+          curl --fail --silent --show-error --location https://github.com/BOBWORKS-XR/CREATOR-PROJECT-SETUP/releases/download/v0.3.7/Creator.Project.Setup_0.3.7_amd64.deb -o "$input"
+          test "$(stat -c %s "$input")" = 5966970
+          printf 'be18f23450146e71a2960e2110474f6e0409a9521a3ced308b7fd6a6d584c63d  %s\n' "$input" | sha256sum --check --strict
+      - name: Install existing lockfile-pinned SDK without lifecycle scripts or product build
+        run: npm ci --prefix modules/mcp --omit=dev --ignore-scripts --no-audit --no-fund
+      - name: Build only experimental helper, install both baselines and preserve live SDK across both retirements
+        # Keep distro documentation exclusions unchanged; the required notice is package data.
+        run: node scripts/linux-deb-helper-transaction-sdk.cjs
+      # Capture even an artifact/setup failure. Never clear diversions, markers or stages.
+      - name: Read-only final system diversions, package state and protected helper evidence
+        if: always()
+        run: python3 -B scripts/linux-deb-helper-transaction-probe.py diagnostics
+      - name: Retain Setup package, protected candidate and dpkg evidence without retries
+        # Capture missing files and unchanged distro path exclusions on failure.
+        if: always()
+        run: python3 -B scripts/linux-setup-helper-transaction-probe.py diagnostics
+      - name: Retain original logs and false production gates, not product/package payloads
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-deb-helper-transaction-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            /__w/_temp/linux-deb-helper-preflight/*.json
+            /__w/_temp/linux-deb-helper-preflight/*.stdout
+            /__w/_temp/linux-deb-helper-preflight/*.stderr
+            /__w/_temp/linux-deb-helper-transaction/*.json
+            /__w/_temp/linux-deb-helper-transaction/*.stdout
+            /__w/_temp/linux-deb-helper-transaction/*.stderr
+            /__w/_temp/linux-deb-helper-transaction/setup/*.json
+            /__w/_temp/linux-deb-helper-transaction/setup/*.stdout
+            /__w/_temp/linux-deb-helper-transaction/setup/*.stderr

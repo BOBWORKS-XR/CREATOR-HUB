@@ -1,0 +1,52 @@
+name: Read-only 14 retained Intel app DMG repack (diagnostic only)
+
+on:
+  push:
+    branches: ['validation/mac-dmg-repack-014']
+    paths: ['.github/workflows/macos-dmg-repack.yml']
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  repack:
+    if: ${{ false }} # macOS support suspended; preserve historical workflow only.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # No ARM row: the retained failed-run app and all pins are x64-only.
+          - os: macos-15-intel
+            target: macos-intel
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24.17.0
+      - name: Install JS test dependencies only (no app build)
+        run: npm ci
+      - name: Check wrapper and headless worker guards
+        run: node --test scripts/macos-dmg-repack.test.cjs scripts/macos-dmg.test.cjs
+      - name: Repack exact retained failed-CI Intel app without rebuilding or signing
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CREATOR_MACOS_DMG_EXPERIMENT: '1'
+          CREATOR_MACOS_DMG_REPACK: '1'
+        run: |
+          set -euo pipefail
+          temp=$(/usr/bin/python3 -c 'import os; print(os.path.realpath(os.environ["RUNNER_TEMP"]))')
+          node scripts/macos-dmg-repack.cjs --target '${{ matrix.target }}' --output "$temp/macos-dmg-repack"
+      - name: Preserve original ZIP, original inputs and new failure/tool reports (not release)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: readonly14-headless-dmg-diagnostic-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/macos-dmg-repack/
+          retention-days: 7
+          if-no-files-found: warn
+          include-hidden-files: true

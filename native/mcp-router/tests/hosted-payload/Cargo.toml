@@ -1,0 +1,11 @@
+[package]
+name = "creator-hub-unix-hosted-payload-tests"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+libc = "0.2"
+sha2 = "0.10"
+tempfile = "3"
+uuid = { version = "1", features = ["v4"] }

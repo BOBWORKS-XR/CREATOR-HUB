@@ -1,0 +1,53 @@
+name: Linux migration integration preflight (not release acceptance)
+
+on:
+  push:
+    branches: [validation/linux-migration-preflight-014]
+    paths: [.github/workflows/linux-migration-preflight-014.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    if: github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.repository_id == '1364807512'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.99.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            src-tauri
+            native/linux-retirement-check
+          cache-on-failure: true
+      - name: Test finite helper protocol before installing compilation dependencies
+        run: |
+          cargo fmt --manifest-path native/linux-retirement-check/Cargo.toml --check
+          cargo clippy --locked --manifest-path native/linux-retirement-check/Cargo.toml --all-targets -- -D warnings
+          cargo test --locked --manifest-path native/linux-retirement-check/Cargo.toml
+          cargo build --locked --manifest-path native/linux-deb-retirement/Cargo.toml
+          node --test scripts/linux-retirement-integration.test.cjs scripts/linux-update.test.cjs scripts/linux-deb-helper.test.cjs scripts/flatpak-host-reader.test.cjs
+      - name: Execute native helper and host-reader fixtures without installing a Creator app
+        run: |
+          cargo test --locked --manifest-path native/flatpak-host-reader/Cargo.toml observable_same_length_in_place_change_during_read_is_not_returned -- --exact linux::tests::observable_same_length_in_place_change_during_read_is_not_returned --nocapture
+          cargo test --locked --manifest-path native/linux-deb-retirement/Cargo.toml
+          cargo test --locked --manifest-path native/linux-deb-retirement/Cargo.toml --features experimental-transaction --target-dir native/linux-deb-retirement/target/experimental
+          cargo clippy --locked --manifest-path native/flatpak-host-reader/Cargo.toml --all-targets -- -D warnings
+          cargo test --locked --manifest-path native/flatpak-host-reader/Cargo.toml
+          cargo test --locked --manifest-path native/linux-update-check/Cargo.toml
+      - name: Install compilation dependencies only on this disposable runner
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev libxdo-dev libssl-dev librsvg2-dev build-essential
+      - name: Check actual Linux Root with the nondefault migration route
+        # Bind both finite products, partial outcomes and read-only interruption review.
+        run: cargo check --locked --manifest-path src-tauri/Cargo.toml --all-targets --features experimental-linux-migration
+      - name: Run Root migration and journal regressions without launching an app
+        run: |
+          cargo test --locked --manifest-path src-tauri/Cargo.toml --features experimental-linux-migration convergence
+          cargo test --locked --manifest-path src-tauri/Cargo.toml --features experimental-linux-migration linux_retirement

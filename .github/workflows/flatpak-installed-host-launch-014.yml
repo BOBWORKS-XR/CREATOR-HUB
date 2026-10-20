@@ -1,0 +1,102 @@
+name: Installed synthetic Flatpak host launch (not Hub integration acceptance)
+
+on:
+  push:
+    branches: [validation/flatpak-installed-host-launch-014]
+    paths:
+      - .github/workflows/flatpak-installed-host-launch-014.yml
+      - scripts/native-flatpak-installed-transport.cjs
+      - scripts/native-flatpak-installed-transport.test.cjs
+      - scripts/flatpak-host-launch.test.cjs
+      - native/flatpak-host-launch/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  installed-transport:
+    if: >-
+      github.repository == 'BOBWORKS-XR/CREATOR-HUB' &&
+      github.repository_id == '1364807512' &&
+      github.ref == 'refs/heads/validation/flatpak-installed-host-launch-014' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-22.04
+    timeout-minutes: 25
+    env:
+      CREATOR_FLATPAK_INSTALLED_TRANSPORT: '1'
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24.17.0
+      - uses: dtolnay/rust-toolchain@1.99.0
+      - name: Source, metadata, refusal and YAML/Bash preflight before native setup
+        run: |
+          set -euo pipefail
+          npm ci --ignore-scripts
+          node --test scripts/native-flatpak-installed-transport.test.cjs scripts/flatpak-host-launch.test.cjs
+          node -e 'require("./scripts/native-flatpak-installed-transport.cjs").admission()'
+          cargo fmt --manifest-path native/flatpak-host-launch/Cargo.toml --check
+          cargo test --locked --manifest-path native/flatpak-host-launch/Cargo.toml \
+            --target-dir "$RUNNER_TEMP/flatpak-metadata-unit-target" --lib linux::identity::tests::metadata_refusal_
+          test "$(id -u)" -ne 0
+          uname -r
+      - name: Provision reviewed native Flatpak 1.18.4 on this disposable runner only
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential meson ninja-build pkg-config bison gettext gperf git curl ca-certificates \
+            libcap-dev libarchive-dev libglib2.0-dev libcurl4-openssl-dev libxml2-dev libzstd-dev \
+            libsystemd-dev libfuse3-dev fuse3 libxau-dev libostree-dev libjson-glib-dev libappstream-dev \
+            libgdk-pixbuf-2.0-dev libseccomp-dev libgpgme-dev libdbus-1-dev libselinux1-dev \
+            python3-pyparsing ostree
+          src="$RUNNER_TEMP/flatpak-1.18.4-source"
+          mkdir -m 700 "$src"
+          curl --fail --location --proto '=https' --tlsv1.2 --max-time 120 \
+            'https://github.com/flatpak/flatpak/releases/download/1.18.4/flatpak-1.18.4.tar.xz' \
+            --output "$src/upstream.tar.xz"
+          test "$(stat -c %s "$src/upstream.tar.xz")" = 1363232
+          printf '%s  %s\n' b899a7a00c48d2c626cb8ec33fe556720b376c25805d7222430c0fdca4c6ac8d "$src/upstream.tar.xz" | sha256sum --check --strict
+          tar -xJf "$src/upstream.tar.xz" --directory "$src" --no-same-owner
+          meson setup "$src/build" "$src/flatpak-1.18.4" --prefix=/usr --sysconfdir=/etc \
+            --localstatedir=/var --libdir=lib/x86_64-linux-gnu --buildtype=release \
+            -Dtests=false -Dinstalled_tests=false -Ddocbook_docs=disabled -Dman=disabled \
+            -Dgtkdoc=disabled -Dgir=disabled -Dmalcontent=disabled -Ddconf=disabled \
+            -Dselinux_module=disabled -Dsystem_helper=disabled -Dwayland_security_context=disabled
+          test "$(git -C "$src/flatpak-1.18.4/subprojects/bubblewrap" rev-parse HEAD)" = 2a76602a8c71f36c1527cf9fc3417d9149822e0c
+          test "$(git -C "$src/flatpak-1.18.4/subprojects/dbus-proxy" rev-parse HEAD)" = 72b40c8f6d9d585cfbdb249690724f740d207087
+          meson compile -C "$src/build" -j 2
+          sudo meson install -C "$src/build" --no-rebuild
+          sudo ldconfig
+          test "$(/usr/bin/flatpak --version)" = 'Flatpak 1.18.4'
+          sha256sum /usr/bin/flatpak /usr/libexec/flatpak-bwrap /usr/libexec/flatpak-dbus-proxy
+      - name: Install verified public Platform in the default system installation only
+        run: |
+          set -euo pipefail
+          sudo /usr/bin/flatpak remote-add --system flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+          sudo /usr/bin/flatpak install --system --noninteractive --assumeyes --no-related flathub org.gnome.Platform/x86_64/50
+          /usr/bin/flatpak info --system --show-commit runtime/org.gnome.Platform/x86_64/50
+      - name: Fetch only the locked public Rust dependencies
+        run: cargo fetch --locked --manifest-path native/flatpak-host-launch/Cargo.toml
+      - name: Compile echo, install unsigned isolated fixture, pin independently, compile host and exchange once
+        run: |
+          set -euo pipefail
+          export CREATOR_FLATPAK_FIXTURE_CARGO="$(command -v cargo)"
+          export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
+          export RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
+          timeout --signal=TERM --kill-after=5s 10m node scripts/native-flatpak-installed-transport.cjs run
+      - name: Retain bounded original receipts and native stdout even on refusal
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: flatpak-installed-transport-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/creator-flatpak-launch-proof/deployment-metadata-refusal.json
+            ${{ runner.temp }}/creator-flatpak-launch-proof/*.json
+            ${{ runner.temp }}/creator-flatpak-launch-proof/logs/*

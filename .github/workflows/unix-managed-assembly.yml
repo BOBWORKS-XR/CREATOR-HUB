@@ -1,0 +1,406 @@
+name: Fresh signed Linux packages (not acceptance)
+on:
+  push:
+    branches: [validation/unix-assembly-014]
+  workflow_dispatch:
+    inputs:
+      signed_inputs:
+        description: Exact platform, runner, private validation asset ID, ZIP size/hash and handoff hash pins
+        type: string
+        required: true
+      linux_retirement_test_candidate:
+        description: Build only the acceptance-only native DEB with the fixed helper and auth_admin policy; never publish
+        type: boolean
+        default: false
+        required: false
+      linux_integrated_candidate:
+        description: Build the integrated Linux DEB candidate with native activation; no acceptance or publication
+        type: boolean
+        default: false
+        required: false
+      linux_production_migration_016:
+        description: Build a new 016 Root with strict production migration protocol and fixed administrator policy; qualification and publication remain separate
+        type: boolean
+        default: false
+        required: false
+      linux_portable_host_candidate:
+        description: Compile new Linux Root with signed portable startup binding; production016 also includes native portable update/restart; not installation or acceptance
+        type: boolean
+        default: false
+        required: false
+permissions:
+  contents: read
+jobs:
+  candidate-options:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    env:
+      CREATOR_LINUX_RETIREMENT_TEST_CANDIDATE: ${{ inputs.linux_retirement_test_candidate && '1' || '0' }}
+      CREATOR_LINUX_INTEGRATED_CANDIDATE: ${{ inputs.linux_integrated_candidate && '1' || '0' }}
+      CREATOR_LINUX_PRODUCTION_MIGRATION_016: ${{ inputs.linux_production_migration_016 && '1' || '0' }}
+      CREATOR_LINUX_PORTABLE_HOST_CANDIDATE: ${{ inputs.linux_portable_host_candidate && '1' || '0' }}
+      SIGNED_INPUTS: ${{ inputs.signed_inputs }}
+    steps:
+      - name: Refuse conflicting candidate profiles before any download
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${CREATOR_LINUX_PRODUCTION_MIGRATION_016:-0}" == 1 && ( "$CREATOR_LINUX_RETIREMENT_TEST_CANDIDATE" != 0 || "$CREATOR_LINUX_INTEGRATED_CANDIDATE" != 0 || "$GITHUB_REF" != refs/heads/validation/linux-integrated-candidate-016 || "$GITHUB_EVENT_NAME" != workflow_dispatch ) ]]; then
+            echo '::error::Production migration requires the explicit 016 profile, not either development profile.' >&2
+            exit 64
+          fi
+          if [[ "${CREATOR_LINUX_PORTABLE_HOST_CANDIDATE:-0}" == 1 && ( ( "$CREATOR_LINUX_INTEGRATED_CANDIDATE" != 1 && "${CREATOR_LINUX_PRODUCTION_MIGRATION_016:-0}" != 1 ) || "$CREATOR_LINUX_RETIREMENT_TEST_CANDIDATE" != 0 || "$GITHUB_REF" != refs/heads/validation/linux-integrated-candidate-016 || "$GITHUB_EVENT_NAME" != workflow_dispatch ) ]]; then
+            echo '::error::Portable host compilation requires the explicit 016 integrated Linux profile.' >&2
+            exit 64
+          fi
+          if [[ "$CREATOR_LINUX_RETIREMENT_TEST_CANDIDATE" == 1 && "$CREATOR_LINUX_INTEGRATED_CANDIDATE" == 1 ]]; then
+            echo '::error::Choose either the TEST ONLY retirement profile or the integrated candidate, not both.' >&2
+            exit 64
+          fi
+          if [[ "$GITHUB_REF" == refs/heads/validation/linux-integrated-candidate-016 ]]; then
+            python3 - <<'PY'
+          import json, os
+          assert os.environ['GITHUB_REPOSITORY'] == 'BOBWORKS-XR/CREATOR-HUB'
+          assert os.environ['GITHUB_REPOSITORY_ID'] == '1364807512'
+          assert os.environ['GITHUB_EVENT_NAME'] == 'workflow_dispatch'
+          assert (os.environ['CREATOR_LINUX_INTEGRATED_CANDIDATE'] == '1') != (os.environ.get('CREATOR_LINUX_PRODUCTION_MIGRATION_016', '0') == '1')
+          assert os.environ['CREATOR_LINUX_RETIREMENT_TEST_CANDIDATE'] == '0'
+          inputs = json.loads(os.environ['SIGNED_INPUTS'])
+          assert len(inputs) == 1 and inputs[0]['target'] == 'linux' and inputs[0]['os'] == 'ubuntu-22.04'
+          PY
+          fi
+  stage-input:
+    needs: candidate-options
+    if: ${{ !(inputs.linux_retirement_test_candidate && inputs.linux_integrated_candidate) }}
+    # Draft assets need push permission. No checkout, dependency installation,
+    # candidate decoding or application execution runs with this token.
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(inputs.signed_inputs || '[{"target":"linux","os":"ubuntu-22.04","assetId":641883669,"zipBytes":53946597,"zipSha256":"28887d8d783468e04583d75905ca732237986f90110dea1d4929a103e37c6eb5","handoffSha256":"75cab0f78bb373c0a6d65a13b3c145b168e1b05439fd257e76991ad14d7295ae"}]') }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - name: Read only the pinned public-signature-only validation asset
+        uses: actions/github-script@v8
+        env:
+          ASSET_ID: ${{ matrix.assetId }}
+          ZIP_BYTES: ${{ matrix.zipBytes }}
+          ZIP_SHA256: ${{ matrix.zipSha256 }}
+          HANDOFF_SHA256: ${{ matrix.handoffSha256 }}
+          TARGET: ${{ matrix.target }}
+          HUB_VERSION: ${{ github.ref == 'refs/heads/validation/linux-integrated-candidate-016' && '0.1.16' || '0.1.14' }}
+        with:
+          script: |
+            const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto');
+            assert.equal(process.env.TARGET,'linux','macOS support is suspended');
+            assert.ok(['0.1.14','0.1.16'].includes(process.env.HUB_VERSION));
+            if(process.env.HUB_VERSION==='0.1.16')assert.equal(context.ref,'refs/heads/validation/linux-integrated-candidate-016');
+            const id=Number(process.env.ASSET_ID),size=Number(process.env.ZIP_BYTES),digest=process.env.ZIP_SHA256;
+            assert.ok(Number.isSafeInteger(id)&&id>0&&Number.isSafeInteger(size)&&size>0&&size<=300*1024*1024);
+            assert.match(digest,/^[a-f0-9]{64}$/);assert.match(process.env.HANDOFF_SHA256,/^[a-f0-9]{64}$/);
+            const {data:release}=await github.rest.repos.getRelease({...context.repo,release_id:411494394});
+            assert.equal(release.draft,true);assert.equal(release.tag_name,'v0.1.13-validation');
+            const assets=await github.paginate(github.rest.repos.listReleaseAssets,{...context.repo,release_id:release.id,per_page:100});
+            const matches=assets.filter(a=>a.id===id);assert.equal(matches.length,1);
+            const asset=matches[0];assert.equal(asset.size,size);assert.equal(asset.digest,`sha256:${digest}`);
+            assert.ok(asset.name.startsWith(`signed-unix-handoff-${process.env.HUB_VERSION}-${process.env.TARGET}-`)&&asset.name.endsWith('.zip'));
+            const {data}=await github.rest.repos.getReleaseAsset({...context.repo,asset_id:id,headers:{accept:'application/octet-stream'}});
+            const bytes=Buffer.from(data);assert.equal(bytes.length,size);assert.equal(crypto.createHash('sha256').update(bytes).digest('hex'),digest);
+            fs.writeFileSync(path.join(fs.realpathSync(process.env.RUNNER_TEMP),'signed-unix-handoff.zip'),bytes,{flag:'wx',mode:0o600});
+      - uses: actions/upload-artifact@v4
+        with:
+          name: signed-unix-input-${{ matrix.target }}
+          path: ${{ runner.temp }}/signed-unix-handoff.zip
+          retention-days: 7
+          if-no-files-found: error
+  assembly:
+    needs: stage-input
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(inputs.signed_inputs || '[{"target":"linux","os":"ubuntu-22.04","assetId":641883669,"zipBytes":53946597,"zipSha256":"28887d8d783468e04583d75905ca732237986f90110dea1d4929a103e37c6eb5","handoffSha256":"75cab0f78bb373c0a6d65a13b3c145b168e1b05439fd257e76991ad14d7295ae"}]') }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 65
+    env:
+      CREATOR_UNIX_HANDOFF_SHA256: ${{ matrix.handoffSha256 }}
+      CREATOR_LINUX_RETIREMENT_TEST_CANDIDATE: ${{ inputs.linux_retirement_test_candidate && '1' || '0' }}
+      CREATOR_LINUX_INTEGRATED_CANDIDATE: ${{ inputs.linux_integrated_candidate && '1' || '0' }}
+      CREATOR_LINUX_PRODUCTION_MIGRATION_016: ${{ inputs.linux_production_migration_016 && '1' || '0' }}
+      CREATOR_LINUX_PORTABLE_HOST_CANDIDATE: ${{ inputs.linux_portable_host_candidate && '1' || '0' }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check the portable handoff wrapper before dependency installation
+        run: |
+          python3 -B scripts/pack-signed-unix-handoff.test.py
+          python3 -B scripts/stage-signed-unix-handoff.test.py
+      - uses: actions/download-artifact@v4
+        with:
+          name: signed-unix-input-${{ matrix.target }}
+          path: ${{ runner.temp }}/assembly-signed-input
+      - name: Stage exactly nine bounded files without executing any candidate payload
+        env:
+          ZIP_BYTES: ${{ matrix.zipBytes }}
+          ZIP_SHA256: ${{ matrix.zipSha256 }}
+        run: |
+          set -euo pipefail
+          temp=$(python3 -B -c 'import os; print(os.path.realpath(os.environ["RUNNER_TEMP"]))')
+          python3 -B scripts/stage-signed-unix-handoff.py "$temp/assembly-signed-input/signed-unix-handoff.zip" "$ZIP_SHA256" "$ZIP_BYTES" "$temp/signed-unix-input"
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24.17.0
+          cache: npm
+      - uses: dtolnay/rust-toolchain@1.99.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            native/unix-transfer
+            src-tauri -> ../artifacts/unix-verifier-target
+          cache-on-failure: true
+      - name: Install native Linux prerequisites only on the disposable runner
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev libxdo-dev libssl-dev librsvg2-dev build-essential file \
+            patchelf rpm libarchive-tools python3-yaml
+          for tool in patchelf rpm bsdtar dpkg-deb file; do command -v "$tool"; done
+      - run: npm ci
+      - name: Check the handoff and bounded native extraction contracts
+        run: |
+          node --test scripts/assemble-unix-payload.test.cjs scripts/sign-unix-payload.test.cjs scripts/unix-managed-payload.test.cjs scripts/linux-retirement-package.test.cjs scripts/build-unified.test.cjs scripts/linux-016-portable-package.test.cjs
+          python3 -B scripts/stage-signed-unix-handoff.test.py
+          python3 -B scripts/linux-retirement-package-verify.test.py
+      - name: Test Linux migration completion and real owned GUI process detection before packaging
+        run: >-
+          cargo test --release --locked --manifest-path src-tauri/Cargo.toml
+          --target-dir artifacts/unix-verifier-target
+      - name: Compile and test the exact Mac SDK diagnostic and action-helper guards
+        if: runner.os == 'macOS'
+        env:
+          CREATOR_MACOS_OWNED_GUI_TEST: '1'
+        run: node --test scripts/native-macos-app-probe.test.cjs scripts/native-macos-window.test.cjs
+      - name: Test nondefault native retirement route before building the acceptance-only DEB
+        if: runner.os == 'Linux' && inputs.linux_retirement_test_candidate
+        run: |
+          cargo test --release --locked --manifest-path src-tauri/Cargo.toml --target-dir artifacts/unix-verifier-target --features experimental-linux-migration convergence
+          cargo test --release --locked --manifest-path src-tauri/Cargo.toml --target-dir artifacts/unix-verifier-target --features experimental-linux-migration linux_retirement
+          cargo test --locked --manifest-path native/linux-deb-retirement/Cargo.toml --features experimental-transaction
+      - name: Test the strict production protocol without accepting or installing a package
+        if: runner.os == 'Linux' && inputs.linux_production_migration_016
+        run: |
+          cargo test --locked --manifest-path native/linux-deb-retirement/Cargo.toml --features production-transaction
+          cargo test --release --locked --manifest-path src-tauri/Cargo.toml --target-dir artifacts/unix-verifier-target --features linux-production-migration linux_retirement
+          cargo test --release --locked --manifest-path src-tauri/Cargo.toml --target-dir artifacts/unix-verifier-target --features linux-production-migration convergence
+      - name: Verify trusted handoff and compile only the outer native Hub
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          temp=$(python3 -B -c 'import os; print(os.path.realpath(os.environ["RUNNER_TEMP"]))')
+          if [[ "${CREATOR_LINUX_PRODUCTION_MIGRATION_016:-0}" == 1 && ( "$CREATOR_LINUX_RETIREMENT_TEST_CANDIDATE" != 0 || "$CREATOR_LINUX_INTEGRATED_CANDIDATE" != 0 || "$GITHUB_REF" != refs/heads/validation/linux-integrated-candidate-016 || "$GITHUB_EVENT_NAME" != workflow_dispatch ) ]]; then
+            echo '::error::Conflicting or non-016 production migration profile.' >&2
+            exit 64
+          fi
+          if [[ "${CREATOR_LINUX_PORTABLE_HOST_CANDIDATE:-0}" == 1 && ( ( "$CREATOR_LINUX_INTEGRATED_CANDIDATE" != 1 && "${CREATOR_LINUX_PRODUCTION_MIGRATION_016:-0}" != 1 ) || "$CREATOR_LINUX_RETIREMENT_TEST_CANDIDATE" != 0 || "$GITHUB_REF" != refs/heads/validation/linux-integrated-candidate-016 || "$GITHUB_EVENT_NAME" != workflow_dispatch ) ]]; then
+            echo '::error::Portable host compilation requires the explicit 016 integrated Linux profile.' >&2
+            exit 64
+          fi
+          if [[ "$CREATOR_LINUX_RETIREMENT_TEST_CANDIDATE" == 1 && "$CREATOR_LINUX_INTEGRATED_CANDIDATE" == 1 ]]; then
+            echo '::error::Conflicting native DEB candidate profiles.' >&2
+            exit 64
+          fi
+          extra=()
+          if [[ "$CREATOR_LINUX_RETIREMENT_TEST_CANDIDATE" == 1 ]]; then extra+=(--linux-retirement-test-candidate); fi
+          if [[ "$CREATOR_LINUX_INTEGRATED_CANDIDATE" == 1 ]]; then extra+=(--linux-integrated-candidate --integrated-features); fi
+          if [[ "${CREATOR_LINUX_PRODUCTION_MIGRATION_016:-0}" == 1 ]]; then extra+=(--linux-production-migration-016 --integrated-features); fi
+          if [[ "${CREATOR_LINUX_PORTABLE_HOST_CANDIDATE:-0}" == 1 ]]; then extra+=(--linux-portable-host-candidate); fi
+          # Integrated runtime snapshot preparation belongs after the builder's trusted extraction.
+          # Do not regenerate release:launcher or enable optional-library tests before that trusted boundary.
+          npm run build:unified -- ci-signed-unix-hub --installer --managed --experimental-unix --experimental-unix-writable --signed-unix-input "$temp/signed-unix-input" "${extra[@]}"
+      - name: Bind the actual packaged Mac app, native version and primary assembly receipt
+        if: runner.os == 'macOS'
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path');
+            const {execFileSync}=require('node:child_process');
+            const probe=require('./scripts/native-macos-app-probe.cjs'),unix=require('./scripts/unix-package-payload.cjs');
+            const output=fs.realpathSync('artifacts/unified/ci-signed-unix-hub');
+            const temp=fs.realpathSync(process.env.RUNNER_TEMP),proof=path.join(temp,'fresh-root-package');
+            const arch=process.env.RUNNER_ARCH==='ARM64'?'aarch64':process.env.RUNNER_ARCH==='X64'?'x86_64':null;
+            assert.ok(arch);assert.equal(process.platform,'darwin');
+            const integrityPin=probe.pin(path.join(output,'unix-package-integrity.json'),1048576,true);
+            const integrity=JSON.parse(integrityPin.bytes);
+            assert.equal(integrity.integrityPassed,true);assert.equal(integrity.platform,'macos');assert.equal(integrity.arch,arch);
+            assert.equal(integrity.experimental,true);assert.equal(integrity.mcpMode,'writable');
+            assert.equal(integrity.writableGuiAccepted,false);assert.equal(integrity.releaseReady,false);
+            assert.deepEqual(integrity.packages.map(p=>p.format),['app','dmg']);
+            const [appRecord,dmgRecord]=integrity.packages;
+            assert.equal(appRecord.path,'native-packages/Creator Hub.app');
+            assert.match(dmgRecord.path,/^native-packages\/[^/\\]+\.dmg$/);
+            assert.equal(dmgRecord.hubSha256,appRecord.hubSha256);assert.deepEqual(dmgRecord.files,appRecord.files);
+            const sourceApp=path.join(output,appRecord.path),sourceExe=path.join(sourceApp,'Contents/MacOS/creator-hub');
+            const sourceInfo=path.join(sourceApp,'Contents/Info.plist');
+            const executablePin=probe.pin(sourceExe),infoPin=probe.pin(sourceInfo,65536,true);
+            assert.equal(executablePin.image.sha256,appRecord.hubSha256);
+            const dmgPin=probe.pin(path.join(output,dmgRecord.path),512*1024*1024);
+            assert.equal(dmgPin.image.sha256,dmgRecord.sha256);
+            const assemblyPin=probe.pin(path.join(output,'signed-unix-assembly.json'),16384,true);
+            const source=probe.assemblyIdentity(assemblyPin.bytes,arch,'0.1.14');
+            assert.equal(source.assemblyCommit,process.env.GITHUB_SHA);
+            assert.equal(source.privateSource.sourceCommit,'a517375633f149aed719c8d5d84031f3303c0bcd');
+            assert.equal(source.privateSource.runId,38599976833);assert.equal(source.handoffSha256,process.env.CREATOR_UNIX_HANDOFF_SHA256);
+            fs.mkdirSync(proof,{mode:0o700});
+            const flags={nativeGuiAccepted:false,mcpAccepted:false,migrationAccepted:false,updateAccepted:false,releaseReady:false};
+            fs.writeFileSync(path.join(proof,'Info.plist'),infoPin.bytes,{flag:'wx',mode:0o600});
+            const info=JSON.parse(execFileSync('/usr/bin/plutil',['-convert','json','-o','-','--','-'],
+              {input:infoPin.bytes,encoding:'utf8',timeout:15000,maxBuffer:65536}));
+            fs.writeFileSync(path.join(proof,'package-info.json'),JSON.stringify({schemaVersion:1,diagnosticOnly:true,...flags,
+              phase:'prelaunch-package-identity',primaryInfoPlistImage:infoPin.image,actualBundle:info},null,2),{flag:'wx',mode:0o600});
+            assert.equal(info.CFBundleIdentifier,'com.creatorworks.hub');assert.equal(info.CFBundleExecutable,'creator-hub');
+            assert.equal(info.CFBundleShortVersionString,'0.1.14');
+            assert.equal(typeof info.CFBundleVersion,'string');assert.match(info.CFBundleVersion,/^\d{1,6}(?:\.\d{1,6}){0,3}$/);
+            const app=path.join(proof,'Creator Hub.app'),receipt=path.join(proof,'signed-unix-assembly.json');
+            fs.cpSync(sourceApp,app,{recursive:true,verbatimSymlinks:true,errorOnExist:true,force:false});
+            fs.copyFileSync(path.join(output,'signed-unix-assembly.json'),receipt,fs.constants.COPYFILE_EXCL);
+            const manifest=JSON.parse(probe.pin(path.join(output,'builtin-manifest.json'),1048576,true).bytes);
+            assert.equal(manifest.platform,'macos');assert.equal(manifest.arch,arch);assert.ok(manifest.managedRouting);
+            assert.deepEqual(unix.verifyResources(path.join(app,'Contents/Resources/modules'),manifest),appRecord.files);
+            execFileSync('/usr/bin/codesign',['--verify','--deep','--strict',app],{timeout:30000,maxBuffer:65536});
+            assert.equal(probe.pin(path.join(app,'Contents/MacOS/creator-hub')).image.sha256,executablePin.image.sha256);
+            assert.equal(probe.pin(path.join(app,'Contents/Info.plist'),65536).image.sha256,infoPin.image.sha256);
+            assert.equal(probe.pin(receipt,16384).image.sha256,assemblyPin.image.sha256);
+            for(const [name,expected,max] of [['unix-package-integrity.json',integrityPin.image,1048576],
+              ['signed-unix-assembly.json',assemblyPin.image,16384]]) assert.ok(probe.sameImage(probe.pin(path.join(output,name),max).image,expected));
+            assert.ok(probe.sameImage(probe.pin(sourceExe).image,executablePin.image));
+            assert.ok(probe.sameImage(probe.pin(sourceInfo,65536).image,infoPin.image));
+            fs.writeFileSync(path.join(proof,'package-probe-binding.json'),JSON.stringify({schemaVersion:1,diagnosticOnly:true,...flags,
+              source,primaryAssemblyImage:assemblyPin.image,primaryIntegrityImage:integrityPin.image,
+              primaryExecutableImage:executablePin.image,primaryInfoPlistImage:infoPin.image,dmg:dmgRecord,actualBundle:info},null,2),{flag:'wx',mode:0o600});
+            core.exportVariable('APP_PATH',app);core.exportVariable('HUB_SHA256',appRecord.hubSha256);
+            core.exportVariable('ASSEMBLY_RECEIPT',receipt);core.exportVariable('ASSEMBLY_RECEIPT_SHA256',assemblyPin.image.sha256);
+      - name: Capture fresh14 Root readiness, exact-owned bitmap and normal native close
+        if: runner.os == 'macOS'
+        env:
+          CREATOR_MACOS_APP_PROBE: '1'
+          CREATOR_MACOS_OWNED_GUI_TEST: '1'
+        run: |
+          node scripts/native-macos-app-probe.cjs --app "$APP_PATH" --hub-sha256 "$HUB_SHA256" --output "$RUNNER_TEMP/root-app-probe" \
+            --expected-version 0.1.14 --assembly-receipt "$ASSEMBLY_RECEIPT" --assembly-receipt-sha256 "$ASSEMBLY_RECEIPT_SHA256"
+      - name: Bind compact Linux byte receipts before uploading large packages
+        if: success() && runner.os == 'Linux'
+        run: |
+          node - <<'NODE'
+          const fs=require('node:fs'),crypto=require('node:crypto'),path=require('node:path');
+          const output=path.resolve('artifacts/unified/ci-signed-unix-hub');
+          const files={};
+          for(const name of ['creator-hub','builtin-manifest.json','modules.tar.gz','signed-unix-assembly.json','unix-package-integrity.json']) {
+            const file=path.join(output,name),stat=fs.lstatSync(file);
+            if(!stat.isFile()||stat.isSymbolicLink()||stat.size<=0||stat.size>256*1024*1024)throw Error('Invalid compact-receipt input');
+            const bytes=fs.readFileSync(file);
+            files[name]={bytes:bytes.length,sha256:crypto.createHash('sha256').update(bytes).digest('hex')};
+          }
+          fs.writeFileSync(path.join(output,'linux-byte-receipts.json'),JSON.stringify({schemaVersion:1,
+            sourceCommit:process.env.GITHUB_SHA,runId:Number(process.env.GITHUB_RUN_ID),runAttempt:Number(process.env.GITHUB_RUN_ATTEMPT),
+            files,nativeGuiAccepted:false,migrationAccepted:false,signedUpdateAccepted:false,releaseReady:false},null,2),{flag:'wx'});
+          NODE
+      - name: Retain compact Linux receipts for independent review, without executable payloads
+        if: success() && runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: signed-linux-receipts-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: error
+          path: |
+            artifacts/unified/ci-signed-unix-hub/linux-byte-receipts.json
+            artifacts/unified/ci-signed-unix-hub/builtin-manifest.json
+            artifacts/unified/ci-signed-unix-hub/signed-unix-assembly.json
+            artifacts/unified/ci-signed-unix-hub/unix-package-integrity.json
+            artifacts/unified/ci-signed-unix-hub/direct-features-candidate.json
+            artifacts/unified/ci-signed-unix-hub/linux-retirement-candidate.json
+            artifacts/unified/ci-signed-unix-hub/linux-retirement-package-integrity.json
+      - name: Retain signed build evidence, not publication or migration acceptance
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: signed-unix-hub-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            artifacts/unified/ci-signed-unix-hub/builtin-manifest.json
+            artifacts/unified/ci-signed-unix-hub/builtin-manifest.pre-wrapper.json
+            artifacts/unified/ci-signed-unix-hub/builtin-manifest.preparation.json
+            artifacts/unified/ci-signed-unix-hub/signed-unix-assembly.json
+            artifacts/unified/ci-signed-unix-hub/unix-package-integrity.json
+            artifacts/unified/ci-signed-unix-hub/native-packages/*.dmg
+            artifacts/unified/ci-signed-unix-hub/native-packages/*.deb
+            artifacts/unified/ci-signed-unix-hub/native-packages/*.rpm
+            artifacts/unified/ci-signed-unix-hub/native-packages/*.AppImage
+            artifacts/unified/ci-signed-unix-hub/creator-hub
+            artifacts/unified/ci-signed-unix-hub/modules.tar.gz
+            artifacts/unified/ci-signed-unix-hub/modules/
+      - name: Retain separate acceptance-only helper and authorization package receipts
+        if: always() && runner.os == 'Linux' && (inputs.linux_retirement_test_candidate || inputs.linux_integrated_candidate)
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-retirement-development-receipts-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            artifacts/unified/ci-signed-unix-hub/linux-retirement-candidate.json
+            artifacts/unified/ci-signed-unix-hub/linux-retirement-package-integrity.json
+            artifacts/unified/ci-signed-unix-hub/tauri-linux-retirement-acceptance.json
+            artifacts/unified/ci-signed-unix-hub/tauri-linux-integrated-candidate.json
+            artifacts/unified/ci-signed-unix-hub/direct-features-candidate.json
+            artifacts/unified/ci-signed-unix-hub/native-activation.service
+      - name: Retain only owned fresh14 package metadata and Root diagnostic reports, including refusals
+        if: always() && runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: fresh14-mac-root-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/fresh-root-package/Info.plist
+            ${{ runner.temp }}/fresh-root-package/package-info.json
+            ${{ runner.temp }}/fresh-root-package/package-probe-binding.json
+            ${{ runner.temp }}/fresh-root-package/signed-unix-assembly.json
+            ${{ runner.temp }}/root-app-probe/*.json
+            ${{ runner.temp }}/root-app-probe/*.stdout
+            ${{ runner.temp }}/root-app-probe/*.stderr
+            ${{ runner.temp }}/root-app-probe/window-bitmap/receipt.json
+      - name: Admit only a completed exact-owned-window bitmap diagnostic
+        if: always() && runner.os == 'macOS'
+        id: bitmap
+        shell: bash
+        run: |
+          node - <<'NODE'
+          const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path');
+          const probe=require('./scripts/native-macos-app-probe.cjs');
+          const root=path.join(fs.realpathSync(process.env.RUNNER_TEMP),'root-app-probe');
+          try {
+            const report=JSON.parse(fs.readFileSync(path.join(root,'report.json'),'utf8'));
+            if(report.windowBitmap?.completed!==true||report.windowBitmap.diagnosticOnly!==true) process.exit(0);
+            const file=path.join(root,'window-bitmap','root-window.png'),image=probe.bitmapImage(file);
+            const {path:reportedPath,...expectedImage}=report.windowBitmap.image||{};
+            assert.equal(reportedPath,file);
+            assert.deepEqual(Object.keys(expectedImage).sort(),Object.keys(image).sort());
+            assert.ok(probe.sameImage(image,expectedImage));
+            for(const key of Object.keys(probe.acceptance)) assert.equal(report.windowBitmap[key],false);
+            fs.appendFileSync(process.env.GITHUB_OUTPUT,'completed=true\n');
+          } catch(error) { if(error.code!=='ENOENT') throw error; }
+          NODE
+      - name: Retain completed owned-window bitmap, never another desktop surface
+        if: always() && runner.os == 'macOS' && steps.bitmap.outputs.completed == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: fresh14-mac-bitmap-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/root-app-probe/window-bitmap/root-window.png
+          retention-days: 7
+          if-no-files-found: error
