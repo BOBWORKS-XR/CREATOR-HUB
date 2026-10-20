@@ -992,9 +992,13 @@ function dynamicTableEvidence(text) {
   const versionTypes = new Map([[0x6ffffff0n, 'VERSYM'], [0x6ffffffcn, 'VERDEF'], [0x6ffffffdn, 'VERDEFNUM'],
     [0x6ffffffen, 'VERNEED'], [0x6fffffffn, 'VERNEEDNUM']]);
   for (const [index, line] of lines.entries()) {
-    const row = /^0x([0-9a-fA-F]{1,16})\s+\(([^()\r\n]+)\)\s+(.+)$/.exec(line);
+    const row = /^0x([0-9a-fA-F]{1,16})\s+\(([^()\r\n]+)\)(?:\s+(.+))?$/.exec(line);
     assert.ok(row, 'Malformed dynamic table row');
     const tag = BigInt(`0x${row[1]}`), type = row[2].trim();
+    assert.equal(tag === 24n, type === 'BIND_NOW', 'Inconsistent dynamic BIND_NOW tag');
+    // DT_BIND_NOW ignores d_un; GNU readelf prints no value for this exact tag.
+    // https://gabi.xinuos.com/elf/08-dynamic.html#dynamic-section
+    assert.ok(row[3] || tag === 24n, 'Malformed dynamic table row');
     assert.equal(tag === 0n, type === 'NULL', 'Inconsistent dynamic NULL tag');
     assert.equal(tag === 1n, type === 'NEEDED', 'Inconsistent dynamic NEEDED tag');
     if (versionTypes.has(tag)) {
