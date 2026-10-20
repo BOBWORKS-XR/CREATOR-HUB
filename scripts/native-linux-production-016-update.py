@@ -798,6 +798,50 @@ def wait(test, seconds=30, pump=lambda: None):
     raise RuntimeError("Readiness deadline; no repeated input, manual successor or outcome adoption")
 
 
+def refusal_diagnostic(error):
+    # Never read locals, source lines, exception messages or native objects here.
+    frames, visited = [], 0
+    current = BaseException.__getattribute__(error, "__traceback__")
+    known_files = {str(root / name): name for root in (HERE, BASE / "scripts") for name in SOURCES}
+    while current is not None and visited < 64:
+        code = current.tb_frame.f_code
+        file, function = code.co_filename, code.co_name
+        known = file in known_files
+        frame = {"file": known_files[file] if known else "other", "line": current.tb_lineno}
+        if known and re.fullmatch(r"[A-Za-z_][A-Za-z_0-9]{0,95}|<module>|<lambda>", function):
+            frame["function"] = function
+        else:
+            frame["functionSha256"] = hashlib.sha256(function[:4096].encode()).hexdigest()
+        if not known:
+            frame["filePrefixSha256"] = hashlib.sha256(file[:4096].encode()).hexdigest()
+            frame["fileChars"] = len(file)
+        frames.append(frame)
+        frames = frames[-16:]
+        current, visited = current.tb_next, visited + 1
+    value = {"schemaVersion": 1, "frames": frames, "visitedFrames": visited,
+             "truncated": current is not None or visited > 16}
+    module = sys.modules.get("gi._error")
+    glib_type = module.__dict__.get("GError") if type(module) is type(sys) else None
+    if isinstance(glib_type, type) and isinstance(error, glib_type):
+        fields = BaseException.__getattribute__(error, "__dict__")
+        domain, code = fields.get("domain"), fields.get("code")
+        info = {"domain": {"kind": "unavailable"}, "code": code if type(code) is int and -(2**31) <= code < 2**31 else None}
+        if type(domain) is str:
+            info["domain"] = ({"value": "atspi_error"} if domain == "atspi_error" else
+                              {"kind": "redacted", "chars": len(domain), "prefixSha256": hashlib.sha256(domain[:256].encode()).hexdigest()})
+        value["glib"] = info
+    require(len(json.dumps(value, allow_nan=False).encode()) <= 8192, "Refusal diagnostic exceeds bound")
+    return value
+
+
+def retain_refusal_diagnostic(record, error):
+    try:
+        if "refusalDiagnostic" not in record:
+            record["refusalDiagnostic"] = refusal_diagnostic(error)
+    except Exception:
+        record.setdefault("refusalDiagnosticUnavailable", True)
+
+
 def fingerprint(file):
     first = Path(file).lstat(); raw = read(file, 2 * 1024**2)
     require(stamp(Path(file).lstat()) == stamp(first), "Fixture changed during observation")
@@ -849,7 +893,7 @@ def windows(x11):
 
 class _IncompleteHtmlSnapshot(RuntimeError):
     def __init__(self, reason, detail):
-        require(reason in ("missing-parent", "missing-child", "changed-child-count"), "Unknown incomplete HTML AX read")
+        require(reason in ("missing-parent", "missing-child", "changed-child-count", "disposed-accessible"), "Unknown incomplete HTML AX read")
         super().__init__("Incomplete owned HTML AX snapshot")
         self.reason, self.detail = reason, detail
 
@@ -1030,8 +1074,8 @@ class Surface:
             require((rect.x, rect.y, rect.width, rect.height) == self.request.gtk_message_info_frame, "Modal AX/native frame geometry differs")
         return frame
 
-    def _snapshot_once(self):
-        nodes = self.walk(); rows = []
+    def _snapshot_rows(self, nodes):
+        rows = []
         for node in nodes:
             protected = node.get_role() == self.atspi.Role.PASSWORD_TEXT or node.get_state_set().contains(self.atspi.StateType.EDITABLE)
             attrs = node.get_attributes(); name = "" if protected else (node.get_name() or "")
@@ -1051,6 +1095,30 @@ class Surface:
                     require(text.get_character_count() == count and len(row["text"].encode()) <= 16384, "UI text changed")
             rows.append(row)
         require(len(json.dumps(rows).encode()) <= 131072, "Bounded UI snapshot")
+        return rows
+
+    def _snapshot_once(self):
+        nodes = self.walk()
+        if self.dialog:
+            return self._snapshot_rows(nodes), nodes
+        module = sys.modules.get("gi._error")
+        candidate = module.__dict__.get("GError") if type(module) is type(sys) else None
+        glib_error = candidate if isinstance(candidate, type) and issubclass(candidate, BaseException) else ()
+        try:
+            rows = self._snapshot_rows(nodes)
+        except glib_error as error:
+            if type(error) is not glib_error:
+                raise
+            fields = BaseException.__getattribute__(error, "__dict__")
+            if (type(fields.get("domain")) is not str or fields["domain"] != "atspi_error"
+                    or type(fields.get("code")) is not int or fields["code"] != 0
+                    or self.renderer is None or self.references.window is None):
+                raise
+            detail = {"site": "Surface._snapshot_rows", "glibDomain": "atspi_error", "glibCode": 0}
+            retain_refusal_diagnostic(detail, error)
+            if "refusalDiagnostic" not in detail:
+                raise
+            raise _IncompleteHtmlSnapshot("disposed-accessible", detail) from error
         return rows, nodes
 
     def snapshot(self):
@@ -1934,6 +2002,7 @@ def native_session(env):
     except Exception as error:
         failure = error
         report["refusal"] = {"type": type(error).__name__, "message": str(error)[:1000]}
+        retain_refusal_diagnostic(report, error)
     finally:
         if secret is not None:
             secret[:] = b"\0" * len(secret)
@@ -2735,6 +2804,7 @@ def broker(env):
     except Exception as error:
         failure = error
         record["refusal"] = {"type": type(error).__name__, "message": str(error)[:1000]}
+        retain_refusal_diagnostic(record, error)
         report_path = BASE / "result/report.json"
         if report_path.exists():
             try:

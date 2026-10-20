@@ -193,6 +193,8 @@ jobs:
             polkitd=0.105-33ubuntu0.2 coreutils=8.32-4.1ubuntu1.4 passwd=1:4.8.1-2ubuntu2.2
           sudo systemctl start systemd-logind.service polkit.service
       - uses: dtolnay/rust-toolchain@1.99.0
+      - name: Verify genuine GI error binding and typed read-only conversion before UI
+        run: /usr/bin/python3 -I -B scripts/native-linux-production-016-update.test.py GenuineGiBinding
       - name: Build only the shared locked offline verifier, with source, production key, compiler and fresh executable evidence
         run: /usr/bin/python3 -I -S -B scripts/native-linux-production-016-update.py verifier
       - name: Verify production signatures, complete archive inventories and native DEB contents without execution

@@ -1,4 +1,4 @@
-"""Pure tests only. No native application, auth, trust-store or package writes."""
+"""Pure preflight and explicit GI binding tests. No native application, auth, trust-store or package writes."""
 import ast
 from contextlib import ExitStack, contextmanager
 import copy
@@ -19,7 +19,7 @@ import tarfile
 import tempfile
 import unittest
 from unittest.mock import patch
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 import zipfile
 
 HERE = Path(__file__).resolve().parent
@@ -1252,6 +1252,38 @@ class Pure(unittest.TestCase):
         self.assertNotIn("pip install", commands)
         source = (HERE / "native-linux-production-016-update.py").read_text()
         self.assertIn('load("native-linux-production-016-flatpak")', source)
+
+    def test_real_gi_binding_step_is_post_apt_site_enabled_and_before_ui(self):
+        steps = self.workflow["jobs"]["update"]["steps"]
+        command = "/usr/bin/python3 -I -B scripts/native-linux-production-016-update.test.py GenuineGiBinding"
+        selected = [i for i, step in enumerate(steps) if step.get("run", "").strip() == command]
+        self.assertEqual(len(selected), 1)
+        provision = next(i for i, step in enumerate(steps) if "sudo apt-get install" in step.get("run", ""))
+        self.assertIn("python3-gi", steps[provision]["run"])
+        verifier = next(i for i, step in enumerate(steps) if step.get("run", "").endswith("update.py verifier"))
+        self.assertLess(provision, selected[0]); self.assertLess(selected[0], verifier)
+        self.assertEqual(set(steps[selected[0]]), {"name", "run"})
+        pure = next(step["run"] for step in steps if step.get("name", "").startswith("Pure tests,"))
+        self.assertIn("/usr/bin/python3 -I -S -B scripts/native-linux-production-016-update.test.py", pure)
+        self.assertNotIn("GenuineGiBinding", pure)
+
+    def test_selected_real_gi_runner_requires_exactly_one_success_and_zero_skips(self):
+        tree = ast.parse(Path(__file__).read_text())
+        main = next(n for n in tree.body if isinstance(n, ast.If) and ast.unparse(n.test) == "__name__ == '__main__'")
+        selected = main.body[0]
+        self.assertEqual(ast.unparse(selected.test), "sys.argv[1:] == ['GenuineGiBinding']")
+        body = ast.Module(body=copy.deepcopy(selected.body), type_ignores=[])
+        for count, success, skips, expected, exit_code in ((1, True, [], [], 0), (0, True, [], [], 1), (2, True, [], [], 1),
+                (1, False, [], [], 1), (1, True, [("fixture", "unavailable")], [], 1), (1, True, [], [("fixture", "expected failure")], 1)):
+            result = SimpleNamespace(testsRun=count, wasSuccessful=lambda: success, skipped=skips, expectedFailures=expected)
+            runner = SimpleNamespace(run=lambda suite: result)
+            fake_unittest = SimpleNamespace(defaultTestLoader=SimpleNamespace(loadTestsFromTestCase=lambda case: object()),
+                                            TextTestRunner=lambda **kwargs: runner)
+            def exit(value): raise SystemExit(value)
+            with self.subTest(count=count, success=success, skips=len(skips)), self.assertRaises(SystemExit) as caught:
+                exec(compile(body, "actual-real-gi-selection", "exec"),
+                     {"unittest": fake_unittest, "GenuineGiBinding": object(), "sys": SimpleNamespace(exit=exit)})
+            self.assertEqual(caught.exception.code, exit_code)
 
     def test_main_verifier_real_shared_builder_and_command_create_fresh_tool_evidence(self):
         shared = M.load("native-linux-production-016-flatpak")
@@ -2639,6 +2671,397 @@ class StartupPartialEvidence(unittest.TestCase):
                          ["report['initialPageActionAttempts']", "report['successorPageActionAttempts']"])
 
 
+class GenuineGiBinding(unittest.TestCase):
+    def test_actual_gi_error_identity_and_readonly_metadata_conversion(self):
+        if sys.argv[1:] != ["GenuineGiBinding"]:
+            self.skipTest("Requires dedicated post-APT /usr/bin/python3 -I -B invocation; that selection rejects skips")
+        self.assertTrue(sys.flags.isolated)
+        self.assertFalse(sys.flags.no_site)
+        self.assertTrue(sys.flags.dont_write_bytecode)
+        from gi.repository import GLib
+        from gi._error import GError
+        self.assertIs(GLib.Error, GError)
+        self.assertIs(sys.modules["gi._error"].GError, GError)
+        for domain, code in (("atspi_error", 0), ("creator-gi-synthetic-other", 0), ("atspi_error", 1)):
+            with self.subTest(domain=domain, code=code):
+                error = GLib.Error("Synthetic pre-UI GI binding test", domain, code)
+                self.assertIs(type(error), GError)
+                self.assertIs(type(error.domain), str); self.assertEqual(error.domain, domain)
+                self.assertIs(type(error.code), int); self.assertEqual(error.code, code)
+                surface = M.Surface.__new__(M.Surface)
+                surface.dialog, surface.last, surface.ax_snapshot_diagnostic = False, None, None
+                surface.renderer, surface.references = {"pid": 43}, SimpleNamespace(window=(":1.1", "/synthetic-frame"))
+                surface.call_phase = "pre-ui-genuine-gi"
+                calls = []
+                def walk(): calls.append("walk"); return []
+                def metadata(nodes):
+                    calls.append("metadata")
+                    if calls.count("metadata") == 1: raise error
+                    return [{"id": "synthetic-ready"}]
+                surface.walk, surface._snapshot_rows = walk, metadata
+                surface.recheck = lambda **kwargs: calls.append(("guard", kwargs))
+                if domain == "atspi_error" and code == 0:
+                    rows, _ = surface.snapshot()
+                    self.assertEqual(rows, [{"id": "synthetic-ready"}])
+                    self.assertEqual(calls, ["walk", "metadata", ("guard", {"full": True})] * 2)
+                    retained = surface.ax_snapshot_diagnostic["firstIncomplete"]
+                    self.assertEqual(retained["reason"], "disposed-accessible")
+                    self.assertEqual(retained["refusalDiagnostic"]["glib"], {"domain": {"value": "atspi_error"}, "code": 0})
+                else:
+                    with self.assertRaises(GError) as caught: surface.snapshot()
+                    self.assertIs(caught.exception, error)
+                    self.assertEqual(calls, ["walk", "metadata"])
+                    self.assertIsNone(surface.ax_snapshot_diagnostic)
+
+
+class RefusalDiagnostics(unittest.TestCase):
+    def glib(self):
+        module = ModuleType("gi._error")
+        class GError(RuntimeError):
+            def __init__(self, domain="atspi_error", code=0):
+                super().__init__("PRIVATE_EXCEPTION_BODY")
+                self.domain, self.code = domain, code
+            def __str__(self): raise AssertionError("Exception message must not be queried")
+            def __getattribute__(self, name):
+                if name in ("domain", "code"): raise AssertionError("Do not invoke exception attribute getters")
+                return super().__getattribute__(name)
+        module.GError = GError
+        return module, GError
+
+    def trace(self, error, *, file=None, function="failing_getter"):
+        file = str(M.BASE / "scripts" / Path(M.__file__).name) if file is None else file
+        namespace = {"error": error}
+        source = "def " + function + "():\n    private_local = 'PRIVATE_LOCAL_VALUE'\n    raise error\n"
+        exec(compile(source, file, "exec"), namespace)
+        try: namespace[function]()
+        except Exception as caught: return caught
+        self.fail("Synthetic original error required")
+
+    def test_known_owned_frame_function_line_and_actual_glib_fields_are_retained_without_locals(self):
+        module, error_type = self.glib()
+        original = self.trace(error_type())
+        with patch.dict(sys.modules, {"gi._error": module}), patch.object(M, "read") as read, \
+                patch.object(M.subprocess, "run") as run:
+            value = M.refusal_diagnostic(original)
+        self.assertEqual(value["frames"][-1], {"file": Path(M.__file__).name, "function": "failing_getter", "line": 3})
+        self.assertEqual(value["glib"], {"domain": {"value": "atspi_error"}, "code": 0})
+        self.assertFalse(value["truncated"]); self.assertNotIn("PRIVATE", json.dumps(value))
+        read.assert_not_called(); run.assert_not_called()
+
+    def test_foreign_filename_function_and_unknown_domain_are_hashed_not_dumped(self):
+        module, error_type = self.glib()
+        error = self.trace(error_type("PRIVATE_DOMAIN", 17), file="/PRIVATE_HOME/PRIVATE_FILE.py", function="PRIVATE_FUNCTION")
+        with patch.dict(sys.modules, {"gi._error": module}): value = M.refusal_diagnostic(error)
+        frame = value["frames"][-1]
+        self.assertEqual(frame["file"], "other"); self.assertNotIn("function", frame)
+        self.assertEqual(frame["functionSha256"], hashlib.sha256(b"PRIVATE_FUNCTION").hexdigest())
+        self.assertEqual(value["glib"]["code"], 17)
+        self.assertEqual(value["glib"]["domain"]["kind"], "redacted")
+        self.assertNotIn("PRIVATE", json.dumps(value))
+
+    def test_glib_requires_loaded_authentic_type_not_error_name_or_duck_typed_properties(self):
+        module, _ = self.glib()
+        class Error(RuntimeError):
+            @property
+            def domain(self): self.fail("Foreign domain getter queried")
+            @property
+            def code(self): self.fail("Foreign code getter queried")
+        for loaded in (None, module):
+            with self.subTest(loaded=loaded is not None), patch.dict(sys.modules, {"gi._error": loaded}):
+                value = M.refusal_diagnostic(self.trace(Error("PRIVATE_ERROR")))
+                self.assertNotIn("glib", value); self.assertNotIn("PRIVATE", json.dumps(value))
+
+    def test_oversized_glib_domain_and_invalid_codes_remain_bounded_redacted_data(self):
+        module, error_type = self.glib()
+        for code in (True, "PRIVATE_CODE", 2**31, -(2**31) - 1):
+            with self.subTest(code=type(code).__name__), patch.dict(sys.modules, {"gi._error": module}):
+                value = M.refusal_diagnostic(self.trace(error_type("PRIVATE" * 10000, code)))
+                self.assertIsNone(value["glib"]["code"])
+                self.assertEqual(value["glib"]["domain"]["chars"], 70000)
+                self.assertLessEqual(len(json.dumps(value).encode()), 8192)
+                self.assertNotIn("PRIVATE", json.dumps(value))
+
+    def test_deep_trace_is_finite_truncated_and_has_no_source_line_or_local_dump(self):
+        error = RuntimeError("PRIVATE_BODY")
+        def recurse(depth):
+            local_secret = "PRIVATE_LOCAL"
+            if depth: return recurse(depth - 1)
+            raise error
+        try: recurse(90)
+        except RuntimeError as caught: value = M.refusal_diagnostic(caught)
+        self.assertEqual(len(value["frames"]), 16); self.assertEqual(value["visitedFrames"], 64)
+        self.assertTrue(value["truncated"]); self.assertNotIn("PRIVATE", json.dumps(value))
+        self.assertLessEqual(len(json.dumps(value).encode()), 8192)
+
+    def test_capture_failure_cannot_replace_original_and_first_diagnostic_is_never_overwritten(self):
+        original = self.trace(RuntimeError("original failure")); record = {}
+        with patch.object(M, "refusal_diagnostic", side_effect=ValueError("PRIVATE_CAPTURE_ERROR")):
+            M.retain_refusal_diagnostic(record, original)
+        self.assertEqual(record, {"refusalDiagnosticUnavailable": True})
+        self.assertEqual(str(original), "original failure")
+        record = {"refusalDiagnostic": {"first": True}}
+        with patch.object(M, "refusal_diagnostic") as capture: M.retain_refusal_diagnostic(record, original)
+        capture.assert_not_called(); self.assertEqual(record, {"refusalDiagnostic": {"first": True}})
+
+    def test_actual_session_and_broker_error_handlers_keep_existing_refusal_and_original_exception(self):
+        tree = ast.parse(Path(M.__file__).read_text())
+        for name in ("native_session", "broker"):
+            function = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == name)
+            handlers = [n for n in ast.walk(function) if isinstance(n, ast.ExceptHandler)
+                        and any(isinstance(s, ast.Expr) and isinstance(s.value, ast.Call)
+                                and ast.unparse(s.value.func) == "retain_refusal_diagnostic" for s in n.body)]
+            self.assertEqual(len(handlers), 1)
+            body = handlers[0].body
+            end = next(i for i, s in enumerate(body) if isinstance(s, ast.Expr) and isinstance(s.value, ast.Call)
+                       and ast.unparse(s.value.func) == "retain_refusal_diagnostic")
+            original = self.trace(RuntimeError("original source refusal")); record = {}
+            namespace = {"error": original, "report": record, "record": record,
+                         "retain_refusal_diagnostic": M.retain_refusal_diagnostic}
+            with self.subTest(function=name):
+                exec(compile(ast.Module(body=copy.deepcopy(body[:end + 1]), type_ignores=[]), "actual-refusal-handler", "exec"), namespace)
+                self.assertIs(namespace["failure"], original)
+                self.assertEqual(record["refusal"], {"type": "RuntimeError", "message": "original source refusal"})
+                self.assertIn("refusalDiagnostic", record)
+
+
+class DisposedAccessibleAcquisition(unittest.TestCase):
+    def surface(self, *, dialog=False):
+        surface = HtmlSnapshotAcquisition().surface(dialog=dialog)
+        reads = []
+        def walk(): reads.append("walk"); return [object()]
+        surface.walk = walk
+        return surface, reads
+
+    def test_exact_registered_glib_type_domain_and_code_reacquires_metadata_only(self):
+        module, error_type = RefusalDiagnostics().glib()
+        surface, reads = self.surface(); rows = [{"id": "ready"}]
+        def metadata(nodes):
+            reads.append("metadata")
+            if reads.count("metadata") == 1: raise error_type()
+            return rows
+        surface._snapshot_rows = metadata
+        with patch.dict(sys.modules, {"gi._error": module}): result = surface.snapshot()
+        self.assertIs(result[0], rows); self.assertEqual(reads, ["walk", "metadata"] * 2)
+        self.assertEqual(surface.checks, [{"full": True}] * 2)
+        first = surface.ax_snapshot_diagnostic["firstIncomplete"]
+        self.assertEqual(first["reason"], "disposed-accessible")
+        self.assertEqual((first["glibDomain"], first["glibCode"]), ("atspi_error", 0))
+        self.assertEqual(first["refusalDiagnostic"]["glib"], {"domain": {"value": "atspi_error"}, "code": 0})
+        self.assertEqual(surface.ax_snapshot_diagnostic["outcome"], "complete")
+        self.assertNotIn("PRIVATE", json.dumps(surface.ax_snapshot_diagnostic))
+
+    def test_real_metadata_serialization_discards_disposed_node_and_returns_fresh_rows(self):
+        module, error_type = RefusalDiagnostics().glib(); surface, reads = self.surface()
+        roles = SimpleNamespace(PASSWORD_TEXT=75, LABEL=29, TEXT=61, STATIC=116, PARAGRAPH=73, STATUS_BAR=54)
+        states = SimpleNamespace(**{name: name for name in ("EDITABLE", "SHOWING", "ENABLED", "SENSITIVE", "DEFUNCT", "BUSY", "PRESSED")})
+        surface.atspi = SimpleNamespace(Role=roles, StateType=states)
+        surface.references.identity = lambda node, owner: (":1.4", node.path)
+        current = []
+        def walk():
+            reads.append("walk")
+            disposed = not current
+            def role():
+                if disposed: raise error_type()
+                return 43
+            node = SimpleNamespace(path="/fresh" + str(len(current)), get_role=role,
+                get_state_set=lambda: SimpleNamespace(contains=lambda name: name in ("SHOWING", "ENABLED", "SENSITIVE")),
+                get_attributes=lambda: {"id": "ready", "tag": "button", "toolkit": "WebKitGTK"}, get_name=lambda: "Ready")
+            current.append(node)
+            return [node]
+        surface.walk = walk
+        with patch.dict(sys.modules, {"gi._error": module}): rows, nodes = surface.snapshot()
+        self.assertEqual(reads, ["walk", "walk"]); self.assertIs(nodes[0], current[1]); self.assertIsNot(nodes[0], current[0])
+        self.assertEqual(rows[0]["reference"], (":1.4", "/fresh1")); self.assertEqual(rows[0]["id"], "ready")
+        self.assertEqual(rows[0]["role"], 43); self.assertFalse(rows[0]["defunct"])
+        self.assertEqual(surface.ax_snapshot_diagnostic["firstIncomplete"]["glibCode"], 0)
+
+    def test_wrong_registered_type_domain_code_or_provider_is_fatal_without_next_read(self):
+        module, error_type = RefusalDiagnostics().glib()
+        class Subclass(error_type): pass
+        class Impostor(RuntimeError): pass
+        Impostor.__name__, Impostor.__module__ = "Error", "gi.repository.GLib"
+        class Domain(str): pass
+        cases = [(module, Subclass()), (module, Impostor("atspi_error: The application no longer exists (0)")),
+                 (module, error_type("other", 0)), (module, error_type(Domain("atspi_error"), 0)),
+                 (module, error_type("atspi_error", 1)), (module, error_type("atspi_error", 2)),
+                 (module, error_type("atspi_error", False)), (module, error_type("atspi_error", "0")),
+                 (module, error_type("atspi_error", 0.0)), (None, error_type()),
+                 (SimpleNamespace(GError=error_type), error_type())]
+        for provider, original in cases:
+            with self.subTest(type=type(original).__name__, provider=type(provider).__name__):
+                surface, reads = self.surface()
+                def metadata(nodes): reads.append("metadata"); raise original
+                surface._snapshot_rows = metadata
+                with patch.dict(sys.modules, {"gi._error": provider}), self.assertRaises(type(original)) as caught:
+                    surface.snapshot()
+                self.assertIs(caught.exception, original); self.assertEqual(reads, ["walk", "metadata"])
+                self.assertIsNone(surface.ax_snapshot_diagnostic); self.assertEqual(surface.checks, [])
+
+    def test_missing_preexisting_renderer_or_frame_binding_never_adopts(self):
+        module, error_type = RefusalDiagnostics().glib()
+        for missing in ("renderer", "frame"):
+            surface, reads = self.surface(); original = error_type()
+            if missing == "renderer": surface.renderer = None
+            else: surface.references.window = None
+            def metadata(nodes): reads.append("metadata"); raise original
+            surface._snapshot_rows = metadata
+            with self.subTest(missing=missing), patch.dict(sys.modules, {"gi._error": module}), self.assertRaises(error_type) as caught:
+                surface.snapshot()
+            self.assertIs(caught.exception, original); self.assertEqual(reads, ["walk", "metadata"])
+            self.assertEqual(surface.checks, []); self.assertIsNone(surface.ax_snapshot_diagnostic)
+
+    def owned_surface(self):
+        surface, reads = self.surface()
+        root = {"pid": 42, "startTime": "10", "parentPid": 41, "uids": [21314] * 4,
+                "executable": "/fixture/root", "kernelImageSha256": "a" * 64}
+        renderer = {**copy.deepcopy(root), "pid": 43, "startTime": "11", "parentPid": 42,
+                    "executable": "/fixture/WebKitWebProcess", "kernelImageSha256": "b" * 64}
+        surface.pid, surface.record, surface.root, surface.renderer = 42, root, root, renderer
+        surface.xres, surface.main_window, surface.request, surface.x11 = {"client": 7}, None, object(), object()
+        state = {"processes": {42: copy.deepcopy(root), 43: copy.deepcopy(renderer)},
+                 "images": {42: copy.deepcopy(root), 43: copy.deepcopy(renderer)}, "xres": {"client": 7},
+                 "bus": {":1.1": {"owner": ":1.1", "pid": 42, "uid": 21314},
+                         ":1.4": {"owner": ":1.4", "pid": 43, "uid": 21314}}}
+        def process(pid, helper, full=False):
+            reads.append(("process", pid))
+            if pid not in state["processes"]: raise RuntimeError("Owned process is not live")
+            return state["processes"][pid]
+        def xres(request, x11): reads.append("xres"); return state["xres"]
+        def kernel(pid, native, helper): reads.append(("kernel", pid)); return state["images"][pid]
+        native = M.load("native-linux-root-probe")
+        def resolve(name): reads.append(("bus", name)); return state["bus"][name]
+        surface.references = native.AxReferences(resolve, copy.deepcopy(state["bus"]), (":1.1", "/org/a11y/frame"))
+        surface.native, surface.helper = SimpleNamespace(native_process=process), SimpleNamespace(bound_window=xres)
+        surface.recheck = lambda **kwargs: M.Surface.recheck(surface, **kwargs)
+        return surface, reads, state, kernel
+
+    def test_real_full_recheck_precedes_next_walk_and_keeps_all_bindings(self):
+        module, error_type = RefusalDiagnostics().glib()
+        surface, reads, state, kernel = self.owned_surface(); original_renderer = surface.renderer; original_window = surface.references.window
+        def metadata(nodes):
+            reads.append("metadata")
+            if reads.count("metadata") == 1: raise error_type()
+            return [{"id": "ready"}]
+        surface._snapshot_rows = metadata
+        with patch.dict(sys.modules, {"gi._error": module}), patch.object(M, "alive_stat"), patch.object(M, "kernel_record", side_effect=kernel):
+            surface.snapshot()
+        first = reads.index("metadata"); second_walk = reads.index("walk", first)
+        self.assertEqual(reads[first + 1:second_walk], [("process", 42), "xres", ("process", 43),
+                         ("kernel", 42), ("kernel", 43), ("bus", ":1.1"), ("bus", ":1.4")])
+        self.assertIs(surface.renderer, original_renderer); self.assertIs(surface.references.window, original_window)
+
+    def test_full_guard_root_renderer_xres_or_bus_loss_is_fatal_before_second_acquisition(self):
+        module, error_type = RefusalDiagnostics().glib()
+        for defect in ("root-exit", "root-start", "root-uid", "root-kernel", "frame", "renderer-exit",
+                       "renderer-parent", "renderer-start", "renderer-uid", "renderer-kernel", "app-owner", "renderer-owner"):
+            with self.subTest(defect=defect):
+                surface, reads, state, kernel = self.owned_surface()
+                def metadata(nodes):
+                    reads.append("metadata")
+                    if defect == "root-exit": del state["processes"][42]
+                    elif defect == "root-start": state["processes"][42]["startTime"] = "999"
+                    elif defect == "root-uid": state["processes"][42]["uids"] = [1] * 4
+                    elif defect == "root-kernel": state["images"][42]["kernelImageSha256"] = "c" * 64
+                    elif defect == "frame": state["xres"] = {"client": 8}
+                    elif defect == "renderer-exit": del state["processes"][43]
+                    elif defect == "renderer-parent": state["processes"][43]["parentPid"] = 99
+                    elif defect == "renderer-start": state["processes"][43]["startTime"] = "999"
+                    elif defect == "renderer-uid": state["processes"][43]["uids"] = [1] * 4
+                    elif defect == "renderer-kernel": state["images"][43]["kernelImageSha256"] = "c" * 64
+                    elif defect == "app-owner": state["bus"][":1.1"]["owner"] = ":1.99"
+                    elif defect == "renderer-owner": state["bus"][":1.4"]["pid"] = 99
+                    raise error_type()
+                surface._snapshot_rows = metadata
+                with patch.dict(sys.modules, {"gi._error": module}), patch.object(M, "alive_stat"), \
+                        patch.object(M, "kernel_record", side_effect=kernel), self.assertRaises(RuntimeError) as caught:
+                    surface.snapshot()
+                self.assertNotIsInstance(caught.exception, M._IncompleteHtmlSnapshot)
+                self.assertNotIsInstance(caught.exception, error_type)
+                self.assertEqual(reads.count("walk"), 1); self.assertEqual(reads.count("metadata"), 1)
+                self.assertEqual(surface.last, ["previous-not-current"])
+                self.assertEqual(surface.ax_snapshot_diagnostic["firstIncomplete"]["glibCode"], 0)
+
+    def test_persistent_disposed_objects_exhaust_exact_eight_attempts_without_stale_result(self):
+        module, error_type = RefusalDiagnostics().glib(); surface, reads = self.surface()
+        def metadata(nodes): reads.append("metadata"); raise error_type()
+        surface._snapshot_rows = metadata
+        with patch.dict(sys.modules, {"gi._error": module}), self.assertRaisesRegex(RuntimeError, "snapshot attempt limit"):
+            surface.snapshot()
+        self.assertEqual(reads, ["walk", "metadata"] * 8)
+        self.assertEqual(surface.ax_snapshot_diagnostic["incompleteReads"], 8)
+        self.assertEqual(surface.ax_snapshot_diagnostic["outcome"], "attempt-limit")
+        self.assertEqual(surface.last, ["previous-not-current"])
+
+    def test_disposed_read_or_postguard_deadline_equality_never_starts_next_acquisition(self):
+        module, error_type = RefusalDiagnostics().glib()
+        for stage in ("read", "guard"):
+            surface, reads = self.surface(); clock = [0]
+            def metadata(nodes):
+                reads.append("metadata")
+                if stage == "read": clock[0] = 30
+                raise error_type()
+            def check(**kwargs): surface.checks.append(kwargs); clock[0] = 30
+            surface._snapshot_rows, surface.recheck = metadata, check
+            with self.subTest(stage=stage), patch.dict(sys.modules, {"gi._error": module}), \
+                    patch.object(M.time, "monotonic", side_effect=lambda: clock[0]), self.assertRaisesRegex(RuntimeError, "HTML AX snapshot deadline"):
+                surface.snapshot()
+            self.assertEqual(reads, ["walk", "metadata"])
+            self.assertEqual(len(surface.checks), 0 if stage == "read" else 1)
+            self.assertEqual(surface.last, ["previous-not-current"])
+
+    def test_reacquired_graph_must_still_fully_pass_original_checks(self):
+        module, error_type = RefusalDiagnostics().glib(); surface, reads = self.surface()
+        original = RuntimeError("Duplicate/cyclic AX graph")
+        def walk():
+            reads.append("walk")
+            if reads.count("walk") == 2: raise original
+            return [object()]
+        def metadata(nodes): reads.append("metadata"); raise error_type()
+        surface.walk, surface._snapshot_rows = walk, metadata
+        with patch.dict(sys.modules, {"gi._error": module}), self.assertRaises(RuntimeError) as caught:
+            surface.snapshot()
+        self.assertIs(caught.exception, original); self.assertEqual(reads, ["walk", "metadata", "walk"])
+        self.assertEqual(surface.last, ["previous-not-current"])
+
+    def test_gi_error_in_walk_native_dialog_or_close_is_never_reacquired(self):
+        module, error_type = RefusalDiagnostics().glib()
+        for phase in ("walk", "dialog", "close"):
+            surface, reads = self.surface(dialog=phase == "dialog"); original = error_type()
+            def fail(*args): reads.append("failure"); raise original
+            surface._snapshot_rows = fail
+            if phase == "walk": surface.walk = fail
+            if phase == "close":
+                surface.window, surface.request = 7, object()
+                surface.helper = SimpleNamespace(bound_window=lambda *args: {"client": 7})
+                surface.x11 = SimpleNamespace(close_window=fail)
+            with self.subTest(phase=phase), patch.dict(sys.modules, {"gi._error": module}), self.assertRaises(error_type) as caught:
+                surface.close() if phase == "close" else surface.snapshot()
+            self.assertIs(caught.exception, original); self.assertEqual(reads.count("failure"), 1)
+            self.assertIsNone(surface.ax_snapshot_diagnostic)
+
+    def test_authentic_gi_error_from_input_is_not_caught_or_retried(self):
+        module, error_type = RefusalDiagnostics().glib(); surface, reads = self.surface(); actions = []; original = error_type()
+        surface.x11, surface.window, surface.html_actions = object(), 7, []
+        def action(index): reads.append("input"); raise original
+        node = SimpleNamespace(get_action_iface=lambda: SimpleNamespace(get_n_actions=lambda: 1, get_action_name=lambda index: "press", do_action=action))
+        row = {"id": "suite-trigger", "reference": [":1.4", "/button"], "toolkit": "WebKitGTK", "tag": "button",
+               "showing": True, "enabled": True, "sensitive": True, "busy": False, "defunct": False}
+        surface.walk = lambda: [node]; surface._snapshot_rows = lambda nodes: [row]
+        with patch.dict(sys.modules, {"gi._error": module}), patch.object(M, "windows", return_value=[7]), self.assertRaises(error_type) as caught:
+            surface.click("suite-trigger", actions)
+        self.assertIs(caught.exception, original); self.assertEqual(reads, ["input"])
+        self.assertEqual(actions, ["suite-trigger"]); self.assertIsNone(surface.ax_snapshot_diagnostic)
+
+    def test_diagnostic_failure_keeps_original_glib_error_fatal(self):
+        module, error_type = RefusalDiagnostics().glib(); surface, reads = self.surface(); original = error_type()
+        def metadata(nodes): reads.append("metadata"); raise original
+        surface._snapshot_rows = metadata
+        with patch.dict(sys.modules, {"gi._error": module}), patch.object(M, "refusal_diagnostic", side_effect=ValueError("PRIVATE")), self.assertRaises(error_type) as caught:
+            surface.snapshot()
+        self.assertIs(caught.exception, original); self.assertEqual(reads, ["walk", "metadata"])
+        self.assertIsNone(surface.ax_snapshot_diagnostic)
+
+
 class HtmlSnapshotAcquisition(unittest.TestCase):
     def surface(self, *, dialog=False):
         surface = M.Surface.__new__(M.Surface)
@@ -3006,4 +3429,8 @@ class PartialAxParentEvidence(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main()
+    if sys.argv[1:] == ["GenuineGiBinding"]:
+        result = unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromTestCase(GenuineGiBinding))
+        sys.exit(0 if result.testsRun == 1 and result.wasSuccessful() and not result.skipped and not result.expectedFailures else 1)
+    else:
+        unittest.main()
