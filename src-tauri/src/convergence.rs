@@ -1774,14 +1774,31 @@ pub async fn move_to_hub(handle: tauri::AppHandle) -> Result<MoveOutcome, String
             #[cfg(not(all(target_os = "linux", feature = "experimental-linux-migration")))]
             route.activate_convergence(&consent)?;
             #[cfg(all(target_os = "linux", feature = "experimental-linux-migration"))]
-            let linux_runtime = creator_hub_mcp_router::Store::installed()?.resolve()?;
+            let linux_store = creator_hub_mcp_router::Store::installed()?;
             #[cfg(all(target_os = "linux", feature = "experimental-linux-migration"))]
-            let mut linux_native = originals.map(|originals| originals.bind(&linux_router.command)).transpose()?;
+            let linux_receipt = linux_store.snapshot()?;
+            #[cfg(all(target_os = "linux", feature = "experimental-linux-migration"))]
+            let linux_runtime = linux_store.resolve()?;
+            #[cfg(all(target_os = "linux", feature = "experimental-linux-migration"))]
+            let recheck_linux_transfer = || -> Result<(), String> {
+                if let Some(originals) = &originals { originals.recheck()?; }
+                let runtime = linux_store.resolve()?;
+                if linux_store.snapshot()? != linux_receipt
+                    || linux_store.router()?.command != linux_router.command
+                    || runtime.generation != linux_runtime.generation
+                    || runtime.hub_version != linux_runtime.hub_version
+                    || runtime.node != linux_runtime.node
+                    || runtime.server != linux_runtime.server
+                {
+                    return Err("The approved MCP route or runtime changed during connection transfer. Apps were kept; review the retained outcome.".into());
+                }
+                Ok(())
+            };
             creator_works_mcp_launcher::service::initialize(&handle, server_root)?;
             creator_works_mcp_launcher::service::bind_managed_route(&handle)?;
             plan.retry_allowed = false;
             #[cfg(all(target_os = "linux", feature = "experimental-linux-migration"))]
-            let linux_transfer = linux_native.as_mut().map(|native| native.begin_connection_transfer()).transpose()?;
+            recheck_linux_transfer()?;
             let workflow = creator_works_mcp_launcher::service::call(&handle, "begin_ui_operation", json!({}))?;
             let transfer = creator_works_mcp_launcher::service::apply_convergence(&handle, approved);
             let finish = creator_works_mcp_launcher::service::call(&handle, "finish_ui_operation", json!({"id":workflow}));
@@ -1799,7 +1816,11 @@ pub async fn move_to_hub(handle: tauri::AppHandle) -> Result<MoveOutcome, String
             if !idle { return Err("The internal MCP workflow still needs outcome review.".into()); }
             recheck(plan)?;
             #[cfg(all(target_os = "linux", feature = "experimental-linux-migration"))]
-            if let Some(transfer) = linux_transfer { transfer.complete()?; }
+            recheck_linux_transfer()?;
+            // Strict GUI dependency checks run only after approved connections
+            // have moved; Originals retained baseline authority throughout.
+            #[cfg(all(target_os = "linux", feature = "experimental-linux-migration"))]
+            let linux_native = originals.map(|originals| originals.bind(&linux_router.command)).transpose()?;
             save_review_at(&record_path()?, &plan.stores)?;
             plan.report.stage = "connections-reviewed";
             phase = "cleanup";
@@ -2424,6 +2445,11 @@ mod tests {
         assert!(body.contains("Cancelling a later system prompt does not undo earlier cleanup"));
         assert!(body.contains("Continuing also accepts the unknown custom-GUI integration risk"));
         assert!(body.contains("These TEST ONLY packages are not release acceptance"));
+        assert!(body.contains("{LINUX_PRODUCTION_RETIREMENT_CONSENT}"));
+        assert!(LINUX_PRODUCTION_RETIREMENT_CONSENT.contains(
+            "All nine old MCP Node/server/license/bridge files stay at their existing paths."
+        ));
+        assert!(LINUX_PRODUCTION_RETIREMENT_CONSENT.contains("custom integrations requiring an old app window or its desktop registration may stop working and are not converted"));
         let guarded_call = "#[cfg(all(target_os = \"linux\", not(feature = \"experimental-linux-migration\")))]\n            require_no_retirement";
         let has_guarded_call = |source: &str| source.replace("\r\n", "\n").contains(guarded_call);
         assert!(has_guarded_call(body));
@@ -2464,7 +2490,7 @@ mod tests {
     }
 
     #[test]
-    fn linux_renewal_is_after_the_known_transfer_and_never_replaces_original_helper_plans() {
+    fn gui_retirement_linux_strict_plan_is_bound_only_after_completed_connection_transfer() {
         let body = include_str!("convergence.rs")
             .split("pub async fn move_to_hub(")
             .nth(1)
@@ -2473,39 +2499,80 @@ mod tests {
             .next()
             .unwrap();
         let bind = body.find("originals.bind(&linux_router.command)").unwrap();
-        let boundary = body.find("native.begin_connection_transfer()").unwrap();
+        let transfer = body.find("transfer?;").unwrap();
+        let finish = body.find("finish?;").unwrap();
+        let idle = body.find("if !idle").unwrap();
+        let rechecked = transfer + body[transfer..].find("recheck(plan)?;").unwrap();
+        let cleanup = body.find("retire_linux_batch(").unwrap();
+        assert!(
+            transfer < finish
+                && finish < idle
+                && idle < rechecked
+                && rechecked < bind
+                && bind < cleanup,
+            "A strict GUI-retirement Plan must not block the native legacy-connection review before transfer, or authorize cleanup before transfer/finish/idle/settings checks complete"
+        );
+        let native = include_str!("convergence_linux.rs");
+        let bind_body = native
+            .split("pub fn bind(self, router: &Path)")
+            .nth(1)
+            .unwrap()
+            .split("pub struct Plan")
+            .next()
+            .unwrap();
+        assert!(bind_body.contains("self.recheck()?"));
+        assert!(bind_body.contains("gui_retirement_snapshot"));
+        assert!(bind_body.contains("dependencies.recheck()"));
+        assert!(bind_body.contains("plan.recheck()?"));
+    }
+
+    #[test]
+    fn linux_strict_binding_follows_transfer_and_never_replaces_original_helper_plans() {
+        let body = include_str!("convergence.rs")
+            .split("pub async fn move_to_hub(")
+            .nth(1)
+            .unwrap()
+            .split("fn cleanup_failure(")
+            .next()
+            .unwrap();
+        let bind = body.find("originals.bind(&linux_router.command)").unwrap();
+        let boundary = body.find("recheck_linux_transfer()?").unwrap();
         let apply = body.find("service::apply_convergence(").unwrap();
         let finish = body.find("transfer?;").unwrap();
         let idle = body.find("if !idle").unwrap();
-        let renewal = body.find("transfer.complete()?").unwrap();
+        let renewal = body.rfind("recheck_linux_transfer()?").unwrap();
         let cleanup = body.find("retire_linux_batch(plan").unwrap();
         assert!(
-            bind < boundary
-                && boundary < apply
+            boundary < apply
                 && apply < finish
                 && finish < idle
                 && idle < renewal
-                && renewal < cleanup
+                && renewal < bind
+                && bind < cleanup
         );
+        assert!(!body.contains("native.begin_connection_transfer()"));
+        assert!(!body.contains("transfer.complete()?"));
         assert!(body[..renewal].contains("refresh_reviewed_server_paths(plan"));
         assert!(body[..renewal].contains("refresh_finished_outcome_journal(plan"));
         let native = include_str!("convergence_linux.rs");
-        let renew = native
-            .split("impl ConnectionTransfer<'_>")
+        let bind_source = native
+            .split("pub fn bind(self, router: &Path)")
             .nth(1)
             .unwrap()
-            .split("impl Plan")
+            .split("pub struct Plan")
             .next()
             .unwrap();
-        assert!(renew.contains("plan.recheck_native_with(&[])"));
-        assert!(renew.contains("app.dependencies = dependencies"));
+        assert!(bind_source.contains("self.recheck()?"));
+        assert!(bind_source.contains("for (target, helper) in self.installations"));
+        assert!(bind_source.contains("dependencies.recheck()"));
+        assert!(bind_source.contains("plan.recheck()?"));
         for replaced in [
             "linux_retirement::Plan::inspect",
             "app.helper =",
             "plan.installations =",
         ] {
             assert!(
-                !renew.contains(replaced),
+                !bind_source.contains(replaced),
                 "original identity must stay bound: {replaced}"
             );
         }
@@ -2527,6 +2594,79 @@ mod tests {
             assert!(cleanup.contains(guard), "Linux batch guard: {guard}");
         }
         assert!(!cleanup.contains(".blocking_show()"));
+    }
+
+    #[test]
+    fn linux_transfer_keeps_original_signed_route_and_runtime_checks_around_service_writes() {
+        let normalize = |source: &str| source.replace("\r\n", "\n");
+        let body = normalize(
+            include_str!("convergence.rs")
+                .split("pub async fn move_to_hub(")
+                .nth(1)
+                .unwrap()
+                .split("fn cleanup_failure(")
+                .next()
+                .unwrap(),
+        );
+        let check = body
+            .split("let recheck_linux_transfer =")
+            .nth(1)
+            .unwrap()
+            .split("service::initialize(")
+            .next()
+            .unwrap();
+        for guard in [
+            "originals.recheck()?",
+            "linux_store.resolve()?",
+            "linux_store.snapshot()? != linux_receipt",
+            "linux_store.router()?.command != linux_router.command",
+            "runtime.generation != linux_runtime.generation",
+            "runtime.hub_version != linux_runtime.hub_version",
+            "runtime.node != linux_runtime.node",
+            "runtime.server != linux_runtime.server",
+        ] {
+            assert!(check.contains(guard), "transfer identity guard: {guard}");
+        }
+        assert_eq!(body.matches("recheck_linux_transfer()?").count(), 2);
+        for statement in [
+            "let linux_store =",
+            "let linux_receipt =",
+            "let linux_runtime =",
+            "let recheck_linux_transfer =",
+            "recheck_linux_transfer()?;",
+            "let linux_native =",
+        ] {
+            let guarded = format!(
+                "#[cfg(all(target_os = \"linux\", feature = \"experimental-linux-migration\"))]\n            {statement}"
+            );
+            assert!(body.contains(&guarded), "non-Linux exclusion: {statement}");
+        }
+        for (guard, statement, wrong_guard) in [
+            (
+                "#[cfg(not(all(target_os = \"linux\", feature = \"experimental-linux-migration\")))]",
+                "route.activate_convergence(&consent)?;",
+                "#[cfg(all(target_os = \"linux\", feature = \"experimental-linux-migration\"))]",
+            ),
+            (
+                "#[cfg(windows)]",
+                "retire_batch_apps(plan, &installations, &mut cleanup_started)?;",
+                "#[cfg(unix)]",
+            ),
+        ] {
+            let expected = format!("{guard}\n            {statement}");
+            assert!(body.contains(&expected));
+            for newline in ["\n", "\r\n"] {
+                let fixture = expected.replace('\n', newline);
+                assert!(normalize(&fixture).contains(&expected));
+                for wrong in [
+                    fixture.replace(guard, wrong_guard),
+                    fixture.replace(guard, ""),
+                    fixture.replace(statement, &format!("unrelated_call(); {statement}")),
+                ] {
+                    assert!(!normalize(&wrong).contains(&expected));
+                }
+            }
+        }
     }
 
     #[test]
