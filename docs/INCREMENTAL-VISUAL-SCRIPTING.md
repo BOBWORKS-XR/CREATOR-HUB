@@ -68,6 +68,14 @@ Source anchors refer to the inspected working tree; line numbers may move.
   No arbitrary type/member invocation, reflection payload, C#, raw JSON/YAML
   patch or canvas automation. Internal version-specific API binding is not a
   caller-programmable reflection interface.
+  Preserve bridge compilation in projects without Visual Scripting. The current
+  installer/payload verifies the single bridge source and logo; an optional
+  strongly typed adapter/assembly needs its own installation, payload manifest
+  and stale-bridge tests. A helper file existing in this repository is not proof
+  that an installed user's project receives or can compile it.
+  Bind the installed bridge's editing capability/version before dispatch. An
+  older bridge must return an actionable update-required refusal without any
+  fallback to whole-graph writing, serialized patches or canvas interaction.
 - [ ] Required initial operations: add an allowlisted node through a closed,
   version-specific factory, typed literal/default updates and explicit
   control/value connect/disconnect. Candidate factories are Sequence, Custom
@@ -151,6 +159,42 @@ Source anchors refer to the inspected working tree; line numbers may move.
   before adding event-specific operations or recommending event wiring. Do not
   infer multiplayer delivery/order or unknown external guard behavior from them.
   Release/native qualification remains with the parent task.
+
+## Assessment Checkpoint Evidence
+
+- Canonical MCP TypeScript build and 40 existing layout/profile/graph tests
+  passed. Actual tool registration for all/read/author/banter confirms the two
+  proposed tools are absent. These baseline tests do not implement them.
+- A test-only, version-pinned Unity 6000.3.2f1 / VS 1.9.9 fixture is retained in
+  ignored `artifacts/release-016-updater-20261019/vs-incremental-assessment`.
+  Its fixed graph has Custom Event senders/receivers and Sequences. It adds
+  Sequence, Trigger Custom Event and ordinary Null/Equal/If units; the latter
+  are a structural guard stand-in, not an SDK/network-authority repair.
+- Native run `07554851200d44e2a96cd3e63a488215` passed isolated preview,
+  stale/unknown-node/unknown-port rejection and its injected-failure complete
+  object Undo check. The successful-edit save/reload path did **not** pass, and
+  a subsequent recovery exception masked its primary error. All four synthetic
+  asset/meta files equalled their backups after Editor exit. This does not prove
+  successful commit, committed-edit Undo/Redo, reopen or crash recovery.
+- The diagnostic fixture now records the primary transaction exception and phase
+  before recovery. Fourteen static/API-source tests pass. Native diagnostic run
+  `5f59f52f9d2a4de69d5df7223acd8f92` reproduced the failure specifically at
+  `reloaded-fingerprint`: `Save/reload changed graph`. This is a mismatch of the
+  fixture's serialized-graph fingerprint, not proof of lost nodes or behavior.
+  The preceding unchanged-unit/reference assertions passed. A typed before/after
+  snapshot of all new units, edges and graph settings is needed to distinguish
+  semantic drift from serialization-order/identity differences. Recovery then
+  failed to replace `Graph.asset`; the original failure is now retained. No
+  graph-semantics workaround, weakened comparison or production tool wiring was
+  added. Persistence, cold reopen and original in-the-wild behavior stay unproven.
+  A separate post-exit readback verified all four test asset/meta files match
+  their before-images and every one of 3,864 package files matches in both the
+  original cache and disposable copy. These preservation checks do not turn the
+  failed transaction into a successful graph edit.
+- Current MCP product sources, installed Hub and release module payloads were
+  not changed for this assessment. No private user graph was requested again,
+  opened or modified. These disposable results cannot authorize release or
+  establish multiplayer behavior.
 
 ## Primary API References
 

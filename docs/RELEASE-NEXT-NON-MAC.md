@@ -88,9 +88,23 @@ not approval of untested packages or a publication receipt.
   proxy's HTTP/1.1 contract. This is a harness blocker, not a qualified bootstrap
   or evidence of a product network failure. The older Root remains diagnostic
   only; activation, migration and update/restart still need final bytes.
+- Readiness correction `24e8a94` passed native transfer in `39409484679`: all
+  five pinned assets were served with zero proxy rejections. Native Setup was
+  reached, but confirmation was not attempted because its exact title label
+  was absent from the test expectation. Both the title and 577-character consent
+  body matched production source. Source `93b0859` changes only the two expected
+  label lists and adds four regressions; 124 tests and independent review pass.
+  Its signature preflight `39411086875` passed. Controlled native run
+  `39411925207` then passed Setup cancellation, signed bootstrap and cold
+  activation against the unchanged older `ff305353` host. Warm activation
+  refused at the exact mapped XRes-owned Root companion guard; cause remains
+  unqualified. Update/restart, final preservation, migration and final newer
+  Root-byte qualification remain open. Do not relabel these prefix results as
+  a complete Flatpak pass.
 - Official signed Unity Hub 3.22.3 capture `39408054247` retained the owned first
   bitmap: one color and not rendered. AX was unavailable at that point; a later
-  exact-window guard refused before a second sample. The captured evidence does
+  exact-window guard refused while validating the second capture, before it
+  could be retained or accepted. The captured evidence does
   not establish why that window changed, a GPU defect, account readiness or
   genuine current-registry compatibility. No sandbox override or input was used.
 - User decision: hold 0.1.16 for automatic current Unity Hub project-registry
