@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import re
+import runpy
 import shlex
 import stat
 import subprocess
@@ -112,6 +113,66 @@ class CaptureTests(unittest.TestCase):
                      "UNITY_NO_CONSENT_PROMPT", "ELECTRON_DISABLE_SANDBOX", "CHROME_FLAGS", "https_proxy", "FLATPAK_ID"):
             with self.subTest(name=name), self.assertRaises(RuntimeError):
                 self.admit({**self.env(), name: ""})
+
+    def test_inherited_refusal_reports_only_forbidden_names_never_values(self):
+        with self.assertRaises(RuntimeError) as caught:
+            self.admit({**self.env(), "CHROME_BIN": "DO_NOT_EXPORT_THIS_VALUE", "DISPLAY": "ALSO_PRIVATE"})
+        message = str(caught.exception)
+        self.assertTrue(message.startswith("Inherited injection or sandbox/trust override refused; "))
+        details = json.loads(message.split("; ", 1)[1])
+        self.assertEqual(details, {"forbiddenEnvNames": ["CHROME_BIN"], "omitted": 0})
+        self.assertNotIn("DO_NOT_EXPORT", message)
+        self.assertNotIn("ALSO_PRIVATE", message)
+        self.assertNotIn("DISPLAY", message)
+
+    def test_inherited_name_diagnostic_is_bounded_and_control_safe(self):
+        names = ["LD_" + "a" * 200, "LD_\nprivate", "LD_\udcff"] + ["CHROME_NAME_" + str(i) for i in range(20)]
+        with self.assertRaises(RuntimeError) as caught:
+            self.admit({**self.env(), **dict.fromkeys(names, "NEVER_LOG_VALUE")})
+        message = str(caught.exception)
+        details = json.loads(message.split("; ", 1)[1])
+        self.assertLessEqual(len(message), 512)
+        self.assertEqual(len(details["forbiddenEnvNames"]), 4)
+        self.assertEqual(details["omitted"], len(names) - 4)
+        self.assertNotIn("NEVER_LOG_VALUE", message)
+        self.assertNotIn("\n", message)
+
+    def test_irregular_forbidden_name_is_hashed_not_exported(self):
+        name = "LD_\n" + "x" * 200
+        with self.assertRaises(RuntimeError) as caught:
+            self.admit({**self.env(), name: "PRIVATE"})
+        details = json.loads(str(caught.exception).split("; ", 1)[1])
+        self.assertEqual(details["forbiddenEnvNames"], ["sha256:" + C.hashlib.sha256(name.encode()).hexdigest()])
+        self.assertNotIn(name, str(caught.exception))
+
+    def test_original_inherited_rejection_predicate_is_unchanged(self):
+        original = r"^(LD_|DYLD_|PYTHONPATH$|PYTHONHOME$|SSL_CERT_|CURL_CA_BUNDLE$|REQUESTS_CA_BUNDLE$|UNITY_|HUB_|ELECTRON_|CHROME_|FLATPAK_ID$)"
+        names = ("DISPLAY", "CHROME_BIN", "CHROME_FLAGS", "chrome_bin", "ALL_PROXY", "no_proxy", "prefixPROXY",
+                 "PYTHONPATH", "PYTHONPATH_EXTRA", "HUB_HOME", "ELECTRON_FLAGS", "UNITY_NO_CONSENT_PROMPT", "UNITY_HUB_CAPTURE_REQUEST")
+        for name in names:
+            env = self.env() if name == "UNITY_HUB_CAPTURE_REQUEST" else {**self.env(), name: ""}
+            rejected = (re.match(original, name) and name != "UNITY_HUB_CAPTURE_REQUEST") or name.lower().endswith("proxy")
+            with self.subTest(name=name):
+                if rejected:
+                    with self.assertRaises(RuntimeError):
+                        self.admit(env)
+                else:
+                    self.admit(env)
+
+    def test_actual_admit_entrypoint_has_no_setup_download_gui_or_environment_mutation(self):
+        env = self.env()
+        with mock.patch.dict(C.os.environ, env, clear=True), mock.patch.object(sys, "argv", [str(SPEC.origin), "admit"]), \
+                mock.patch.object(C.platform, "system", return_value="Linux"), \
+                mock.patch.object(C.platform, "machine", return_value="x86_64"), \
+                mock.patch.object(C.os, "getuid", return_value=1001, create=True), \
+                mock.patch.object(C.os, "geteuid", return_value=1001, create=True), \
+                mock.patch.object(C.os, "mkdir", side_effect=AssertionError("No setup allowed")), \
+                mock.patch.object(C.urllib.request, "build_opener", side_effect=AssertionError("No network allowed")), \
+                mock.patch.object(C.subprocess, "Popen", side_effect=AssertionError("No process allowed")), \
+                mock.patch.dict(sys.modules, {"gi": None}):
+            runpy.run_path(str(SPEC.origin), run_name="__main__")
+            self.assertEqual(dict(C.os.environ), env)
+        self.assertEqual(list(self.root.iterdir()), [])
 
     def test_private_closed_environment(self):
         value = C.environment(self.root)
@@ -612,6 +673,8 @@ class CaptureTests(unittest.TestCase):
         self.assertIn("persist-credentials: false", workflow)
         self.assertLess(workflow.index("native-linux-unity-hub-registry-capture.test.py"), workflow.index("native-linux-unity-hub-registry-capture.py stage"))
         self.assertLess(workflow.index("native-linux-unity-hub-registry-capture.test.py"), workflow.index("sudo apt-get update"))
+        self.assertLess(workflow.index("native-linux-unity-hub-registry-capture.py admit"), workflow.index("sudo apt-get update"))
+        self.assertLess(workflow.index("native-linux-unity-hub-registry-capture.py admit"), workflow.index("native-linux-unity-hub-registry-capture.py stage"))
         self.assertLess(workflow.index("sudo apt-get update"), workflow.index("native-linux-unity-hub-registry-capture.py prerequisites"))
         self.assertLess(workflow.index("native-linux-unity-hub-registry-capture.py prerequisites"), workflow.index("native-linux-unity-hub-registry-capture.py stage"))
         self.assertLess(workflow.index("native-linux-unity-hub-registry-capture.py stage"), workflow.index("native-linux-unity-hub-registry-capture.py session"))

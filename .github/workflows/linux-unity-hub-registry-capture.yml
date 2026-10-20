@@ -33,6 +33,8 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+      - name: Admission-only preflight before setup, downloads or GUI activity
+        run: /usr/bin/python3 -I -B scripts/native-linux-unity-hub-registry-capture.py admit
       - name: Mandatory pure authority, parser, Python 3.10 and workflow tests
         run: /usr/bin/python3 -I -B scripts/native-linux-unity-hub-registry-capture.test.py
       - name: Provision only the fixed disposable-runner GUI observation prerequisites

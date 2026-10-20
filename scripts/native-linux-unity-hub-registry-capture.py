@@ -161,8 +161,12 @@ def admission(env, system=None, machine=None, uid=None, euid=None):
         re.fullmatch(r"[1-9][0-9]*", env.get(name, "")) for name in ("GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT")),
         "Exact run/source identity required")
     forbidden = r"^(LD_|DYLD_|PYTHONPATH$|PYTHONHOME$|SSL_CERT_|CURL_CA_BUNDLE$|REQUESTS_CA_BUNDLE$|UNITY_|HUB_|ELECTRON_|CHROME_|FLATPAK_ID$)"
-    require(not any((re.match(forbidden, name) and name != "UNITY_HUB_CAPTURE_REQUEST")
-                    or name.lower().endswith("proxy") for name in env), "Inherited injection or sandbox/trust override refused")
+    blocked = sorted(name for name in env if (re.match(forbidden, name) and name != "UNITY_HUB_CAPTURE_REQUEST")
+                     or name.lower().endswith("proxy"))
+    names = [name if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", name)
+             else "sha256:" + hashlib.sha256(name.encode("utf8", errors="surrogatepass")).hexdigest() for name in blocked[:4]]
+    require(not blocked, "Inherited injection or sandbox/trust override refused; " + json.dumps(
+        {"forbiddenEnvNames": names, "omitted": max(0, len(blocked) - len(names))}, separators=(",", ":")))
 
 
 def root_path(env):
@@ -733,5 +737,5 @@ def observe(env):
 
 
 if __name__ == "__main__":
-    require(len(sys.argv) == 2 and sys.argv[1] in ("prerequisites", "stage", "session", "observe"), "Only finite capture phases exist")
-    {"prerequisites": prerequisites, "stage": stage, "session": session, "observe": observe}[sys.argv[1]](os.environ)
+    require(len(sys.argv) == 2 and sys.argv[1] in ("admit", "prerequisites", "stage", "session", "observe"), "Only finite capture phases exist")
+    {"admit": admission, "prerequisites": prerequisites, "stage": stage, "session": session, "observe": observe}[sys.argv[1]](os.environ)
