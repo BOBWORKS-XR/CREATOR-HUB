@@ -57,7 +57,7 @@ sys.exit(0 if result["fresh"] else 1)
 STOCK_ARCHIVE = ("https://archive.ubuntu.com/ubuntu/pool/main/p/policykit-1/polkitd_0.105-33ubuntu0.2_amd64.deb",
                  80152, "8a8e123a44e2c3deef2c072db7248e94d9d7ad7c874127facc7d1abaf622ea85")
 HELPERS = {"native-linux-root-probe.py": "91983346c5bac811028135b41c11a0dfc10e40a61c9f65aab535df326e354e72",
-           "native-unix-window.py": "a8aa761c41b26c4cd4a52f4f3c698046ca4cca20e97c08ee5cd41d68afbfb83f"}
+           "native-unix-window.py": "86d91a98ba823035d80fe75412daace276722ab9b8504317b39b546537f22d2d"}
 # Independent primary Ubuntu archive bytes, not hashes learned from a live PID.
 FILES = {
     AGENT: ("policykit-1-gnome", "0.105-7ubuntu3", 55448, "871825e1437644fbf8bde51b27b65e93f43e439df662183f012983258e45e48c", 0o755),

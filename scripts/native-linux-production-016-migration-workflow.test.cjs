@@ -93,6 +93,23 @@ test('pinned preflight Python precedes pure tests while native brokers retain th
   assert.match(controller, /import tomllib as toml\s+except ImportError:\s+import toml/);
 });
 
+test('actual reused polkit and transitive helper suites are mandatory before downloads or apt', () => {
+  const steps = workflow.jobs.migration.steps;
+  const pure = steps.findIndex(step => step.name?.startsWith('Pure execution'));
+  const download = steps.findIndex(step => step.uses === 'actions/github-script@v8');
+  const apt = steps.findIndex(step => step.run?.includes('sudo apt-get'));
+  assert.ok(0 <= pure && pure < download && download < apt);
+  assert.equal(steps[pure]['continue-on-error'], undefined);
+  for (const name of ['native-linux-polkit-probe', 'native-linux-root-probe', 'native-unix-window']) {
+    const command = `"$PREFLIGHT_PYTHON" -B scripts/${name}.test.py`;
+    assert.equal(steps[pure].run.split('\n').filter(line => line === command).length, 1, command);
+    assert.equal(steps.filter(step => (step.run || '').includes(command)).length, 1, command);
+  }
+  assert.doesNotMatch(steps[pure].run, /\|\||set \+e|continue-on-error/);
+  const suite = fs.readFileSync(path.join(__dirname, 'native-linux-polkit-probe.test.py'), 'utf8');
+  assert.match(suite, /^b = p\.base\(\)$/m);
+});
+
 test('unchanged production API/offline gate precedes any candidate execution or privilege', () => {
   const steps = workflow.jobs.migration.steps;
   const index = needle => steps.findIndex(step => step.run?.includes(needle));
@@ -110,9 +127,11 @@ test('unchanged production API/offline gate precedes any candidate execution or 
   assert.doesNotMatch(source, /build:unified|cargo (?:build|run)|gh release|contents: write|actions: write|continue-on-error|flatpak install/);
 });
 
-test('inline scripts parse with the stdlib and artifact exports have an explicit bounded safe list', () => {
+test('inline Python and Bash parse and artifact exports have an explicit bounded safe list', () => {
   const commands = workflow.jobs.migration.steps.filter(step => step.run).map(step => step.run);
   for (const command of commands) assert.ok(!command.includes('${{'), 'No workflow input interpolation into shell/Python source');
+  for (const command of commands) cp.execFileSync(process.platform === 'win32' ? 'C:/Program Files/Git/bin/bash.exe' : '/bin/bash',
+    ['-n'], { input: command, encoding: 'utf8', timeout: 10000, maxBuffer: 65536 });
   const scripts = commands.flatMap(command => [...command.matchAll(/<<'PY'\n([\s\S]*?)\nPY(?:\n|$)/g)].map(match => match[1]));
   assert.equal(scripts.length, 3);
   cp.execFileSync(process.platform === 'win32' ? 'python' : 'python3', ['-c',

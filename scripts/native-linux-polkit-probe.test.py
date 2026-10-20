@@ -44,6 +44,46 @@ def runner():
 
 
 class ContractTests(unittest.TestCase):
+    def test_fresh_base_checks_the_closed_transitive_helper_set_without_native_work(self):
+        self.assertEqual(set(p.HELPERS), {"native-linux-root-probe.py", "native-unix-window.py"})
+        self.assertEqual(b.HELPER, HERE / "native-unix-window.py")
+        source = ast.parse(Path(b.__file__).read_text())
+        loaders = [node for node in ast.walk(source) if isinstance(node, ast.Call)
+                   and isinstance(node.func, ast.Attribute) and node.func.attr == "spec_from_file_location"]
+        self.assertEqual(len(loaders), 1)
+        self.assertIsInstance(loaders[0].args[1], ast.Name)
+        self.assertEqual(loaders[0].args[1].id, "HELPER")
+        with mock.patch.object(p, "_b", None), mock.patch.object(p.subprocess, "Popen") as spawn, \
+                mock.patch.object(p.urllib.request, "urlopen") as fetch:
+            fresh = p.base()
+            helper = fresh.load_helper()
+            self.assertEqual(Path(helper.__file__), HERE / "native-unix-window.py")
+            self.assertIs(p.base(), fresh)
+        spawn.assert_not_called(); fetch.assert_not_called()
+
+    def test_each_helper_hash_mismatch_refuses_before_import_or_any_native_work(self):
+        original = {name: (HERE / name).read_bytes() for name in p.HELPERS}
+        expected_pins = dict(p.HELPERS)
+        for changed in p.HELPERS:
+            def read(path):
+                return original[path.name] + (b"\n# synthetic changed helper\n" if path.name == changed else b"")
+            with self.subTest(helper=changed), mock.patch.object(p, "_b", None), \
+                    mock.patch.object(Path, "read_bytes", autospec=True, side_effect=read), \
+                    mock.patch.object(p.importlib.util, "spec_from_file_location") as loader, \
+                    mock.patch.object(p.subprocess, "Popen") as spawn, \
+                    mock.patch.object(p.urllib.request, "urlopen") as fetch, \
+                    self.assertRaisesRegex(RuntimeError, "Reviewed helper bytes changed"):
+                p.base()
+            loader.assert_not_called(); spawn.assert_not_called(); fetch.assert_not_called()
+            self.assertEqual(p.HELPERS, expected_pins)
+
+    def test_missing_helper_is_not_imported_or_replaced_with_a_learned_hash(self):
+        with mock.patch.object(p, "_b", None), mock.patch.object(Path, "read_bytes", side_effect=FileNotFoundError()), \
+                mock.patch.object(p.importlib.util, "spec_from_file_location") as loader, \
+                self.assertRaises(FileNotFoundError):
+            p.base()
+        loader.assert_not_called()
+
     def test_exact_native_admission_push_and_manual(self):
         for event in ("push", "workflow_dispatch"):
             p.admission(runner() | {"GITHUB_EVENT_NAME": event}, "linux", "x86_64")
