@@ -46,6 +46,28 @@ not approval of untested packages or a publication receipt.
 
 ### Current Evidence, 2026-10-20
 
+- A genuine Unity Hub 3.22.2 project created through its UI is now available on
+  the physical Steam Deck (Unity 6000.3.26f1). Its registry is in Unity Hub's
+  Flatpak profile, not the native configuration directory. Root's existing
+  native-profile-only lookup misses that location; Linux-only profile discovery
+  and its packaged qualification are still required.
+- Pinned Unity CLI beta9 successfully returned that project from an isolated
+  SQLite backup of the genuine registry. The probe restricts schema, objects,
+  metadata and project rows before and after backup, uses private HOME/XDG paths,
+  sealed helper bytes and bounded child output, and copies no account files.
+  Six focused tests passed locally and on Deck. Source database/WAL and the two
+  checked project-file hashes were unchanged. This is snapshot compatibility,
+  not write-free live-profile access or production Root discovery acceptance.
+- Diagnostic source `1ef33b2` passed 24 observer,130 controller,78 input and59
+  shared-window tests, with two existing platform-specific skips,12 Node tests
+  and eight Python3.10 parses. Signature-only run `39423675957` passed and bound
+  all eight current Python source/test files. Actual run `39423929394` then
+  pinpointed a release-event SendEvent BadWindow on the exact launcher XID and
+  request serial. Root's matching activation reply was retained, but a parent
+  process image disappeared during sender attribution. The original input
+  refusal remains failed; no retry or qualification was manufactured. Temporary
+  trust cleanup passed. A pre-input ownership baseline and separately verified
+  terminal activation outcome remain necessary before warm activation can pass.
 - Source-bound passive diagnostic `f3ae036` passed independent review, 130
   controller tests, 17 observer tests, 73 input-guard tests and 12 CJS tests.
   Its signature-only run `39419577175` verified the exact four Python imports
