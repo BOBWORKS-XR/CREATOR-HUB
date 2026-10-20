@@ -122,6 +122,671 @@ pub(crate) fn child_dir(name: &str) -> Result<PathBuf, String> {
     Ok(path)
 }
 
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum LinuxUpdateCache {
+    #[cfg(any(feature = "experimental-linux-portable-update", test))]
+    Portable,
+    #[cfg(any(feature = "experimental-linux-portable-update", test))]
+    PortableRecords,
+    Deb,
+    DebRecords,
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn prepare_linux_update_cache(kind: LinuxUpdateCache) -> Result<PathBuf, String> {
+    let data = dirs::data_local_dir().ok_or("Local app data is unavailable.")?;
+    private_linux_cache::prepare(&data, kind, unsafe { libc::geteuid() }, |_| {})
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn linux_update_cache_path(kind: LinuxUpdateCache) -> Result<PathBuf, String> {
+    let data = dirs::data_local_dir().ok_or("Local app data is unavailable.")?;
+    private_linux_cache::inspect(&data, kind, unsafe { libc::geteuid() })
+}
+
+#[cfg(target_os = "linux")]
+mod private_linux_cache {
+    use super::LinuxUpdateCache;
+    use std::{
+        ffi::CString,
+        fs::{self, File, Metadata},
+        os::{
+            fd::{AsRawFd, FromRawFd},
+            unix::{
+                ffi::OsStrExt,
+                fs::{DirBuilderExt, MetadataExt},
+            },
+        },
+        path::{Component, Path, PathBuf},
+    };
+
+    const ROOT: &str = "creator-hub-update-cache";
+
+    #[derive(Clone, Copy)]
+    enum Access {
+        Inspect,
+        Prepare,
+    }
+
+    struct Held {
+        path: PathBuf,
+        file: File,
+        before: Metadata,
+        private: bool,
+    }
+
+    fn valid(info: &Metadata, private: bool, uid: u32) -> bool {
+        info.is_dir()
+            && !info.file_type().is_symlink()
+            && if private {
+                info.uid() == uid && info.mode() & 0o7777 == 0o700
+            } else {
+                (info.uid() == 0 || info.uid() == uid)
+                    && (info.mode() & 0o022 == 0 || info.uid() == 0 && info.mode() & 0o1000 != 0)
+            }
+    }
+
+    fn same(left: &Metadata, right: &Metadata) -> bool {
+        (left.dev(), left.ino(), left.mode(), left.uid(), left.gid())
+            == (
+                right.dev(),
+                right.ino(),
+                right.mode(),
+                right.uid(),
+                right.gid(),
+            )
+    }
+
+    fn recheck(held: &[Held], uid: u32) -> Result<(), String> {
+        for entry in held {
+            let named = fs::symlink_metadata(&entry.path)
+                .map_err(|_| "Linux update cache ancestry changed.")?;
+            let opened = entry
+                .file
+                .metadata()
+                .map_err(|_| "Cannot recheck Linux update cache ancestry.")?;
+            if !valid(&named, entry.private, uid)
+                || !same(&entry.before, &named)
+                || !same(&entry.before, &opened)
+            {
+                return Err("Linux update cache ancestry changed or is unsafe.".into());
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn prepare(
+        data: &Path,
+        kind: LinuxUpdateCache,
+        uid: u32,
+        after_open: impl FnMut(&Path),
+    ) -> Result<PathBuf, String> {
+        resolve(data, kind, uid, Access::Prepare, after_open)
+    }
+
+    pub(super) fn inspect(
+        data: &Path,
+        kind: LinuxUpdateCache,
+        uid: u32,
+    ) -> Result<PathBuf, String> {
+        resolve(data, kind, uid, Access::Inspect, |_| {})
+    }
+
+    fn resolve(
+        data: &Path,
+        kind: LinuxUpdateCache,
+        uid: u32,
+        access: Access,
+        mut after_open: impl FnMut(&Path),
+    ) -> Result<PathBuf, String> {
+        if !data.is_absolute()
+            || data.as_os_str().as_bytes().len() > 4096
+            || data.components().count() > 128
+            || data
+                .components()
+                .any(|part| !matches!(part, Component::RootDir | Component::Normal(_)))
+        {
+            return Err("Absolute unlinked Linux data directory required.".into());
+        }
+        let (area, records) = match kind {
+            #[cfg(any(feature = "experimental-linux-portable-update", test))]
+            LinuxUpdateCache::Portable => ("portable", false),
+            #[cfg(any(feature = "experimental-linux-portable-update", test))]
+            LinuxUpdateCache::PortableRecords => ("portable", true),
+            LinuxUpdateCache::Deb => ("deb", false),
+            LinuxUpdateCache::DebRecords => ("deb", true),
+        };
+        let mut path = data.join(ROOT).join(area);
+        if records {
+            path.push("records");
+        }
+        let private_root = data.join(ROOT);
+        let mut held = Vec::new();
+        let mut current = PathBuf::from("/");
+        let root = File::open("/").map_err(|_| "Cannot inspect Linux update cache root.")?;
+        let info = root
+            .metadata()
+            .map_err(|_| "Cannot inspect Linux filesystem root.")?;
+        if !valid(&info, false, uid) {
+            return Err("Unsafe Linux update cache ancestry.".into());
+        }
+        held.push(Held {
+            path: current.clone(),
+            file: root,
+            before: info,
+            private: false,
+        });
+        for part in path.components().skip(1) {
+            let Component::Normal(name) = part else {
+                return Err("Unambiguous Linux update cache path required.".into());
+            };
+            recheck(&held, uid)?;
+            current.push(name);
+            let private = current.starts_with(&private_root);
+            let parent = &held.last().ok_or("Linux cache parent unavailable.")?.file;
+            let name =
+                CString::new(name.as_bytes()).map_err(|_| "Invalid Linux cache component.")?;
+            let created = match fs::symlink_metadata(&current) {
+                Ok(info) if valid(&info, private, uid) => false,
+                Ok(_) => {
+                    return Err(
+                        "Unsafe existing Linux update cache directory; nothing was changed.".into(),
+                    )
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    if matches!(access, Access::Inspect) {
+                        recheck(&held, uid)?;
+                        return Ok(path.clone());
+                    }
+                    // Create beneath the held parent, never a replaced pathname.
+                    let anchored = PathBuf::from(format!("/proc/self/fd/{}", parent.as_raw_fd()))
+                        .join(part.as_os_str());
+                    fs::DirBuilder::new()
+                        .mode(0o700)
+                        .create(anchored)
+                        .map_err(|_| "Cannot exclusively create private Linux update cache.")?;
+                    true
+                }
+                Err(_) => return Err("Cannot inspect Linux update cache ancestry.".into()),
+            };
+            let private = private || created;
+            let before = fs::symlink_metadata(&current)
+                .map_err(|_| "Linux update cache directory changed after creation.")?;
+            let descriptor = unsafe {
+                libc::openat(
+                    parent.as_raw_fd(),
+                    name.as_ptr(),
+                    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                )
+            };
+            if descriptor < 0 {
+                return Err("Cannot hold Linux update cache directory.".into());
+            }
+            let file = unsafe { File::from_raw_fd(descriptor) };
+            let opened = file
+                .metadata()
+                .map_err(|_| "Cannot inspect held Linux update cache.")?;
+            if !valid(&before, private, uid) || !same(&before, &opened) {
+                return Err("Linux update cache directory identity, owner or mode changed.".into());
+            }
+            held.push(Held {
+                path: current.clone(),
+                file,
+                before,
+                private,
+            });
+            after_open(&current);
+            recheck(&held, uid)?;
+        }
+        Ok(path)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::{
+            os::unix::fs::{symlink, PermissionsExt},
+            process::Command,
+        };
+
+        fn fixture() -> tempfile::TempDir {
+            let temporary = tempfile::Builder::new()
+                .prefix("creator-hub-cache-test-")
+                .tempdir_in(Path::new("/tmp").canonicalize().unwrap())
+                .unwrap();
+            assert_eq!(temporary.path().canonicalize().unwrap(), temporary.path());
+            temporary
+        }
+
+        fn prepare_at(data: &Path, kind: LinuxUpdateCache) -> Result<PathBuf, String> {
+            prepare(data, kind, unsafe { libc::geteuid() }, |_| {})
+        }
+
+        fn inspect_at(data: &Path, kind: LinuxUpdateCache) -> Result<PathBuf, String> {
+            inspect(data, kind, unsafe { libc::geteuid() })
+        }
+
+        fn private_dir(path: &Path) {
+            fs::DirBuilder::new().mode(0o700).create(path).unwrap();
+        }
+
+        fn mode(path: &Path) -> u32 {
+            fs::symlink_metadata(path).unwrap().mode() & 0o7777
+        }
+
+        fn snapshot(path: &Path) -> (u64, u64, u32, u32, u32, i64, i64) {
+            let info = fs::symlink_metadata(path).unwrap();
+            (
+                info.dev(),
+                info.ino(),
+                info.mode(),
+                info.uid(),
+                info.gid(),
+                info.mtime(),
+                info.mtime_nsec(),
+            )
+        }
+
+        fn creation_child(acl: bool) {
+            let temporary = fixture();
+            let status = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "manager::private_linux_cache::tests::private_creation_child",
+                    "--nocapture",
+                ])
+                .env("CREATOR_HUB_CACHE_TEST_ROOT", temporary.path())
+                .env("CREATOR_HUB_CACHE_TEST_ACL", if acl { "1" } else { "0" })
+                .status()
+                .unwrap();
+            assert!(
+                status.success(),
+                "isolated Linux cache creation test failed"
+            );
+        }
+
+        #[test]
+        fn private_creation_under_umask_0002() {
+            creation_child(false);
+        }
+
+        #[test]
+        fn private_creation_under_inherited_permissive_default_acl() {
+            creation_child(true);
+        }
+
+        #[test]
+        fn first_inspection_preserves_absent_data_and_cache_and_matches_preparation() {
+            for existing_data in [false, true] {
+                let temporary = fixture();
+                let data = temporary.path().join("data");
+                if existing_data {
+                    private_dir(&data);
+                }
+                let before = snapshot(temporary.path());
+                let mut expected = Vec::new();
+                for kind in [
+                    LinuxUpdateCache::Portable,
+                    LinuxUpdateCache::PortableRecords,
+                    LinuxUpdateCache::Deb,
+                    LinuxUpdateCache::DebRecords,
+                ] {
+                    expected.push((kind, inspect_at(&data, kind).unwrap()));
+                    assert_eq!(data.exists(), existing_data);
+                    assert!(!data.join(ROOT).exists());
+                    assert!(!data.join("CreatorHub").exists());
+                    assert!(!data.join("creator-hub-portable").exists());
+                }
+                assert_eq!(snapshot(temporary.path()), before);
+                for (kind, path) in expected {
+                    assert_eq!(prepare_at(&data, kind).unwrap(), path);
+                    assert_eq!(inspect_at(&data, kind).unwrap(), path);
+                }
+            }
+        }
+
+        #[test]
+        fn private_creation_child() {
+            let Some(root) = std::env::var_os("CREATOR_HUB_CACHE_TEST_ROOT") else {
+                return;
+            };
+            let root = PathBuf::from(root);
+            assert_eq!(mode(&root), 0o700);
+            assert_eq!(root.canonicalize().unwrap(), root);
+            assert_eq!(
+                root.parent().unwrap(),
+                Path::new("/tmp").canonicalize().unwrap()
+            );
+            assert!(root
+                .file_name()
+                .unwrap()
+                .as_bytes()
+                .starts_with(b"creator-hub-cache-test-"));
+            assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
+            // This test binary is a separate process; never alter the parent test runner's mask.
+            unsafe {
+                libc::umask(0o002);
+            }
+            let data = root.join("data");
+            private_dir(&data);
+            let acl = std::env::var("CREATOR_HUB_CACHE_TEST_ACL").unwrap() == "1";
+            let directory = File::open(&data).unwrap();
+            let name = CString::new("system.posix_acl_default").unwrap();
+            if acl {
+                // Linux UAPI posix_acl_xattr.h/posix_acl.h: version 2, u::rwx,g::rwx,o::rwx.
+                let mut bytes = 2u32.to_le_bytes().to_vec();
+                for tag in [0x01u16, 0x04, 0x20] {
+                    bytes.extend(tag.to_le_bytes());
+                    bytes.extend(7u16.to_le_bytes());
+                    bytes.extend(u32::MAX.to_le_bytes());
+                }
+                let result = unsafe {
+                    libc::fsetxattr(
+                        directory.as_raw_fd(),
+                        name.as_ptr(),
+                        bytes.as_ptr().cast(),
+                        bytes.len(),
+                        0,
+                    )
+                };
+                assert_eq!(
+                    result,
+                    0,
+                    "real default ACL fixture required: {}",
+                    std::io::Error::last_os_error()
+                );
+            } else {
+                // Keep the umask-only control independent of the host's inherited default ACL.
+                let result = unsafe { libc::fremovexattr(directory.as_raw_fd(), name.as_ptr()) };
+                assert!(
+                    result == 0
+                        || std::io::Error::last_os_error().raw_os_error() == Some(libc::ENODATA)
+                );
+            }
+            let control = data.join("default-mode-control");
+            fs::create_dir(&control).unwrap();
+            assert_eq!(mode(&control), if acl { 0o777 } else { 0o775 });
+            for (kind, relative) in [
+                (LinuxUpdateCache::Portable, "portable"),
+                (LinuxUpdateCache::PortableRecords, "portable/records"),
+                (LinuxUpdateCache::Deb, "deb"),
+                (LinuxUpdateCache::DebRecords, "deb/records"),
+            ] {
+                let cache = prepare_at(&data, kind).unwrap();
+                assert_eq!(cache, data.join(ROOT).join(relative));
+                for entry in cache.ancestors().take_while(|entry| *entry != data) {
+                    assert_eq!(mode(entry), 0o700);
+                    assert_eq!(fs::metadata(entry).unwrap().uid(), unsafe {
+                        libc::geteuid()
+                    });
+                }
+            }
+            assert!(!data.join("CreatorHub").exists());
+            assert!(!data.join("creator-hub-portable").exists());
+        }
+
+        #[test]
+        fn missing_data_directories_are_private_without_touching_existing_ancestors() {
+            let temporary = fixture();
+            let before = snapshot(temporary.path());
+            let data = temporary.path().join("new/local/data");
+            prepare_at(&data, LinuxUpdateCache::Portable).unwrap();
+            for path in [
+                temporary.path().join("new"),
+                temporary.path().join("new/local"),
+                data,
+            ] {
+                assert_eq!(mode(&path), 0o700);
+            }
+            let after = snapshot(temporary.path());
+            assert_eq!(
+                (before.0, before.1, before.2, before.3, before.4),
+                (after.0, after.1, after.2, after.3, after.4)
+            );
+        }
+
+        #[test]
+        fn unsafe_existing_private_directories_are_refused_without_mutation() {
+            for relative in ["", "portable", "portable/records", "deb", "deb/records"] {
+                for refused_mode in [0o775, 0o777, 0o755] {
+                    let temporary = fixture();
+                    let data = temporary.path();
+                    prepare_at(data, LinuxUpdateCache::PortableRecords).unwrap();
+                    prepare_at(data, LinuxUpdateCache::DebRecords).unwrap();
+                    let bad = data.join(ROOT).join(relative);
+                    let sentinel = bad.join("keep");
+                    fs::write(&sentinel, b"unrelated cache data").unwrap();
+                    fs::set_permissions(&bad, fs::Permissions::from_mode(refused_mode)).unwrap();
+                    let before = (snapshot(&bad), snapshot(&sentinel));
+                    let kind = if relative.starts_with("deb") {
+                        LinuxUpdateCache::DebRecords
+                    } else {
+                        LinuxUpdateCache::PortableRecords
+                    };
+                    assert!(inspect_at(data, kind).is_err());
+                    assert!(prepare_at(data, kind).is_err());
+                    assert_eq!((snapshot(&bad), snapshot(&sentinel)), before);
+                    assert_eq!(fs::read(sentinel).unwrap(), b"unrelated cache data");
+                    assert_eq!(mode(&bad), refused_mode);
+                }
+            }
+        }
+
+        #[test]
+        fn writable_data_ancestor_is_refused_before_any_cache_creation() {
+            for refused_mode in [0o775, 0o777] {
+                let temporary = fixture();
+                let data = temporary.path().join("data");
+                private_dir(&data);
+                fs::set_permissions(&data, fs::Permissions::from_mode(refused_mode)).unwrap();
+                let before = snapshot(&data);
+                assert!(inspect_at(&data, LinuxUpdateCache::Portable).is_err());
+                assert!(prepare_at(&data, LinuxUpdateCache::Portable).is_err());
+                assert_eq!(snapshot(&data), before);
+                assert!(!data.join(ROOT).exists());
+            }
+        }
+
+        #[test]
+        fn foreign_owner_validation_refuses_existing_cache_without_mutation() {
+            let temporary = fixture();
+            let data = temporary.path();
+            prepare_at(data, LinuxUpdateCache::Portable).unwrap();
+            let cache = data.join(ROOT);
+            let info = fs::symlink_metadata(&cache).unwrap();
+            let foreign_uid = info.uid().checked_add(1).unwrap();
+            assert!(!valid(&info, true, foreign_uid));
+            let before = snapshot(&cache);
+            assert!(prepare(data, LinuxUpdateCache::Deb, foreign_uid, |_| {}).is_err());
+            assert_eq!(snapshot(&cache), before);
+            assert!(!cache.join("deb").exists());
+        }
+
+        #[test]
+        fn links_and_non_directories_are_refused_without_following_or_removal() {
+            for link in [false, true] {
+                let temporary = fixture();
+                let data = temporary.path();
+                let other = data.join("unrelated");
+                private_dir(&other);
+                fs::write(other.join("keep"), b"preserved").unwrap();
+                let bad = data.join(ROOT);
+                if link {
+                    symlink(&other, &bad).unwrap();
+                } else {
+                    fs::write(&bad, b"not a directory").unwrap();
+                }
+                let before = (snapshot(&bad), snapshot(&other));
+                assert!(inspect_at(data, LinuxUpdateCache::Portable).is_err());
+                assert!(prepare_at(data, LinuxUpdateCache::Portable).is_err());
+                assert_eq!((snapshot(&bad), snapshot(&other)), before);
+                assert_eq!(fs::read(other.join("keep")).unwrap(), b"preserved");
+                assert!(!other.join("portable").exists());
+            }
+        }
+
+        #[test]
+        fn data_directory_symlink_is_refused_before_touching_its_target() {
+            let temporary = fixture();
+            let target = temporary.path().join("target");
+            private_dir(&target);
+            fs::write(target.join("keep"), b"unrelated data").unwrap();
+            let link = temporary.path().join("data");
+            symlink(&target, &link).unwrap();
+            let before = (snapshot(&target), snapshot(&link));
+            assert!(inspect_at(&link, LinuxUpdateCache::Deb).is_err());
+            assert!(prepare_at(&link, LinuxUpdateCache::Deb).is_err());
+            assert_eq!((snapshot(&target), snapshot(&link)), before);
+            assert_eq!(fs::read(target.join("keep")).unwrap(), b"unrelated data");
+            assert!(!target.join(ROOT).exists());
+        }
+
+        #[test]
+        fn named_directory_replacement_is_refused_before_creating_foreign_children() {
+            let temporary = fixture();
+            let data = temporary.path();
+            let cache = data.join(ROOT);
+            private_dir(&cache);
+            fs::write(cache.join("keep"), b"old cache").unwrap();
+            let retained = data.join("retained-cache");
+            let mut replaced = false;
+            let result = prepare(
+                data,
+                LinuxUpdateCache::Portable,
+                unsafe { libc::geteuid() },
+                |path| {
+                    if path == cache && !replaced {
+                        fs::rename(&cache, &retained).unwrap();
+                        private_dir(&cache);
+                        fs::write(cache.join("foreign"), b"not adopted").unwrap();
+                        replaced = true;
+                    }
+                },
+            );
+            assert!(replaced && result.is_err());
+            assert_eq!(fs::read(retained.join("keep")).unwrap(), b"old cache");
+            assert_eq!(fs::read(cache.join("foreign")).unwrap(), b"not adopted");
+            assert!(!cache.join("portable").exists());
+            assert!(!retained.join("portable").exists());
+            assert_eq!(mode(&cache), 0o700);
+        }
+
+        #[test]
+        fn postcreation_mode_change_is_refused_without_repair() {
+            let temporary = fixture();
+            let data = temporary.path();
+            let cache = data.join(ROOT);
+            let result = prepare(
+                data,
+                LinuxUpdateCache::Portable,
+                unsafe { libc::geteuid() },
+                |path| {
+                    if path == cache {
+                        fs::set_permissions(path, fs::Permissions::from_mode(0o777)).unwrap();
+                    }
+                },
+            );
+            assert!(result.is_err());
+            assert_eq!(mode(&cache), 0o777);
+            assert!(!cache.join("portable").exists());
+        }
+
+        #[test]
+        fn unsafe_legacy_tree_is_preserved_and_cancelled_download_never_creates_store() {
+            use std::sync::atomic::AtomicBool;
+            let temporary = fixture();
+            let data = temporary.path();
+            let legacy = data.join("CreatorHub");
+            private_dir(&legacy);
+            let settings = legacy.join("settings.json");
+            fs::write(&settings, b"original settings and unknown fields").unwrap();
+            fs::set_permissions(&legacy, fs::Permissions::from_mode(0o777)).unwrap();
+            let before = (snapshot(&legacy), snapshot(&settings));
+            for kind in [
+                LinuxUpdateCache::Portable,
+                LinuxUpdateCache::PortableRecords,
+                LinuxUpdateCache::Deb,
+                LinuxUpdateCache::DebRecords,
+            ] {
+                assert_eq!(mode(&prepare_at(data, kind).unwrap()), 0o700);
+            }
+            let hash = "0".repeat(64);
+            let result = crate::manager::copy_verified(
+                b"package".as_slice(),
+                Vec::new(),
+                7,
+                &hash,
+                &AtomicBool::new(true),
+                |_| {},
+            );
+            assert!(result.unwrap_err().contains("cancelled"));
+            assert_eq!((snapshot(&legacy), snapshot(&settings)), before);
+            assert_eq!(
+                fs::read(settings).unwrap(),
+                b"original settings and unknown fields"
+            );
+            assert!(!data.join("creator-hub-portable").exists());
+        }
+
+        #[test]
+        fn existing_settings_old_caches_store_and_generations_are_not_adopted_or_changed() {
+            let temporary = fixture();
+            let data = temporary.path();
+            let mut preserved = Vec::new();
+            for name in [
+                "CreatorHub/preferences/hub-preferences.json",
+                "CreatorHub/projects.json",
+                "CreatorHub/hub-portable-updates/old/archive.tar.gz",
+                "CreatorHub/downloads/old.deb",
+                "CreatorHub/hub-updates/hosted-restore.json",
+                "creator-hub-portable/current.json",
+                "creator-hub-portable/generations/old/keep",
+            ] {
+                let path = data.join(name);
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                fs::write(&path, name.as_bytes()).unwrap();
+                preserved.push((path.clone(), snapshot(&path), fs::read(path).unwrap()));
+            }
+            for kind in [
+                LinuxUpdateCache::Portable,
+                LinuxUpdateCache::PortableRecords,
+                LinuxUpdateCache::Deb,
+                LinuxUpdateCache::DebRecords,
+            ] {
+                prepare_at(data, kind).unwrap();
+            }
+            for (path, before, bytes) in preserved {
+                assert_eq!(snapshot(&path), before);
+                assert_eq!(fs::read(path).unwrap(), bytes);
+            }
+            assert_eq!(
+                fs::read_dir(data.join(ROOT).join("portable"))
+                    .unwrap()
+                    .count(),
+                1
+            );
+            assert_eq!(
+                fs::read_dir(data.join(ROOT).join("deb")).unwrap().count(),
+                1
+            );
+        }
+
+        #[test]
+        fn relative_and_traversal_roots_are_refused_without_creation() {
+            let temporary = fixture();
+            for path in [
+                PathBuf::from("relative"),
+                temporary.path().join("missing/../other"),
+            ] {
+                assert!(prepare_at(&path, LinuxUpdateCache::Deb).is_err());
+            }
+            assert!(!temporary.path().join("missing").exists());
+            assert!(!temporary.path().join("other").exists());
+        }
+    }
+}
+
 pub(crate) fn bounded_read(path: &Path, max: u64) -> Result<Vec<u8>, String> {
     platform::reject_links(path)?;
     let mut bytes = Vec::new();
