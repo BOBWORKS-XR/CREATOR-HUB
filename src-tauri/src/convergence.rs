@@ -254,13 +254,18 @@ fn label(store: stores::Store) -> &'static str {
     }
 }
 
+fn migration_relevant(snapshot: &stores::Snapshot) -> bool {
+    snapshot.bytes().is_some()
+        && (snapshot.store() != stores::Store::McpHostedOutcomes || snapshot.needs_outcome_review())
+}
+
 fn inspect() -> Result<Plan, String> {
     let mut snapshots = Vec::new();
     let mut settings = Vec::new();
     let base = roots()?;
     for store in stores::STORES {
         let snapshot = stores::Snapshot::inspect(store, &base)?;
-        if snapshot.bytes().is_some() {
+        if migration_relevant(&snapshot) {
             settings.push(label(store));
         }
         snapshots.push(snapshot);
@@ -2419,7 +2424,22 @@ mod tests {
         assert!(body.contains("Cancelling a later system prompt does not undo earlier cleanup"));
         assert!(body.contains("Continuing also accepts the unknown custom-GUI integration risk"));
         assert!(body.contains("These TEST ONLY packages are not release acceptance"));
-        assert!(body.contains("#[cfg(all(target_os = \"linux\", not(feature = \"experimental-linux-migration\")))]\n            require_no_retirement"));
+        let guarded_call = "#[cfg(all(target_os = \"linux\", not(feature = \"experimental-linux-migration\")))]\n            require_no_retirement";
+        let has_guarded_call = |source: &str| source.replace("\r\n", "\n").contains(guarded_call);
+        assert!(has_guarded_call(body));
+        for newline in ["\n", "\r\n"] {
+            let fixture = guarded_call.replace('\n', newline);
+            assert!(has_guarded_call(&fixture));
+            let wrong_guard = fixture.replace(
+                "not(feature = \"experimental-linux-migration\")",
+                "feature = \"experimental-linux-migration\"",
+            );
+            assert!(!has_guarded_call(&wrong_guard));
+            assert!(!has_guarded_call(&fixture.replace(
+                "require_no_retirement",
+                "unrelated_call(); require_no_retirement",
+            )));
+        }
         let native = include_str!("convergence_linux.rs");
         let originals = native
             .split("impl Originals {")
@@ -2720,6 +2740,160 @@ mod tests {
         assert!(!migration_required(0, 4, true, false));
         assert!(migration_required(0, 1, false, false));
         assert!(!migration_required(0, 0, false, false));
+    }
+
+    #[test]
+    fn migration_relevance_fresh_page_history_does_not_prompt_on_reopen() {
+        let (_temp, base, _) = fixture_plan();
+        let current = stores::Store::McpCurrent.path(&base).unwrap();
+        fs::remove_file(&current).unwrap();
+        let before: Vec<_> = stores::STORES
+            .into_iter()
+            .map(|kind| stores::Snapshot::inspect(kind, &base).unwrap())
+            .collect();
+        let key = prompt_review_key(&before, &[], false).unwrap();
+        assert!(!before.iter().any(migration_relevant));
+        // Fresh16 run 39357446683 completed exactly these read operations before normal close.
+        let body = serde_json::to_vec(&json!({"revision":1,"records":[
+            {"session":"a".repeat(64),"id":3,"command":"load_config","outcome":"returned-ok"},
+            {"session":"a".repeat(64),"id":4,"command":"discover_unity_projects","outcome":"returned-ok"}
+        ]}))
+        .unwrap();
+        let path = stores::Store::McpHostedOutcomes.path(&base).unwrap();
+        fs::write(&path, &body).unwrap();
+        for _ in 0..2 {
+            let snapshots: Vec<_> = stores::STORES
+                .into_iter()
+                .map(|kind| stores::Snapshot::inspect(kind, &base).unwrap())
+                .collect();
+            assert_eq!(snapshots.len(), stores::STORES.len());
+            let settings = snapshots
+                .iter()
+                .filter(|saved| migration_relevant(saved))
+                .count();
+            assert_eq!(settings, 0);
+            assert!(!migration_required(0, settings, false, false));
+            assert_eq!(prompt_review_key(&snapshots, &[], false).unwrap(), key);
+            let journal = snapshots
+                .iter()
+                .find(|saved| saved.store() == stores::Store::McpHostedOutcomes)
+                .unwrap();
+            assert_eq!(journal.bytes(), Some(body.as_slice()));
+            for snapshot in &snapshots {
+                snapshot.recheck().unwrap();
+            }
+            assert!(!current.exists());
+            assert_eq!(fs::read(&path).unwrap(), body);
+        }
+    }
+
+    #[test]
+    fn migration_relevance_preserves_uncertain_outcome_semantics_and_journal_bytes() {
+        let (_temp, base, _) = fixture_plan();
+        fs::remove_file(stores::Store::McpCurrent.path(&base).unwrap()).unwrap();
+        let path = stores::Store::McpHostedOutcomes.path(&base).unwrap();
+        for (outcome, required) in [
+            ("accepted", true),
+            ("unknown-acknowledged", true),
+            ("returned-ok", false),
+            ("returned-error", false),
+        ] {
+            write_outcome(&base, outcome);
+            let bytes = fs::read(&path).unwrap();
+            let snapshots: Vec<_> = stores::STORES
+                .into_iter()
+                .map(|kind| stores::Snapshot::inspect(kind, &base).unwrap())
+                .collect();
+            assert_eq!(snapshots.len(), stores::STORES.len());
+            assert_eq!(snapshots[2].needs_outcome_review(), required);
+            let settings = snapshots
+                .iter()
+                .filter(|saved| migration_relevant(saved))
+                .count();
+            assert_eq!(migration_required(0, settings, false, false), required);
+            assert_eq!(settings_need_review(&snapshots), required);
+            assert_eq!(snapshots[2].bytes(), Some(bytes.as_slice()));
+            snapshots[2].recheck().unwrap();
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+        }
+    }
+
+    #[test]
+    fn migration_relevance_unknown_journals_still_fail_closed_and_remain_unchanged() {
+        let (_temp, base, _) = fixture_plan();
+        fs::remove_file(stores::Store::McpCurrent.path(&base).unwrap()).unwrap();
+        let path = stores::Store::McpHostedOutcomes.path(&base).unwrap();
+        for body in [
+            br#"{"revision":2,"records":[]}"#.to_vec(),
+            br#"{"revision":1,"records":[],"future":true}"#.to_vec(),
+            b"malformed journal".to_vec(),
+            serde_json::to_vec(&json!({"revision":1,"records":[{
+                "session":"a".repeat(64),"id":3,"command":"load_config","outcome":"future-outcome"
+            }]}))
+            .unwrap(),
+        ] {
+            fs::write(&path, &body).unwrap();
+            let inspected: Result<Vec<_>, _> = stores::STORES
+                .into_iter()
+                .map(|kind| stores::Snapshot::inspect(kind, &base))
+                .collect();
+            assert!(inspected.is_err());
+            assert_eq!(fs::read(&path).unwrap(), body);
+        }
+    }
+
+    #[test]
+    fn migration_relevance_keeps_real_settings_apps_and_pending_batches_required() {
+        for kind in [
+            stores::Store::McpCurrent,
+            stores::Store::McpLegacy,
+            stores::Store::SetupEditors,
+        ] {
+            let (_temp, base, _) = fixture_plan();
+            let current = stores::Store::McpCurrent.path(&base).unwrap();
+            let mut bytes = fs::read(&current).unwrap();
+            fs::remove_file(&current).unwrap();
+            if kind == stores::Store::SetupEditors {
+                bytes = b"[]".to_vec();
+            }
+            let path = kind.path(&base).unwrap();
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, &bytes).unwrap();
+            let snapshots: Vec<_> = stores::STORES
+                .into_iter()
+                .map(|kind| stores::Snapshot::inspect(kind, &base).unwrap())
+                .collect();
+            let settings = snapshots
+                .iter()
+                .filter(|saved| migration_relevant(saved))
+                .count();
+            assert_eq!(settings, 1);
+            assert!(migration_required(0, settings, false, false));
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+        }
+        assert!(migration_required(1, 0, false, false));
+        let (temp, _, _) = fixture_plan();
+        let path = temp.path().join("move.json");
+        for outcome in ["started", "stopped"] {
+            record_batch_at(
+                &path,
+                &BatchRecord {
+                    policy: POLICY,
+                    phase: "backup".into(),
+                    outcome: outcome.into(),
+                    review_key: "a".repeat(64),
+                    retry_blocked: outcome == "started",
+                },
+            )
+            .unwrap();
+            let pending = read_batch_at(&path).unwrap().unwrap();
+            assert!(migration_required(
+                0,
+                0,
+                false,
+                pending.outcome != "complete"
+            ));
+        }
     }
 
     fn fixture_plan() -> (tempfile::TempDir, stores::Roots, Plan) {
