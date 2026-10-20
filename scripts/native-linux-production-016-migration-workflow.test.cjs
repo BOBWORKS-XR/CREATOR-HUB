@@ -65,15 +65,27 @@ test('pinned preflight Python precedes pure tests while native brokers retain th
   const steps = workflow.jobs.migration.steps;
   const setups = steps.filter(step => step.uses === 'actions/setup-python@v6');
   assert.equal(setups.length, 1);
-  assert.deepEqual(setups[0].with, { 'python-version': '3.11.17' });
+  assert.equal(setups[0].id, 'preflight_python');
+  assert.deepEqual(setups[0].with, { 'python-version': '3.11.17', 'update-environment': false });
   const setup = steps.indexOf(setups[0]);
   const pure = steps.findIndex(step => step.name?.startsWith('Pure execution'));
   const download = steps.findIndex(step => step.uses === 'actions/github-script@v8');
   const dependencies = steps.findIndex(step => step.run?.includes('sudo apt-get install'));
   const broker = steps.findIndex(step => step.name?.startsWith('Fixed root broker'));
   assert.ok(0 < setup && setup < pure && pure < download && download < dependencies && dependencies < broker);
-  assert.match(steps[pure].run, /^python3 -B scripts\/native-linux-production-016-stage\.test\.py$/m);
-  assert.match(steps[pure].run, /^python3 -B scripts\/native-linux-production-016-migration\.test\.py$/m);
+  assert.deepEqual(steps[pure].env, { PREFLIGHT_PYTHON: '${{ steps.preflight_python.outputs.python-path }}' });
+  assert.match(steps[pure].run, /^"\$PREFLIGHT_PYTHON" -I -c 'import sys, tomllib; assert sys.version_info\[:3\] == \(3, 11, 17\)'$/m);
+  assert.match(steps[pure].run, /^"\$PREFLIGHT_PYTHON" -B scripts\/native-linux-production-016-stage\.test\.py$/m);
+  assert.match(steps[pure].run, /^"\$PREFLIGHT_PYTHON" -B scripts\/native-linux-production-016-migration\.test\.py$/m);
+  for (const env of [workflow.env, workflow.jobs.migration.env, ...steps.map(step => step.env)]) {
+    for (const key of Object.keys(env || {})) assert.doesNotMatch(key, /^(?:LD_|DYLD_|PYTHONPATH$|PYTHONHOME$)/);
+  }
+  assert.equal(Object.hasOwn(workflow.jobs.migration.env, 'PREFLIGHT_PYTHON'), false);
+  for (const step of steps.filter((_, index) => index !== pure)) {
+    assert.equal(Object.hasOwn(step.env || {}, 'PREFLIGHT_PYTHON'), false);
+    assert.doesNotMatch(step.run || '', /PREFLIGHT_PYTHON|preflight_python\.outputs/);
+  }
+  assert.doesNotMatch(source, /\bunset\b|GITHUB_ENV|GITHUB_PATH/);
   assert.match(steps[dependencies].run, /python3-gi python3-toml/);
   assert.match(steps[broker].run, /'PATH=\/usr\/bin:\/bin', 'LANG=C', 'LC_ALL=C',\s*'\/usr\/bin\/python3', '-B', str\(source\), 'broker'/);
   const controller = fs.readFileSync(path.join(__dirname, 'native-linux-production-016-migration.py'), 'utf8');

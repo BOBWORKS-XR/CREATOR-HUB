@@ -49,14 +49,19 @@ jobs:
         with:
           node-version: 24.17.0
       - uses: actions/setup-python@v6
+        id: preflight_python
         with:
           python-version: '3.11.17'
+          update-environment: false
       - run: npm ci --ignore-scripts
       - name: Pure execution and inspection refusal tests before download or privilege
+        env:
+          PREFLIGHT_PYTHON: ${{ steps.preflight_python.outputs.python-path }}
         run: |
+          "$PREFLIGHT_PYTHON" -I -c 'import sys, tomllib; assert sys.version_info[:3] == (3, 11, 17)'
           node --test scripts/native-linux-production-016-input.test.cjs scripts/native-linux-production-016-migration-workflow.test.cjs
-          python3 -B scripts/native-linux-production-016-stage.test.py
-          python3 -B scripts/native-linux-production-016-migration.test.py
+          "$PREFLIGHT_PYTHON" -B scripts/native-linux-production-016-stage.test.py
+          "$PREFLIGHT_PYTHON" -B scripts/native-linux-production-016-migration.test.py
       - name: Use unchanged production API admission and bound downloads
         uses: actions/github-script@v8
         env:
