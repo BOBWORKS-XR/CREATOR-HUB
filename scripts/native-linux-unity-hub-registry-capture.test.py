@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import traceback
 import types
 import unittest
 from unittest import mock
@@ -102,6 +103,13 @@ class CaptureTests(unittest.TestCase):
                 patch = mock.patch.object(C.os, name, 0, create=True)
                 patch.start()
                 self.addCleanup(patch.stop)
+        if os.name == "nt":
+            # Linux descriptors have binary semantics; do not let Windows CRLF/Ctrl-Z translation alter PNG fixtures.
+            native_open = C.os.open
+            patch = mock.patch.object(C.os, "open", side_effect=lambda path, flags, *args, **kwargs:
+                                      native_open(path, flags | os.O_BINARY, *args, **kwargs))
+            patch.start()
+            self.addCleanup(patch.stop)
 
     def env(self):
         return {"GITHUB_ACTIONS": "true", "GITHUB_REPOSITORY": C.REPO, "GITHUB_REPOSITORY_ID": C.REPO_ID,
@@ -690,6 +698,209 @@ class CaptureTests(unittest.TestCase):
             with self.subTest(drift=drift), self.assertRaises(RuntimeError):
                 self.exec_fixture(native_drift=drift)
 
+    def test_frame_metrics_match_shared_predicate_and_keep_blank_unqualified(self):
+        _helper, native = C.helpers()
+        for channels in (3, 4):
+            pixels = bytes(component for i in range(256) for component in ([i, 255 - i, i // 2] + ([255] if channels == 4 else [])))
+            metrics = C.frame_metrics(pixels, 16, 16, 16 * channels, channels)
+            self.assertEqual(metrics, native.pixel_metrics(pixels, 16, 16, 16 * channels, channels))
+        blank = bytes(16 * 16 * 3)
+        self.assertFalse(C.frame_metrics(blank, 16, 16, 48, 3)["nonblank"])
+        with self.assertRaisesRegex(RuntimeError, "blank/insufficiently varied"):
+            native.pixel_metrics(blank, 16, 16, 48, 3)
+
+    def test_malformed_pixel_buffers_are_fatal_not_pending(self):
+        for shape in ((0, 16, 48, 3), (16, 16, 48, 2), (16, 16, 47, 3), (16, 16, 48, 3)):
+            with self.subTest(shape=shape), self.assertRaisesRegex(RuntimeError, "Pixel buffer exceeds contract"):
+                C.frame_metrics(b"short", *shape)
+
+    def test_pixel_readiness_thresholds_match_frozen_shared_guard_exactly(self):
+        _helper, native = C.helpers()
+        for colors, high, changed, ready in ((16, 32, 100, True), (15, 32, 100, False), (16, 31, 100, False), (16, 32, 99, False)):
+            palette = list(range(1, colors - 1)) + [high]
+            values = [0] + [palette[i % len(palette)] for i in range(changed)] + [0] * (255 - changed)
+            pixels = bytes(component for value in values for component in (value, value, value))
+            with self.subTest(colors=colors, high=high, changed=changed):
+                metrics = C.frame_metrics(pixels, 16, 16, 48, 3)
+                self.assertEqual(metrics["nonblank"], ready)
+                if ready:
+                    self.assertEqual(metrics, native.pixel_metrics(pixels, 16, 16, 48, 3))
+                else:
+                    with self.assertRaises(RuntimeError):
+                        native.pixel_metrics(pixels, 16, 16, 48, 3)
+
+    def frame_fixture(self, *, blank=False, drift=None, capture_error=False):
+        helper, native, x11, pixbuf, window, gdk, gdkx11 = (mock.Mock() for _ in range(7))
+        request = types.SimpleNamespace(window=100)
+        bound = {"pid": 123, "client": 10, "title": "Unity Hub", "mapped": True}
+        rectangle = (0, 0, 16, 16)
+        helper.bound_window.return_value = bound
+        native.visible_rectangle.return_value = rectangle
+        if drift == "window":
+            helper.bound_window.side_effect = [bound, {**bound, "pid": 999}]
+        if drift == "geometry":
+            native.visible_rectangle.side_effect = [rectangle, (1, 0, 16, 16)]
+        if drift == "post-encoding-window":
+            helper.bound_window.side_effect = [bound, bound, {**bound, "pid": 999}]
+        if drift == "post-encoding-geometry":
+            native.visible_rectangle.side_effect = [rectangle, rectangle, (1, 0, 16, 16)]
+        window.get_xid.return_value, window.get_scale_factor.return_value = 100, 1
+        gdkx11.X11Window.foreign_new_for_display.return_value = window
+        gdk.pixbuf_get_from_window.return_value = None if capture_error else pixbuf
+        pixbuf.get_width.return_value, pixbuf.get_height.return_value = 16, 16
+        pixbuf.get_bits_per_sample.return_value, pixbuf.get_rowstride.return_value, pixbuf.get_n_channels.return_value = 8, 48, 3
+        pixbuf.get_pixels.return_value = bytes(768) if blank else bytes(component for i in range(256) for component in (i, 255 - i, i // 2))
+        pixbuf.save_to_bufferv.return_value = (True, b"\x89PNG\r\n\x1a\nmock")
+        gi, repository = types.ModuleType("gi"), types.ModuleType("gi.repository")
+        gi.require_version = mock.Mock()
+        repository.Gdk, repository.GdkX11 = gdk, gdkx11
+        gi.repository = repository
+        self.frame_helper, self.frame_pixbuf = helper, pixbuf
+        with mock.patch.dict(sys.modules, {"gi": gi, "gi.repository": repository}):
+            return C.owned_frame(request, helper, native, x11)
+
+    def test_owned_frame_retains_metrics_for_blank_without_relaxing_identity_checks(self):
+        raw, metadata = self.frame_fixture(blank=True)
+        self.assertTrue(raw.startswith(b"\x89PNG"))
+        self.assertFalse(metadata["nonblank"])
+        self.assertTrue(metadata["diagnosticOnly"])
+        self.assertTrue(metadata["windowOnly"])
+        self.assertEqual(self.frame_helper.identity.call_count, 3)
+
+    def test_owned_frame_window_geometry_and_capture_errors_are_fatal(self):
+        for kind in ("window", "geometry", "capture", "post-encoding-window", "post-encoding-geometry"):
+            with self.subTest(kind=kind), self.assertRaises(RuntimeError):
+                self.frame_fixture(drift=kind, capture_error=kind == "capture")
+            if kind.startswith("post-encoding"):
+                self.frame_pixbuf.save_to_bufferv.assert_called_once()
+            else:
+                self.frame_pixbuf.save_to_bufferv.assert_not_called()
+
+    def render_fixture(self, samples, *, clock=None, ax=None, guard_error_at=None):
+        index = getattr(self, "render_index", 0) + 1
+        self.render_index = index
+        root = self.root / ("render-" + str(index))
+        (root / "evidence").mkdir(parents=True)
+        helper, native, atspi, x11, output, wm_output, guard = (mock.Mock() for _ in range(7))
+        helper.perform.side_effect = ax if ax is not None else [{"nodes": [], "actionCount": 0}] * 2
+        if guard_error_at is not None:
+            guard.side_effect = [None] * (guard_error_at - 1) + [RuntimeError("Owned identity/window changed")]
+        values = []
+        for i, value in enumerate(samples):
+            values.append(value if isinstance(value, Exception) else
+                          (b"\x89PNG\r\n\x1a\n" + bytes([i]), {"nonblank": value, "diagnosticOnly": True, "sample": i}))
+        report = dict(C.FALSE)
+        failure = None
+        with mock.patch.object(C, "owned_frame", side_effect=values) as frames, \
+                mock.patch.object(C.time, "monotonic", side_effect=clock, return_value=0):
+            try:
+                report["surface"] = C.observe_render(mock.Mock(), helper, native, atspi, x11, root, 1, guard, output, wm_output, report)
+            except RuntimeError as error:
+                failure = error
+        return report, failure, frames, guard, helper, root
+
+    def test_blank_then_rendered_preserves_first_last_before_qualification(self):
+        report, failure, frames, _guard, helper, root = self.render_fixture([False, True])
+        self.assertIsNone(failure)
+        self.assertEqual(frames.call_count, 2)
+        self.assertEqual(helper.perform.call_count, 2)
+        first, last = report["renderReadiness"]["first"], report["renderReadiness"]["last"]
+        self.assertFalse(first["nonblank"])
+        self.assertTrue(last["nonblank"])
+        self.assertNotEqual(first["image"], last["image"])
+        for record in (first, last):
+            self.assertEqual(C.pin((root / "evidence" / record["path"]).read_bytes()), record["image"])
+        self.assertTrue(all(report[name] is False for name in C.FALSE))
+
+    def test_permanent_blank_expires_original_budget_with_unqualified_images(self):
+        report, failure, frames, _guard, helper, root = self.render_fixture([False, False], clock=[0, 0, 0.1, 1])
+        self.assertIn("render deadline", str(failure))
+        self.assertNotIn("surface", report)
+        self.assertFalse(report["renderReadiness"]["last"]["nonblank"])
+        self.assertTrue((root / "evidence/hub-first-frame.png").exists())
+        self.assertTrue((root / "evidence/root-window.png").exists())
+        self.assertEqual(frames.call_count, 2)
+        helper.perform.assert_called_once()
+        self.assertNotIn("axFinal", report)
+        self.assertTrue(all(report[name] is False for name in C.FALSE))
+
+    def test_rendered_sample_after_remaining_budget_never_qualifies_or_restarts_clock(self):
+        report, failure, frames, _guard, helper, root = self.render_fixture([True], clock=[0, 0, 1])
+        self.assertIn("render deadline", str(failure))
+        self.assertNotIn("surface", report)
+        self.assertTrue((root / "evidence/root-window.png").exists())
+        self.assertTrue(report["renderReadiness"]["last"]["diagnosticOnly"])
+        frames.assert_called_once()
+        helper.perform.assert_called_once()
+        self.assertNotIn("axFinal", report)
+
+    def test_render_identity_drift_and_capture_errors_never_retry(self):
+        report, failure, frames, _guard, _helper, _root = self.render_fixture([False, True], guard_error_at=5)
+        self.assertIn("identity/window changed", str(failure))
+        self.assertEqual(frames.call_count, 1)
+        self.assertNotIn("surface", report)
+        report, failure, frames, _guard, helper, root = self.render_fixture([RuntimeError("Owned drawable copy failed")])
+        self.assertIn("drawable copy failed", str(failure))
+        frames.assert_called_once()
+        helper.perform.assert_not_called()
+        self.assertFalse((root / "evidence/hub-first-frame.png").exists())
+
+    def test_first_and_final_ax_refusals_are_retained_once_without_auth_values(self):
+        messages = ["Owned accessibility application is missing or ambiguous", "Exact owned accessibility window is missing or ambiguous"]
+        report, failure, _frames, _guard, helper, root = self.render_fixture([False, True], ax=[RuntimeError(x) for x in messages])
+        self.assertIsNone(failure)
+        self.assertEqual(helper.perform.call_count, 2)
+        for label, message in zip(("first", "final"), messages):
+            record = json.loads((root / "evidence" / ("ax-" + label + ".json")).read_text())
+            self.assertEqual(record["refusal"]["message"], message)
+            self.assertEqual(record["classification"], "unclassified-no-input-authorized")
+        secret = "SECRET_AUTH_VALUE=do-not-export"
+        report, failure, frames, _guard, helper, root = self.render_fixture([False, True], ax=[RuntimeError(secret)])
+        self.assertIn("unsafe AX refusal", str(failure))
+        self.assertEqual(frames.call_count, 1)
+        helper.perform.assert_called_once()
+        retained = (root / "evidence/ax-first.json").read_text()
+        self.assertNotIn(secret, retained + json.dumps(report) + str(failure))
+        self.assertEqual(json.loads(retained)["refusal"]["messageSha256"], C.pin(secret.encode())["sha256"])
+        self.assertTrue((root / "evidence/root-window.png").exists())
+
+    def test_ax_resnapshot_classifies_rendered_surface_and_preserves_images_first(self):
+        calls = []
+        def snapshot(*_args):
+            evidence = self.root / "render-1/evidence"
+            calls.append(True)
+            self.assertTrue((evidence / "hub-first-frame.png").exists())
+            if len(calls) == 1:
+                raise RuntimeError("Owned accessibility application is missing or ambiguous")
+            self.assertTrue((evidence / "root-window.png").exists())
+            return {"actionCount": 0, "nodes": [dict(role=43, name=name, showing=True, enabled=True, sensitive=True,
+                    defunct=False, busy=False) for name in ("Sign in", "PRIVATE_AUTH_VALUE")]}
+        report, failure, _frames, _guard, helper, root = self.render_fixture([False, True], ax=snapshot)
+        self.assertIsNone(failure)
+        self.assertEqual(helper.perform.call_count, 2)
+        self.assertEqual(report["axFirst"]["classification"], "unclassified-no-input-authorized")
+        self.assertEqual(report["axFinal"]["classification"], "sign-in-surface-observed-no-interaction")
+        self.assertNotIn("PRIVATE_AUTH_VALUE", (root / "evidence/ax-final.json").read_text() + json.dumps(report))
+        self.assertTrue(all(report[name] is False for name in C.FALSE))
+
+    def test_ax_ownership_refusal_is_fatal_not_an_unavailable_retry(self):
+        _report, failure, frames, _guard, helper, _root = self.render_fixture([False, True], ax=[RuntimeError("Owned executable hash changed")])
+        self.assertIsNotNone(failure)
+        self.assertEqual(frames.call_count, 1)
+        helper.perform.assert_called_once()
+
+    def test_non_runtime_ax_exception_cannot_use_unavailable_message_allowlist(self):
+        message = "Owned accessibility application is missing or ambiguous"
+        report, failure, frames, _guard, helper, root = self.render_fixture([False, True], ax=[ValueError(message)])
+        self.assertIn("unsafe AX refusal", str(failure))
+        frames.assert_called_once()
+        helper.perform.assert_called_once()
+        record = json.loads((root / "evidence/ax-first.json").read_text())
+        self.assertEqual(record["refusal"], {"type": "ValueError", "message": None,
+                         "messageSha256": C.pin(message.encode())["sha256"], "knownUnavailable": False})
+        self.assertNotIn("surface", report)
+        self.assertNotIn("axFinal", report)
+
     def test_stage_metadata_refusal_precedes_installer_download_and_tools(self):
         def mkdir(path):
             path.mkdir()
@@ -726,7 +937,8 @@ class CaptureTests(unittest.TestCase):
             C.session(self.env())
         launch.assert_not_called()
 
-    def observe_fixture(self, *, bitmap_error=None, changed_before_close=False, sandboxes=None, prelaunch_property=(33, 32, [])):
+    def observe_fixture(self, *, bitmap_error=None, changed_before_close=False, sandboxes=None,
+                        prelaunch_property=(33, 32, []), close_timeout=False, close_alive=False):
         """Mocks only: no ELF, display, native imports, screenshot or input is executed."""
         (self.root / "evidence").mkdir()
         C.save(self.root / "evidence/session-attempt.json", {"attemptConsumed": True})
@@ -754,15 +966,14 @@ class CaptureTests(unittest.TestCase):
         native.client_ids.side_effect = AssertionError("Nonempty-only Root helper must not gate this local desktop")
         native.native_process.return_value = process
         native.process_uids.return_value = [1001] * 4
-        native.bitmap.return_value = {"mockOnly": True}
-        if bitmap_error:
-            native.bitmap.side_effect = bitmap_error
+        frame = (b"\x89PNG\r\n\x1a\nmock", {"mockOnly": True, "nonblank": True})
         def close(*_args):
             self.assertTrue((self.root / "evidence/normal-close-intent.json").exists())
-            alive[0] = False
+            alive[0] = close_alive
         x11.close_window.side_effect = close
+        finished = [False]
         if changed_before_close:
-            native.native_process.side_effect = [process] * 4 + [{**process, "startTime": "999"}]
+            native.native_process.side_effect = lambda *_args: {**process, "startTime": "999"} if finished[0] else process
         gi, repository = types.ModuleType("gi"), types.ModuleType("gi.repository")
         gi.require_version = mock.Mock()
         repository.Atspi, repository.Gdk = mock.Mock(), mock.Mock()
@@ -776,6 +987,11 @@ class CaptureTests(unittest.TestCase):
                     return value
             return real_file_pin(path, limit, wanted)
         sandbox = {"readOnly": True, "kernelSettings": {C.USERNS_SYSCTL: "1"}, "chromeSandbox": None}
+        render = C.observe_render
+        def observe_render(*args):
+            value = render(*args)
+            finished[0] = True
+            return value
         with mock.patch.dict(sys.modules, {"gi": gi, "gi.repository": repository}), \
                 mock.patch.object(C, "review_stage", return_value=(self.root, staged)), \
                 mock.patch.object(C, "helpers", return_value=(helper, native)), \
@@ -786,9 +1002,12 @@ class CaptureTests(unittest.TestCase):
                 mock.patch.object(C, "file_pin", side_effect=image_pin), \
                 mock.patch.object(C.os, "getuid", return_value=1001, create=True), \
                 mock.patch.object(C, "source_gate", return_value=staged["sources"]), \
-                mock.patch.object(C, "Drain") as output, mock.patch.object(C, "wait_exit", return_value=0), \
+                mock.patch.object(C, "owned_frame", return_value=frame, side_effect=bitmap_error), \
+                mock.patch.object(C, "observe_render", side_effect=observe_render), \
+                mock.patch.object(C, "Drain") as output, \
+                mock.patch.object(C, "wait_exit", return_value=0, side_effect=RuntimeError("Owned process/output deadline") if close_timeout else None), \
                 mock.patch.object(C.subprocess, "Popen", side_effect=[wm, child]) as launch:
-            output.return_value.metadata.return_value = {}
+            output.return_value.metadata.return_value = {"stdout": {"eof": not close_timeout}, "stderr": {"eof": not close_timeout}}
             failure = None
             try:
                 C.observe(env)
@@ -805,7 +1024,7 @@ class CaptureTests(unittest.TestCase):
         self.assertTrue(all(report[name] is False for name in C.FALSE))
         self.assertEqual(helper.Request.parse.call_args.args[0][0], "snapshot")
         self.assertTrue(all(type(value) is str for value in helper.Request.parse.call_args.args[0]))
-        helper.perform.assert_called_once()
+        self.assertEqual(helper.perform.call_count, 2)
         x11.close_window.assert_called_once_with(100, mock.ANY)
         self.assertEqual(launch.call_args_list[1].args[0], [str(self.root / "image" / C.WRAPPER)])
         self.assertEqual(helper.Request.parse.call_args.args[0][3], str(self.root / "image" / C.NATIVE))
@@ -819,7 +1038,60 @@ class CaptureTests(unittest.TestCase):
         self.assertFalse(report["observationCaptured"])
         self.assertTrue(report["normalCloseObserved"])
         x11.close_window.assert_called_once()
-        helper.perform.assert_called_once()
+        helper.perform.assert_not_called()  # Capture failure is fatal before AX; no generic retry.
+
+    def assert_sanitization_exception_redacted(self, label):
+        secret = "SYNTHETIC_PRIVATE_AX_MARKER"
+        steps = [ValueError(secret)] if label == "first" else [[], ValueError(secret)]
+        with mock.patch.object(C, "sanitize_ax", side_effect=steps) as sanitize:
+            report, failure, helper, x11, _launch = self.observe_fixture()
+        self.assertIsInstance(failure, RuntimeError)
+        self.assertIn("unsafe AX refusal", report["refusal"])
+        self.assertFalse(report["observationCaptured"])
+        self.assertNotIn("surface", report)
+        self.assertTrue(all(report[name] is False for name in C.FALSE))
+        self.assertEqual(sanitize.call_count, len(steps))
+        self.assertEqual(helper.perform.call_count, len(steps))
+        path = self.root / "evidence" / ("ax-" + label + ".json")
+        record = json.loads(path.read_text())
+        self.assertEqual(record["refusal"], {"type": "ValueError", "message": None,
+                         "messageSha256": C.pin(secret.encode())["sha256"], "knownUnavailable": False})
+        summary = report["ax" + label.title()]
+        self.assertEqual(summary["refusal"], record["refusal"])
+        self.assertEqual(summary["file"], C.pin(path.read_bytes()))
+        self.assertLessEqual(path.stat().st_size, 196608)
+        if label == "first":
+            self.assertNotIn("axFinal", report)
+            self.assertFalse((self.root / "evidence/ax-final.json").exists())
+        retained = "".join(p.read_text() for p in (self.root / "evidence").glob("*.json"))
+        formatted = "".join(traceback.format_exception(type(failure), failure, failure.__traceback__))
+        self.assertNotIn(secret, retained + json.dumps(report) + str(failure) + formatted)
+        self.assertIsNone(failure.__context__)
+        self.assertTrue(report["normalCloseObserved"])
+        x11.close_window.assert_called_once()
+
+    def test_first_ax_sanitization_exception_is_fatal_and_redacted(self):
+        self.assert_sanitization_exception_redacted("first")
+
+    def test_final_ax_sanitization_exception_is_fatal_and_redacted(self):
+        self.assert_sanitization_exception_redacted("final")
+
+    def test_one_close_timeout_retains_separate_popen_and_eof_states(self):
+        for alive in (False, True):
+            # Each fixture gets a fresh evidence directory, never a retry of an uncertain action.
+            original = self.root
+            self.root = original / ("close-" + str(alive))
+            self.root.mkdir()
+            try:
+                report, failure, _helper, x11, _launch = self.observe_fixture(close_timeout=True, close_alive=alive)
+            finally:
+                self.root = original
+            self.assertIsNotNone(failure)
+            self.assertTrue(report["normalCloseAttempted"])
+            self.assertFalse(report["normalCloseObserved"])
+            self.assertEqual(report["normalCloseStatus"], {"popenPoll": None if alive else 0, "eof": {"stdout": False, "stderr": False}})
+            x11.close_window.assert_called_once()
+            self.assertTrue(all(report[name] is False for name in C.FALSE))
 
     def test_mocked_changed_identity_blocks_normal_close_no_retry(self):
         report, failure, _helper, x11, _launch = self.observe_fixture(changed_before_close=True)
@@ -966,7 +1238,8 @@ class CaptureTests(unittest.TestCase):
         ast.parse(source, feature_version=(3, 10))
         ast.parse(Path(__file__).read_text(encoding="utf8"), feature_version=(3, 10))
         self.assertIn('helper.Request.parse(["snapshot"', source)
-        self.assertIn('native.bitmap(request, root / "evidence", helper, x11)', source)
+        self.assertIn('native.visible_rectangle(request, helper, x11)', source)
+        self.assertIn('Gdk.pixbuf_get_from_window(window, 0, 0, rectangle[2], rectangle[3])', source)
         self.assertLess(source.index('write_new(root / "evidence/normal-close-intent.json"'), source.index('x11.close_window(request.window, bound)'))
         self.assertNotIn(".kill(", source)
         self.assertNotIn(".terminate(", source)
@@ -974,6 +1247,8 @@ class CaptureTests(unittest.TestCase):
         self.assertNotIn("--disable-setuid-sandbox", source)
         self.assertNotIn("os.chmod", source)
         self.assertNotIn("os.chown", source)
+        self.assertNotIn("time.sleep", source)
+        self.assertEqual(source.count("deadline = time.monotonic() + 45"), 1)
 
     def test_workflow_registration_skips_and_manual_gate_precedes_native(self):
         workflow = (HERE.parent / ".github/workflows/linux-unity-hub-registry-capture.yml").read_text(encoding="utf8")

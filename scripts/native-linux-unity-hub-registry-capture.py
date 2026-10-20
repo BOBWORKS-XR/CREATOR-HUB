@@ -55,6 +55,13 @@ FALSE = dict.fromkeys(("hubUiRegistrationAttempted", "hubUiFixtureAccepted", "no
                       "automaticDiscoveryAccepted", "cliBeta9CompatibilityAccepted", "accountInteractionAttempted",
                       "unityEditorAccepted", "releaseReady"), False)
 MAX_LOG, MAX_TAR, MAX_FILE, MAX_ENTRIES = 1024 * 1024, 768 * 1024 * 1024, 256 * 1024 * 1024, 20000
+MAX_PNG = 16 * 1024 * 1024
+AX_UNAVAILABLE = {
+    "Owned accessibility application is missing or ambiguous",
+    "Exact owned accessibility window is missing or ambiguous",
+    "Owned control/window is hidden or not enabled",
+    "Owned control/window is not actionable",
+}
 SYSTEM_TOOLS = ("/usr/bin/gpg", "/usr/bin/gpgv", "/usr/bin/dpkg-deb", "/usr/bin/xauth",
                 "/usr/bin/env", "/usr/bin/bash", "/usr/bin/cat", "/usr/bin/dirname", "/usr/bin/readlink")
 GUI_TOOLS = ("/usr/bin/dbus-run-session", "/usr/bin/xvfb-run", "/usr/bin/Xvfb", "/usr/bin/openbox")
@@ -723,6 +730,119 @@ def classify_ax(nodes):
     return "unclassified-no-input-authorized"
 
 
+def frame_metrics(pixels, width, height, stride, channels):
+    # Same bounds and predicate as native-linux-root-probe.pixel_metrics; blank is diagnostic, not accepted.
+    require(0 < width <= 1920 and 0 < height <= 1080 and width * height <= 1920 * 1080 and channels in (3, 4)
+            and width * channels <= stride <= width * channels + 64
+            and (height - 1) * stride + width * channels <= len(pixels) <= height * stride,
+            "Pixel buffer exceeds contract")
+    colors, low, high, changed, first = set(), 255, 0, 0, tuple(pixels[:3])
+    for y in range(height):
+        for x in range(width):
+            offset = y * stride + x * channels
+            color = tuple(pixels[offset:offset + 3])
+            if len(colors) < 256:
+                colors.add(color)
+            low, high = min(low, *color), max(high, *color)
+            changed += color != first
+    return {"width": width, "height": height, "colorsAtLeast": len(colors), "channelRange": high - low,
+            "pixelsDifferentFromFirst": changed, "nonblank": len(colors) >= 16 and high - low >= 32 and changed >= 100}
+
+
+def owned_frame(request, helper, native, x11):
+    import gi
+    gi.require_version("Gdk", "3.0")
+    gi.require_version("GdkX11", "3.0")
+    from gi.repository import Gdk, GdkX11
+    proc = helper.Proc()
+    helper.identity(request, proc)
+    bound = helper.bound_window(request, x11)
+    rectangle = native.visible_rectangle(request, helper, x11)
+    display = Gdk.Display.get_default()
+    require(display is not None, "GDK X11 display unavailable")
+    window = GdkX11.X11Window.foreign_new_for_display(display, request.window)
+    require(window is not None and window.get_xid() == request.window and window.get_scale_factor() == 1,
+            "Exact unscaled X11 drawable unavailable")
+    pixbuf = Gdk.pixbuf_get_from_window(window, 0, 0, rectangle[2], rectangle[3])
+    require(pixbuf is not None and pixbuf.get_width() == rectangle[2] and pixbuf.get_height() == rectangle[3]
+            and pixbuf.get_bits_per_sample() == 8, "Owned drawable copy failed")
+    metrics = frame_metrics(pixbuf.get_pixels(), pixbuf.get_width(), pixbuf.get_height(), pixbuf.get_rowstride(), pixbuf.get_n_channels())
+    helper.identity(request, proc)
+    require(helper.bound_window(request, x11) == bound and native.visible_rectangle(request, helper, x11) == rectangle,
+            "Owned drawable changed during capture")
+    ok, raw = pixbuf.save_to_bufferv("png", [], [])
+    raw = bytes(raw)
+    require(ok and 0 < len(raw) <= MAX_PNG and raw[:8] == b"\x89PNG\r\n\x1a\n", "Bounded PNG encoding failed")
+    helper.identity(request, proc)
+    require(helper.bound_window(request, x11) == bound and native.visible_rectangle(request, helper, x11) == rectangle,
+            "Owned XRes identity/geometry changed before PNG retention")
+    return raw, {"diagnosticOnly": True, "windowOnly": True, "xid": request.window, "xres": bound,
+                 "rectangle": rectangle, **metrics}
+
+
+def snapshot_ax(request, helper, atspi, x11, root, label, guard, report):
+    guard()
+    result = {"actionCount": 0, "classification": "unclassified-no-input-authorized"}
+    fatal = False
+    try:
+        nodes = sanitize_ax(helper.perform(request, atspi, helper.Proc(), x11))
+        result.update(nodes=nodes, classification=classify_ax(nodes))
+    except Exception as error:
+        message = str(error)
+        known = isinstance(error, RuntimeError) and message in AX_UNAVAILABLE
+        raw = message.encode("utf8", errors="surrogatepass")
+        result["refusal"] = {"type": type(error).__name__[:64], "message": message if known else None,
+                             "messageSha256": hashlib.sha256(raw).hexdigest(), "knownUnavailable": known}
+        fatal = not known
+    path = root / "evidence" / ("ax-" + label + ".json")
+    save(path, result, 196608)
+    report["ax" + label.title()] = {**{key: value for key, value in result.items() if key != "nodes"},
+                                   "nodeCount": len(result.get("nodes", [])), "file": file_pin(path, 196608)}
+    guard()
+    require(not fatal, "Unrecognized or unsafe AX refusal; see bounded owned AX diagnostic")
+    return result["classification"]
+
+
+def observe_render(request, helper, native, atspi, x11, root, deadline, guard, output, wm_output, report):
+    latest = None
+    progress = {"sampleCount": 0, "diagnosticOnly": True}
+    report["renderReadiness"] = progress
+    def retain(name, raw, metadata):
+        require(type(raw) is bytes and 0 < len(raw) <= MAX_PNG and raw[:8] == b"\x89PNG\r\n\x1a\n", "Bounded owned PNG required")
+        path = root / "evidence" / name
+        write_new(path, raw)
+        return {**metadata, "path": name, "image": file_pin(path, MAX_PNG, pin(raw))}
+    try:
+        while True:
+            require(time.monotonic() < deadline, "Owned render deadline; frame remains unqualified")
+            output.pump()
+            output.check()
+            wm_output.pump()
+            wm_output.check()
+            guard()
+            raw, metadata = owned_frame(request, helper, native, x11)
+            guard()
+            latest = raw, metadata
+            progress["sampleCount"] += 1
+            if progress["sampleCount"] == 1:
+                progress["first"] = retain("hub-first-frame.png", raw, metadata)
+                require(time.monotonic() < deadline, "Owned render deadline; no AX call after expiry")
+                snapshot_ax(request, helper, atspi, x11, root, "first", guard, report)
+            require(type(metadata["nonblank"]) is bool, "Exact pixel-readiness predicate required")
+            if metadata["nonblank"]:
+                break
+            # Only valid, owned, low-variety pixels reach another read-only sample.
+    finally:
+        if latest is not None:
+            progress["last"] = retain("root-window.png", *latest)
+    require(time.monotonic() < deadline, "Owned render deadline; frame remains unqualified")
+    require(progress["last"]["nonblank"] is True, "Owned frame remains blank/unqualified")
+    report["firstRunState"] = snapshot_ax(request, helper, atspi, x11, root, "final", guard, report)
+    require(time.monotonic() < deadline, "Owned render deadline; final AX observation exceeded budget")
+    guard()
+    return progress["last"]
+
+
 def observe(env):
     root, staged = review_stage(env)
     require(env.get("DISPLAY") and env.get("DBUS_SESSION_BUS_ADDRESS", "").startswith("unix:")
@@ -793,15 +913,10 @@ def observe(env):
         request = helper.Request.parse(["snapshot", str(child.pid), process["startTime"], str(executable),
                                         staged["image"]["sha256"], str(window), bound["title"], "FRAME"])
         report.update(window=window, xres=bound, phase="owned-first-run-capture")
-        try:
-            ax = sanitize_ax(helper.perform(request, Atspi, helper.Proc(), x11))
-            save(root / "evidence/ax.json", {"nodes": ax, "actionCount": 0}, 196608)
-            report["firstRunState"] = classify_ax(ax)
-        except Exception as error:
-            report["axUnavailable"] = type(error).__name__
-            report["firstRunState"] = "unclassified-no-input-authorized"
-        report["surface"] = native.bitmap(request, root / "evidence", helper, x11)
-        require(native.native_process(child.pid, helper) == process and x11.inspect(window) == bound, "Hub changed during observation")
+        def capture_guard():
+            require(child.poll() is None and native.native_process(child.pid, helper) == process and x11.inspect(window) == bound,
+                    "Hub changed during observation")
+        report["surface"] = observe_render(request, helper, native, Atspi, x11, root, deadline, capture_guard, output, wm_output, report)
         report.update(observationCaptured=True, phase="observation-complete-no-registration")
     except Exception as error:
         report["refusal"] = type(error).__name__ + ": " + str(error)[:512]
@@ -816,7 +931,12 @@ def observe(env):
                     "startTime": process["startTime"], "window": request.window, "oneAttempt": True}).encode())
                 report["normalCloseAttempted"] = True
                 x11.close_window(request.window, bound)
-                report["exitCode"] = wait_exit(child, output, 15)
+                try:
+                    report["exitCode"] = wait_exit(child, output, 15)
+                finally:
+                    streams = output.metadata()
+                    report["normalCloseStatus"] = {"popenPoll": child.poll(),
+                        "eof": {name: streams[name]["eof"] for name in ("stdout", "stderr")}}
                 require(report["exitCode"] == 0 and not wm_client_ids(x11), "Normal Hub close was not confirmed")
                 report["normalCloseObserved"] = True
             if output is not None:
