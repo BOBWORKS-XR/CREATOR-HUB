@@ -602,7 +602,8 @@ class FailedProcessAttributionTests(unittest.TestCase):
             original = RuntimeError("Synthetic session failed/unknown; no signal or retry requested")
             record = {"scenarioPassed": False, **M.FLAGS}
             callback = Mock(**({"side_effect": diagnostic} if isinstance(diagnostic, Exception) else {"return_value": diagnostic}))
-            scope = {"error": original, "record": record, "child": Mock(), "helper": Mock(), "failed_process_attribution": callback}
+            scope = {"error": original, "record": record, "child": Mock(), "helper": Mock(), "failed_process_attribution": callback,
+                     "capture_wrapper": Mock(), "logs": Mock(), "wrapper_started": 0, "deadline": 540}
             exec(block, scope)
             self.assertIs(scope["failure"], original); callback.assert_called_once_with(scope["child"], scope["helper"])
             self.assertEqual(record["refusal"], {"type": "RuntimeError", "message": str(original)})
@@ -1747,6 +1748,192 @@ class AuthorizationReadinessCaptureTests(unittest.TestCase):
             native.cancel_once(profile, Mock(), record)
         profile.assert_called_once(); button.get_action_iface.assert_not_called()
         self.assertNotIn("cancelActionAttempts", record)
+
+
+class ExitDiagnosticsTests(unittest.TestCase):
+    def test_wrapper_distinguishes_exit_signal_and_live_deadline_without_adopting_outcome(self):
+        for code in (0, 1, 126, -11, None):
+            for expired in (False, True):
+                with self.subTest(code=code, expired=expired):
+                    child = SimpleNamespace(pid=123, poll=lambda: code, stdout=SimpleNamespace(closed=False), stderr=SimpleNamespace(closed=False))
+                    pipes = {name: {"bytes": 12, "retainedBytes": 12, "eof": code is not None, "truncated": False} for name in ("stdout", "stderr")}
+                    logs, record = Mock(), {"scenarioPassed": False, **M.FLAGS}
+                    logs.metadata.return_value = pipes
+                    with patch.object(M.time, "monotonic", return_value=700 if expired else 200), patch.object(M, "diagnostic_event"):
+                        M.capture_wrapper(record, child, logs, 100, 640)
+                    value = record["sessionWrapper"]
+                    self.assertEqual((value["pid"], value["returnCode"], value["deadlineExpired"]), (123, code, expired))
+                    self.assertEqual(value["pipes"], pipes)
+                    self.assertLessEqual(value["drainPumps"], 16)
+                    if code is None: logs.pump.assert_not_called()
+                    self.assertFalse(record["scenarioPassed"])
+                    self.assertTrue(all(record[key] is False for key in M.FLAGS))
+
+    def test_wrapper_diagnostic_errors_preserve_the_exact_original_assertion(self):
+        tree = ast.parse(Path(M.__file__).read_text())
+        broker = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "broker")
+        body = next(n.body for n in broker.body if isinstance(n, ast.Try))
+        assertion = next(i for i, n in enumerate(body) if isinstance(n, ast.Expr) and isinstance(n.value, ast.Call)
+                         and any(isinstance(a, ast.Constant) and a.value == "Synthetic session failed/unknown; no signal or retry requested" for a in n.value.args))
+        block = compile(ast.fix_missing_locations(ast.Module(body=copy.deepcopy(body[assertion - 1:assertion + 1]), type_ignores=[])), "wrapper-before-assertion", "exec")
+        self.assertEqual(ast.unparse(body[assertion - 1].value.func), "capture_wrapper")
+        child = SimpleNamespace(pid=123, poll=lambda: -11)
+        logs, record = Mock(), {}
+        logs.metadata.side_effect = OSError("never-export-this-pipe-secret")
+        logs.pump.side_effect = OSError("never-export-this-drain-secret")
+        with patch.object(M.os, "write", side_effect=OSError("never-export-this-output-secret")):
+            with self.assertRaisesRegex(RuntimeError, "^Synthetic session failed/unknown; no signal or retry requested$"):
+                exec(block, {**vars(M), "record": record, "child": child, "logs": logs, "wrapper_started": 0, "deadline": 540})
+        self.assertEqual(record["sessionWrapper"]["returnCode"], -11)
+        self.assertNotIn("secret", json.dumps(record))
+
+    def test_wrapper_bounds_drain_and_reports_pipe_failure_without_raw_exception_strings(self):
+        record, logs = {}, Mock()
+        logs.metadata.return_value = {name: {"bytes": 1, "retainedBytes": 1, "eof": False, "truncated": False} for name in ("stdout", "stderr")}
+        child = SimpleNamespace(pid=123, poll=lambda: 1, stdout=SimpleNamespace(closed=True), stderr=SimpleNamespace(closed=False))
+        with patch.object(M.time, "monotonic", return_value=100), patch.object(M, "diagnostic_event"):
+            M.capture_wrapper(record, child, logs, 1, 99)
+        self.assertEqual(logs.pump.call_count, 16)
+        self.assertTrue(record["sessionWrapper"]["pipeClosed"]["stdout"])
+        self.assertFalse(record["sessionWrapper"]["pipes"]["stderr"]["eof"])
+        logs.metadata.side_effect = ValueError("private diagnostic failure")
+        with patch.object(M, "diagnostic_event"):
+            M.capture_wrapper({}, child, logs, None, None)
+
+    def test_diagnostic_event_is_one_bounded_nonwaiting_write_and_never_raises(self):
+        with patch.object(M.select, "select", return_value=([], [2], [])), patch.object(M.os, "write", side_effect=lambda fd, raw: len(raw)) as write:
+            M.diagnostic_event("report-save-entered")
+        raw = write.call_args.args[1]
+        self.assertLessEqual(len(raw), 4096)
+        value = json.loads(raw)
+        self.assertTrue(value["diagnosticOnly"])
+        self.assertFalse(value["authorityGranted"])
+        self.assertFalse(value["releaseReady"])
+        for unavailable in (OSError("secret"), RuntimeError("secret")):
+            with patch.object(M.select, "select", side_effect=unavailable), patch.object(M.os, "write") as write:
+                M.diagnostic_event("report-save-entered")
+                write.assert_not_called()
+        with patch.object(M.select, "select", return_value=([], [], [])), patch.object(M.os, "write") as write:
+            M.diagnostic_event("report-save-entered")
+            write.assert_not_called()
+
+    def test_stalled_first_projects_captures_only_own_main_metadata_once_without_locals(self):
+        frames = None
+        for _ in range(20):
+            frames = SimpleNamespace(f_code=SimpleNamespace(co_filename="/private/secret-argument.py", co_name="secret-function"), f_lineno=4, f_back=frames)
+        frames = SimpleNamespace(f_code=SimpleNamespace(co_filename=M.__file__, co_name="process_guard"), f_lineno=1270, f_back=frames)
+        timer = Mock()
+        with patch.object(M.threading, "Timer", return_value=timer) as factory, patch.object(M.sys, "_current_frames", return_value={M.threading.main_thread().ident: frames}), patch.object(M, "diagnostic_event") as emit:
+            with M.ProjectsDiagnostic(True):
+                callback = factory.call_args.args[1]
+                callback()
+            timer.start.assert_called_once(); timer.cancel.assert_called_once()
+            self.assertTrue(timer.daemon)
+        events = {call.args[0]: call.args[1] if len(call.args) > 1 else {} for call in emit.call_args_list}
+        rows = events["projects-main-stack"]["frames"]
+        self.assertEqual(len(rows), 16)
+        self.assertEqual(rows[0], {"source": Path(M.__file__).name, "function": "process_guard", "line": 1270})
+        self.assertEqual(rows[1], {"source": "redacted", "function": "redacted", "line": 4})
+        self.assertTrue(events["projects-main-stack"]["framesTruncated"])
+        self.assertEqual(events["projects-main-stack"]["pid"], os.getpid())
+        self.assertEqual(events["projects-main-stack"]["mainThreadIdent"], M.threading.main_thread().ident)
+        self.assertNotIn("secret", json.dumps(events))
+        self.assertEqual(factory.call_args.args[0], 10)
+        self.assertIn("projects-completed", events)
+
+    def test_no_watchdog_on_reopen_and_all_optional_failures_preserve_original(self):
+        original = RuntimeError("original observation refusal")
+        with patch.object(M.threading, "Timer") as timer, patch.object(M, "diagnostic_event"):
+            with M.ProjectsDiagnostic(False): pass
+            timer.assert_not_called()
+        for broken in ("create", "start", "cancel", "stack", "write"):
+            with self.subTest(broken=broken):
+                timer = Mock()
+                if broken in ("start", "cancel"): getattr(timer, broken).side_effect = OSError("private")
+                with patch.object(M.threading, "Timer", side_effect=OSError("private") if broken == "create" else None, return_value=timer) as factory, patch.object(M.os, "write", side_effect=OSError("private")), patch.object(M.sys, "_current_frames", side_effect=ValueError("private")):
+                    with self.assertRaises(RuntimeError) as raised:
+                        with M.ProjectsDiagnostic(True):
+                            if broken == "stack": factory.call_args.args[1]()
+                            raise original
+                self.assertIs(raised.exception, original)
+
+    def test_stopped_watchdog_never_samples_later_main_thread_work(self):
+        with patch.object(M.threading, "Timer") as timer, patch.object(M.sys, "_current_frames") as frames, patch.object(M, "diagnostic_event"):
+            with M.ProjectsDiagnostic(True): pass
+            timer.call_args.args[1]()
+            frames.assert_not_called()
+
+    def test_stack_and_report_save_diagnostics_export_no_payload_and_cannot_replace_save_failure(self):
+        original = OSError("original-save-payload-secret")
+        run = next(n for n in ast.parse(Path(M.__file__).read_text()).body if isinstance(n, ast.FunctionDef) and n.name == "run_session")
+        final = next(n.finalbody for n in run.body if isinstance(n, ast.Try) and n.finalbody)
+        marker = next(i for i, n in enumerate(final) if isinstance(n, ast.Expr) and isinstance(n.value, ast.Call) and n.value.func.id == "diagnostic_event")
+        block = compile(ast.fix_missing_locations(ast.Module(body=copy.deepcopy(final[marker:marker + 2]), type_ignores=[])), "report-save-failed-diagnostics", "exec")
+        for failed in ("select", "write"):
+            with patch.object(M.select, "select", side_effect=OSError("private") if failed == "select" else None, return_value=([], [2], [])), patch.object(M.os, "write", side_effect=OSError("private")):
+                with self.assertRaises(OSError) as raised:
+                    exec(block, {**vars(M), "root": Path("/fixture"), "report": {"private": "payload"}, "save": Mock(side_effect=original)})
+                self.assertIs(raised.exception, original)
+
+    def test_actual_projects_wrapper_preserves_observation_sequence_and_scope(self):
+        run = next(n for n in ast.parse(Path(M.__file__).read_text()).body if isinstance(n, ast.FunctionDef) and n.name == "finish_ui")
+        scope = next(n for n in run.body if isinstance(n, ast.With))
+        self.assertEqual(ast.unparse(scope.items[0].context_expr), "ProjectsDiagnostic(not reopened)")
+        self.assertEqual([type(n).__name__ for n in scope.body], ["Expr", "If", "Expr", "Assign"])
+        self.assertEqual(ast.unparse(scope.body[0]), "pages.wait(lambda: d.read('#view-projects', 'attribute/aria-busy') == 'false')")
+        self.assertEqual(ast.unparse(scope.body[1]), 'if d.read(\'#project-sdk\', \'property/value\') != \'all\':\n    d.click(\'#project-sdk option[value="all"]\')')
+        self.assertEqual(ast.unparse(scope.body[-1]), "session.evidence['home'] = home_observation(d, BASE / 'result/home')")
+
+    def test_injected_stall_at_actual_projects_read_captures_before_same_original_failure(self):
+        finish = next(n for n in ast.parse(Path(M.__file__).read_text()).body if isinstance(n, ast.FunctionDef) and n.name == "finish_ui")
+        scope = next(n for n in finish.body if isinstance(n, ast.With))
+        block = compile(ast.fix_missing_locations(ast.Module(body=[copy.deepcopy(scope)], type_ignores=[])), "actual-projects-observation", "exec")
+        original = RuntimeError("original stalled project read")
+        session, timer, events = SimpleNamespace(evidence={}), Mock(), []
+        def read(selector, _):
+            if selector == "#view-projects": return "false"
+            self.assertEqual(selector, "#project-sdk")
+            factory.call_args.args[1]()
+            self.assertIn("projects-main-stack", events)
+            raise original
+        d = SimpleNamespace(read=Mock(side_effect=read), click=Mock(), elements=Mock())
+        namespace = {**vars(M), "d": d, "session": session, "pages": SimpleNamespace(wait=lambda check: check()), "reopened": False}
+        with patch.object(M.threading, "Timer", return_value=timer) as factory, patch.object(M, "diagnostic_event", side_effect=lambda event, *_: events.append(event)):
+            with self.assertRaises(RuntimeError) as raised: exec(block, namespace)
+        self.assertIs(raised.exception, original)
+        self.assertEqual(events, ["projects-entered", "projects-main-stack", "projects-failed"])
+        self.assertEqual(d.read.call_count, 2)
+        d.click.assert_not_called(); d.elements.assert_not_called()
+        self.assertNotIn("home", session.evidence)
+
+    def test_report_save_markers_precede_and_follow_the_original_save_only_on_success(self):
+        run = next(n for n in ast.parse(Path(M.__file__).read_text()).body if isinstance(n, ast.FunctionDef) and n.name == "run_session")
+        final = next(n.finalbody for n in run.body if isinstance(n, ast.Try) and n.finalbody)
+        marker = next(i for i, n in enumerate(final) if isinstance(n, ast.Expr) and isinstance(n.value, ast.Call)
+                      and n.value.func.id == "diagnostic_event")
+        block = compile(ast.fix_missing_locations(ast.Module(body=copy.deepcopy(final[marker:marker + 2]), type_ignores=[])), "report-save", "exec")
+        for failure in (None, OSError("original-save-secret")):
+            events = []
+            save = Mock(side_effect=lambda *_: events.append("save")) if failure is None else Mock(side_effect=failure)
+            namespace = {**vars(M), "root": Path("/fixture"), "report": {}, "save": save, "diagnostic_event": lambda event, *args: events.append(event)}
+            if failure is None:
+                exec(block, namespace)
+                self.assertEqual(events, ["report-save-entered", "save", "report-save-completed"])
+            else:
+                with self.assertRaises(OSError) as raised: exec(block, namespace)
+                self.assertIs(raised.exception, failure)
+                self.assertEqual(events, ["report-save-entered", "report-save-failed"])
+
+    def test_session_command_retains_all_unit_lifecycle_properties_except_quiet(self):
+        env = {key: "synthetic" for key in M.ENVIRONMENT}
+        command = M.session_command(env)
+        self.assertNotIn("--quiet", command)
+        self.assertEqual(command[:9], ["/usr/bin/systemd-run", "--wait", "--pipe", "--collect", "--unit=creator-production-migration-016-fixture",
+            "--uid=" + M.USER, "--property=PAMName=login", "--property=Type=exec", "--property=LimitCORE=0"])
+        self.assertEqual(command[9], "--property=WorkingDirectory=" + str(M.BASE))
+        source = Path(M.__file__).read_text()
+        self.assertIn("index, deadline = 1, time.monotonic() + 540", source)
+        self.assertIn("while child.poll() is None and time.monotonic() < deadline:", source)
 
 
 class SessionProgressTests(unittest.TestCase):

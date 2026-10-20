@@ -2245,6 +2245,75 @@ def home_observation(d, home):
     return {"platform": "Linux", "product": "Creator Hub", "version": "0.1.16", "compactProjects": True, "rows": rows}
 
 
+def diagnostic_event(event, metadata=None):
+    # Independent of the session receipt lock: a stalled guard must not block
+    # this one bounded, best-effort write to the already captured stderr pipe.
+    try:
+        raw = json.dumps({"migrationDiagnostic": event, "diagnosticOnly": True, "authorityGranted": False,
+                          "releaseReady": False, **(metadata or {})}, separators=(",", ":"), allow_nan=False).encode() + b"\n"
+        if len(raw) <= 4096 and select.select([], [2], [], 0)[1]:
+            os.write(2, raw)
+    except Exception:
+        pass
+
+
+class ProjectsDiagnostic:
+    def __init__(self, enabled):
+        self.enabled, self.timer, self.active = enabled, None, False
+
+    def __enter__(self):
+        if self.enabled:
+            try:
+                require(threading.current_thread() is threading.main_thread(), "Only own main thread stack")
+                self.ident, self.started = threading.main_thread().ident, time.monotonic()
+                self.active = True
+                diagnostic_event("projects-entered")
+                self.timer = threading.Timer(10, self.capture)
+                self.timer.daemon = True
+                self.timer.start()
+            except Exception as error:
+                diagnostic_event("projects-stack-unavailable", {"errorType": type(error).__name__[:80]})
+        return self
+
+    def capture(self):
+        frame = None
+        try:
+            if not self.active:
+                return
+            frame = sys._current_frames().get(self.ident)
+            require(frame is not None, "Own main frame unavailable")
+            rows = []
+            for _ in range(16):
+                if frame is None:
+                    break
+                name, function = Path(frame.f_code.co_filename).name, frame.f_code.co_name
+                known = name in SOURCES or name in ("threading.py", "socket.py", "selectors.py", "request.py", "client.py", "select.py")
+                rows.append({"source": name if known else "redacted",
+                             "function": function if known and re.fullmatch(r"[A-Za-z_<>][A-Za-z0-9_<>.]{0,79}", function) else "redacted",
+                             "line": min(1000000, max(0, frame.f_lineno))})
+                frame = frame.f_back
+            if self.active:
+                diagnostic_event("projects-main-stack", {"pid": os.getpid(), "mainThreadIdent": self.ident,
+                    "elapsedMs": min(86400000, max(0, int((time.monotonic() - self.started) * 1000))),
+                    "frames": rows, "framesTruncated": frame is not None})
+        except Exception as error:
+            diagnostic_event("projects-stack-unavailable", {"errorType": type(error).__name__[:80]})
+        finally:
+            del frame
+
+    def __exit__(self, kind, error, traceback):
+        if self.enabled:
+            self.active = False
+            try:
+                if self.timer is not None:
+                    self.timer.cancel()
+            except Exception as capture_error:
+                diagnostic_event("projects-stack-cancel-unavailable", {"errorType": type(capture_error).__name__[:80]})
+            diagnostic_event("projects-completed" if kind is None else "projects-failed",
+                             {} if kind is None else {"errorType": kind.__name__[:80]})
+        return False
+
+
 def finish_ui(session, scenario, *, reopened=False):
     d, pages = session.d, session.pages
     session.checkpoint("finish-ui")
@@ -2263,13 +2332,14 @@ def finish_ui(session, scenario, *, reopened=False):
         d.click("#convergence-later")
     pages.wait(lambda: d.read("#convergence-dialog", "attribute/open") is None)
     session.checkpoint("projects-wait")
-    pages.wait(lambda: d.read("#view-projects", "attribute/aria-busy") == "false")
-    # Synthetic projects deliberately declare no SDK. Use the existing native
-    # filter action, rather than pretending an SDK or bridge was installed.
-    if d.read("#project-sdk", "property/value") != "all":
-        d.click('#project-sdk option[value="all"]')
-    pages.wait(lambda: bool(d.elements('#project-list .project-row[data-mcp-selected="true"]')))
-    session.evidence["home"] = home_observation(d, BASE / "result/home")
+    with ProjectsDiagnostic(not reopened):
+        pages.wait(lambda: d.read("#view-projects", "attribute/aria-busy") == "false")
+        # Synthetic projects deliberately declare no SDK. Use the existing native
+        # filter action, rather than pretending an SDK or bridge was installed.
+        if d.read("#project-sdk", "property/value") != "all":
+            d.click('#project-sdk option[value="all"]')
+        pages.wait(lambda: bool(d.elements('#project-list .project-row[data-mcp-selected="true"]')))
+        session.evidence["home"] = home_observation(d, BASE / "result/home")
     session.checkpoint("home-observed")
     session.guard()
     folder = session.root / "home-bitmap"
@@ -2491,7 +2561,7 @@ def session_command(env):
     values = {key: env[key] for key in ENVIRONMENT}
     values.update(HOME=str(BASE / "result/home"), USER=USER, RUNNER_TEMP=str(BASE / "result"),
                   XDG_RUNTIME_DIR=str(BASE / "result/runtime"), LANG="C", LC_ALL="C", GDK_BACKEND="x11", NO_AT_BRIDGE="0")
-    return ["/usr/bin/systemd-run", "--wait", "--pipe", "--collect", "--quiet", "--unit=creator-production-migration-016-fixture",
+    return ["/usr/bin/systemd-run", "--wait", "--pipe", "--collect", "--unit=creator-production-migration-016-fixture",
             "--uid=" + USER, "--property=PAMName=login", "--property=Type=exec", "--property=LimitCORE=0", "--property=WorkingDirectory=" + str(BASE),
             *("--setenv=" + key + "=" + value for key, value in values.items()),
             "/usr/bin/dbus-run-session", "--", "/usr/bin/xvfb-run", "-a", "--server-args=-screen 0 1280x1000x24",
@@ -2501,6 +2571,44 @@ def session_command(env):
 def wipe(value):
     if value is not None:
         value[:] = b"\0" * len(value)
+
+
+def capture_wrapper(record, child, logs, started, deadline):
+    value = {"diagnosticOnly": True, "authorityGranted": False, "releaseReady": False, "drainPumps": 0}
+    record["sessionWrapper"] = value
+    try:
+        now = time.monotonic()
+        value.update(pid=child.pid, returnCode=child.poll(),
+                     elapsedMs=None if started is None else max(0, min(86400000, int((now - started) * 1000))),
+                     deadlineExpired=None if deadline is None else now >= deadline,
+                     remainingMs=None if deadline is None else max(0, min(540000, int((deadline - now) * 1000))))
+        # Only drain owned output after exit, never extend a live session's wait
+        # or run another input/guard. Preserve EOF=false if descendants hold pipes.
+        if value["returnCode"] is not None and logs is not None:
+            until = time.monotonic() + 1
+            try:
+                for _ in range(16):
+                    if time.monotonic() >= until or all(row["eof"] for row in logs.metadata().values()):
+                        break
+                    value["drainPumps"] += 1
+                    logs.pump(0.05)
+            except Exception as error:
+                value["drainErrorType"] = type(error).__name__[:80]
+        try:
+            metadata = logs.metadata()
+            pipes = {}
+            for name in ("stdout", "stderr"):
+                row = metadata[name]
+                require(all(type(row[key]) is int and 0 <= row[key] <= 16777216 for key in ("bytes", "retainedBytes"))
+                        and all(type(row[key]) is bool for key in ("eof", "truncated")), "Bounded pipe metadata required")
+                pipes[name] = {key: row[key] for key in ("bytes", "retainedBytes", "eof", "truncated")}
+            value["pipes"] = pipes
+            value["pipeClosed"] = {name: getattr(child, name).closed is True for name in ("stdout", "stderr")}
+        except Exception as error:
+            value["pipeErrorType"] = type(error).__name__[:80]
+    except Exception as error:
+        value["errorType"] = type(error).__name__[:80]
+    diagnostic_event("wrapper-observed", value)
 
 
 def broker(env):
@@ -2520,6 +2628,7 @@ def broker(env):
     record = {"scope": "production-016-disposable-migration", "scenario": scenario, "harnessSource": env["GITHUB_SHA"],
               "inputProofs": 0, "fixtureRelocked": False, "scenarioPassed": False, **FLAGS}
     context, relock, failure = {}, False, None
+    wrapper_started, deadline = None, None
     inventory_state = {"sequence": 1, "nonces": set()}
     try:
         if scenario in SCENARIOS[2:]:
@@ -2528,6 +2637,7 @@ def broker(env):
             polkit.fixture_credential("provision", secret)
             require(polkit.fixture_credential("status") == "P", "Synthetic provisioning failed")
             payload = bytearray(secret + b"\n")
+        wrapper_started = time.monotonic()
         child = subprocess.Popen(session_command(env), stdin=subprocess.PIPE if payload is not None else subprocess.DEVNULL,
                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=BASE,
                                  env={"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"})
@@ -2551,6 +2661,7 @@ def broker(env):
                 index += 1
                 record["inputProofs"] += 1
             time.sleep(0.05)
+        capture_wrapper(record, child, logs, wrapper_started, deadline)
         require(child.poll() == 0, "Synthetic session failed/unknown; no signal or retry requested")
         result = P.parse(read_file(BASE / "result/report.json", 1048576, uid=UID, mode=0o600))
         require(result["scenario"] == scenario and result["harnessSource"] == env["GITHUB_SHA"] and result["scenarioPassed"] is True
@@ -2560,6 +2671,8 @@ def broker(env):
     except Exception as error:
         failure = error
         record["refusal"] = {"type": type(error).__name__, "message": str(error)[:1000]}
+        if "sessionWrapper" not in record:
+            capture_wrapper(record, child, logs, wrapper_started, deadline)
         try:
             record["failedProcessAttribution"] = failed_process_attribution(child, helper)
         except Exception as capture_error:
@@ -2740,7 +2853,14 @@ def run_session(env):
         raise
     finally:
         wipe(secret)
-        save(root / "report.json", report)
+        diagnostic_event("report-save-entered")
+        try:
+            save(root / "report.json", report)
+        except Exception as error:
+            diagnostic_event("report-save-failed", {"errorType": type(error).__name__[:80]})
+            raise
+        else:
+            diagnostic_event("report-save-completed")
         # Unknown product/package outcomes are left for disposable runner teardown.
         if report["scenarioPassed"]:
             polkit.own_agent(agent, agent_identity, parent, helper)
