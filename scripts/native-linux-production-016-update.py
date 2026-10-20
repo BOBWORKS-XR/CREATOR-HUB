@@ -1646,6 +1646,80 @@ def protected_ancestry(path):
         require(stat.S_ISDIR(info.st_mode) and info.st_uid == info.st_gid == 0 and not info.st_mode & 0o022, "Protected root-owned directory required")
 
 
+def prepare_fixture_parent(env):
+    admission(env)
+    require(os.getuid() == os.geteuid() == os.getgid() == os.getegid() == 0
+            and HERE == Path(env["GITHUB_WORKSPACE"]) / "scripts", "Exact root checkout fixture broker required")
+    require(BASE == Path("/opt/creator-polkit-fixture") and not os.path.lexists(BASE), "Fresh fixed fixture only; no parent path overrides")
+    paths = (("/", Path("/")), ("/opt", Path("/opt")))
+    report = {"kind": "production016-update-parent-ancestry", "ciOnly": True, "guardPassed": False,
+              "chmodAttemptCount": 0, **FALSE}
+    handles, before, failure = [], [], None
+
+    def row(name, file, info):
+        return {"path": name, "dev": info.st_dev, "ino": info.st_ino, "uid": info.st_uid, "gid": info.st_gid,
+                "mode": format(stat.S_IMODE(info.st_mode), "04o"), "directory": stat.S_ISDIR(info.st_mode),
+                "resolvedPath": str(file.resolve(strict=True))}
+
+    def emit(phase):
+        raw = json.dumps({**report, "phase": phase}, separators=(",", ":"), allow_nan=False)
+        require(len(raw.encode()) <= 8192, "Fixed parent diagnostic exceeds bound")
+        print(raw, flush=True)
+
+    def verify(opt_mode):
+        after = []
+        for index, (name, file) in enumerate(paths):
+            named = os.lstat("/") if index == 0 else os.stat("opt", dir_fd=handles[0], follow_symlinks=False)
+            for info in (os.fstat(handles[index]), named):
+                require(stat.S_ISDIR(info.st_mode) and info.st_uid == info.st_gid == 0
+                        and (info.st_dev, info.st_ino) == (before[index].st_dev, before[index].st_ino)
+                        and stat.S_IMODE(info.st_mode) == (0o755 if index == 0 else opt_mode),
+                        "CI fixture parent identity changed: " + name)
+            require(file.resolve(strict=True) == file, "Redirected CI fixture parent: " + name)
+            after.append(row(name, file, named))
+        return after
+
+    try:
+        report["before"] = []
+        for name, file in paths:
+            info = file.lstat(); before.append(info); report["before"].append(row(name, file, info))
+        # Capture this run's exact metadata before any permission change. Only
+        # the previously supported disposable-runner /opt 0777 shape is tightened.
+        emit("before")
+        for index, (name, file) in enumerate(paths):
+            info = before[index]
+            require(file.resolve(strict=True) == file and stat.S_ISDIR(info.st_mode) and info.st_uid == info.st_gid == 0
+                    and stat.S_IMODE(info.st_mode) in ((0o755,) if index == 0 else (0o755, 0o777)),
+                    "Unknown fixed CI directory; no repair: " + name)
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+        handles.append(os.open("/", flags))
+        handles.append(os.open("opt", flags, dir_fd=handles[0]))
+        verify(stat.S_IMODE(before[1].st_mode))
+        if stat.S_IMODE(before[1].st_mode) == 0o777:
+            report["chmodAttemptCount"] = 1
+            os.fchmod(handles[1], 0o755)
+        report["after"] = verify(0o755)
+        protected_ancestry(BASE.parent)
+        report["guardPassed"] = True
+        return report
+    except Exception as error:
+        failure = error
+        report["error"] = {"type": type(error).__name__, "message": str(error)[:1024]}
+        raise
+    finally:
+        for fd in reversed(handles):
+            try:
+                os.close(fd)
+            except Exception:
+                if failure is None:
+                    raise
+        try:
+            emit("after")
+        except Exception:
+            if failure is None:
+                raise
+
+
 def clean_context(env):
     return {**{key: env[key] for key in ENVIRONMENT}, "PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"}
 
@@ -1965,6 +2039,7 @@ def broker(env):
     for package, executable in (("creator-hub", "/usr/bin/creator-hub"), ("creator-works-mcp", "/usr/bin/creator-works-mcp-launcher"), ("creator-project-setup", "/usr/bin/creator-project-setup")):
         result = subprocess.run(["/usr/bin/dpkg-query", "-W", "-f=${Status}", package], capture_output=True, env={"PATH": "/usr/bin:/bin", "LANG": "C"}, check=False, timeout=10)
         require(result.returncode == 1 and not result.stdout and not os.path.lexists(executable), "Pre-existing product refused; no restoration or replacement")
+    prepare_fixture_parent(env)
     protected_ancestry(BASE.parent)
     BASE.mkdir(mode=0o755)
     for name in ("scripts", "result"):

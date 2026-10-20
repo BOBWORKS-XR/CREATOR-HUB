@@ -1,5 +1,6 @@
 """Pure tests only. No native application, auth, trust-store or package writes."""
 import ast
+from contextlib import ExitStack
 import copy
 import gzip
 import hashlib
@@ -191,6 +192,120 @@ def offline_verifier_inputs(folder):
 
 
 class Pure(unittest.TestCase):
+    def parent_fixture(self, *, mode=0o777, fault=None, context=None, log_error=None, guard_only=False):
+        root = dict(st_dev=10, st_ino=1, st_uid=0, st_gid=0, st_mode=stat.S_IFDIR | 0o755)
+        opt = {**root, "st_ino": 2, "st_mode": stat.S_IFDIR | mode}
+        named, handles, changes, output = {"/": root, "/opt": opt}, {}, [], []
+        if fault == "owner": opt["st_uid"] = 1001
+        if fault == "group": opt["st_gid"] = 1001
+        if fault == "symlink": opt["st_mode"] = stat.S_IFLNK | 0o777
+        if fault == "root-mode": root["st_mode"] = stat.S_IFDIR | 0o777
+        def lstat(file):
+            key = "/" if file == Path("/") or file == "/" else "/opt"
+            self.assertIn(file, (Path("/"), Path("/opt"), "/", "/opt"))
+            return SimpleNamespace(**named[key])
+        def opened(name, flags, **kwargs):
+            self.assertTrue(flags & M.os.O_DIRECTORY and flags & M.os.O_NOFOLLOW and flags & M.os.O_CLOEXEC)
+            if name == "/":
+                self.assertFalse(kwargs); handles[10] = named["/"]; return 10
+            self.assertEqual(name, "opt"); self.assertEqual(kwargs, {"dir_fd": 10})
+            if fault == "before-open": named["/opt"]["st_ino"] += 1
+            handles[11] = named["/opt"]
+            if fault == "after-open": named["/opt"] = {**opt, "st_ino": 99}
+            return 11
+        def chmod(fd, value):
+            self.assertEqual((fd, value), (11, 0o755)); changes.append((fd, value))
+            handles[fd]["st_mode"] = stat.S_IFDIR | value
+            if fault == "after-chmod": named["/opt"] = {**opt, "st_ino": 99}
+        def stat_at(name, **kwargs):
+            self.assertEqual((name, kwargs), ("opt", {"dir_fd": 10, "follow_symlinks": False}))
+            return SimpleNamespace(**named["/opt"])
+        def printed(raw, **kwargs):
+            self.assertEqual(kwargs, {"flush": True}); value = json.loads(raw); output.append(value)
+            self.assertLess(len(raw.encode()), 8192)
+            if value["phase"] == log_error: raise OSError("diagnostic sink refused")
+        env = {**environment(), "GITHUB_WORKSPACE": str(HERE.parent), **(context or {})}
+        with ExitStack() as stack:
+            for manager in (
+                patch.object(M.sys, "platform", "linux"), patch.object(M.platform, "machine", return_value="x86_64"),
+                patch.object(M.os, "getuid", return_value=M.UID if fault == "nonroot" else 0, create=True), patch.object(M.os, "geteuid", return_value=0, create=True),
+                patch.object(M.os, "getgid", return_value=0, create=True), patch.object(M.os, "getegid", return_value=0, create=True),
+                patch.object(M.os.path, "lexists", return_value=fault == "reused"),
+                patch.object(Path, "lstat", autospec=True, side_effect=lstat),
+                patch.object(Path, "resolve", autospec=True, side_effect=lambda file, strict: Path("/foreign") if fault == "redirect" and file == Path("/opt") else file),
+                patch.object(M.os, "O_DIRECTORY", 0x10000, create=True), patch.object(M.os, "O_NOFOLLOW", 0x20000, create=True),
+                patch.object(M.os, "O_CLOEXEC", 0x40000, create=True), patch.object(M.os, "open", side_effect=opened),
+                patch.object(M.os, "fstat", side_effect=lambda fd: SimpleNamespace(**handles[fd])),
+                patch.object(M.os, "stat", side_effect=stat_at), patch.object(M.os, "lstat", side_effect=lstat),
+                patch.object(M.os, "fchmod", side_effect=chmod, create=True), patch.object(M.os, "close", side_effect=lambda fd: handles.pop(fd)),
+                patch.object(M.os, "chmod", side_effect=AssertionError("No path-based permission changes")),
+                patch.object(M.os, "chown", side_effect=AssertionError("No ownership repair"), create=True),
+                patch.object(M, "run_tool", side_effect=AssertionError("No installation or external command")), patch("builtins.print", side_effect=printed)
+            ): stack.enter_context(manager)
+            try:
+                result, error = (M.protected_ancestry(M.BASE.parent) if guard_only else M.prepare_fixture_parent(env)), None
+            except Exception as caught:
+                result, error = None, caught
+        self.assertFalse(handles, "Every opened directory FD must close")
+        return SimpleNamespace(result=result, error=error, changes=changes, output=output)
+
+    def test_fixed_ci_parent_0777_tightens_once_then_original_ancestry_guard_passes(self):
+        value = self.parent_fixture()
+        self.assertIsNone(value.error); self.assertEqual(value.changes, [(11, 0o755)])
+        self.assertTrue(value.result["guardPassed"])
+        self.assertEqual([item["phase"] for item in value.output], ["before", "after"])
+        self.assertEqual(value.result["before"][1]["mode"], "0777")
+        self.assertEqual(value.result["after"][1]["mode"], "0755")
+        self.assertEqual(value.result["before"][0], value.result["after"][0])
+        value = self.parent_fixture(mode=0o755)
+        self.assertIsNone(value.error); self.assertFalse(value.changes)
+        self.assertEqual(value.result["before"], value.result["after"])
+
+    def test_original_ancestry_guard_still_refuses_writable_parent_without_preparation(self):
+        value = self.parent_fixture(guard_only=True)
+        self.assertIsInstance(value.error, RuntimeError); self.assertIn("Protected root-owned directory required", str(value.error))
+        self.assertFalse(value.changes); self.assertFalse(value.output)
+        self.assertIsNone(self.parent_fixture(mode=0o755, guard_only=True).error)
+
+    def test_fixed_ci_parent_unknown_modes_ownership_links_and_reuse_never_chmod(self):
+        for fault in ("owner", "group", "symlink", "redirect", "root-mode", "reused"):
+            with self.subTest(fault=fault):
+                value = self.parent_fixture(fault=fault)
+                self.assertIsInstance(value.error, RuntimeError); self.assertFalse(value.changes)
+        for mode in (0o775, 0o1777, 0o700, 0o4755):
+            with self.subTest(mode=mode):
+                value = self.parent_fixture(mode=mode)
+                self.assertIsInstance(value.error, RuntimeError); self.assertFalse(value.changes)
+                self.assertEqual(value.output[0]["before"][1]["mode"], format(mode, "04o"))
+
+    def test_fixed_ci_parent_fd_and_named_inode_races_refuse_without_adopting_foreign_directories(self):
+        for fault in ("before-open", "after-open", "after-chmod"):
+            with self.subTest(fault=fault):
+                value = self.parent_fixture(fault=fault)
+                self.assertIsInstance(value.error, RuntimeError)
+                self.assertEqual(len(value.changes), 1 if fault == "after-chmod" else 0)
+                self.assertFalse(value.output[-1]["guardPassed"])
+
+    def test_fixed_ci_parent_context_and_diagnostic_failures_do_not_permit_permission_changes(self):
+        value = self.parent_fixture(context={"GITHUB_EVENT_NAME": "push"})
+        self.assertIsInstance(value.error, RuntimeError); self.assertFalse(value.changes); self.assertFalse(value.output)
+        value = self.parent_fixture(log_error="before")
+        self.assertIsInstance(value.error, OSError); self.assertFalse(value.changes)
+        value = self.parent_fixture(mode=0o775, log_error="after")
+        self.assertIsInstance(value.error, RuntimeError); self.assertIn("Unknown fixed CI directory", str(value.error)); self.assertFalse(value.changes)
+        for options in ({"fault": "nonroot"}, {"context": {"GITHUB_WORKSPACE": "/foreign"}}):
+            value = self.parent_fixture(**options)
+            self.assertIsInstance(value.error, RuntimeError); self.assertFalse(value.changes); self.assertFalse(value.output)
+
+    def test_parent_preparation_and_unchanged_guard_precede_all_fixture_and_install_writes(self):
+        tree = ast.parse((HERE / "native-linux-production-016-update.py").read_text())
+        broker = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "broker")
+        code = ast.unparse(broker)
+        self.assertLess(code.index("prepare_fixture_parent(env)"), code.index("protected_ancestry(BASE.parent)"))
+        self.assertLess(code.index("protected_ancestry(BASE.parent)"), code.index("BASE.mkdir("))
+        self.assertLess(code.index("protected_ancestry(BASE.parent)"), code.index("prepare_tls("))
+        self.assertLess(code.index("protected_ancestry(BASE.parent)"), code.index("'/usr/bin/dpkg', '--install'"))
+
     @classmethod
     def setUpClass(cls):
         node = shutil.which("node")
