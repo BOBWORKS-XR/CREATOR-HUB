@@ -85,62 +85,148 @@ class Transcript:
             return bounded(self.value)
 
 
-def sender_snapshot(name, original, client, read, peer, redact, *, budget):
+def sender_snapshot(name, original, client, read, peer, redact, *, budget, diagnostic_state=None):
     """Compare observations only. A pathname or ancestry match grants no authority."""
     result = dict(qualified=False, inputPermitted=False, stable=False, correlatesToOriginalPopen=False)
+    stage = 'sender-name'
+
+    def state():
+        try:
+            value = diagnostic_state() if diagnostic_state is not None else None
+            require(type(value) is dict and set(value) == {'closed', 'stopRequested', 'deadlineExceeded', 'cancelled'}
+                    and all(type(flag) is bool for flag in value.values()))
+            return copy.deepcopy(value)
+        except Exception:
+            return {'unavailable': True}
+
+    def operands(row, pid):
+        # Retain numeric operands from this read, never executable paths or arbitrary strings.
+        def scalar(value):
+            kind = type(value)
+            item = {'type': kind.__name__ if kind in (int, str, bool, list, tuple, dict, type(None)) else 'other'}
+            if kind is bool or kind is int and -(2**63) <= value < 2**64:
+                item['value'] = value
+            elif kind is str and re.fullmatch(r'[0-9]{1,20}', value):
+                item['value'] = value
+            else:
+                item['valueOmitted'] = True
+            return item
+        def uids(value):
+            item = scalar(value)
+            if type(value) in (list, tuple):
+                item['count'] = len(value)
+                if len(value) <= 4 and all(type(uid) is int and 0 <= uid < 2**31 for uid in value):
+                    item['values'] = list(value)
+            return item
+        value = {'requestedPid': pid, 'stateAfterRead': state(), 'rowType': scalar(row)['type']}
+        if type(row) is dict:
+            for key in ('pid', 'parentPid', 'startTime'):
+                value[key] = scalar(row[key]) if key in row else {'missing': True}
+            value['uids'] = uids(row.get('uids'))
+            image = row.get('image')
+            if type(image) is dict:
+                value['image'] = {key: scalar(image[key]) for key in (
+                    'st_size', 'st_uid', 'st_gid', 'st_mode', 'st_dev', 'st_ino', 'st_mtime_ns', 'st_ctime_ns') if key in image}
+        return bounded(value, 4096)
+
     try:
         require(unique(name))
+        stage = 'expected-process-records'
         result['originalPopen'], result['expectedClient'] = redact(original), redact(client)
+        stage = 'credentials-budget'
+        result['stateBeforeOperation'] = state()
         budget()
+        stage = 'credentials-read'
         credentials = peer(name)
+        stage = 'credentials-validation'
         require(type(credentials) is dict and set(credentials) == {'name', 'pid', 'uid'} and credentials['name'] == name
                 and type(credentials['pid']) is int and 1 < credentials['pid'] < 2**31
                 and type(credentials['uid']) is int and credentials['uid'] == original['uids'][0])
         result['peer'] = credentials
 
-        def capture(pid, full=False):
+        def capture(pid, full=False, *, label):
+            nonlocal stage
+            stage = label + '.budget'
+            result['stateBeforeOperation'] = state()
             budget()
+            stage = label + '.read'
             row = read(pid, False)
-            require(row['pid'] == pid and row['uids'] == original['uids'] and len(row['uids']) == 4
-                    and len(set(row['uids'])) == 1 and type(row['startTime']) is str
-                    and re.fullmatch(r'[1-9][0-9]{0,19}', row['startTime'])
-                    and type(row['parentPid']) is int and 0 < row['parentPid'] < 2**31)
+            if label == 'sender.0':
+                try:
+                    result['firstSenderRead'] = operands(row, pid)
+                except Exception:
+                    result['firstSenderRead'] = {'unavailable': True}
+            stage = label + '.pid-match'
+            require(row['pid'] == pid)
+            stage = label + '.uids-match'
+            require(row['uids'] == original['uids'])
+            stage = label + '.uids-count'
+            require(len(row['uids']) == 4)
+            stage = label + '.uids-uniform'
+            require(len(set(row['uids'])) == 1)
+            stage = label + '.start-type'
+            require(type(row['startTime']) is str)
+            stage = label + '.start-value'
+            require(re.fullmatch(r'[1-9][0-9]{0,19}', row['startTime']))
+            stage = label + '.parent-type'
+            require(type(row['parentPid']) is int)
+            stage = label + '.parent-range'
+            require(0 < row['parentPid'] < 2**31)
             if full:
-                require(0 < int(row['image']['st_size']) <= 64 * 1024 * 1024)
+                stage = label + '.image-size-parse'
+                size = int(row['image']['st_size'])
+                stage = label + '.image-size-range'
+                require(0 < size <= 64 * 1024 * 1024)
+                stage = label + '.full-read'
                 complete = read(pid, True)
+                stage = label + '.full-identity'
                 require({k: v for k, v in complete.items() if k != 'kernelImageSha256'} == row)
                 return complete
             return row
 
-        def walk(pid, output):
+        def walk(pid, output, label):
+            nonlocal stage
             rows, seen = [], set()
             for index in range(MAX_ANCESTORS):
+                tag = f'{label}.{index}'
+                stage = tag + '.ancestor-pid'
                 require(pid > 1 and pid not in seen)
                 seen.add(pid)
-                row = capture(pid, full=index < 2)
+                row = capture(pid, full=index < 2, label=tag)
+                stage = tag + '.append'
                 output.append(redact(row)); rows.append(row)
                 if pid == original['pid']:
+                    stage = tag + '.original-continuity'
                     require(all(row[key] == original[key] for key in ('pid', 'parentPid', 'startTime', 'uids')))
                     return rows
+                stage = tag + '.start-order'
                 require(int(row['startTime']) >= int(original['startTime']))
                 pid = row['parentPid']
+            stage = label + '.ancestor-limit'
             raise ValueError()
 
         result['senderAncestors'], result['clientAncestors'] = [], []
-        sender_rows = walk(credentials['pid'], result['senderAncestors'])
-        client_rows = walk(client['pid'], result['clientAncestors'])
+        sender_rows = walk(credentials['pid'], result['senderAncestors'], 'sender')
+        client_rows = walk(client['pid'], result['clientAncestors'], 'client')
+        stage = 'sender-client-identity'
         require(sender_rows[0]['executable'] == '/usr/bin/xdg-dbus-proxy'
                 and {k: v for k, v in client_rows[0].items() if k != 'kernelImageSha256'}
                 == {k: v for k, v in client.items() if k != 'kernelImageSha256'})
         result['senderAfter'], result['clientAfter'] = [], []
-        for rows, output in ((sender_rows, result['senderAfter']), (client_rows, result['clientAfter'])):
-            for row in rows:
-                current = capture(row['pid'], full='kernelImageSha256' in row)
+        for label, rows, output in (('sender-recheck', sender_rows, result['senderAfter']),
+                                    ('client-recheck', client_rows, result['clientAfter'])):
+            for index, row in enumerate(rows):
+                tag = f'{label}.{index}'
+                current = capture(row['pid'], full='kernelImageSha256' in row, label=tag)
+                stage = tag + '.append'
                 output.append(redact(current))
+                stage = tag + '.identity'
                 require(current == row)
+        stage = 'credentials-recheck'
         require(peer(name) == credentials)
         result.update(stable=True, correlatesToOriginalPopen=True)
     except Exception as error:
+        result['failureStage'], result['stateAtFailure'] = stage, state()
         result['unavailable'] = type(error).__name__ if type(error) in (
             ValueError, KeyError, TypeError, RuntimeError, PermissionError, FileNotFoundError, ProcessLookupError, OSError) else 'OtherError'
     try:
@@ -164,6 +250,13 @@ class PassiveCapture:
 
     def budget(self):
         require(not self.stop.is_set() and time.monotonic() <= self.transcript.deadline)
+
+    def diagnostic_state(self):
+        with self.lock:
+            closed = self.closed
+        return dict(closed=closed, stopRequested=self.stop.is_set(),
+                    deadlineExceeded=time.monotonic() > self.transcript.deadline,
+                    cancelled=False if self.cancellable is None else self.cancellable.is_cancelled())
 
     def query(self, method, value, kind):
         self.budget()
@@ -283,7 +376,7 @@ class PassiveCapture:
                     value = self.transcript.snapshot()
                     if record['kind'] == 1 and value.get('call') == record and self.sender is None:
                         result = sender_snapshot(record['sender'], self.original, self.client, self.read, self.peer,
-                                                 self.redact, budget=self.budget)
+                                                 self.redact, budget=self.budget, diagnostic_state=self.diagnostic_state)
                         with self.lock:
                             self.sender = result
         except Exception as error:
@@ -295,6 +388,7 @@ class PassiveCapture:
             if self.final is not None:
                 return copy.deepcopy(self.final)
             self.closed = True
+            pending_at_close, headers_at_close = len(self.pending), copy.deepcopy(self.headers)
         self.stop.set(); self.wake.set()
         if self.cancellable is not None:
             self.cancellable.cancel()
@@ -311,12 +405,33 @@ class PassiveCapture:
                 except Exception:
                     with self.lock:
                         self.failure = self.failure or 'CloseUnavailable'
+        stopped = self.worker is None or not self.worker.is_alive()
+        drained, drain_unavailable = 0, None
+        if not stopped:
+            drain_unavailable = 'WorkerStillRunning'
+        else:
+            # No new bus/proc reads: process only the frozen, unprocessed header suffix.
+            before = self.transcript.snapshot()
+            prefix = [before[key] for key in ('call', 'reply') if key in before]
+            if before.get('unknown'):
+                drain_unavailable = 'TranscriptUnknown'
+            elif len(headers_at_close) > MAX_PENDING or before['messageCount'] != len(prefix) or headers_at_close[:len(prefix)] != prefix:
+                drain_unavailable = 'CapturedPrefixMismatch'
+            else:
+                for record in headers_at_close[len(prefix):]:
+                    self.transcript.add(record)
+                    drained += 1
+                with self.lock:
+                    self.pending = []
         self.transcript.close()
         result = self.transcript.snapshot()
         with self.lock:
-            result.update(armed=self.armed, callbackMessages=self.total, pendingAtClose=len(self.pending),
-                          workerStopped=self.worker is None or not self.worker.is_alive(), cleanupRequested=True,
+            result.update(armed=self.armed, callbackMessages=self.total, pendingAtClose=pending_at_close,
+                          drainedAtClose=drained, pendingAfterClose=len(self.pending),
+                          workerStopped=stopped, cleanupRequested=True,
                           busIdentityMatched=self.bus_identity_matched, observedHeaders=copy.deepcopy(self.headers))
+            if drain_unavailable is not None:
+                result['drainUnavailable'] = drain_unavailable
             if self.sender is not None:
                 result['senderObservation'] = copy.deepcopy(self.sender)
             if self.failure:

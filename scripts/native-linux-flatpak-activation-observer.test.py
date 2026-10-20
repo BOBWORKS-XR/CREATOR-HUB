@@ -145,6 +145,64 @@ class BindingTests(unittest.TestCase):
         result = M.sender_snapshot(':1.40', *self.fixture()[:5], budget=lambda: (_ for _ in ()).throw(RuntimeError('SECRET')))
         self.assertNotIn('SECRET', str(result)); self.assertFalse(result['stable'])
 
+    def test_pre_first_read_cancellation_is_distinct_from_a_process_value_failure(self):
+        args = list(self.fixture())
+        reads = Mock(wraps=args[2]); args[2] = reads
+        count = [0]
+        def budget():
+            count[0] += 1
+            if count[0] == 2: raise ValueError('PRIVATE')
+        status = dict(closed=True, stopRequested=True, deadlineExceeded=False, cancelled=True)
+        result = M.sender_snapshot(':1.40', *args[:5], budget=budget, diagnostic_state=lambda: status)
+        self.assertEqual(result['failureStage'], 'sender.0.budget')
+        self.assertEqual(result['stateAtFailure'], status)
+        self.assertNotIn('firstSenderRead', result); self.assertEqual(result['senderAncestors'], [])
+        reads.assert_not_called(); self.assertNotIn('PRIVATE', str(result))
+
+    def test_first_same_read_values_are_retained_before_shape_or_value_rejection(self):
+        for change, stage in ((lambda row: row.update(uids=(1001,) * 4), 'uids-match'),
+                              (lambda row: row.update(startTime=12), 'start-type'),
+                              (lambda row: row.update(parentPid=0), 'parent-range'),
+                              (lambda row: row['image'].update(st_size='not-numeric'), 'image-size-parse')):
+            with self.subTest(stage=stage):
+                def alter(row, calls):
+                    if row['pid'] == 12: change(row)
+                args = self.fixture(alter)
+                status = dict(closed=False, stopRequested=False, deadlineExceeded=False, cancelled=False)
+                result = M.sender_snapshot(':1.40', *args[:5], budget=lambda: None, diagnostic_state=lambda: status)
+                self.assertEqual(result['failureStage'], 'sender.0.' + stage)
+                first = result['firstSenderRead']
+                self.assertEqual(first['requestedPid'], 12)
+                self.assertEqual(first['pid']['value'], 12)
+                self.assertEqual(first['stateAfterRead'], status)
+                self.assertEqual(result['senderAncestors'], [])
+                self.assertFalse(result['qualified']); self.assertFalse(result['stable'])
+                if stage == 'uids-match':
+                    self.assertEqual(first['uids']['type'], 'tuple')
+                    self.assertEqual(first['uids']['values'], [1001] * 4)
+                if stage == 'image-size-parse': self.assertNotIn('not-numeric', str(first))
+
+    def test_first_full_read_identity_mismatch_keeps_original_metadata_not_a_new_read(self):
+        args = list(self.fixture())
+        reader, calls = args[2], []
+        def read(pid, full=False):
+            row = reader(pid, full); calls.append((pid, full))
+            if full and pid == 12: row['image']['st_size'] = '65'
+            return row
+        args[2] = read
+        result = M.sender_snapshot(':1.40', *args[:5], budget=lambda: None)
+        self.assertEqual(result['failureStage'], 'sender.0.full-identity')
+        self.assertEqual(result['firstSenderRead']['image']['st_size']['value'], '64')
+        self.assertEqual(calls, [(12, False), (12, True)])
+        self.assertEqual(result['senderAncestors'], [])
+
+    def test_read_failure_has_exact_stage_without_claiming_process_values(self):
+        args = list(self.fixture()); args[2] = Mock(side_effect=PermissionError('PRIVATE READ'))
+        result = M.sender_snapshot(':1.40', *args[:5], budget=lambda: None)
+        self.assertEqual(result['failureStage'], 'sender.0.read')
+        self.assertNotIn('firstSenderRead', result); self.assertNotIn('PRIVATE READ', str(result))
+        args[2].assert_called_once_with(12, False)
+
 
 class GioAdapterTests(unittest.TestCase):
     @staticmethod
@@ -227,6 +285,46 @@ class GioAdapterTests(unittest.TestCase):
         self.assertFalse(value['workerStopped']); self.assertFalse(value['qualified'])
         self.assertEqual(value['unavailable'], 'CloseUnavailable')
         self.assertNotIn('PRIVATE', str(value))
+
+    def test_observed_f3_close_drains_captured_reply_without_input_or_credential_reads(self):
+        observer = self.capture()
+        observer.transcript.add(message())
+        observer.headers = [message(), message(2)]
+        observer.pending = [message(2)]
+        observer.sender = dict(qualified=False, inputPermitted=False, stable=False,
+                               correlatesToOriginalPopen=False, unavailable='ValueError')
+        observer.peer = Mock(side_effect=AssertionError('No new credentials at close'))
+        value = observer.close()
+        self.assertEqual(value['messageCount'], 2); self.assertTrue(value['callReplyMatched'])
+        self.assertEqual(value['pendingAtClose'], 1); self.assertEqual(value['drainedAtClose'], 1)
+        self.assertEqual(value['pendingAfterClose'], 0)
+        self.assertFalse(value['qualified']); self.assertFalse(value['senderObservation']['stable'])
+        observer.peer.assert_not_called(); observer.read.assert_not_called()
+        self.assertEqual(value['observedHeaders'], [message(), message(2)])
+
+    def test_close_also_retains_a_reply_in_an_abandoned_worker_batch(self):
+        observer = self.capture(); observer.transcript.add(message())
+        observer.headers = [message(), message(2)]
+        self.assertEqual(observer.pending, [])
+        value = observer.close()
+        self.assertTrue(value['callReplyMatched']); self.assertEqual(value['drainedAtClose'], 1)
+
+    def test_close_cannot_recover_bad_replies_or_process_transcript_while_worker_is_live(self):
+        for failure in ('wrong-reply', 'duplicate', 'deadline', 'worker-live'):
+            with self.subTest(failure=failure):
+                observer = self.capture(); observer.transcript.add(message())
+                observer.headers = [message(), message(2, replySerial=99) if failure == 'wrong-reply' else message(2)]
+                observer.pending = observer.headers[1:]
+                if failure == 'duplicate': observer.headers.append(message(2))
+                if failure == 'deadline': observer.transcript.deadline = 0
+                if failure == 'worker-live':
+                    observer.worker = Mock(); observer.worker.is_alive.return_value = True
+                value = observer.close()
+                self.assertFalse(value['callReplyMatched']); self.assertFalse(value['qualified'])
+                if failure == 'worker-live':
+                    self.assertEqual(value['drainedAtClose'], 0)
+                    self.assertEqual(value['drainUnavailable'], 'WorkerStillRunning')
+                if failure == 'deadline': self.assertTrue(value['deadlineExceeded'])
 
     def test_only_bus_introspection_and_monitor_setup_can_be_called(self):
         source = Path(M.__file__).read_text('utf8')
