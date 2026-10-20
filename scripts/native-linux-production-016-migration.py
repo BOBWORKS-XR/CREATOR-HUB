@@ -808,7 +808,7 @@ def ax_graph(atspi, helper, native, refs, owner, frame, *, protected=None):
     candidates = [node for node in tops if node.get_role() in (atspi.Role.ALERT, atspi.Role.DIALOG)]
     require(len(candidates) == 1, "One native AX dialog required")
     pending, rows, nodes = [(candidates[0], None, 0)], [], []
-    parent_ref = refs.identity(apps[0], owner)
+    parent_ref = tuple(refs.identity(apps[0], owner))
     while pending:
         node, parent, depth = pending.pop()
         require(len(rows) < 64 and depth < 12 and node.get_process_id() == owner.root["pid"], "AX graph escaped native owner/bounds")

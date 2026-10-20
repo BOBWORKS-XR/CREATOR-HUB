@@ -1873,6 +1873,42 @@ class ControllerTests(unittest.TestCase):
         for bad in (raw.replace(b"auth_admin", b"yes"), raw.replace(b"auth_admin", b"auth_admin_keep"), raw.replace(M.HELPER.encode(), b"/bin/sh")):
             with self.assertRaises(RuntimeError): M.policy_question(bad)
 
+    def test_native_ax_graph_real_list_references_keep_reverse_parent_and_owner_guards(self):
+        native = M.load("native-linux-root-probe")
+        owner = SimpleNamespace(root={"pid": 123, "uids": [M.UID] * 4}, renderer=None, node=Mock())
+        app = SimpleNamespace(app=SimpleNamespace(bus_name=":1.7"), path="/org/a11y/atspi/accessible/root",
+                              get_process_id=lambda: 123)
+        other = SimpleNamespace(app=app.app, path="/org/a11y/atspi/accessible/other", get_process_id=lambda: 123)
+        states = SimpleNamespace(contains=lambda key: key in ("SHOWING", "ENABLED", "SENSITIVE"))
+        dialog = SimpleNamespace(app=app.app, path="/org/a11y/atspi/accessible/dialog", get_process_id=lambda: 123,
+                                 get_role=lambda: 2, clear_cache=lambda: None, get_parent=lambda: app,
+                                 get_state_set=lambda: states, get_name=lambda: "Information",
+                                 get_component_iface=lambda: SimpleNamespace(get_extents=lambda _: SimpleNamespace(x=0, y=0, width=200, height=100)))
+        desktop = object()
+        helper = SimpleNamespace(fresh_close_children=lambda node, limit: [app] if node is desktop else [dialog] if node is app else [])
+        atspi = SimpleNamespace(get_desktop=lambda _: desktop, Role=SimpleNamespace(ALERT=2, DIALOG=16, PASSWORD_TEXT=40),
+                                StateType=SimpleNamespace(**{key: key for key in ("EDITABLE", "SHOWING", "ENABLED", "SENSITIVE", "DEFUNCT", "BUSY")}),
+                                CoordType=SimpleNamespace(SCREEN=0))
+        refs = native.AxReferences(lambda _: {"owner": ":1.7", "pid": 123, "uid": M.UID})
+        parent = refs.identity(app, owner)
+        self.assertIsInstance(parent, list)
+        graph, nodes = M.ax_graph(atspi, helper, native, refs, owner, (0, 0, 200, 100))
+        self.assertEqual(graph[0]["parent"], parent)
+        self.assertEqual(nodes, [dialog]); owner.node.assert_called_once_with(dialog)
+        for actual in (None, other):
+            with self.subTest(parent=actual):
+                dialog.get_parent = lambda actual=actual: actual
+                with self.assertRaisesRegex(RuntimeError, "Native reverse parent changed"):
+                    M.ax_graph(atspi, helper, native, refs, owner, (0, 0, 200, 100))
+        dialog.get_parent = lambda: app
+        dialog.get_process_id = lambda: 999
+        with self.assertRaisesRegex(RuntimeError, "AX graph escaped native owner/bounds"):
+            M.ax_graph(atspi, helper, native, refs, owner, (0, 0, 200, 100))
+        dialog.get_process_id = lambda: 123
+        owner.node.side_effect = RuntimeError("Synthetic owner guard refused")
+        with self.assertRaisesRegex(RuntimeError, "Synthetic owner guard refused"):
+            M.ax_graph(atspi, helper, native, refs, owner, (0, 0, 200, 100))
+
     def test_native_guide_graph_requires_source_question_owner_buttons_and_readiness(self):
         question = M.GUIDE + M.GUIDE_SUMMARY + M.GUIDE_END
         graph = [{"reference": [":1.2", str(i)], "parent": [":1.2", "app" if i == 0 else "0"], "pid": 123,
