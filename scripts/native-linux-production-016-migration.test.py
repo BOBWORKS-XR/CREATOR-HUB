@@ -8,10 +8,12 @@ import json
 import os
 from pathlib import Path
 import re
+import struct
 import subprocess
 import sys
 import tempfile
 import unittest
+import zlib
 from contextlib import ExitStack, contextmanager
 from unittest.mock import Mock, patch
 from types import SimpleNamespace
@@ -1945,6 +1947,136 @@ class ControllerTests(unittest.TestCase):
                 M.no_legacy_backend({"executable": image}, command)
         for command in (b"", b"unterminated", b"x" * 8192 + b"\0"):
             with self.assertRaises(RuntimeError): M.no_legacy_backend({"executable": M.OLD_NODE}, command)
+
+    @contextmanager
+    def finished_home_fixture(self, *, reopened=False):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve() / ("reopened" if reopened else "first")
+            root.mkdir(mode=0o700)
+            width, height = 560, 480
+            row = b"\0" + b"".join(bytes((x % 256, x * 3 % 256, x * 7 % 256)) for x in range(width))
+            def chunk(name, raw):
+                return struct.pack(">I", len(raw)) + name + raw + struct.pack(">I", zlib.crc32(name + raw))
+            png = (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+                   + chunk(b"IDAT", zlib.compress(row * height)) + chunk(b"IEND", b""))
+            state = SimpleNamespace(events=[], fault=None, error=None, identity="original", windows=[42], png=png)
+            session = M.Session.__new__(M.Session)
+            session.root, session.evidence = root, {}
+            session.request, session.window = SimpleNamespace(window=42), 42
+            session.xres = {"pid": 123, "client": 17, "title": M.TITLE, "mapped": True}
+            state.xres = copy.deepcopy(session.xres)
+            session.x11, session.dialogs = Mock(), set()
+            def process_guard():
+                state.events.append("guard")
+                M.require(state.identity == "original", "Synthetic Root identity changed")
+            session.process_guard = process_guard
+            session.helper = SimpleNamespace(bound_window=lambda *_: copy.deepcopy(state.xres))
+            def take(request, folder, helper, x11):
+                self.assertIs(request, session.request); self.assertIs(helper, session.helper); self.assertIs(x11, session.x11)
+                self.assertEqual(folder, root / "home-bitmap"); self.assertEqual(state.events, ["home", "guard"])
+                state.events.append("bitmap")
+                if state.error is not None:
+                    raise state.error
+                file = folder / "root-window.png"
+                file.write_bytes(png); file.chmod(0o600)
+                result = {"nonblank": True, "windowOnly": True, "xid": 42, "xres": copy.deepcopy(session.xres),
+                          "width": width, "height": height, "rectangle": (0, 0, width, height),
+                          "image": {"size": len(png), "sha256": M.digest(png)}}
+                if state.fault == "blank": result["nonblank"] = False
+                if state.fault == "foreign-xid": result["xid"] = 43
+                if state.fault == "foreign-xres": result["xres"]["client"] += 1
+                if state.fault == "wrong-size": result["image"]["size"] += 1
+                if state.fault == "wrong-hash": result["image"]["sha256"] = "0" * 64
+                if state.fault == "wrong-dimensions": result["width"] += 1
+                if state.fault == "wrong-rectangle": result["rectangle"] = (0, 0, width + 1, height)
+                if state.fault == "missing": file.unlink()
+                if state.fault == "changed-image": file.write_bytes(png + b"changed")
+                if state.fault == "after-identity": state.identity = "replacement"
+                if state.fault == "after-xres": state.xres["client"] += 1
+                if state.fault == "after-window": state.windows.append(43)
+                return result
+            session.native = SimpleNamespace(bitmap=Mock(side_effect=take), client_ids=lambda _: state.windows)
+            session.d = SimpleNamespace(read=Mock(side_effect=lambda selector, endpoint="text":
+                "all" if selector == "#project-sdk" else None if endpoint == "attribute/open" else "false"),
+                elements=Mock(return_value=["selected"]), click=Mock(),
+                call=Mock(side_effect=RuntimeError("WebDriver screenshot transport must not be used")))
+            session.pages = SimpleNamespace(wait=lambda check, *args: M.require(bool(check()), "Synthetic UI not ready"),
+                                            png_dimensions=M.load("native-linux-integrated-pages").png_dimensions)
+            def home(driver, folder):
+                self.assertIs(driver, session.d); self.assertEqual(folder, M.BASE / "result/home")
+                state.events.append("home")
+                return {"platform": "Linux", "fixtureOnly": True}
+            original_read = M.read_file
+            def read(file, limit, **kwargs):
+                self.assertEqual(kwargs, {"uid": M.UID, "mode": 0o600})
+                # Pure temporary files do not belong to the native fixture UID.
+                return original_read(file, limit)
+            state.session = session
+            with patch.object(M, "home_observation", side_effect=home), patch.object(M, "read_file", side_effect=read):
+                yield state
+
+    def test_finish_ui_retains_guarded_native_bitmap_at_existing_first_and_reopened_exports(self):
+        for reopened in (False, True):
+            with self.subTest(reopened=reopened), self.finished_home_fixture(reopened=reopened) as f:
+                M.finish_ui(f.session, M.SCENARIOS[0], reopened=reopened)
+                self.assertEqual(f.events, ["home", "guard", "bitmap", "guard"])
+                f.session.native.bitmap.assert_called_once(); f.session.d.call.assert_not_called()
+                self.assertEqual((f.session.root / "home.png").read_bytes(), f.png)
+                self.assertEqual((f.session.root / "home-bitmap/root-window.png").read_bytes(), f.png)
+                evidence = f.session.evidence["homeScreenshot"]
+                self.assertEqual((evidence["size"], evidence["sha256"], evidence["dimensions"]),
+                                 (len(f.png), M.digest(f.png), (560, 480)))
+                self.assertTrue(evidence["nativeBitmap"]["nonblank"])
+                self.assertEqual(f.session.d.click.call_args_list, [] if reopened else [unittest.mock.call("#convergence-later")])
+
+    def test_finish_ui_bitmap_failure_never_retries_falls_back_or_accepts_missing_pixels(self):
+        with self.finished_home_fixture() as f:
+            original = RuntimeError("Owned drawable capture refused")
+            f.error = original
+            with self.assertRaises(RuntimeError) as raised:
+                M.finish_ui(f.session, M.SCENARIOS[0])
+            self.assertIs(raised.exception, original)
+            f.session.native.bitmap.assert_called_once(); f.session.d.call.assert_not_called()
+            self.assertNotIn("homeScreenshot", f.session.evidence)
+            self.assertFalse((f.session.root / "home.png").exists())
+        for fault in ("blank", "foreign-xid", "foreign-xres", "wrong-size", "wrong-hash", "wrong-dimensions",
+                      "wrong-rectangle", "missing", "changed-image"):
+            with self.subTest(fault=fault), self.finished_home_fixture() as f:
+                f.fault = fault
+                with self.assertRaises((RuntimeError, FileNotFoundError)):
+                    M.finish_ui(f.session, M.SCENARIOS[0])
+                f.session.native.bitmap.assert_called_once(); f.session.d.call.assert_not_called()
+                self.assertNotIn("homeScreenshot", f.session.evidence)
+                self.assertFalse((f.session.root / "home.png").exists())
+
+    def test_finish_ui_bitmap_checks_real_session_identity_and_root_window_guards_before_and_after(self):
+        for fault in ("before-identity", "before-xres", "before-window", "after-identity", "after-xres", "after-window"):
+            with self.subTest(fault=fault), self.finished_home_fixture() as f:
+                f.fault = fault
+                if fault == "before-identity": f.identity = "replacement"
+                if fault == "before-xres": f.xres["client"] += 1
+                if fault == "before-window": f.windows.append(43)
+                with self.assertRaises(RuntimeError):
+                    M.finish_ui(f.session, M.SCENARIOS[0])
+                self.assertEqual(f.session.native.bitmap.call_count, 0 if fault.startswith("before-") else 1)
+                f.session.d.call.assert_not_called()
+                self.assertNotIn("homeScreenshot", f.session.evidence)
+                self.assertFalse((f.session.root / "home.png").exists())
+
+    def test_finish_ui_bitmap_export_is_exclusive_and_its_written_bytes_are_rechecked(self):
+        for fault in ("existing-export", "changed-export"):
+            with self.subTest(fault=fault), self.finished_home_fixture() as f:
+                target = f.session.root / "home.png"
+                if fault == "existing-export": target.write_bytes(b"preserved earlier evidence")
+                original_write = M.P.write
+                def write(file, raw):
+                    self.assertEqual(file, target)
+                    original_write(file, b"changed" if fault == "changed-export" else raw)
+                with patch.object(M.P, "write", side_effect=write), self.assertRaises((RuntimeError, FileExistsError)):
+                    M.finish_ui(f.session, M.SCENARIOS[0])
+                self.assertEqual(target.read_bytes(), b"preserved earlier evidence" if fault == "existing-export" else b"changed")
+                self.assertNotIn("homeScreenshot", f.session.evidence)
+                f.session.d.call.assert_not_called()
 
     def test_actual_home_observation_requires_linux_version_dense_projects_selection_and_bridge_fields(self):
         home, values = Path("/synthetic/home"), {}

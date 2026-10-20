@@ -1885,12 +1885,20 @@ def finish_ui(session, scenario, *, reopened=False):
         d.click('#project-sdk option[value="all"]')
     pages.wait(lambda: bool(d.elements('#project-list .project-row[data-mcp-selected="true"]')))
     session.evidence["home"] = home_observation(d, BASE / "result/home")
-    screenshot = d.call("GET", "/screenshot", limit=9 * 1024 * 1024)
-    require(type(screenshot) is str and len(screenshot) <= 8 * 1024 * 1024, "Native home screenshot exceeds bound")
-    png = base64.b64decode(screenshot, validate=True)
+    session.guard()
+    folder = session.root / "home-bitmap"
+    folder.mkdir(mode=0o700)
+    bitmap = session.native.bitmap(session.request, folder, session.helper, session.x11)
+    session.guard()
+    require(bitmap["nonblank"] is True and bitmap["windowOnly"] is True
+            and bitmap["xid"] == session.request.window and bitmap["xres"] == session.xres, "Exact owned home pixels required")
+    png = read_file(folder / "root-window.png", 16 * 1024 * 1024, uid=UID, mode=0o600)
+    require(len(png) == bitmap["image"]["size"] and digest(png) == bitmap["image"]["sha256"], "Owned home bitmap bytes changed")
     dimensions = pages.png_dimensions(png)
+    require(dimensions == (bitmap["width"], bitmap["height"]) == tuple(bitmap["rectangle"][2:]), "Owned home bitmap geometry differs")
     P.write(session.root / "home.png", png)
-    session.evidence["homeScreenshot"] = {"size": len(png), "sha256": digest(png), "dimensions": dimensions}
+    require(read_file(session.root / "home.png", 16 * 1024 * 1024, uid=UID, mode=0o600) == png, "Retained home bitmap bytes changed")
+    session.evidence["homeScreenshot"] = {"size": len(png), "sha256": digest(png), "dimensions": dimensions, "nativeBitmap": bitmap}
 
 
 def batch_outcome(home, scenario):
