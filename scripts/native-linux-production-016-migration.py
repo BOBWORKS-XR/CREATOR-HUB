@@ -927,7 +927,64 @@ def connection_review_graph_contract(rows, *, pid, question, record):
         raise
 
 
-def ax_graph(atspi, helper, native, refs, owner, frame, *, protected=None):
+def authentication_readiness_diagnostic(rows, observations, *, pid, question):
+    require(type(rows) is list and 1 <= len(rows) <= 64 and type(observations) is list
+            and len(observations) == len(rows) and type(pid) is int and 1 < pid < 2**31
+            and type(question) is str and len(question) <= 4096, "Readiness diagnostic exceeds bound")
+    references = []
+    for row in rows:
+        keys(row, ("reference", "parent", "pid", "role", "name", "ready"))
+        require(row["pid"] == pid and type(row["role"]) is int and 0 <= row["role"] < 65536
+                and type(row["ready"]) is bool, "Readiness diagnostic owner/metadata differs")
+        for field in ("reference", "parent"):
+            require(type(row[field]) is list and len(row[field]) == 2
+                    and all(type(v) is str and len(v) <= 256 for v in row[field]), "Readiness reference exceeds bound")
+        references.append(tuple(row["reference"]))
+    require(len(set(references)) == len(rows), "Readiness reference duplicated")
+    indexes = {reference: i for i, reference in enumerate(references)}
+    nodes, failed, text_bytes = [], [], 0
+    for index, (row, observed) in enumerate(zip(rows, observations)):
+        keys(observed, ("reference", "states"))
+        require(observed["reference"] == row["reference"], "Readiness observation reference differs")
+        keys(observed["states"], ("SHOWING", "ENABLED", "SENSITIVE", "DEFUNCT", "BUSY"))
+        require(all(v is None or type(v) is bool for v in observed["states"].values()), "Invalid same-read state observation")
+        parent = indexes.get(tuple(row["parent"]))
+        require(index == 0 or parent is not None, "Readiness parent escaped")
+        name = row["name"]
+        require(name is None if row["role"] == 40 else type(name) is str and len(name) <= 4096,
+                "Readiness text exceeds bound or password was read")
+        summary = {"kind": "unread"}
+        if name is not None:
+            raw = name.encode("utf-8"); text_bytes += len(raw)
+            require(text_bytes <= 65536, "Readiness text budget exceeded")
+            summary = ({"kind": "known", "text": name} if name in ("", "Authenticate", "Cancel", "Password:", "Details", "Action:", "Vendor:") else
+                       {"kind": "expected-question" if name == question else "redacted",
+                        "chars": len(name), "utf8Bytes": len(raw), "sha256": digest(raw)})
+        nodes.append({"index": index, "reference": list(row["reference"]), "parentIndex": parent, "role": row["role"],
+                      "name": summary, "ready": row["ready"], "states": dict(observed["states"])})
+        if row["role"] in (2, 16, 29, 40, 43) and not row["ready"]:
+            failed.append(index)
+    value = {"schemaVersion": 1, "scope": "synthetic-authorization-readiness-016", "diagnosticOnly": True,
+             "inputPermitted": False, "authorityGranted": False, "releaseReady": False,
+             "agentPid": pid, "failedIndexes": failed, "nodes": nodes}
+    require(len(json.dumps(value, allow_nan=False).encode()) <= 32768, "Readiness output budget exceeded")
+    return value
+
+
+def authentication_graph_contract(rows, *, pid, question, observations, record):
+    try:
+        graph_contract(rows, pid=pid, title="Authenticate", question=question, password=True)
+    except RuntimeError as error:
+        if type(error) is RuntimeError and str(error) == "Native controls are not ready" and type(record) is dict:
+            try:
+                if "readinessRefusal" not in record:
+                    record["readinessRefusal"] = authentication_readiness_diagnostic(rows, observations, pid=pid, question=question)
+            except Exception as capture_error:
+                record.setdefault("readinessCaptureUnavailable", {"type": type(capture_error).__name__[:100]})
+        raise
+
+
+def ax_graph(atspi, helper, native, refs, owner, frame, *, protected=None, observations=None):
     apps = [node for node in helper.fresh_close_children(atspi.get_desktop(0), 64) if node.get_process_id() == owner.root["pid"]]
     require(len(apps) == 1, "One attributed AX application required")
     tops = helper.fresh_close_children(apps[0], 8)
@@ -955,10 +1012,19 @@ def ax_graph(atspi, helper, native, refs, owner, frame, *, protected=None):
         require(is_password or not states.contains(atspi.StateType.EDITABLE), "Unexpected editable native node")
         name = None if is_password else node.get_name()
         require(name is None if is_password else type(name) is str and len(name) <= 4096, "Native text exceeds bound")
-        ready = all(states.contains(getattr(atspi.StateType, value)) for value in ("SHOWING", "ENABLED", "SENSITIVE"))
-        ready = ready and not any(states.contains(getattr(atspi.StateType, value)) for value in ("DEFUNCT", "BUSY"))
+        def contains(value):
+            result = states.contains(getattr(atspi.StateType, value))
+            if observations is not None:
+                evaluated[value] = result
+            return result
+        evaluated = dict.fromkeys(("SHOWING", "ENABLED", "SENSITIVE", "DEFUNCT", "BUSY"))
+        ready = all(contains(value) for value in ("SHOWING", "ENABLED", "SENSITIVE"))
+        ready = ready and not any(contains(value) for value in ("DEFUNCT", "BUSY"))
         rows.append({"reference": list(reference), "parent": list(parent_ref if parent is None else parent),
                      "pid": owner.root["pid"], "role": role, "name": name, "ready": ready})
+        if observations is not None:
+            # Preserve short-circuit evaluation: None means not queried, never a guessed state.
+            observations.append({"reference": list(reference), "states": evaluated})
         nodes.append(node)
         if len(rows) == 1 or role in (40, 43):
             rect = node.get_component_iface().get_extents(atspi.CoordType.SCREEN)
@@ -1949,6 +2015,7 @@ class Authorization:
         protected, geometry = {}, {}
         record = {"target": target, "mode": "authenticate" if authenticate else "cancel", "passwordRead": False}
         self.records.append(record)
+        s.evidence["authorization"] = self.records
         def guard():
             self.input_guard(target, record)
         def profile():
@@ -1956,8 +2023,9 @@ class Authorization:
             frame = s.x11.frame_rectangle(windows[0]["window"])
             owner = type("Owner", (), {"root": self.identity, "renderer": None})()
             refs.recheck()
-            graph, nodes = ax_graph(self.atspi, s.helper, s.native, refs, owner, frame, protected=protected)
-            graph_contract(graph, pid=self.identity["pid"], title="Authenticate", question=self.question, password=True)
+            observations = []
+            graph, nodes = ax_graph(self.atspi, s.helper, s.native, refs, owner, frame, protected=protected, observations=observations)
+            authentication_graph_contract(graph, pid=self.identity["pid"], question=self.question, observations=observations, record=record)
             selected = None
             if authenticate:
                 combos = [(node, row) for node, row in zip(nodes, graph) if row["role"] == int(self.atspi.Role.COMBO_BOX)]

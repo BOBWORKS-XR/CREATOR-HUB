@@ -1477,6 +1477,159 @@ class ConnectionReviewGraphCaptureTests(unittest.TestCase):
             self.assertNotIn("PRIVATE_CONFIG_ARGUMENT", json.dumps(value))
 
 
+class AuthorizationReadinessCaptureTests(unittest.TestCase):
+    def fixture(self):
+        question = "fixed synthetic retirement question"
+        labels = [(16, "Authenticate"), (29, question), (40, None), (43, "Cancel"),
+                  (43, "Authenticate"), (29, "PRIVATE unrelated details label")]
+        rows = [{"reference": [":1.9", str(i)], "parent": [":1.9", "app" if i == 0 else "0"],
+                 "pid": 123, "role": role, "name": name, "ready": i != 5}
+                for i, (role, name) in enumerate(labels)]
+        observations = [{"reference": row["reference"], "states": dict(zip(
+            ("SHOWING", "ENABLED", "SENSITIVE", "DEFUNCT", "BUSY"),
+            (True, True, True, False, False) if row["ready"] else (False, None, None, None, None)))} for row in rows]
+        return question, rows, observations
+
+    def check(self, rows, observations, question, record):
+        return M.authentication_graph_contract(rows, pid=123, question=question, observations=observations, record=record)
+
+    def test_first_profile_refusal_retains_exact_role_reference_and_only_evaluated_state_bits(self):
+        question, rows, observations = self.fixture(); record = {}; original = copy.deepcopy((rows, observations))
+        with patch.object(M, "ax_graph") as walk, patch.object(M, "read_file") as read, \
+                patch.object(M.subprocess, "Popen") as spawn, self.assertRaisesRegex(RuntimeError, "^Native controls are not ready$"):
+            self.check(rows, observations, question, record)
+        value = record["readinessRefusal"]
+        self.assertEqual((rows, observations), original)
+        self.assertEqual(value["failedIndexes"], [5])
+        node = value["nodes"][5]
+        self.assertEqual((node["role"], node["reference"], node["parentIndex"]), (29, [":1.9", "5"], 0))
+        self.assertEqual(node["states"], {"SHOWING": False, "ENABLED": None, "SENSITIVE": None, "DEFUNCT": None, "BUSY": None})
+        self.assertEqual(value["nodes"][2]["name"], {"kind": "unread"})
+        self.assertEqual(value["nodes"][1]["name"]["kind"], "expected-question")
+        self.assertNotIn("PRIVATE", json.dumps(value)); self.assertNotIn(question, json.dumps(value))
+        self.assertLessEqual(len(json.dumps(value).encode()), 32768)
+        for key in ("inputPermitted", "authorityGranted", "releaseReady"): self.assertIs(value[key], False)
+        self.assertTrue(value["diagnosticOnly"])
+        walk.assert_not_called(); read.assert_not_called(); spawn.assert_not_called()
+
+    def test_no_capture_on_success_or_other_contract_failure_or_different_exception_type(self):
+        question, rows, observations = self.fixture()
+        rows[-1]["ready"] = True
+        with patch.object(M, "authentication_readiness_diagnostic") as capture:
+            record = {}; self.check(rows, observations, question, record)
+            self.assertEqual(record, {}); capture.assert_not_called()
+            rows[1]["name"] = "wrong question"
+            with self.assertRaisesRegex(RuntimeError, "Exact source-bound native question"):
+                self.check(rows, observations, question, record)
+            self.assertEqual(record, {}); capture.assert_not_called()
+            class Other(RuntimeError): pass
+            original = Other("Native controls are not ready")
+            with patch.object(M, "graph_contract", side_effect=original), self.assertRaises(Other) as raised:
+                self.check(rows, observations, question, record)
+            self.assertIs(raised.exception, original); capture.assert_not_called()
+
+    def test_capture_failure_preserves_original_and_first_capture_is_not_replaced(self):
+        question, rows, observations = self.fixture(); record = {}
+        original = RuntimeError("Native controls are not ready")
+        with patch.object(M, "graph_contract", side_effect=original), \
+                patch.object(M, "authentication_readiness_diagnostic", side_effect=ValueError("PRIVATE capture error")), \
+                self.assertRaises(RuntimeError) as raised:
+            self.check(rows, observations, question, record)
+        self.assertIs(raised.exception, original)
+        self.assertEqual(record, {"readinessCaptureUnavailable": {"type": "ValueError"}})
+        record = {"readinessRefusal": {"first": True}}
+        with patch.object(M, "authentication_readiness_diagnostic") as capture, self.assertRaises(RuntimeError):
+            self.check(rows, observations, question, record)
+        capture.assert_not_called(); self.assertEqual(record, {"readinessRefusal": {"first": True}})
+
+    def test_malformed_foreign_or_oversized_diagnostic_is_rejected(self):
+        question, rows, observations = self.fixture()
+        for mutate in (lambda r, o: r.extend(copy.deepcopy(r) * 12), lambda r, o: r[5].update(name="x" * 4097),
+                       lambda r, o: r[5].update(pid=999), lambda r, o: r[5].update(parent=[":foreign", "outside"]),
+                       lambda r, o: o[5].update(reference=o[0]["reference"]),
+                       lambda r, o: o[5]["states"].update(ENABLED="PRIVATE"),
+                       lambda r, o: o[5]["states"].update(OTHER=True)):
+            r, o = copy.deepcopy((rows, observations)); mutate(r, o)
+            with self.subTest(mutate=mutate), self.assertRaises(RuntimeError):
+                M.authentication_readiness_diagnostic(r, o, pid=123, question=question)
+
+    def test_actual_first_cancel_profile_failure_persists_before_action_with_no_additional_walk(self):
+        question, rows, observations = self.fixture(); native = M.load("native-linux-polkit-probe")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            with patch.object(M.Session, "start"):
+                session = M.Session(root, binding())
+            windows = [{"window": 42}]; bus, refs, button = Mock(), Mock(), Mock()
+            session.polkit = SimpleNamespace(windows=Mock(return_value=windows), cancel_once=native.cancel_once)
+            session.pages = SimpleNamespace(wait=lambda check, _seconds: check())
+            session.x11 = SimpleNamespace(frame_rectangle=lambda _xid: (0, 0, 200, 100))
+            session.native = SimpleNamespace(native_ax_references=lambda: (refs, bus))
+            session.helper = Mock()
+            authorizer = M.Authorization(session, Mock(), {"pid": 123}, {}, {}, Mock(), Mock(), Mock(), question, [0], Mock(), {})
+            authorizer.input_guard = Mock()
+            def walk(*_args, **kwargs):
+                kwargs["observations"].extend(copy.deepcopy(observations))
+                return rows, [button] * len(rows)
+            with patch.object(M, "ax_graph", side_effect=walk) as walked:
+                try:
+                    authorizer.act("mcp", False, None)
+                except RuntimeError as error:
+                    session.retain_failure(error)
+                else: self.fail("Original readiness refusal required")
+            self.assertEqual(walked.call_count, 1); authorizer.input_guard.assert_called_once()
+            button.get_action_iface.assert_not_called(); bus.close_sync.assert_called_once_with(None)
+            value = json.loads((root / "session.json").read_bytes())
+            self.assertEqual(value["firstFailure"]["message"], "Native controls are not ready")
+            record = value["authorization"][0]
+            self.assertEqual(record["readinessRefusal"]["failedIndexes"], [5])
+            self.assertFalse(record["passwordRead"])
+            for key in ("cancelProfile", "cancelActionAttempts", "passwordWriteAttempts", "actionMayHaveRun"):
+                self.assertNotIn(key, record)
+
+    def test_state_capture_preserves_exact_short_circuit_reads_and_unknown_bits(self):
+        names = ("SHOWING", "ENABLED", "SENSITIVE", "DEFUNCT", "BUSY")
+        for changed in (*names, None):
+            calls = []
+            def contains(name):
+                calls.append(name)
+                return (name in names[:3]) != (name == changed)
+            states = SimpleNamespace(contains=contains)
+            app, desktop = object(), object()
+            dialog = SimpleNamespace(get_process_id=lambda: 123, get_role=lambda: 16, clear_cache=lambda: None,
+                                     get_parent=lambda: app, get_state_set=lambda: states, get_name=lambda: "Authenticate",
+                                     get_component_iface=lambda: SimpleNamespace(get_extents=lambda _: SimpleNamespace(x=0, y=0, width=200, height=100)))
+            helper = SimpleNamespace(fresh_close_children=lambda node, _limit: [app] if node is desktop else [dialog] if node is app else [])
+            atspi = SimpleNamespace(get_desktop=lambda _: desktop, Role=SimpleNamespace(ALERT=2, DIALOG=16, PASSWORD_TEXT=40),
+                                    StateType=SimpleNamespace(EDITABLE="EDITABLE", **{name: name for name in names}),
+                                    CoordType=SimpleNamespace(SCREEN=0))
+            # Application attribution is queried before the bounded dialog walk.
+            app = SimpleNamespace(get_process_id=lambda: 123)
+            refs = SimpleNamespace(identity=lambda node, _owner: [":1.9", "app" if node is app else "dialog"])
+            owner = SimpleNamespace(root={"pid": 123})
+            with self.subTest(changed=changed):
+                plain, _ = M.ax_graph(atspi, helper, Mock(), refs, owner, (0, 0, 200, 100))
+                original_calls = list(calls); calls.clear(); observed = []
+                captured, _ = M.ax_graph(atspi, helper, Mock(), refs, owner, (0, 0, 200, 100), observations=observed)
+                self.assertEqual(captured, plain); self.assertEqual(calls, original_calls)
+                expected_reads = ["EDITABLE", *names[:names.index(changed) + 1]] if changed is not None else ["EDITABLE", *names]
+                self.assertEqual(calls, expected_reads)
+                self.assertEqual(captured[0]["ready"], changed is None)
+                expected = {name: ((name in names[:3]) != (name == changed)) if name in calls else None for name in names}
+                self.assertEqual(observed, [{"reference": [":1.9", "dialog"], "states": expected}])
+
+    def test_failed_first_profile_never_retries_or_reads_password(self):
+        question, rows, observations = self.fixture(); native = M.load("native-linux-polkit-probe")
+        button = Mock(); record = {"mode": "cancel"}
+        def profile():
+            self.check(rows, observations, question, record)
+            return button, {}
+        profile = Mock(side_effect=profile)
+        with self.assertRaisesRegex(RuntimeError, "^Native controls are not ready$"):
+            native.cancel_once(profile, Mock(), record)
+        profile.assert_called_once(); button.get_action_iface.assert_not_called()
+        self.assertNotIn("cancelActionAttempts", record)
+
+
 class SessionProgressTests(unittest.TestCase):
     class Stall(BaseException):
         pass
