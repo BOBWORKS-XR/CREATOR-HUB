@@ -323,24 +323,46 @@ class ProxyAssociationProc:
         finally:
             os.close(fd)
 
-    def candidates(self, uid, budget):
+    def candidates(self, uid, budget, *, diagnostic=None):
         count, found = 0, []
+        scan = dict(inventoryComplete=False, scannedPids=0, scanSkipped=0, skippedTypes={}, skipped=[], skippedTruncated=False)
+        if diagnostic is not None:
+            require(type(diagnostic) is dict)
+            diagnostic.update(scan)
+            scan = diagnostic
         with os.scandir('/proc') as entries:
             for entry in entries:
                 if not re.fullmatch(r'[1-9][0-9]{0,9}', entry.name):
                     continue
                 count += 1
                 require(count <= self.MAX_PIDS and int(entry.name) < 2**31)
+                scan['scannedPids'] = count
                 budget()
-                before = entry.stat(follow_symlinks=False)
-                require(stat.S_ISDIR(before.st_mode))
-                if before.st_uid != uid:
+                observed_uid, operation = None, 'pid-stat'
+                try:
+                    before = entry.stat(follow_symlinks=False)
+                    require(stat.S_ISDIR(before.st_mode) and type(before.st_uid) is int and 0 <= before.st_uid < 2**32)
+                    observed_uid = before.st_uid
+                    if observed_uid != uid:
+                        continue
+                    operation = 'exe-readlink'
+                    target = os.readlink('/proc/' + entry.name + '/exe')
+                    operation = 'pid-stat-recheck'
+                    require(len(target) <= 4096 and self.stamp(entry.stat(follow_symlinks=False)) == self.stamp(before))
+                except (PermissionError, FileNotFoundError, ProcessLookupError) as error:
+                    kind = 'PermissionError' if isinstance(error, PermissionError) else (
+                        'FileNotFoundError' if isinstance(error, FileNotFoundError) else 'ProcessLookupError')
+                    scan['scanSkipped'] += 1
+                    scan['skippedTypes'][kind] = scan['skippedTypes'].get(kind, 0) + 1
+                    if len(scan['skipped']) < 16:
+                        scan['skipped'].append(dict(pid=int(entry.name), uid=observed_uid, operation=operation, type=kind))
+                    else:
+                        scan['skippedTruncated'] = True
                     continue
-                target = os.readlink('/proc/' + entry.name + '/exe')
-                require(len(target) <= 4096 and self.stamp(entry.stat(follow_symlinks=False)) == self.stamp(before))
                 if target == '/usr/bin/xdg-dbus-proxy':
                     found.append(int(entry.name))
                     require(len(found) <= 4)
+        scan['inventoryComplete'] = scan['scanSkipped'] == 0
         return sorted(found), count
 
     def info(self, pid):
@@ -407,6 +429,8 @@ def proxy_association_diagnostic(original, client, tree, read, *, image_open, sy
     """Corroborating evidence for a refused launch; never an alternative lineage admission."""
     value = dict(readOnly=True, qualified=False, inputPermitted=False, authorityGranted=False, releaseReady=False,
                  complete=False, associationObserved=False, candidates=[])
+    inventory = dict(inventoryComplete=False, scannedPids=0, scanSkipped=0, skippedTypes={}, skipped=[], skippedTruncated=False)
+    value['inventory'] = inventory
     proc = ProxyAssociationProc() if proc is None else proc
     held, fds, rows, stage = {}, {}, {}, 'owned-launch'
     try:
@@ -440,10 +464,15 @@ def proxy_association_diagnostic(original, client, tree, read, *, image_open, sy
             pid = parent
         require(chain[-1] == original['pid'] and rows[original['pid']] == original and rows[client['pid']] == client)
         stage = 'candidate-inventory'
-        candidates, scanned = proc.candidates(original['uids'][0], budget)
+        candidates, scanned = proc.candidates(original['uids'][0], budget, diagnostic=inventory)
+        require(type(inventory['scanSkipped']) is int and 0 <= inventory['scanSkipped'] <= ProxyAssociationProc.MAX_PIDS
+                and type(inventory['inventoryComplete']) is bool
+                and inventory['inventoryComplete'] == (inventory['scanSkipped'] == 0)
+                and inventory['scannedPids'] == scanned)
+        if type(candidates) is list:
+            value.update(scannedPids=scanned, candidateCount=len(candidates))
         require(type(candidates) is list and 0 < len(candidates) <= 4 and len(set(candidates)) == len(candidates)
                 and type(scanned) is int and len(candidates) <= scanned <= ProxyAssociationProc.MAX_PIDS)
-        value.update(scannedPids=scanned, candidateCount=len(candidates))
         protected = system_image.snapshot()
         for pid in candidates:
             stage = 'candidate-image'
@@ -496,7 +525,10 @@ def proxy_association_diagnostic(original, client, tree, read, *, image_open, sy
         stage = 'association-ambiguity'
         require(len(associations) <= 1)
         guard(); budget()
-        value.update(complete=True, associationObserved=len(associations) == 1)
+        value.update(complete=inventory['inventoryComplete'],
+                     associationObserved=inventory['inventoryComplete'] and len(associations) == 1)
+        if not inventory['inventoryComplete']:
+            value['unavailable'] = 'IncompleteInventory'
     except Exception as error:
         value.update(complete=False, associationObserved=False, failureStage=stage,
                      unavailable=type(error).__name__ if type(error) in (ValueError, KeyError, TypeError, RuntimeError,

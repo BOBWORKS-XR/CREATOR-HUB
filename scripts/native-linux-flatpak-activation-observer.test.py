@@ -402,6 +402,11 @@ class ProxyAssociationTests(unittest.TestCase):
         state.proc = SimpleNamespace(candidates=Mock(return_value=([12], 8)),
             info=Mock(side_effect=lambda pid: copy.deepcopy(state.info)),
             pipes=Mock(side_effect=lambda pid: copy.deepcopy(state.pipes[pid])))
+        state.scan = dict(inventoryComplete=True, scanSkipped=0, skippedTypes={}, skipped=[], skippedTruncated=False)
+        def candidates(uid, budget, *, diagnostic):
+            diagnostic.update(copy.deepcopy(state.scan), scannedPids=state.proc.candidates.return_value[1])
+            return state.proc.candidates.return_value
+        state.proc.candidates.side_effect = candidates
         def read(pid, full=False):
             state.reads.append((pid, full))
             return copy.deepcopy(state.rows[pid])
@@ -450,6 +455,45 @@ class ProxyAssociationTests(unittest.TestCase):
             with self.subTest(change=change):
                 value = state.run()
                 self.assertTrue(value['complete']); self.assertFalse(value['associationObserved'])
+
+    def test_incomplete_scan_retains_accessible_proxy_evidence_but_never_association_or_authority(self):
+        state = self.fixture()
+        state.scan.update(inventoryComplete=False, scanSkipped=1, skippedTypes={'PermissionError': 1},
+                          skipped=[dict(pid=99, uid=1001, operation='exe-readlink', type='PermissionError')])
+        value = state.run()
+        self.assertFalse(value['complete']); self.assertFalse(value['associationObserved'])
+        self.assertEqual(value['unavailable'], 'IncompleteInventory')
+        self.assertFalse(value['inventory']['inventoryComplete']); self.assertEqual(value['inventory']['scanSkipped'], 1)
+        self.assertTrue(value['candidates'][0]['infoMatchesLauncher'])
+        self.assertEqual(value['candidates'][0]['sharedPipes'][0]['inode'], 900)
+        for key in ('qualified', 'inputPermitted', 'authorityGranted', 'releaseReady'): self.assertFalse(value[key])
+        with self.assertRaises(ValueError): state.build()
+
+    def test_skipped_unknown_or_proxy_is_never_retained_or_given_an_association(self):
+        for operation in ('pid-stat', 'exe-readlink', 'pid-stat-recheck'):
+            state = self.fixture(); state.proc.candidates.return_value = [], 1
+            state.scan.update(inventoryComplete=False, scanSkipped=1, skippedTypes={'PermissionError': 1},
+                skipped=[dict(pid=12, uid=None if operation == 'pid-stat' else 1001, operation=operation, type='PermissionError')])
+            with self.subTest(operation=operation):
+                value = state.run()
+                self.assertEqual(value['candidateCount'], 0); self.assertEqual(value['candidates'], [])
+                self.assertFalse(value['complete']); self.assertFalse(value['associationObserved'])
+                self.assertEqual(value['failureStage'], 'candidate-inventory'); state.proc.info.assert_not_called()
+                self.assertNotIn(12, state.closed)
+
+    def test_incomplete_scan_does_not_exempt_changed_held_proxy(self):
+        state = self.fixture()
+        state.scan.update(inventoryComplete=False, scanSkipped=1, skippedTypes={'PermissionError': 1},
+                          skipped=[dict(pid=99, uid=1001, operation='exe-readlink', type='PermissionError')])
+        original, calls = state.proc.pipes.side_effect, {}
+        def pipes(pid):
+            calls[pid] = calls.get(pid, 0) + 1
+            if pid == 12 and calls[pid] == 2: state.rows[12]['startTime'] = '999'
+            return original(pid)
+        state.proc.pipes.side_effect = pipes
+        value = state.run()
+        self.assertFalse(value['complete']); self.assertFalse(value['associationObserved'])
+        self.assertEqual(value['unavailable'], 'ValueError'); self.assertEqual(value['failureStage'], 'association-recheck')
 
     def test_foreign_uid_image_path_or_nonprotected_proxy_refuses_before_private_info(self):
         for change in ('uid', 'image', 'path', 'writable'):
@@ -603,8 +647,68 @@ class ProxyAssociationProcTests(unittest.TestCase):
                     patch.object(M.os, 'readlink', return_value='/usr/bin/xdg-dbus-proxy'), self.assertRaises(ValueError):
                 proc.candidates(1001, lambda: None)
         with patch.object(M.os, 'scandir', return_value=context([entry(15)])), \
-                patch.object(M.os, 'readlink', side_effect=FileNotFoundError()), self.assertRaises(FileNotFoundError):
+                patch.object(M.os, 'readlink', side_effect=FileNotFoundError()):
+            diagnostic = {}
+            self.assertEqual(proc.candidates(1001, lambda: None, diagnostic=diagnostic), ([], 1))
+            self.assertFalse(diagnostic['inventoryComplete']); self.assertEqual(diagnostic['scanSkipped'], 1)
+
+    def test_denied_and_disappeared_entries_record_only_fixed_operands_then_continue(self):
+        from contextlib import nullcontext
+        proc = M.ProxyAssociationProc()
+        info = SimpleNamespace(st_mode=stat.S_IFDIR | 0o555, st_dev=1, st_ino=2, st_uid=1001, st_gid=1001,
+                               st_nlink=1, st_size=0, st_mtime_ns=1, st_ctime_ns=1)
+        entries = [SimpleNamespace(name='14', stat=Mock(return_value=info)),
+                   SimpleNamespace(name='15', stat=Mock(side_effect=FileNotFoundError('PRIVATE/stat'))),
+                   SimpleNamespace(name='16', stat=Mock(side_effect=[info, PermissionError('PRIVATE/recheck')])),
+                   SimpleNamespace(name='17', stat=Mock(return_value=info)),
+                   SimpleNamespace(name='18', stat=Mock(side_effect=ProcessLookupError('PRIVATE/process')))]
+        def readlink(path):
+            if path == '/proc/14/exe': raise PermissionError('PRIVATE/executable')
+            return '/usr/bin/xdg-dbus-proxy'
+        diagnostic = {}
+        with patch.object(M.os, 'scandir', return_value=nullcontext(iter(entries))), \
+                patch.object(M.os, 'readlink', side_effect=readlink):
+            self.assertEqual(proc.candidates(1001, lambda: None, diagnostic=diagnostic), ([17], 5))
+        self.assertFalse(diagnostic['inventoryComplete']); self.assertEqual(diagnostic['scanSkipped'], 4)
+        self.assertEqual(diagnostic['skippedTypes'], {'PermissionError': 2, 'FileNotFoundError': 1, 'ProcessLookupError': 1})
+        self.assertEqual(diagnostic['skipped'], [
+            dict(pid=14, uid=1001, operation='exe-readlink', type='PermissionError'),
+            dict(pid=15, uid=None, operation='pid-stat', type='FileNotFoundError'),
+            dict(pid=16, uid=1001, operation='pid-stat-recheck', type='PermissionError'),
+            dict(pid=18, uid=None, operation='pid-stat', type='ProcessLookupError')])
+        self.assertNotIn('PRIVATE', M.json.dumps(diagnostic)); self.assertNotIn('exe', set(diagnostic['skipped'][0]))
+
+    def test_skipped_detail_cap_counts_every_failure_and_does_not_expand_inventory_bound(self):
+        from contextlib import nullcontext
+        proc = M.ProxyAssociationProc()
+        entries = [SimpleNamespace(name=str(pid), stat=Mock(side_effect=PermissionError('PRIVATE'))) for pid in range(10, 30)]
+        diagnostic = {}
+        with patch.object(M.os, 'scandir', return_value=nullcontext(iter(entries))):
+            self.assertEqual(proc.candidates(1001, lambda: None, diagnostic=diagnostic), ([], 20))
+        self.assertEqual(diagnostic['scanSkipped'], 20); self.assertEqual(len(diagnostic['skipped']), 16)
+        self.assertTrue(diagnostic['skippedTruncated']); self.assertFalse(diagnostic['inventoryComplete'])
+        self.assertEqual(diagnostic['skippedTypes'], {'PermissionError': 20})
+        self.assertLess(len(M.json.dumps(diagnostic)), 4096); self.assertNotIn('PRIVATE', M.json.dumps(diagnostic))
+        entries = [SimpleNamespace(name=str(pid), stat=Mock(side_effect=PermissionError())) for pid in range(10, 4107)]
+        with patch.object(M.os, 'scandir', return_value=nullcontext(iter(entries))), self.assertRaises(ValueError):
             proc.candidates(1001, lambda: None)
+
+    def test_metadata_mutation_other_io_errors_and_budget_are_not_skipped(self):
+        from contextlib import nullcontext
+        proc = M.ProxyAssociationProc()
+        info = SimpleNamespace(st_mode=stat.S_IFDIR | 0o555, st_dev=1, st_ino=2, st_uid=1001, st_gid=1001,
+                               st_nlink=1, st_size=0, st_mtime_ns=1, st_ctime_ns=1)
+        changed = copy.copy(info); changed.st_ino = 999
+        for cause in ('metadata', 'io', 'budget'):
+            entry = SimpleNamespace(name='14', stat=Mock(side_effect=[info, changed] if cause == 'metadata' else None, return_value=info))
+            diagnostic = {}
+            with patch.object(M.os, 'scandir', return_value=nullcontext(iter([entry]))), \
+                    patch.object(M.os, 'readlink', side_effect=OSError('PRIVATE IO') if cause == 'io' else None,
+                                 return_value='/usr/bin/xdg-dbus-proxy'), \
+                    self.assertRaises((ValueError, OSError)):
+                proc.candidates(1001, Mock(side_effect=ValueError('PRIVATE BUDGET')) if cause == 'budget' else lambda: None,
+                                diagnostic=diagnostic)
+            self.assertFalse(diagnostic['inventoryComplete']); self.assertEqual(diagnostic['scanSkipped'], 0)
 
     def test_pipe_capture_has_no_other_targets_and_rejects_bad_fdinfo_and_mapping(self):
         proc = M.ProxyAssociationProc()
