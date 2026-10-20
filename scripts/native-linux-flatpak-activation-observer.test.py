@@ -204,12 +204,155 @@ class BindingTests(unittest.TestCase):
         args[2].assert_called_once_with(12, False)
 
 
+class PreInputLineageTests(unittest.TestCase):
+    def fixture(self):
+        rows = {pid: process(pid, parent, path, full=True) for pid, parent, path in (
+            (10, 9, '/usr/bin/bwrap'), (11, 10, '/usr/bin/bwrap'), (12, 11, '/usr/bin/xdg-dbus-proxy'),
+            (13, 10, '/usr/bin/bwrap'), (14, 13, '/app/bin/creator-hub-flatpak-activate'))}
+        for pid, row in rows.items():
+            row['image'].update(st_dev='1', st_ino=str(pid), st_gid='0', st_mtime_ns='5', st_ctime_ns='6')
+        state = SimpleNamespace(rows=rows, reads=[], dead=set(), closed=[], images=[], guard=Mock())
+        def read(pid, full=False):
+            state.reads.append((pid, full))
+            if pid not in rows: raise FileNotFoundError()
+            row = copy.deepcopy(rows[pid])
+            if not full: row.pop('kernelImageSha256')
+            return row
+        def image(pid):
+            held = SimpleNamespace(snapshot=lambda: (copy.deepcopy(rows[pid]['image']), 'a' * 64), close=Mock())
+            # A held FD survives its process; its snapshot does not reopen /proc/PID/exe.
+            stamp = copy.deepcopy(rows[pid]['image'])
+            held.snapshot = lambda: (copy.deepcopy(stamp), 'a' * 64)
+            state.images.append(held)
+            return held
+        system = SimpleNamespace(snapshot=lambda: (copy.deepcopy(rows[12]['image']), 'a' * 64), close=Mock())
+        state.system = system
+        tree = {pid: {k: copy.deepcopy(v) for k, v in row.items() if k != 'kernelImageSha256'} for pid, row in rows.items()}
+        def build():
+            return M.OwnedLineage(rows[10], rows[14], tree, read, lambda row: copy.deepcopy(row),
+                image_open=image, system_image=system, pidfds=SimpleNamespace(open=lambda pid: pid,
+                    ready=lambda fd: fd in state.dead, close=lambda fd: state.closed.append(fd)),
+                guard=state.guard, budget=lambda: None)
+        state.build, state.tree = build, tree
+        return state
+
+    def test_preinput_seal_and_live_bus_sender_do_not_reopen_historical_parents(self):
+        state = self.fixture(); baseline = state.build(); baseline.begin_input()
+        del state.rows[11]; del state.rows[13]; state.dead.update((11, 13))
+        state.reads.clear()
+        value = baseline.observe(':1.40', lambda name: dict(name=name, pid=12, uid=1001), budget=lambda: None)
+        self.assertTrue(value['stable']); self.assertTrue(value['correlatesToOriginalPopen'])
+        self.assertTrue(value['sealedBeforeInput']); self.assertFalse(value['qualified'])
+        self.assertEqual({pid for pid, _ in state.reads}, {12})
+        self.assertEqual(value['historicalAncestors'][1]['lifetime'], 'pidfd-signalled-exit')
+        baseline.close(); baseline.close()
+        self.assertEqual(len(state.closed), 5)
+        self.assertTrue(all(held.close.call_count == 1 for held in state.images))
+
+    def test_baseline_missing_proxy_foreign_ancestry_and_ambiguous_entries_fail_closed(self):
+        for mutation in ('missing', 'outside', 'cycle', 'uid', 'hash', 'duplicate'):
+            state = self.fixture()
+            if mutation == 'missing': state.tree.pop(12)
+            if mutation == 'outside': state.tree[11]['parentPid'] = state.rows[11]['parentPid'] = 99
+            if mutation == 'cycle': state.tree[11]['parentPid'] = state.rows[11]['parentPid'] = 12
+            if mutation == 'uid': state.tree[12]['uids'] = state.rows[12]['uids'] = [1002] * 4
+            if mutation == 'hash': state.rows[12]['kernelImageSha256'] = 'b' * 64
+            if mutation == 'duplicate': state.tree[20] = copy.deepcopy(state.tree[12])
+            with self.subTest(mutation=mutation), self.assertRaises((ValueError, KeyError)):
+                state.build()
+            self.assertTrue(all(held.close.call_count == 1 for held in state.images))
+
+    def test_before_input_drift_or_already_exited_process_prevents_seal(self):
+        for mutation in ('start', 'parent', 'uid', 'image', 'exit'):
+            state = self.fixture(); baseline = state.build()
+            if mutation == 'exit': state.dead.add(11)
+            elif mutation == 'image': state.rows[11]['image']['st_ino'] = '999'
+            else: state.rows[11][{'start': 'startTime', 'parent': 'parentPid', 'uid': 'uids'}[mutation]] = (
+                '999' if mutation == 'start' else 99 if mutation == 'parent' else [1002] * 4)
+            with self.subTest(mutation=mutation), self.assertRaises(ValueError): baseline.begin_input()
+            baseline.close()
+
+    def test_wrong_sender_reuse_exec_reparent_credentials_and_missing_live_proxy_stay_unknown(self):
+        for mutation in ('wrong-pid', 'uid', 'start', 'parent', 'image', 'exit', 'gone', 'credentials'):
+            state = self.fixture(); baseline = state.build(); baseline.begin_input()
+            credentials = dict(name=':1.40', pid=12, uid=1001)
+            if mutation == 'wrong-pid': credentials['pid'] = 22
+            elif mutation == 'uid': credentials['uid'] = 1002
+            elif mutation == 'exit': state.dead.add(12)
+            elif mutation == 'gone': del state.rows[12]
+            elif mutation == 'image': state.rows[12]['kernelImageSha256'] = 'b' * 64
+            elif mutation in ('start', 'parent'): state.rows[12]['startTime' if mutation == 'start' else 'parentPid'] = '999' if mutation == 'start' else 99
+            count = [0]
+            def peer(name):
+                count[0] += 1
+                return {**credentials, 'pid': 22} if mutation == 'credentials' and count[0] > 1 else credentials
+            value = baseline.observe(':1.40', peer, budget=lambda: None)
+            with self.subTest(mutation=mutation):
+                self.assertFalse(value['stable']); self.assertFalse(value['correlatesToOriginalPopen'])
+            baseline.close()
+
+    def test_unsealed_replayed_and_expired_observations_cannot_attribute(self):
+        state = self.fixture(); baseline = state.build()
+        peer = lambda name: dict(name=name, pid=12, uid=1001)
+        self.assertFalse(baseline.observe(':1.40', peer, budget=lambda: None)['stable'])
+        baseline.begin_input()
+        self.assertFalse(baseline.observe(':1.40', peer, budget=lambda: (_ for _ in ()).throw(ValueError()))['stable'])
+        self.assertFalse(baseline.observe(':1.40', peer, budget=lambda: None)['stable'])
+        baseline.close()
+
+    def test_session_and_a11y_candidates_are_sealed_but_only_exact_bus_peer_pid_is_selected(self):
+        for selected in (12, 15):
+            state = self.fixture()
+            row = copy.deepcopy(state.rows[12]); row.update(pid=15, startTime='15')
+            state.rows[15] = row
+            state.tree[15] = {k: copy.deepcopy(v) for k, v in row.items() if k != 'kernelImageSha256'}
+            baseline = state.build(); baseline.begin_input()
+            value = baseline.observe(':1.40', lambda name: dict(name=name, pid=selected, uid=1001), budget=lambda: None)
+            self.assertTrue(value['stable']); self.assertEqual(value['senderAncestors'][0]['pid'], selected)
+            self.assertEqual(set(baseline.chains), {12, 15})
+            baseline.close()
+
+    def test_all_candidates_need_owned_ancestry_and_the_candidate_set_is_finite(self):
+        for mutation in ('outside', 'too-many'):
+            state = self.fixture()
+            for pid in range(15, 16 if mutation == 'outside' else 19):
+                row = copy.deepcopy(state.rows[12]); row.update(pid=pid, startTime=str(pid), parentPid=99 if mutation == 'outside' else 11)
+                state.rows[pid] = row
+                state.tree[pid] = {k: copy.deepcopy(v) for k, v in row.items() if k != 'kernelImageSha256'}
+            with self.subTest(mutation=mutation), self.assertRaises(ValueError): state.build()
+            self.assertTrue(all(held.close.call_count == 1 for held in state.images))
+
+
 class GioAdapterTests(unittest.TestCase):
     @staticmethod
     def capture():
         return M.PassiveCapture(dict(name=':1.31', pid=40), process(10, 9, '/usr/bin/bwrap'),
             process(14, 13, '/app/bin/creator-hub-flatpak-activate'), Mock(), Mock(),
             lambda: dict(name=':1.31', pid=40), 'unix:path=/private-ci-bus', 1001)
+
+    def test_finish_uses_only_remaining_original_budget_then_closes_without_a_retry(self):
+        observer = self.capture()
+        observer.transcript.deadline = 100
+        observer.settled = Mock()
+        with patch.object(M.time, 'monotonic', return_value=98), patch.object(observer, 'close', return_value={'closed': True}) as close:
+            self.assertEqual(observer.finish_observation(), {'closed': True})
+        observer.settled.wait.assert_called_once_with(2); close.assert_called_once_with()
+        observer.settled.reset_mock()
+        with patch.object(M.time, 'monotonic', return_value=101), patch.object(observer, 'close'):
+            observer.finish_observation()
+        observer.settled.wait.assert_called_once_with(0)
+
+    def test_an_already_observed_call_prevents_input_and_an_unstopped_worker_keeps_attribution_unknown(self):
+        state = PreInputLineageTests().fixture()
+        observer = self.capture(); observer.baseline = state.build(); observer.armed = True
+        observer.headers = [message()]
+        with self.assertRaises(ValueError): observer.begin_input()
+        self.assertFalse(observer.input_started)
+        observer.worker = Mock(); observer.worker.is_alive.return_value = True
+        value = observer.close()
+        self.assertFalse(value['workerStopped']); self.assertFalse(value['qualified'])
+        self.assertFalse(observer.baseline.closed)
+        observer.baseline.close()
 
     def test_callback_never_reads_unrelated_message_body(self):
         observer = self.capture()

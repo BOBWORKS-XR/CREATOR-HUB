@@ -199,7 +199,7 @@ class LauncherKeyboardTests(unittest.TestCase):
     @contextmanager
     def fixture(self, action='Cancel', phase='disclosure-cancel', missing=False, *, partial=None,
                 changed_receipt=None, capture_failure=None, wrong_exit=None, preservation_failure=False,
-                wrong_window=False, first_pre_exec=False):
+                wrong_window=False, first_pre_exec=False, focus_diagnostic=None):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
             source = (HERE.parent / 'native/flatpak-native-activation/src/linux.rs').read_bytes()
@@ -250,6 +250,48 @@ class LauncherKeyboardTests(unittest.TestCase):
             session.snapshot_preserved = preserved
             session.report = {'coldActivationAccepted': True, 'coldRoot': native_root, 'coldRootWindow': 200, 'coldHost1Owner': {'pid': 40, 'name': ':1.42'},
                               'coldRootXres': session.x11.inspect(200)}
+            call = dict(kind=1, sender=':1.40', destination=M.NAME, serial=19, replySerial=0, flags=0, empty=True,
+                        path='/com/creatorworks/hub/Host', interface='com.creatorworks.hub.Host1', member='Start')
+            reply = dict(kind=2, sender=':1.42', destination=':1.40', serial=20, replySerial=19, flags=1, empty=True)
+            state.observer_result = dict(readOnly=True, qualified=False, inputPermitted=False, authorityGranted=False,
+                releaseReady=False, armed=True, inputStarted=True, workerStopped=True, busIdentityMatched=True,
+                closed=True, callReplyMatched=True, deadlineExceeded=False, messageCount=2,
+                call=call, reply=reply, observedHeaders=[copy.deepcopy(call), copy.deepcopy(reply)],
+                senderObservation=dict(qualified=False, inputPermitted=False, stable=True, sealedBeforeInput=True,
+                    correlatesToOriginalPopen=True, originalPopen=M.proxy_process_snapshot(launch),
+                    expectedClient=M.proxy_process_snapshot(client), peer=dict(name=':1.40', pid=12, uid=1001),
+                    senderAncestors=[M.proxy_process_snapshot(self.process(12, 11, '/usr/bin/xdg-dbus-proxy')),
+                                     M.proxy_process_snapshot(launch)]))
+            state.observer_events = []
+            def passive(client, attempt):
+                # Trusted observer adapter fixture; actual baseline/credential guards have their own pure suite.
+                self.assertEqual(state.sends, [])
+                state.observer_events.append('armed')
+                def finish():
+                    state.observer_events.append('finished')
+                    return copy.deepcopy(state.observer_result)
+                return dict(capture=SimpleNamespace(begin_input=lambda: state.observer_events.append('before-input'),
+                        finish_observation=finish, close=finish), record=dict(readOnly=True, qualified=False,
+                            inputPermitted=False, authorityGranted=False, releaseReady=False))
+            session.start_warm_activation_diagnostic = passive
+            state.fresh_disposed, state.old_disposed, state.x_events = 0, False, []
+            native_inspect = session.x11.inspect
+            session.x11.error = False
+            def old_dispose():
+                state.old_disposed = True
+                state.x_events.append('dispose-old')
+            session.x11.dispose = old_dispose
+            def fresh():
+                self.assertTrue(state.old_disposed)
+                self.assertGreater(state.closed, 0)
+                self.assertTrue(all(companion.held is None for companion in state.companions))
+                state.x_events.append('open-fresh')
+                def dispose():
+                    state.fresh_disposed += 1
+                    state.x_events.append('dispose-fresh')
+                return SimpleNamespace(display=2, x=SimpleNamespace(XDefaultRootWindow=lambda _: 50),
+                    property=lambda *_: (33, 32, session.windows()), inspect=native_inspect, dispose=dispose)
+            session.helper.X11 = fresh
             session.portal_calls = [{'url': M.PORTAL_URL, 'browserOpened': False, 'downloadAttempted': False, 'senderUid': 1001}]
             def bind_warm(helper, native, x11, observed, window, owner, owner_probe, *, cold_xres):
                 # Integration adapter fixture only; real FD/XRes/Host1 binding is exercised in the helper suite.
@@ -293,11 +335,16 @@ class LauncherKeyboardTests(unittest.TestCase):
                         changed_receipt(record)
                     if not missing or sequence == 'Escape':
                         state.code = wrong_exit if wrong_exit is not None else 1 if missing else 0
+                    if focus_diagnostic is not None:
+                        session.x11.error = True
+                        error = M.K.InputRefused(record.get('refusal', 'Owned X resource query was refused'), record)
+                        error.focus_diagnostic = copy.deepcopy(focus_diagnostic)
+                        raise error
                     if partial == sequence:
                         raise M.K.InputRefused('terminal candidate', record)
                     return record
                 def close(): state.closed += 1
-                return SimpleNamespace(send=send, close=close)
+                return SimpleNamespace(send=send, close=close, binding=SimpleNamespace(launch=launch, verify=guard))
             tree = {pid: {k: v for k, v in row.items() if k != 'kernelImageSha256'} for pid, row in rows.items() if pid != 40}
             with patch.object(M, 'bound', return_value=source) as source_read, patch.object(M.K, 'capture', side_effect=capture), \
                     patch.object(M.K, 'bind_warm_root', side_effect=bind_warm), \
@@ -609,8 +656,8 @@ class WarmPassiveDiagnosticTests(unittest.TestCase):
             events = []
             value = dict(readOnly=True, qualified=False, inputPermitted=False, authorityGranted=False,
                          releaseReady=False, callReplyMatched=True)
-            capture = SimpleNamespace(close=lambda: events.append('closed') or value)
-            def start(client):
+            capture = SimpleNamespace(begin_input=lambda: None, close=lambda: events.append('closed') or value)
+            def start(client, attempt):
                 self.assertEqual(state.sends, []); events.append('armed')
                 return dict(capture=capture, record=dict(readOnly=True, qualified=False, inputPermitted=False,
                                                        authorityGranted=False, releaseReady=False))
@@ -655,7 +702,7 @@ class WarmPassiveDiagnosticTests(unittest.TestCase):
             binding = dict(harnessSource='a' * 40, profile=M.PROFILE, **M.GATES)
             with patch.dict(M.os.environ, {'GITHUB_SHA': 'a' * 40}), patch.object(M, 'regular', return_value=M.json_bytes(binding)), \
                     patch.object(M.importlib.util, 'module_from_spec') as load:
-                result = session.start_warm_activation_diagnostic(LauncherKeyboardTests.process(14, 13, '/app/bin/creator-hub-flatpak-activate'))
+                result = M.Session.start_warm_activation_diagnostic(session, LauncherKeyboardTests.process(14, 13, '/app/bin/creator-hub-flatpak-activate'))
             self.assertIsNone(result['capture']); self.assertIn('unavailable', result['record'])
             load.assert_not_called(); self.assertEqual(state.sends, [])
 
@@ -669,6 +716,182 @@ class WarmPassiveDiagnosticTests(unittest.TestCase):
         self.assertNotIn('exec_module', source)
         classifier = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == 'keyboard_delivery')
         self.assertIn('len(rows) == 1', ast.get_source_segment(Path(M.__file__).read_text(), classifier))
+
+
+class WarmConsumedTerminalTests(unittest.TestCase):
+    @staticmethod
+    def partial(record):
+        record['deliveryComplete'] = False
+        record['delivery'][1]['synchronized'] = False
+        record['refusal'] = 'Owned X resource query was refused'
+
+    @staticmethod
+    def focus():
+        return dict(schemaVersion=1, kind='x11-keyboard-refusal', readOnly=True, inputPermitted=False,
+            authorityGranted=False, releaseReady=False, latchSet=True, truncated=False, captureUnavailable=False,
+            submissionCaptureUnavailable=False,
+            events=[dict(errorCode=3, requestCode=25, minorCode=0, serial=202, resourceId=100, sameDisplay=True, stage='release-sync')],
+            submissions=[dict(window=100, keycode=36, modifiers=0, pressed=True, latchBeforeSubmit=False, nextRequest=101,
+                              latchBeforeSync=False, latchAfterSync=False, syncReturned=True),
+                         dict(window=100, keycode=36, modifiers=0, pressed=False, latchBeforeSubmit=False, nextRequest=202,
+                              latchBeforeSync=False, latchAfterSync=True, syncReturned=False)])
+
+    @contextmanager
+    def fixture(self, *, focus=None, **options):
+        with LauncherKeyboardTests().fixture('Open Creator Hub', 'warm', changed_receipt=self.partial,
+                focus_diagnostic=self.focus() if focus is None else focus, **options) as value:
+            yield value
+
+    def test_exact_native_release_error_is_only_a_candidate_until_all_independent_outcomes_pass(self):
+        with self.fixture() as (session, state, _):
+            original_x = session.x11
+            session.flatpak('Open Creator Hub', 'warm')
+            self.assertEqual(state.sends, ['Enter']); self.assertEqual(state.closed, 1)
+            original = M.parse((session.root / 'warm-gtk.json').read_bytes())
+            outcome = M.parse((session.root / 'warm-outcome-gtk.json').read_bytes())
+            self.assertEqual(original['deliveryClassification'], 'warm-consumed-terminal-candidate')
+            self.assertFalse(original['keyboard']['deliveryComplete']); self.assertFalse(original['outcomeVerified'])
+            self.assertEqual(original['refusal'], 'Owned X resource query was refused')
+            self.assertEqual(original['keyboard'], outcome['keyboard'])
+            self.assertEqual(original['focusDiagnostic'], outcome['focusDiagnostic'])
+            self.assertTrue(outcome['outcomeVerified']); self.assertTrue(outcome['preservedDataVerified'])
+            self.assertEqual(outcome['outcomeProof'], 'attributed-start-same-owned-native-root')
+            self.assertFalse(outcome['releaseReady']); self.assertFalse(outcome['actionReturned'])
+            self.assertTrue(original_x.error); self.assertIsNot(session.x11, original_x)
+            self.assertEqual(state.x_events, ['dispose-old', 'open-fresh'])
+            self.assertEqual(state.observer_events, ['armed', 'before-input', 'finished'])
+
+    def test_wrong_serial_xid_display_opcode_extra_error_or_dirty_latch_never_reaches_exit_proof(self):
+        changes = [lambda f: f['events'][0].update(serial=201), lambda f: f['events'][0].update(resourceId=999),
+            lambda f: f['events'][0].update(sameDisplay=False), lambda f: f['events'][0].update(errorCode=9),
+            lambda f: f['events'][0].update(requestCode=24), lambda f: f['events'][0].update(minorCode=1),
+            lambda f: f['events'][0].update(stage='release-submit'), lambda f: f['events'].append(copy.deepcopy(f['events'][0])),
+            lambda f: f.update(truncated=True), lambda f: f.update(captureUnavailable=True),
+            lambda f: f.update(submissionCaptureUnavailable=True), lambda f: f['submissions'][0].update(latchAfterSync=True),
+            lambda f: f['submissions'][1].update(latchBeforeSubmit=True), lambda f: f['submissions'][1].update(latchBeforeSync=True),
+            lambda f: f['submissions'][0].update(syncReturned=False), lambda f: f['submissions'][1].update(nextRequest=101),
+            lambda f: f['submissions'][1].update(window=999), lambda f: f['submissions'][1].update(keycode=37),
+            lambda f: f['submissions'][1].update(extra=True), lambda f: f['events'][0].update(serial=True)]
+        for change in changes:
+            focus = self.focus(); change(focus)
+            with self.subTest(change=change), self.fixture(focus=focus) as (session, state, _):
+                with self.assertRaises(RuntimeError): session.flatpak('Open Creator Hub', 'warm')
+                self.assertEqual(state.sends, ['Enter']); self.assertFalse(session.launcher_keys[0]['outcomeVerified'])
+                self.assertNotIn('ownedPhaseExit', session.launcher_keys[0]); self.assertEqual(state.x_events, [])
+
+    def test_cancel_exit_zero_missing_reply_wrong_sender_or_unsealed_history_never_qualifies(self):
+        changes = [lambda r: r.update(callReplyMatched=False), lambda r: r.pop('call'), lambda r: r.pop('reply'),
+            lambda r: r['reply'].update(replySerial=99), lambda r: r['reply'].update(sender=':1.99'),
+            lambda r: r['reply'].update(flags=0), lambda r: r.update(deadlineExceeded=True), lambda r: r.update(unknown=True),
+            lambda r: r.update(workerStopped=False), lambda r: r.update(inputStarted=False),
+            lambda r: r['senderObservation'].update(stable=False), lambda r: r['senderObservation'].update(sealedBeforeInput=False),
+            lambda r: r['senderObservation']['peer'].update(name=':1.99'),
+            lambda r: r['senderObservation']['peer'].update(pid=99), lambda r: r['senderObservation']['peer'].update(uid=1002),
+            lambda r: r['senderObservation']['originalPopen'].update(startTime='999'),
+            lambda r: r['senderObservation']['expectedClient'].update(kernelImageSha256='f' * 64)]
+        for change in changes:
+            with self.subTest(change=change), self.fixture() as (session, state, _):
+                change(state.observer_result)
+                with self.assertRaises(RuntimeError): session.flatpak('Open Creator Hub', 'warm')
+                self.assertEqual(state.code, 0); self.assertEqual(state.sends, ['Enter'])
+                self.assertFalse(session.launcher_keys[0]['outcomeVerified']); self.assertEqual(state.x_events, [])
+
+    def test_original_owned_exit_preservation_root_host_and_window_are_independent_requirements(self):
+        for failure in ('exit', 'preserved', 'root', 'host', 'window'):
+            with self.subTest(failure=failure), self.fixture(wrong_exit=2 if failure == 'exit' else None,
+                    preservation_failure=failure == 'preserved') as (session, state, _):
+                old_wait = session.wait
+                def wait(check, seconds=30):
+                    if state.sends:
+                        if failure == 'root': session.stable = Mock(side_effect=RuntimeError('Root identity changed'))
+                        if failure == 'host': session.host_owner = lambda: dict(name=':1.99', pid=40)
+                        if failure == 'window': session.windows = lambda: [200, 999]
+                    return old_wait(check, seconds)
+                session.wait = wait
+                with self.assertRaises(RuntimeError): session.flatpak('Open Creator Hub', 'warm')
+                self.assertFalse(session.launcher_keys[0]['outcomeVerified']); self.assertEqual(state.sends, ['Enter'])
+                if failure in ('root', 'host', 'window'):
+                    self.assertEqual(state.x_events, ['dispose-old', 'open-fresh', 'dispose-fresh'])
+
+    def test_missing_preinput_baseline_blocks_input_and_does_not_open_fresh_x(self):
+        with self.fixture() as (session, state, _):
+            session.start_warm_activation_diagnostic = lambda *_: dict(capture=None, record={'unavailable': 'NoBaseline'})
+            with self.assertRaisesRegex(RuntimeError, 'no input'): session.flatpak('Open Creator Hub', 'warm')
+            self.assertEqual(state.sends, []); self.assertEqual(state.x_events, [])
+
+    def test_complete_warm_enter_also_needs_attributed_start_not_just_existing_root(self):
+        with LauncherKeyboardTests().fixture('Open Creator Hub', 'warm') as (session, state, _):
+            state.observer_result['callReplyMatched'] = False
+            with self.assertRaises(RuntimeError): session.flatpak('Open Creator Hub', 'warm')
+            self.assertEqual(state.code, 0); self.assertFalse(session.launcher_keys[0]['outcomeVerified'])
+
+
+class WarmLineageWiringTests(unittest.TestCase):
+    def test_actual_captured_observer_import_seals_live_tree_and_never_rereads_parent_after_input(self):
+        with LauncherKeyboardTests().fixture('Open Creator Hub', 'warm') as (session, state, _):
+            fixture = LauncherKeyboardTests()
+            rows = {pid: fixture.process(pid, parent, path) for pid, parent, path in (
+                (10, 9, '/usr/bin/bwrap'), (11, 10, '/usr/bin/bwrap'), (12, 11, '/usr/bin/xdg-dbus-proxy'),
+                (13, 10, '/usr/bin/bwrap'), (14, 13, '/app/bin/creator-hub-flatpak-activate'))}
+            rows[40] = session.report['coldRoot']
+            tree = {pid: {k: copy.deepcopy(v) for k, v in row.items() if k != 'kernelImageSha256'} for pid, row in rows.items() if pid != 40}
+            reads, images, opened, closed, held = [], {}, [], [], []
+            def read(pid, helper, full=True):
+                reads.append((pid, full))
+                if pid not in rows: raise FileNotFoundError()
+                return copy.deepcopy(rows[pid] if full else {k: v for k, v in rows[pid].items() if k != 'kernelImageSha256'})
+            def image(pid):
+                expected = copy.deepcopy(rows[pid]['image']), rows[pid]['kernelImageSha256']
+                result = SimpleNamespace(snapshot=lambda: copy.deepcopy(expected), close=Mock())
+                images[pid] = result; held.append(result)
+                return result
+            names = ('scripts/native-linux-production-016-flatpak.py', 'scripts/native-linux-production-016-flatpak.test.py',
+                'scripts/native-linux-flatpak-activation-observer.py', 'scripts/native-linux-flatpak-activation-observer.test.py',
+                'scripts/native-linux-flatpak-dialog-input.py', 'scripts/native-linux-flatpak-dialog-input.test.py',
+                'scripts/native-unix-window.py', 'scripts/native-unix-window.test.py')
+            source = {name: (HERE.parent / name).read_bytes() for name in names}
+            binding = dict(harnessSource='a' * 40, harnessFiles={name: pin(raw) for name, raw in source.items()}, profile=M.PROFILE, **M.GATES)
+            session.flatpak_child = SimpleNamespace(pid=10)
+            session.native.native_process = read
+            attempt = SimpleNamespace(binding=SimpleNamespace(launch=rows[10], verify=Mock()))
+            connections = []
+            def call_sync(destination, path, interface, method, params, reply, flags, timeout, cancelled):
+                values = {'GetId': 'a' * 32, 'GetNameOwner': ':1.42', 'GetConnectionUnixProcessID': 40, 'GetConnectionUnixUser': 1001}
+                self.assertEqual(destination, 'org.freedesktop.DBus')
+                if method == 'BecomeMonitor': return SimpleNamespace(unpack=lambda: ())
+                self.assertIn(method, values)
+                return SimpleNamespace(unpack=lambda: (values[method],))
+            shared = SimpleNamespace(call_sync=call_sync)
+            def connect(*_):
+                value = Mock(); value.call_sync.side_effect = call_sync; value.add_filter.return_value = 7
+                connections.append(value); return value
+            gio = SimpleNamespace(Cancellable=SimpleNamespace(new=Mock), DBusCallFlags=SimpleNamespace(NONE=0),
+                DBusConnectionFlags=SimpleNamespace(AUTHENTICATION_CLIENT=1, MESSAGE_BUS_CONNECTION=8),
+                DBusConnection=SimpleNamespace(new_for_address_sync=connect), BusType=SimpleNamespace(SESSION=1), bus_get_sync=lambda *_: shared)
+            glib = SimpleNamespace(Variant=lambda *v: v, VariantType=SimpleNamespace(new=lambda v: v))
+            worker = Mock(); worker.is_alive.return_value = False
+            system = SimpleNamespace(snapshot=lambda: (copy.deepcopy(rows[12]['image']), rows[12]['kernelImageSha256']), close=Mock())
+            with patch.dict(sys.modules, {'gi': SimpleNamespace(), 'gi.repository': SimpleNamespace(Gio=gio, GLib=glib)}), \
+                    patch.object(M.sys, 'platform', 'linux'), patch.object(M.os, 'geteuid', return_value=1001, create=True), \
+                    patch.dict(M.os.environ, {'GITHUB_SHA': 'a' * 40, 'DBUS_SESSION_BUS_ADDRESS': 'unix:path=/private-ci-bus'}), \
+                    patch.object(M, 'regular', return_value=M.json_bytes(binding)), \
+                    patch.object(M, 'bound', side_effect=lambda path, *_: source[path.relative_to(HERE.parent).as_posix()]), \
+                    patch.object(M.P, 'subtree', return_value=tree), patch.object(M.K, 'HeldImage', side_effect=image), \
+                    patch.object(M, 'PortalImage', return_value=system), \
+                    patch.object(M.ObserverPidfds, 'open', side_effect=lambda pid: opened.append(pid) or pid), \
+                    patch.object(M.ObserverPidfds, 'ready', return_value=False), \
+                    patch.object(M.ObserverPidfds, 'close', side_effect=closed.append), \
+                    patch('threading.Timer', return_value=Mock()), patch('threading.Thread', return_value=worker):
+                pending = M.Session.start_warm_activation_diagnostic(session, rows[14], attempt)
+                self.assertNotIn('unavailable', pending['record'])
+                capture = pending['capture']; capture.begin_input()
+                self.assertEqual(set(opened), {10, 11, 12, 13, 14})
+                del rows[11]; del rows[13]; reads.clear()
+                observed = capture.baseline.observe(':1.40', lambda name: dict(name=name, pid=12, uid=1001), budget=capture.budget)
+                self.assertTrue(observed['stable']); self.assertEqual({pid for pid, _ in reads}, {12})
+                M.Session.finish_warm_activation_diagnostic(session, pending)
+            self.assertCountEqual(closed, opened)
+            self.assertTrue(all(item.close.call_count == 1 for item in held)); system.close.assert_called_once()
 
 
 class LauncherReadinessDiagnosticTests(unittest.TestCase):

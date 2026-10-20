@@ -235,6 +235,148 @@ def sender_snapshot(name, original, client, read, peer, redact, *, budget, diagn
         return dict(qualified=False, inputPermitted=False, stable=False, correlatesToOriginalPopen=False, unavailable='OutputLimit')
 
 
+class OwnedLineage:
+    """Seal live ancestry before input; never infer a later ancestor's exit from /proc errors."""
+    def __init__(self, original, client, tree, read, redact, *, image_open, system_image, pidfds, guard, budget):
+        self.original, self.client, self.tree = copy.deepcopy(original), copy.deepcopy(client), copy.deepcopy(tree)
+        self.read, self.redact, self.pidfds, self.guard, self.budget = read, redact, pidfds, guard, budget
+        self.system, self.rows, self.held, self.fds, self.chains = system_image, {}, {}, {}, {}
+        self.started, self.used, self.closed = False, False, False
+        self.lock = threading.RLock()
+        try:
+            require(type(tree) is dict and 0 < len(tree) <= 64
+                    and all(type(pid) is int and type(row) is dict and row.get('pid') == pid for pid, row in tree.items()))
+            self.validate(original); self.validate(client)
+            require(original['executable'] == '/usr/bin/bwrap' and client['executable'] == '/app/bin/creator-hub-flatpak-activate'
+                    and original['uids'] == client['uids'] and original['pid'] != client['pid'])
+            self.guard(); self.budget()
+            candidates = [pid for pid, row in tree.items() if row.get('executable') == '/usr/bin/xdg-dbus-proxy']
+            require(0 < len(candidates) <= 4)
+            self.client_chain = self.walk(client['pid'], image_open)
+            require(self.rows[client['pid']] == client and self.rows[original['pid']] == original)
+            for pid in candidates:
+                self.chains[pid] = self.walk(pid, image_open)
+                require((self.rows[pid]['image'], self.rows[pid]['kernelImageSha256']) == self.system.snapshot())
+            self.verify_live()
+        except Exception:
+            self.close()
+            raise
+
+    @staticmethod
+    def validate(row):
+        require(type(row) is dict and set(row) == {'pid', 'parentPid', 'startTime', 'uids', 'executable', 'image', 'kernelImageSha256'}
+                and all(type(row[k]) is int and 1 < row[k] < 2**31 for k in ('pid',))
+                and type(row['parentPid']) is int and 0 < row['parentPid'] < 2**31
+                and type(row['startTime']) is str and re.fullmatch(r'[1-9][0-9]{0,19}', row['startTime'])
+                and type(row['uids']) is list and len(row['uids']) == 4
+                and all(type(uid) is int and 0 < uid < 2**31 for uid in row['uids']) and len(set(row['uids'])) == 1
+                and type(row['executable']) is str and row['executable'].startswith('/') and len(row['executable']) <= 4096
+                and not any(c in row['executable'] for c in ('\0', '\n', '\r')) and not row['executable'].endswith(' (deleted)')
+                and type(row['kernelImageSha256']) is str and re.fullmatch(r'[a-f0-9]{64}', row['kernelImageSha256']))
+        image = row['image']
+        require(type(image) is dict and set(image) == {'st_dev', 'st_ino', 'st_size', 'st_mode', 'st_uid', 'st_gid', 'st_mtime_ns', 'st_ctime_ns'}
+                and all(type(v) is str and re.fullmatch(r'[0-9]{1,20}', v) for v in image.values())
+                and 0 < int(image['st_size']) <= 64 * 1024 * 1024)
+
+    def walk(self, pid, image_open):
+        chain = []
+        for _ in range(MAX_ANCESTORS):
+            self.budget()
+            require(pid in self.tree and pid not in chain)
+            if pid not in self.rows:
+                require(len(self.rows) < 16)
+                fd = self.pidfds.open(pid)
+                self.fds[pid] = fd
+                held = image_open(pid)
+                self.held[pid] = held
+                row = self.read(pid, True)
+                self.validate(row)
+                require(row['pid'] == pid and row['uids'] == self.original['uids']
+                        and {k: v for k, v in row.items() if k != 'kernelImageSha256'} == self.tree[pid]
+                        and not self.pidfds.ready(fd)
+                        and held.snapshot() == (row['image'], row['kernelImageSha256'])
+                        and self.read(pid, True) == row and not self.pidfds.ready(fd))
+                self.rows[pid] = copy.deepcopy(row)
+            row = self.rows[pid]
+            chain.append(pid)
+            if pid == self.original['pid']:
+                require(row == self.original)
+                return chain
+            parent = row['parentPid']
+            require(parent in self.tree and int(self.tree[parent]['startTime']) <= int(row['startTime']))
+            pid = parent
+        raise ValueError('Finite pre-input ancestry exceeded')
+
+    def verify_live(self):
+        require(not self.closed and not self.started)
+        self.guard()
+        for pid, row in self.rows.items():
+            self.budget()
+            require(not self.pidfds.ready(self.fds[pid]) and self.read(pid, True) == row
+                    and self.held[pid].snapshot() == (row['image'], row['kernelImageSha256'])
+                    and self.read(pid, True) == row and not self.pidfds.ready(self.fds[pid]))
+        for pid in self.chains:
+            require(self.system.snapshot() == (self.rows[pid]['image'], self.rows[pid]['kernelImageSha256']))
+        self.guard(); self.budget()
+
+    def begin_input(self):
+        with self.lock:
+            self.verify_live()
+            self.started = True
+
+    def observe(self, name, peer, *, budget):
+        with self.lock:
+            value = dict(qualified=False, inputPermitted=False, stable=False, correlatesToOriginalPopen=False)
+            stage = 'sealed-baseline'
+            try:
+                require(not self.closed and self.started and not self.used)
+                self.used = True
+                require(unique(name)); budget()
+                stage = 'live-sender-credentials'
+                credentials = peer(name)
+                require(type(credentials) is dict and set(credentials) == {'name', 'pid', 'uid'} and credentials['name'] == name
+                        and type(credentials['pid']) is int and type(credentials['uid']) is int
+                        and credentials['uid'] == self.original['uids'][0])
+                matches = [pid for pid in self.chains if pid == credentials['pid']]
+                require(len(matches) == 1)
+                pid, row = matches[0], self.rows[matches[0]]
+                value.update(peer=copy.deepcopy(credentials), sealedBeforeInput=True,
+                    originalPopen=self.redact(self.original), expectedClient=self.redact(self.client),
+                    senderAncestors=[self.redact(self.rows[p]) for p in self.chains[pid]],
+                    clientAncestors=[self.redact(self.rows[p]) for p in self.client_chain])
+                stage = 'live-prebound-proxy'
+                budget()
+                require(not self.pidfds.ready(self.fds[pid]) and self.read(pid, True) == row
+                        and self.held[pid].snapshot() == (row['image'], row['kernelImageSha256'])
+                        and self.system.snapshot() == (row['image'], row['kernelImageSha256'])
+                        and self.read(pid, True) == row and not self.pidfds.ready(self.fds[pid]))
+                stage = 'sender-credentials-recheck'
+                budget(); require(peer(name) == credentials); budget()
+                # These are lifetime observations, not replacements for the sealed ancestry proof.
+                value['historicalAncestors'] = [dict(pid=p, startTime=self.rows[p]['startTime'],
+                    lifetime='pidfd-signalled-exit' if self.pidfds.ready(self.fds[p]) else 'not-signalled') for p in self.chains[pid]]
+                value.update(stable=True, correlatesToOriginalPopen=True)
+            except Exception as error:
+                value.update(failureStage=stage, unavailable=type(error).__name__ if type(error) in (
+                    ValueError, KeyError, RuntimeError, PermissionError, FileNotFoundError, ProcessLookupError, OSError) else 'OtherError')
+            return bounded(value, 24576)
+
+    def close(self):
+        with self.lock:
+            if self.closed:
+                return
+            self.closed = True
+            try:
+                for image in self.held.values():
+                    image.close()
+            finally:
+                try:
+                    for fd in self.fds.values():
+                        self.pidfds.close(fd)
+                finally:
+                    self.system.close()
+
+
 class PassiveCapture:
     def __init__(self, owner, original, client, read, redact, target_guard, address, uid):
         require(type(owner) is dict and set(owner) == {'name', 'pid'} and unique(owner['name'])
@@ -247,6 +389,20 @@ class PassiveCapture:
         self.pending, self.headers, self.total, self.closed, self.failure = [], [], 0, False, None
         self.monitor, self.control, self.filter_id, self.worker, self.timer, self.cancellable = None, None, None, None, None, None
         self.sender, self.armed, self.bus_identity_matched, self.final = None, False, False, None
+        self.baseline, self.input_started, self.settled = None, False, threading.Event()
+
+    def begin_input(self):
+        require(type(self.baseline) is OwnedLineage and self.armed)
+        self.baseline.begin_input()
+        with self.lock:
+            require(not self.closed and not self.stop.is_set() and not self.headers and not self.input_started)
+            self.budget()
+            self.input_started = True
+
+    def finish_observation(self):
+        # Wait only for this already-armed observation, inside its original fifteen-second budget.
+        self.settled.wait(max(0, self.transcript.deadline - time.monotonic()))
+        return self.close()
 
     def budget(self):
         require(not self.stop.is_set() and time.monotonic() <= self.transcript.deadline)
@@ -375,13 +531,23 @@ class PassiveCapture:
                     self.budget(); self.transcript.add(record)
                     value = self.transcript.snapshot()
                     if record['kind'] == 1 and value.get('call') == record and self.sender is None:
-                        result = sender_snapshot(record['sender'], self.original, self.client, self.read, self.peer,
-                                                 self.redact, budget=self.budget, diagnostic_state=self.diagnostic_state)
+                        if self.baseline is not None:
+                            result = self.baseline.observe(record['sender'], self.peer, budget=self.budget) if self.input_started else dict(
+                                qualified=False, inputPermitted=False, stable=False, correlatesToOriginalPopen=False, unavailable='BeforeInput')
+                        else:
+                            result = sender_snapshot(record['sender'], self.original, self.client, self.read, self.peer,
+                                                     self.redact, budget=self.budget, diagnostic_state=self.diagnostic_state)
                         with self.lock:
                             self.sender = result
+                    if self.transcript.snapshot().get('unknown') or self.sender is not None and self.transcript.snapshot().get('reply'):
+                        self.settled.set()
         except Exception as error:
             with self.lock:
                 self.failure = type(error).__name__ if type(error) in (ValueError, RuntimeError, OSError) else 'OtherError'
+            self.settled.set()
+        finally:
+            if self.closed and self.baseline is not None:
+                self.baseline.close()
 
     def close(self):
         with self.lock:
@@ -406,6 +572,8 @@ class PassiveCapture:
                     with self.lock:
                         self.failure = self.failure or 'CloseUnavailable'
         stopped = self.worker is None or not self.worker.is_alive()
+        if stopped and self.baseline is not None:
+            self.baseline.close()
         drained, drain_unavailable = 0, None
         if not stopped:
             drain_unavailable = 'WorkerStillRunning'
@@ -429,7 +597,7 @@ class PassiveCapture:
             result.update(armed=self.armed, callbackMessages=self.total, pendingAtClose=pending_at_close,
                           drainedAtClose=drained, pendingAfterClose=len(self.pending),
                           workerStopped=stopped, cleanupRequested=True,
-                          busIdentityMatched=self.bus_identity_matched, observedHeaders=copy.deepcopy(self.headers))
+                          inputStarted=self.input_started, busIdentityMatched=self.bus_identity_matched, observedHeaders=copy.deepcopy(self.headers))
             if drain_unavailable is not None:
                 result['drainUnavailable'] = drain_unavailable
             if self.sender is not None:

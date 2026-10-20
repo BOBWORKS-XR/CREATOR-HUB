@@ -1091,7 +1091,7 @@ def launcher_button_mapping(source, question, action):
             'widgetFocusVerified': False, 'nativeOutcomeRequired': True}
 
 
-def keyboard_delivery(receipt, sequence, process, window, origin, *, warm_companion=None):
+def keyboard_delivery(receipt, sequence, process, window, origin, *, warm_companion=None, warm_terminal=None):
     fields = {'schemaVersion', 'mechanism', 'pid', 'startTime', 'window', 'intent', 'candidateAction', 'delivery',
               'deliveryComplete', 'launchProvenance', 'widgetFocusVerified', 'outcomeVerified', 'nativeVerificationRequired', 'releaseReady'}
     if warm_companion is not None:
@@ -1136,10 +1136,89 @@ def keyboard_delivery(receipt, sequence, process, window, origin, *, warm_compan
     if receipt['deliveryComplete'] is True:
         require(len(rows) == len(strokes) and synchronized and 'refusal' not in receipt, "Complete keyboard delivery not proven")
         return 'complete'
+    if warm_companion is not None and sequence == 'Enter' and warm_terminal is not None:
+        require(len(rows) == 2 and all(rows[0][k] is True for k in ('submissionAttempted', 'returnObserved', 'submitted', 'synchronized'))
+                and all(rows[1][k] is True for k in ('submissionAttempted', 'returnObserved', 'submitted'))
+                and rows[1]['synchronized'] is False and receipt.get('refusal') == 'Owned X resource query was refused',
+                'Only the observed warm Enter release may be a consumed-terminal candidate')
+        warm_release_error(warm_terminal, rows, window)
+        return 'warm-consumed-terminal-candidate'
     require(sequence in ('Escape', 'Enter') and len(rows) == 1 and synchronized
             and type(receipt.get('refusal')) is str and 0 < len(receipt['refusal']) <= 256,
             "Incomplete keyboard delivery is unknown; no retry")
     return 'terminal-press-pending-owned-exit'
+
+
+def warm_release_error(value, rows, window):
+    require(type(value) is dict and set(value) == {'schemaVersion', 'kind', 'readOnly', 'inputPermitted', 'authorityGranted',
+            'releaseReady', 'latchSet', 'events', 'truncated', 'captureUnavailable', 'submissions', 'submissionCaptureUnavailable'}
+            and type(value['schemaVersion']) is int and value['schemaVersion'] == 1 and value['kind'] == 'x11-keyboard-refusal'
+            and value['readOnly'] is True and value['latchSet'] is True
+            and all(value[k] is False for k in ('inputPermitted', 'authorityGranted', 'releaseReady', 'truncated',
+                                               'captureUnavailable', 'submissionCaptureUnavailable')),
+            'One complete retained X error diagnostic required')
+    events, submissions = value['events'], value['submissions']
+    require(type(events) is list and len(events) == 1 and type(submissions) is list and len(submissions) == 2,
+            'No extra X errors or submissions allowed')
+    for index, row in enumerate(submissions):
+        require(type(row) is dict and set(row) == {'window', 'keycode', 'modifiers', 'pressed', 'latchBeforeSubmit', 'nextRequest',
+                'latchBeforeSync', 'latchAfterSync', 'syncReturned'}
+                and all(type(row[k]) is int for k in ('window', 'keycode', 'modifiers', 'nextRequest'))
+                and row['window'] == window and row['keycode'] == rows[index]['keycode'] and row['modifiers'] == 0
+                and row['pressed'] is (index == 0) and row['latchBeforeSubmit'] is False and row['latchBeforeSync'] is False
+                and row['latchAfterSync'] is (index == 1) and row['syncReturned'] is (index == 0)
+                and 0 < row['nextRequest'] < 2**64, 'Exact clean-latch Enter submission operands required')
+    require(submissions[0]['nextRequest'] < submissions[1]['nextRequest'], 'Release request serial must follow press')
+    event = events[0]
+    require(type(event) is dict and set(event) == {'errorCode', 'requestCode', 'minorCode', 'serial', 'resourceId', 'sameDisplay', 'stage'}
+            and all(type(event[k]) is int for k in ('errorCode', 'requestCode', 'minorCode', 'serial', 'resourceId'))
+            and (event['errorCode'], event['requestCode'], event['minorCode']) == (3, 25, 0)
+            and event['serial'] == submissions[1]['nextRequest'] and event['resourceId'] == window
+            and event['sameDisplay'] is True and event['stage'] == 'release-sync',
+            'Only the exact release SendEvent BadWindow is a candidate; delivery remains incomplete')
+
+
+def attributed_warm_activation(record, client, admitted, owner):
+    require(type(record) is dict and not any(k in record for k in ('unavailable', 'captureUnavailable')),
+            'Warm activation capture unavailable')
+    value = record.get('observation')
+    require(type(value) is dict and all(value.get(k) is True for k in ('readOnly', 'armed', 'inputStarted', 'workerStopped',
+            'busIdentityMatched', 'closed', 'callReplyMatched'))
+            and all(value.get(k) is False for k in ('qualified', 'inputPermitted', 'authorityGranted', 'releaseReady', 'deadlineExceeded'))
+            and not any(k in value for k in ('unknown', 'unavailable', 'drainUnavailable'))
+            and type(value.get('messageCount')) is int and value['messageCount'] == 2,
+            'Exact completed passive observation required; exit zero is not activation evidence')
+    call, reply, sender = value.get('call'), value.get('reply'), value.get('senderObservation')
+    require(type(call) is dict and set(call) == {'kind', 'sender', 'destination', 'serial', 'replySerial', 'flags', 'empty', 'path', 'interface', 'member'}
+            and type(reply) is dict and set(reply) == {'kind', 'sender', 'destination', 'serial', 'replySerial', 'flags', 'empty'}
+            and all(type(row[k]) is int for row in (call, reply) for k in ('kind', 'serial', 'replySerial', 'flags'))
+            and call['kind'] == 1 and call['flags'] == call['replySerial'] == 0 and call['empty'] is True
+            and type(call['sender']) is str and re.fullmatch(r':[0-9]+\.[0-9]+', call['sender'])
+            and call['sender'] != owner['name'] and call['destination'] in (NAME, owner['name'])
+            and (call['path'], call['interface'], call['member']) == ('/com/creatorworks/hub/Host', 'com.creatorworks.hub.Host1', 'Start')
+            and 0 < call['serial'] < 2**32 and 0 < reply['serial'] < 2**32
+            and reply['kind'] == 2 and reply['flags'] == 1 and reply['empty'] is True
+            and reply['sender'] == owner['name'] and reply['destination'] == call['sender'] and reply['replySerial'] == call['serial']
+            and value.get('observedHeaders') == [call, reply], 'Exact empty Host1 Start and successful matched reply required')
+    require(type(sender) is dict and sender.get('qualified') is False and sender.get('inputPermitted') is False
+            and all(sender.get(k) is True for k in ('stable', 'sealedBeforeInput', 'correlatesToOriginalPopen'))
+            and not any(k in sender for k in ('unavailable', 'failureStage'))
+            and sender.get('originalPopen') == proxy_process_snapshot(admitted)
+            and sender.get('expectedClient') == proxy_process_snapshot(client), 'Live sender must match the sealed owned launch')
+    peer, ancestry = sender.get('peer'), sender.get('senderAncestors')
+    require(type(peer) is dict and set(peer) == {'name', 'pid', 'uid'} and peer['name'] == call['sender']
+            and type(peer['pid']) is int and peer['pid'] > 1 and type(peer['uid']) is int and peer['uid'] == client['uids'][0]
+            and type(ancestry) is list and 1 < len(ancestry) <= 12 and ancestry[0]['pid'] == peer['pid']
+            and ancestry[-1] == proxy_process_snapshot(admitted), 'No name-only or UID-only sender attribution')
+
+
+class ObserverPidfds:
+    open = staticmethod(os.pidfd_open) if hasattr(os, 'pidfd_open') else None
+    close = staticmethod(os.close)
+
+    @staticmethod
+    def ready(fd):
+        return bool(select.select([fd], [], [], 0)[0])
 
 
 class Session:
@@ -1367,7 +1446,7 @@ class Session:
         except Exception:
             pass  # Preserve the original refusal even when diagnostics are unavailable.
 
-    def start_warm_activation_diagnostic(self, client):
+    def start_warm_activation_diagnostic(self, client, attempt=None):
         state = {'capture': None, 'record': {'schemaVersion': 1, 'phase': 'warm', 'readOnly': True,
                  'qualified': False, 'inputPermitted': False, 'authorityGranted': False, 'releaseReady': False}}
         try:
@@ -1395,21 +1474,30 @@ class Session:
                 actual = self.host_owner()
                 require(actual == owner, 'Diagnostic cold Host1 owner changed')
                 return actual
-            capture = module.PassiveCapture(owner, self.flatpak_launch, client,
+            require(attempt is not None, 'Live owned keyboard binding required for pre-input ancestry')
+            attempt.binding.verify()
+            capture = module.PassiveCapture(owner, attempt.binding.launch, client,
                 lambda pid, full=False: self.native.native_process(pid, self.helper, full), proxy_process_snapshot,
                 target_guard, os.environ.get('DBUS_SESSION_BUS_ADDRESS'), os.getuid())
             state['capture'] = capture
+            capture.baseline = module.OwnedLineage(attempt.binding.launch, client,
+                P.subtree(self.flatpak_child.pid, self.helper, self.native), capture.read, proxy_process_snapshot,
+                image_open=K.HeldImage, system_image=PortalImage('proxy'), pidfds=ObserverPidfds,
+                guard=attempt.binding.verify, budget=capture.budget)
             capture.arm()
         except Exception as error:
             state['record']['unavailable'] = type(error).__name__
         return state
 
-    def finish_warm_activation_diagnostic(self, state):
+    def finish_warm_activation_diagnostic(self, state, *, settle=False):
         # Neither cleanup nor capture failure may replace the original input/outcome refusal.
         record = state['record']
+        if state.get('finished'):
+            return record
+        state['finished'] = True
         try:
             if state['capture'] is not None:
-                value = state['capture'].close()
+                value = state['capture'].finish_observation() if settle else state['capture'].close()
                 require(type(value) is dict and len(json_bytes(value)) <= 32768
                         and value.get('readOnly') is True
                         and all(value.get(key) is False for key in ('qualified', 'inputPermitted', 'authorityGranted', 'releaseReady')),
@@ -1422,6 +1510,7 @@ class Session:
             save(self.root / 'warm-activation-observer-gtk.json', record)
         except Exception:
             pass
+        return record
 
     def launcher_keyboard(self, client, question, action, phase, *, terminal):
         diagnostic = {'phase': phase, 'client': client, 'mechanism': 'exact-xid-keyboard', 'actionAttempted': False,
@@ -1452,18 +1541,25 @@ class Session:
             options = {} if companion is None else {'warm_companion': companion}
             attempt = K.capture(self.helper, self.native, self.x11, client, self.flatpak_origin, self.flatpak_guard, window, **options)
             if phase == 'warm':
-                passive = self.start_warm_activation_diagnostic(client)
+                passive = self.start_warm_activation_diagnostic(client, attempt)
+                require(passive['capture'] is not None and 'unavailable' not in passive['record'], 'Warm pre-input baseline unavailable; no input')
+                passive['capture'].begin_input()
             try:
                 receipt = attempt.send(mapping['sequence'])
             except K.InputRefused as error:
                 self.retain_focus_diagnostic(diagnostic, error)
                 receipt = error.receipt
+                diagnostic['refusal'] = str(error)[:512]
             diagnostic['keyboard'] = receipt
             diagnostic['actionAttempted'] = type(receipt) is dict and type(receipt.get('delivery')) is list and any(
                 type(row) is dict and row.get('submissionAttempted') is True for row in receipt['delivery'])
-            delivery = keyboard_delivery(receipt, mapping['sequence'], client, window, self.flatpak_origin, warm_companion=companion)
+            delivery = keyboard_delivery(receipt, mapping['sequence'], client, window, self.flatpak_origin, warm_companion=companion,
+                warm_terminal=diagnostic.get('focusDiagnostic') if phase == 'warm' and terminal else None)
             diagnostic['deliveryClassification'] = delivery
             require(delivery == 'complete' or terminal, "Intermediate dialog delivery incomplete; no further input")
+            if phase == 'warm':
+                require(getattr(self, 'warm_activation_pending', None) is None, 'Warm activation cannot be replayed')
+                self.warm_activation_pending, passive = passive, None
             return diagnostic
         except Exception as error:
             self.retain_focus_diagnostic(diagnostic, error)
@@ -1483,6 +1579,30 @@ class Session:
                             companion.close()
                     finally:
                         save(self.root / (phase + '-gtk.json'), diagnostic)
+
+    def consumed_warm_outcome(self):
+        # Dispose in handler-installation order; the old latch/receipt are never reset.
+        old = self.x11
+        require(old.error is True, 'Consumed warm outcome requires the original latched connection')
+        old.dispose()
+        fresh = self.helper.X11()
+        adopted = False
+        try:
+            cold, owner = self.report['coldRoot'], self.report['coldHost1Owner']
+            self.stable(cold)
+            require(self.host_owner() == owner and os.readlink(f'/proc/{cold["pid"]}/ns/mnt') == os.readlink('/proc/self/ns/mnt'),
+                    'Cold Host1 owner/native namespace changed after warm input')
+            stack = fresh.property(fresh.x.XDefaultRootWindow(fresh.display), '_NET_CLIENT_LIST_STACKING')
+            require(stack == (33, 32, [self.report['coldRootWindow']])
+                    and fresh.inspect(self.report['coldRootWindow']) == self.report['coldRootXres'],
+                    'Warm terminal outcome needs the exact sole cold Root XRes window')
+            self.stable(cold)
+            require(self.host_owner() == owner, 'Cold Host1 owner changed during warm outcome')
+            self.x11, adopted = fresh, True
+            return 'attributed-start-same-owned-native-root'
+        finally:
+            if not adopted:
+                fresh.dispose()
 
     def launcher_outcome(self, action, phase, missing):
         if action == 'Cancel' or missing:
@@ -1680,7 +1800,15 @@ class Session:
                 diagnostic['ownedPhaseExit'] = {**self.flatpak_popen, 'exitCode': code, 'expectedExitCode': 1 if missing else 0}
             require(type(code) is int and code == (1 if missing else 0), "Launcher outcome differs")
             self.snapshot_preserved()
-            proof = self.launcher_outcome(action, phase, missing)
+            if phase == 'warm':
+                pending = getattr(self, 'warm_activation_pending', None)
+                require(pending is not None, 'Missing pre-input warm activation capture')
+                record = self.finish_warm_activation_diagnostic(pending, settle=True)
+                require(action == 'Open Creator Hub' and not missing, 'Only warm disclosure Enter may qualify')
+                admitted = self.launcher_keys[-1]['keyboard']['launchProvenance']['admittedLaunch']
+                attributed_warm_activation(record, client, admitted, self.report['coldHost1Owner'])
+            candidate = self.launcher_keys[-1].get('deliveryClassification') == 'warm-consumed-terminal-candidate'
+            proof = self.consumed_warm_outcome() if candidate else self.launcher_outcome(action, phase, missing)
             for diagnostic in self.launcher_keys:
                 diagnostic.update(preservedDataVerified=True, outcomeVerified=True, outcomeProof=proof)
         except Exception as error:
@@ -1688,6 +1816,10 @@ class Session:
                 diagnostic['phaseFailure'] = str(error)[:512]
             raise
         finally:
+            pending = getattr(self, 'warm_activation_pending', None)
+            if pending is not None:
+                self.finish_warm_activation_diagnostic(pending)
+                self.warm_activation_pending = None
             self.portal_client = None
             for diagnostic in self.launcher_keys:
                 # Delivery evidence is immutable; phase outcome is a separate record.
@@ -1905,8 +2037,8 @@ def portal_provider(role):
 class PortalImage(K.HeldImage):
     """Held package image from a finite protected system path, never a caller path."""
     def __init__(self, role):
-        require(role in (*PORTAL_PROVIDERS, 'python', 'curl'), 'Only fixed portal/readiness system images allowed')
-        system = {'python': '/usr/bin/python3', 'curl': '/usr/bin/curl'}
+        require(role in (*PORTAL_PROVIDERS, 'python', 'curl', 'proxy'), 'Only fixed portal/readiness/proxy system images allowed')
+        system = {'python': '/usr/bin/python3', 'curl': '/usr/bin/curl', 'proxy': '/usr/bin/xdg-dbus-proxy'}
         original = Path(system[role] if role in system else PORTAL_PROVIDERS[role][0])
         self.fd, self.parents, self.alias = None, [], None
         try:
