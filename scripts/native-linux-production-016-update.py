@@ -2684,6 +2684,74 @@ def prepare_fixture_parent(env):
                 raise
 
 
+def prepare_fixture_config(created):
+    """Control inheritance only for the broker's newly created empty config directory."""
+    paths = (BASE.parent, BASE, BASE / "result", BASE / "result/home", BASE / "result/home/config")
+    require(BASE.is_absolute() and all(path.resolve(strict=True) == path for path in paths), "Exact nonlinked fixture config ancestry required")
+    handles, observed = [], []
+    expected_acl = bytes.fromhex("0200000001000700ffffffff02000700e903000004000700ffffffff10000700ffffffff20000700ffffffff")
+
+    def xattr(name):
+        try:
+            value = os.getxattr(handles[-1], name)
+        except OSError as error:
+            if error.errno != errno.ENODATA:
+                raise
+            return None
+        require(type(value) is bytes and 0 < len(value) <= 65536, "Bounded ordinary fixture ACL required")
+        return value
+
+    def empty():
+        with os.scandir(handles[-1]) as entries:
+            require(next(entries, None) is None, "Only a newly empty fixture config directory may be prepared")
+
+    def stable(expected):
+        for index, path in enumerate(paths):
+            named = path.lstat() if index == 0 else os.stat(path.name, dir_fd=handles[index - 1], follow_symlinks=False)
+            require(stamp(named) == stamp(expected[index]) and stamp(os.fstat(handles[index])) == stamp(expected[index])
+                    and path.resolve(strict=True) == path, "Fixture config ancestry changed")
+
+    try:
+        for index, path in enumerate(paths):
+            before = path.lstat() if index == 0 else os.stat(path.name, dir_fd=handles[-1], follow_symlinks=False)
+            owner = (os.geteuid(), os.getegid()) if index < 2 else (UID, UID)
+            modes = (0o700, 0o755) if index == 0 else ((0o755,) if index == 1 else (0o700,))
+            require(stat.S_ISDIR(before.st_mode) and (before.st_uid, before.st_gid) == owner
+                    and stat.S_IMODE(before.st_mode) in modes, "Owned private fixture config ancestry required")
+            fd = os.open(path if index == 0 else path.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                         **({} if index == 0 else {"dir_fd": handles[-1]}))
+            handles.append(fd); observed.append(before)
+            require(stamp(os.fstat(fd)) == stamp(before), "Fixture config changed during open")
+        require(stamp(observed[-1]) == stamp(created), "Newly created fixture config identity differs")
+        stable(observed); empty()
+        default, access = xattr("system.posix_acl_default"), xattr("system.posix_acl_access")
+        require(default is None or (default == expected_acl and pin(default) == {
+            "size": 44, "sha256": "ab93799aeaba2b0cf6f6e4a059b93930ac75d3d0452103c295737a79c6094ff3"}),
+            "Unknown inherited fixture default ACL; no change")
+        stable(observed); empty()
+        require(xattr("system.posix_acl_default") == default and xattr("system.posix_acl_access") == access,
+                "Fixture ACL changed before preparation")
+        stable(observed); empty()
+        if default is not None:
+            os.removexattr(handles[-1], "system.posix_acl_default")
+            after = os.fstat(handles[-1])
+            fields = ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_nlink", "st_size", "st_mtime_ns")
+            require(all(getattr(after, name) == getattr(observed[-1], name) for name in fields),
+                    "Fixture default ACL removal changed other metadata")
+            # Only this held directory's ctime may change during the one removal.
+            observed[-1] = after
+        stable(observed); empty()
+        require(xattr("system.posix_acl_default") is None and xattr("system.posix_acl_access") == access,
+                "Fixture ACL preparation postcheck differs")
+        stable(observed); empty()
+        return {"directory": "result/home/config", "uid": UID, "gid": UID, "mode": "0700", "changed": default is not None,
+                "defaultAclBefore": {"present": False} if default is None else {"present": True, **pin(default)},
+                "defaultAclAfter": {"present": False}, "accessAclUnchanged": True}
+    finally:
+        for fd in reversed(handles):
+            os.close(fd)
+
+
 def clean_context(env):
     return {**{key: env[key] for key in ENVIRONMENT}, "PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"}
 
@@ -3220,6 +3288,8 @@ def broker(env):
         os.chmod(file, published_input_mode(file, BASE / "inputs", profile))
     for name in ("home", "home/config", "home/data", "home/cache", "runtime", "tmp"):
         file = BASE / "result" / name; file.mkdir(mode=0o700); os.chown(file, UID, UID)
+        if name == "home/config":
+            config_context = prepare_fixture_config(file.lstat())
     context = transport_context(env)
     transport, pins = prepare_transport(BASE / "inputs", profile, context)
     for file in (transport.parent, transport, *transport.rglob("*")):
@@ -3238,6 +3308,7 @@ def broker(env):
     secret = payload = session = lab = guard = logs = None
     relock, failure = False, None
     record = {"schemaVersion": 1, "profile": PROFILE, "scenario": scenario, "scenarioPassed": False, "fixtureRelocked": False,
+              "fixtureConfigCreationContext": config_context,
               "harnessSource": env["GITHUB_SHA"], "baselineSource": profile["baseline"]["source"], "targetSource": FIXED["17"]["source"],
               "privateTargetQualification": private_target_qualification(), "oldRetirementHelperRestored": False, **FALSE}
     try:

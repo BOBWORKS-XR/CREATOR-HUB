@@ -2627,6 +2627,254 @@ class HomeMenuLabels(unittest.TestCase):
                 namespace["identity"]()
 
 
+class FixtureConfigCreationContext(unittest.TestCase):
+    ACL = bytes.fromhex("0200000001000700ffffffff02000700e903000004000700ffffffff10000700ffffffff20000700ffffffff")
+
+    @contextmanager
+    def fixture(self, *, default=ACL, fault=None, error=None):
+        paths = (M.BASE.parent, M.BASE, M.BASE / "result", M.BASE / "result/home", M.BASE / "result/home/config")
+        named = {path: SimpleNamespace(st_dev=7, st_ino=100 + i, st_uid=0 if i < 2 else M.UID,
+            st_gid=0 if i < 2 else M.UID, st_mode=stat.S_IFDIR | (0o755 if i < 2 else 0o700),
+            st_nlink=2, st_size=4096, st_mtime_ns=1, st_ctime_ns=1) for i, path in enumerate(paths)}
+        created = copy.copy(named[paths[-1]])
+        state = {"default": default, "access": b"SYNTHETIC_ACCESS_ACL", "removed": [], "opened": [], "closed": [], "reads": []}
+        held, fd_paths = {}, {}
+        if fault == "foreign": named[paths[-1]].st_uid = 0
+        if fault == "mode": named[paths[-1]].st_mode = stat.S_IFDIR | 0o777
+        if fault == "symlink": named[paths[-1]].st_mode = stat.S_IFLNK | 0o777
+        if fault == "parent-mode": named[paths[0]].st_mode = stat.S_IFDIR | 0o777
+        if fault == "created-drift": created.st_ino += 1
+
+        def opening(name, flags, **kwargs):
+            path = Path(name) if not kwargs else fd_paths[kwargs["dir_fd"]] / name
+            self.assertIn(path, paths)
+            self.assertEqual(flags, os.O_RDONLY | M.os.O_DIRECTORY | M.os.O_NOFOLLOW | M.os.O_CLOEXEC)
+            fd = 1000 + len(held); held[fd] = copy.copy(named[path]); fd_paths[fd] = path
+            state["opened"].append(fd)
+            if fault == "fd-drift" and path == paths[-1]: held[fd].st_ino += 1
+            return fd
+
+        def stating(name, *, dir_fd, follow_symlinks):
+            self.assertFalse(follow_symlinks)
+            return copy.copy(named[fd_paths[dir_fd] / name])
+
+        def xattr(fd, name):
+            self.assertEqual(fd_paths[fd], paths[-1]); state["reads"].append(name)
+            self.assertIn(name, ("system.posix_acl_default", "system.posix_acl_access"))
+            if error is not None: raise error
+            if fault == "named-drift": named[paths[-1]].st_ino += 1
+            if fault == "default-drift" and name.endswith("default") and state["reads"].count(name) == 2:
+                state["default"] = b"changed default ACL"
+            if fault == "access-before-drift" and name.endswith("access") and state["reads"].count(name) == 2:
+                state["access"] = b"changed access ACL"
+            value = state["default" if name.endswith("default") else "access"]
+            if value is None: raise OSError(M.errno.ENODATA, "absent synthetic attribute")
+            return value
+
+        def removing(fd, name):
+            self.assertEqual(fd_paths[fd], paths[-1]); self.assertEqual(name, "system.posix_acl_default")
+            state["removed"].append((fd, name))
+            if fault == "remove-error": raise PermissionError(13, "synthetic remove refusal")
+            if fault != "default-remains": state["default"] = None
+            for info in (named[paths[-1]], held[fd]):
+                info.st_ctime_ns += 1
+                if fault == "post-mode": info.st_mode = stat.S_IFDIR | 0o755
+                if fault == "post-mtime": info.st_mtime_ns += 1
+            if fault == "access-changed": state["access"] = b"changed access ACL"
+            if fault == "post-parent": named[paths[1]].st_ino += 1
+
+        class Entries:
+            def __enter__(self):
+                return iter(("SYNTHETIC_PRIVATE_NAME",) if fault == "nonempty" or (fault == "post-nonempty" and state["removed"]) else ())
+            def __exit__(self, *args): pass
+
+        with ExitStack() as stack:
+            for name in ("O_DIRECTORY", "O_NOFOLLOW", "O_CLOEXEC"):
+                if not hasattr(M.os, name): stack.enter_context(patch.object(M.os, name, 0, create=True))
+            if not hasattr(M.errno, "ENODATA"): stack.enter_context(patch.object(M.errno, "ENODATA", 61, create=True))
+            for name in ("geteuid", "getegid"):
+                stack.enter_context(patch.object(M.os, name, return_value=0, create=True))
+            stack.enter_context(patch.object(Path, "is_absolute", side_effect=lambda self: self in paths, autospec=True))
+            stack.enter_context(patch.object(Path, "resolve", side_effect=lambda self, **_: self / "redirected" if fault == "canonical" and self == M.BASE else self, autospec=True))
+            stack.enter_context(patch.object(Path, "lstat", side_effect=lambda self: copy.copy(named[self]), autospec=True))
+            stack.enter_context(patch.object(M.os, "open", side_effect=opening))
+            stack.enter_context(patch.object(M.os, "stat", side_effect=stating))
+            stack.enter_context(patch.object(M.os, "fstat", side_effect=lambda fd: copy.copy(held[fd])))
+            stack.enter_context(patch.object(M.os, "close", side_effect=state["closed"].append))
+            stack.enter_context(patch.object(M.os, "scandir", side_effect=lambda fd: Entries()))
+            stack.enter_context(patch.object(M.os, "getxattr", side_effect=xattr, create=True))
+            stack.enter_context(patch.object(M.os, "removexattr", side_effect=removing, create=True))
+            for name in ("chmod", "fchmod", "chown", "umask", "mkdir", "makedirs", "setxattr"):
+                stack.enter_context(patch.object(M.os, name, side_effect=AssertionError("Only owned config default ACL removal allowed"), create=True))
+            try:
+                yield created, state
+            finally:
+                self.assertEqual(state["closed"], list(reversed(state["opened"])))
+
+    def test_known_44_byte_recipe_is_bound_to_actual_capture(self):
+        self.assertEqual(M.pin(self.ACL), {"size": 44, "sha256": "ab93799aeaba2b0cf6f6e4a059b93930ac75d3d0452103c295737a79c6094ff3"})
+
+    def test_known_acl_removes_only_held_new_config_default_and_preserves_access(self):
+        with self.fixture() as (created, state):
+            result = M.prepare_fixture_config(created)
+        self.assertEqual(len(state["removed"]), 1)
+        self.assertEqual(state["access"], b"SYNTHETIC_ACCESS_ACL")
+        self.assertEqual(result["defaultAclBefore"], {"present": True, **M.pin(self.ACL)})
+        self.assertEqual(result["defaultAclAfter"], {"present": False})
+        self.assertTrue(result["accessAclUnchanged"]); self.assertTrue(result["changed"])
+        self.assertEqual(result["mode"], "0700")
+        self.assertNotIn("SYNTHETIC_ACCESS_ACL", json.dumps(result))
+
+    def test_absent_default_acl_is_read_only_and_only_enodata_means_absent(self):
+        with self.fixture(default=None) as (created, state):
+            result = M.prepare_fixture_config(created)
+        self.assertFalse(result["changed"]); self.assertFalse(state["removed"])
+        self.assertEqual(result["defaultAclBefore"], {"present": False})
+        for code in (1, 13, 95):
+            with self.subTest(errno=code), self.fixture(error=OSError(code, "private")) as (created, state), self.assertRaises(OSError):
+                M.prepare_fixture_config(created)
+            self.assertFalse(state["removed"])
+
+    def test_unknown_or_malformed_default_acl_refuses_without_mutation(self):
+        values = (b"", b"x" * 44, self.ACL[:-1], b"\x03" + self.ACL[1:], self.ACL[:12] + b"\x02\x00\x06\x00" + self.ACL[16:],
+                  self.ACL[:16] + b"\xea\x03\x00\x00" + self.ACL[20:], "not-bytes", b"x" * 65537)
+        for raw in values:
+            with self.subTest(value_type=type(raw).__name__), self.fixture(default=raw) as (created, state), self.assertRaises(RuntimeError):
+                M.prepare_fixture_config(created)
+            self.assertFalse(state["removed"])
+
+    def test_nonempty_foreign_symlink_unsafe_ancestry_and_identity_changes_refuse_before_removal(self):
+        for fault in ("canonical", "foreign", "mode", "symlink", "parent-mode", "created-drift", "fd-drift", "named-drift", "default-drift", "access-before-drift", "nonempty"):
+            with self.subTest(fault=fault), self.fixture(fault=fault) as (created, state), self.assertRaises(RuntimeError):
+                M.prepare_fixture_config(created)
+            self.assertFalse(state["removed"])
+
+    def test_removal_or_postcheck_failure_never_retries_or_changes_another_attribute(self):
+        for fault in ("remove-error", "default-remains", "post-mode", "post-mtime", "access-changed", "post-parent", "post-nonempty"):
+            with self.subTest(fault=fault), self.fixture(fault=fault) as (created, state), self.assertRaises((RuntimeError, OSError)):
+                M.prepare_fixture_config(created)
+            self.assertEqual(len(state["removed"]), 1)
+
+    def test_broker_prepares_config_immediately_after_new_mkdir_before_descendants_or_root(self):
+        tree = ast.parse(Path(M.__file__).read_text())
+        broker = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "broker")
+        calls = [n for n in ast.walk(broker) if isinstance(n, ast.Call) and ast.unparse(n.func) == "prepare_fixture_config"]
+        self.assertEqual(len(calls), 1); self.assertEqual(ast.unparse(calls[0].args[0]), "file.lstat()")
+        loop = next(n for n in ast.walk(broker) if isinstance(n, ast.For) and "home/config" in ast.unparse(n.iter))
+        self.assertEqual(ast.unparse(loop.body[-1].test), "name == 'home/config'")
+        code = ast.unparse(broker)
+        self.assertLess(code.index("file.mkdir(mode=448)"), code.index("prepare_fixture_config("))
+        self.assertLess(code.index("prepare_fixture_config("), code.index("prepare_tls("))
+        self.assertIn("'fixtureConfigCreationContext': config_context", code)
+
+    @unittest.skipUnless(sys.platform == "linux", "Requires Linux default ACLs in an owned pure child; no application or system account")
+    def test_real_linux_inherited_exact_acl_0666_then_controlled_config_0644_with_surroundings_unchanged(self):
+        worker = r'''
+import errno, importlib.util, os, pathlib, stat, sys
+source, root = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+spec = importlib.util.spec_from_file_location("fixture_acl_kernel", source)
+m = importlib.util.module_from_spec(spec); sys.modules[spec.name] = m; spec.loader.exec_module(m)
+acl = bytes.fromhex("0200000001000700ffffffff02000700e903000004000700ffffffff10000700ffffffff20000700ffffffff")
+assert m.pin(acl)["sha256"] == "ab93799aeaba2b0cf6f6e4a059b93930ac75d3d0452103c295737a79c6094ff3"
+assert root.resolve(strict=True) == root and root.stat().st_uid == os.geteuid() and stat.S_IMODE(root.stat().st_mode) == 0o700
+uid = os.geteuid()
+if uid != 0 and uid not in {os.getegid(), *os.getgroups()}:
+    print("SKIP: current UID is unavailable as a fixture group; no ownership override attempted", file=sys.stderr)
+    raise SystemExit(77)
+def attr(path, name):
+    try: return os.getxattr(path, name, follow_symlinks=False)
+    except OSError as e:
+        if e.errno != errno.ENODATA: raise
+        return None
+os.setxattr(root, "system.posix_acl_default", acl, follow_symlinks=False)
+for case in ("control", "corrected", "unknown", "sibling"):
+    base = root / case; base.mkdir(mode=0o755)
+    for part in ("result", "result/home", "result/home/config"):
+        path = base / part; path.mkdir(mode=0o700)
+        # The real broker creates these with its synthetic UID as both owner and group.
+        os.chown(path, uid, uid, follow_symlinks=False)
+        assert (path.lstat().st_uid, path.lstat().st_gid) == (uid, uid)
+original_mask = os.umask(0o022)
+def journal(base):
+    folder = base / "result/home/config/creator-works-mcp"; folder.mkdir(mode=0o700)
+    temporary = folder / "journal.tmp"
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o666)
+    os.write(fd, b"{}"); os.fsync(fd); os.close(fd)
+    target = folder / "hosted-operation-outcomes.json"; os.rename(temporary, target)
+    return stat.S_IMODE(target.stat().st_mode)
+try:
+    assert journal(root / "control") == 0o666
+    paths = [root, root / "corrected", root / "corrected/result", root / "corrected/result/home", root / "sibling", root / "control/result/home/config"]
+    def snapshot(path):
+        s = path.stat()
+        return (s.st_dev, s.st_ino, s.st_uid, s.st_gid, s.st_mode, s.st_nlink, s.st_size, s.st_mtime_ns, s.st_ctime_ns,
+                attr(path, "system.posix_acl_default"), attr(path, "system.posix_acl_access"))
+    before = [snapshot(p) for p in paths]
+    m.BASE, m.UID = root / "corrected", uid
+    config = m.BASE / "result/home/config"
+    access, previous_mode = attr(config, "system.posix_acl_access"), config.stat().st_mode
+    assert attr(config, "system.posix_acl_default") == acl and not list(config.iterdir())
+    result = m.prepare_fixture_config(config.lstat())
+    assert result["changed"] and result["accessAclUnchanged"]
+    assert attr(config, "system.posix_acl_default") is None and attr(config, "system.posix_acl_access") == access
+    assert config.stat().st_mode == previous_mode and journal(m.BASE) == 0o644
+    assert before == [snapshot(p) for p in paths]
+    m.BASE = root / "unknown"; config = m.BASE / "result/home/config"
+    other = acl[:16] + b"\xea\x03\x00\x00" + acl[20:]
+    os.setxattr(config, "system.posix_acl_default", other, follow_symlinks=False)
+    before_unknown = snapshot(config)
+    try: m.prepare_fixture_config(config.lstat())
+    except RuntimeError: pass
+    else: raise AssertionError("Unknown ACL accepted")
+    assert snapshot(config) == before_unknown and not list(config.iterdir())
+    print("Real Linux exact inherited ACL: 0666 control -> 0644 corrected; access/ancestors/sibling unchanged; unknown refused")
+finally:
+    os.umask(original_mask)
+'''
+        with tempfile.TemporaryDirectory(prefix="creator-fixture-config-acl-") as folder:
+            result = subprocess.run([sys.executable, "-I", "-S", "-B", "-c", worker, M.__file__, folder],
+                                    stdin=subprocess.DEVNULL, capture_output=True, timeout=20)
+        if result.returncode == 77:
+            self.assertEqual(result.stdout, b"")
+            self.assertEqual(result.stderr, b"SKIP: current UID is unavailable as a fixture group; no ownership override attempted\n")
+            self.skipTest("Current UID is not an available fixture group; no privilege or system group changes attempted")
+        self.assertEqual(result.returncode, 0, result.stderr.decode("utf8", errors="replace"))
+        self.assertIn(b"0666 control -> 0644 corrected", result.stdout)
+
+    def test_real_acl_worker_establishes_matching_group_or_explicitly_skips_without_privilege(self):
+        tree = ast.parse(Path(__file__).read_text())
+        method = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
+                      and n.name == "test_real_linux_inherited_exact_acl_0666_then_controlled_config_0644_with_surroundings_unchanged")
+        worker = ast.parse(next(n.value.value for n in method.body if isinstance(n, ast.Assign)
+                                and any(isinstance(t, ast.Name) and t.id == "worker" for t in n.targets)), feature_version=(3, 10))
+        uid = next(n for n in worker.body if isinstance(n, ast.Assign) and ast.unparse(n.targets[0]) == "uid")
+        gate = next(n for n in worker.body if isinstance(n, ast.If) and "os.getgroups()" in ast.unparse(n.test))
+        code = compile(ast.Module(body=[uid, gate], type_ignores=[]), "real-acl-fixture-group-admission", "exec")
+        for owner, group, supplementary, skipped in ((1000, 1000, [], False), (1000, 2000, [1000], False),
+                                                       (0, 2000, [], False), (1000, 2000, [], True)):
+            stderr = io.StringIO()
+            namespace = {"os": SimpleNamespace(geteuid=lambda: owner, getegid=lambda: group, getgroups=lambda: supplementary),
+                         "sys": SimpleNamespace(stderr=stderr)}
+            with self.subTest(owner=owner, group=group, supplementary=supplementary):
+                if skipped:
+                    with self.assertRaises(SystemExit) as caught: exec(code, namespace)
+                    self.assertEqual(caught.exception.code, 77)
+                    self.assertEqual(stderr.getvalue(), "SKIP: current UID is unavailable as a fixture group; no ownership override attempted\n")
+                else:
+                    exec(code, namespace)
+                    self.assertEqual(stderr.getvalue(), "")
+                self.assertEqual(namespace["uid"], owner)
+        cases = next(n for n in worker.body if isinstance(n, ast.For) and ast.unparse(n.target) == "case")
+        parts = next(n for n in cases.body if isinstance(n, ast.For))
+        self.assertEqual(ast.literal_eval(parts.iter), ("result", "result/home", "result/home/config"))
+        self.assertEqual([ast.unparse(n) for n in parts.body], ["path = base / part", "path.mkdir(mode=448)",
+            "os.chown(path, uid, uid, follow_symlinks=False)", "assert (path.lstat().st_uid, path.lstat().st_gid) == (uid, uid)"])
+        calls = [n for n in ast.walk(worker) if isinstance(n, ast.Call) and ast.unparse(n.func) == "os.chown"]
+        self.assertEqual(len(calls), 1)
+        self.assertLess(worker.body.index(gate), worker.body.index(cases))
+        self.assertLess(worker.body.index(cases), next(i for i, n in enumerate(worker.body) if isinstance(n, ast.Try)))
+
+
 class InitialRootCreationContext(unittest.TestCase):
     @staticmethod
     def launch_node():
