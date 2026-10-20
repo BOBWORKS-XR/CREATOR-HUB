@@ -46,29 +46,173 @@ not approval of untested packages or a publication receipt.
 
 ### Current Evidence, 2026-10-20
 
-- Latest production packaging checkpoint: portable run `39352300183` passed.
+- Read-only publication audit confirms public Windows 0.1.14 skips release rows
+  without both Windows descriptor/signature assets. A future Linux-only release
+  must not add Windows metadata or replace public Windows bytes just to satisfy
+  an old publication check. The existing feed checker requires Windows metadata;
+  Linux-specific qualification and a fresh shared 256 KiB feed-budget check are
+  still required before any Linux-only publication. No publication is implied.
+- Source `e0af866` corrects two Linux migration blockers reproduced in native
+  run `39387608752` before authentication: an unsupported Claude Desktop adapter
+  stays explicit unknown GUI-integration risk, and the original strict cleanup
+  plan is bound only after approved connection transfer finishes and identity,
+  idle and settings checks pass. Focused tests and independent review passed;
+  actual cancellation/approved retirement need a new package containing it.
+- Linux automatic registry source `8383123` adds cache-only background discovery
+  and an explicit helper-download consent action without changing the frozen
+  Setup module. The actual pinned helper passed sealed-memfd execution and an
+  empty JSON list in run `39392221889`. Nonempty current Hub-generated discovery
+  and pagination remain unqualified. Linux-only feature run `39394732042` passed
+  the combined source, all strict Clippy profiles and real helper-preparation
+  permission cases. Root profiles passed 485/504/504 tests with 16 explicit
+  ignores each; both exact live helper tests were separately executed and passed.
+  These overlapping counts are not a total of unique tests.
+- Actual vendor probe `39398536204` registered 13 disposable projects and returned
+  all 13 with both the current JSON query and `--all`; outputs were byte-identical.
+  All 39 authored files and their identities were preserved. The vendor changed
+  project-root directory timestamps, so the strict overall inventory gate refused
+  completion as designed. This establishes that pagination case, not genuine Hub
+  UI discovery, and does not justify changing Root's query arguments.
+- Flatpak run `39388368847` refused before any input because focus was not the
+  exact owned target window. The cause is unknown; no focus exception is added.
+  Exact temporary trust cleanup passed. Diagnostic-only source `3a7dc04` passed
+  preflight `39394698216`; native capture `39395026033` proved stable focus on
+  the launcher's direct child, with the same XRes client, PID, start time and
+  image identity as its parent dialog. A reviewed same-client direct-child
+  correction subsequently passed the native disclosure Cancel and missing-host
+  scenarios. Source `fd856a1` passed data/signature preflight `39406514239` and
+  real platform portal capture in `39407350050`, including the exact signed
+  launcher, one fixed URL, one protected capture worker and normal launcher exit.
+  Temporary trust restoration passed. The run then stopped before Native Setup:
+  Python 3.10's HTTP/1.0 CONNECT readiness client is incompatible with the lab
+  proxy's HTTP/1.1 contract. This is a harness blocker, not a qualified bootstrap
+  or evidence of a product network failure. The older Root remains diagnostic
+  only; activation, migration and update/restart still need final bytes.
+- Official signed Unity Hub 3.22.3 capture `39408054247` retained the owned first
+  bitmap: one color and not rendered. AX was unavailable at that point; a later
+  exact-window guard refused before a second sample. The captured evidence does
+  not establish why that window changed, a GPU defect, account readiness or
+  genuine current-registry compatibility. No sandbox override or input was used.
+- User decision: hold 0.1.16 for automatic current Unity Hub project-registry
+  discovery on Linux as well as complete install/update/restart and Flatpak
+  qualification. Saved/manual project support alone does not satisfy this gate.
+  Reuse the existing pinned helper and native download consent, keep background
+  discovery cache-only, and preserve the frozen private module payload.
+- Native update testing exposed a real Linux cache-creation mismatch: default
+  directory modes can be group/other-writable while the signed deployment
+  guard correctly refuses writable ancestry. Source `1041e91` creates a private
+  sibling updater cache with explicit 0700 modes, noncreating lookup, held-FD
+  identity checks and refusal of unsafe existing directories without changing
+  their permissions. Existing settings, caches and portable generations remain
+  untouched. Independent review, formatting and focused source tests passed.
+  With a test-fixture-only creation-mode correction, source `a35d47e` passed
+  native Linux run `39385900709`: strict Clippy profiles, all test suites and
+  real inherited-ACL/umask child tests. New package qualification remains
+  pending. The older `ff305353` package evidence below cannot qualify this fix.
+- Migration-cancel run `39383336323` preserved exact settings, client entries,
+  project content and the original empty operation journal. The compact Home
+  list showed selected-project and MCP bridge badges, and an owned nonblank
+  bitmap was retained. Hub closed normally. The controller then refused a
+  terminal WebKit test backend during disposal; normal reopen and the complete
+  migration scenario remain unaccepted. No product change or process-permission
+  exception is justified by this harness failure.
+- The reviewed post-close pidfd correction and shared fresh root inventory
+  are in source `1944012`. Against unchanged `ff305353` installer bytes, native
+  migration-cancel run `39386825051` passed cancellation, exact protected-state
+  preservation, normal closure and normal reopen. This qualifies that scenario
+  only, not approved retirement or a future discovery/cache package.
+- Flatpak controller source `8d12a93` passed actual Linux data/signature
+  preflight `39385780718`, including the complete controller and input-helper
+  tests. No candidate was executed; host installation and warm activation
+  remain unaccepted. The exact signed launcher producer is unchanged.
+- Incremental Visual Scripting editing is separately assessed in
+  [its implementation checklist](INCREMENTAL-VISUAL-SCRIPTING.md). The tools are
+  not implemented or enabled in the frozen module payload. Do not expand this
+  release's claims from the new disposable API fixture or existing graph tests.
+- The Deck's exact AppImage exited normally with direct Root exit code zero
+  after the user closed it. Both captured log streams reached EOF without
+  truncation or a crash signal. This is startup/graphics-log and normal-exit
+  evidence, not rendered pixels, bootstrap, update/restart or complete Flatpak
+  acceptance. Receipt SHA-256:
+  `36aa1191c10dc33c9d214a6b171c3d5f53fea645f5d7cd55768111dc1273b418`.
+- Earlier packaged source is `ff3053539e96d3b6af5612a8308d4bda7af773e5`;
+  it lacks the newer cache, discovery and migration corrections above.
+  Assembly `39362673838` passed. Fresh installation and normal close/reopen
+  `39364966306` passed against these exact bytes. Manual upgrade from the old
+  public Linux 0.1.12 package and normal close/reopen `39365628299` also passed.
+  Protected project files, MCP/Setup settings, unrelated client entries and
+  current preferences were preserved. The old Linux updater was Windows-only;
+  this is manual incoming-upgrade proof, not an automatic incoming update.
+  Its Root input trees exactly match the successful native feature tests
+  `39358837285`; only the retirement helper and its guard regression changed.
+  Original ZIP and selected resource bytes were independently checked, and
+  offline DEB/resource inspection `39364292874` passed. Native migration and
+  outgoing signed-update/restart qualification remain pending.
+- Replacement portable producer `39365532397` passed. Its original ZIP and
+  seven selected output members were independently checked. This packages the
+  same final Root source without recompiling it. Its exact manifest and derived
+  descriptor were signed with the existing catalogue key and verified offline,
+  using independent plan `3547e8b0`. Native portable and Flatpak acceptance are
+  still pending; signed metadata does not establish either.
+- Original production portable run `39352300183` passed.
   Its original ZIP, seven output files and all 373 transport inventory entries
   were independently checked. The Native Support alias and ordinary AppImage
   are byte-identical. The private qualification manifest/descriptor were signed
   with the existing catalogue key and independently verified; all installation,
-  update, restart, migration and release acceptance flags remain false.
+  update, restart, migration and release acceptance flags remain false. This
+  older candidate is not final: a native reopen test found a false migration
+  offer after completed read-only operation history, corrected in `53cccf5`.
 - Production Flatpak launcher run `39348943839` passed. The original ZIP,
   exact three files, source binding and imported OSTree inventory were checked.
   This establishes the bundle, not native-host installation or operation.
 - Actual private 0.1.17 assembly `39352480021` passed from `75a99ff`; its original
   ZIP and eight output roles were checked. This is genuinely compiled target
   code for outgoing-update tests, not a renamed 0.1.16 binary. It must never be
-  published or counted as a completed update/restart test.
-- Migration run `39355492887` passed the exact seven-directory CI fixture
-  correction, then refused `/usr/share/dict` while checking system package
-  metadata, before GUI actions or a retirement transaction. That path's actual
-  metadata has not yet been captured; its cause remains unverified. Production
-  guards and system metadata are unchanged. Fresh installation, public-0.1.12
-  manual upgrade, full migration and signed-update native tests remain open.
-- Clean source CI `39349309933` passed all six non-Mac jobs. The Deck is again
-  reachable in Desktop Mode with GNOME Platform 50; no Hub installation or
-  runtime acceptance on that device is implied. Windows published bytes and the
-  user's installed Windows app remain unchanged. No Mac jobs were run.
+  published or counted as a completed update/restart test. Its actual DEB and
+  descriptor were signed and independently verified for private testing only.
+  Portable producer `39358518825` also passed. Its real resource-container
+  derivation, source/API bindings and signatures now pass preflight; exact
+  private manifest/descriptor signatures were created and checked. The source
+  hold regressions and complete signing suite passed 38 tests, with no failures
+  or skips. This still does not qualify native update/restart or public 0.1.17.
+- Migration `39360073526` captured an overstrict helper walk through unrelated
+  `/var/log` permissions. The scoped correction `1c3b673` passed independent
+  source review and actual Ubuntu helper fixtures `39362524877`; Creator path,
+  alias, complete-database and no-follow protections remain. This is not full
+  privileged migration acceptance. The corrected driver readiness was reviewed
+  and exercised in `39366395675`: Root launched, but the same-UID fixture could
+  not inspect one process executable. Exact identity capture is retained; that
+  process was subsequently attributed by held kernel image and parent identity
+  to systemd's PAM session child in `39369292945`. A fresh, nonce-bound root
+  inventory then passed 57 observations in `39371023590` before refusing a
+  terminal process. The terminal-state harness correction is under independent
+  review. No permission exception or retirement acceptance is implied.
+- Outgoing signed DEB update `39367391864` passed real signature admission and
+  verifier construction, then refused fixture ancestry before installation.
+  The earlier missing evidence-parent failure `39365944883` and both original
+  reports are retained. These are test-harness failures, not accepted update
+  cancellation, authorization or automatic restart.
+  Later captures identified and corrected the disposable runner's `/opt`
+  permissions and root package-tool PATH without weakening product checks.
+  Run `39373718360` passed baseline package installation and signature checks,
+  then stopped before GUI launch because the session changed only the synthetic
+  `XDG_CONFIG_HOME` path. The exact guard remains enabled. Its final receipt
+  verifies removal of the temporary certificate and exact original trust
+  restoration. This is not accepted update cancellation or restart.
+- The Deck is reachable in Desktop Mode with GNOME Platform 50. All 35 pure
+  verifier tests passed there from a checked source-only snapshot, with zero
+  skips. Eight owned-alias cleanup regressions also passed on the Deck, including
+  real held symlinks. The exact final AppImage mapped an owned window in Desktop
+  Mode using its packaged X11 backend; captured startup output contained no EGL
+  display or GTK decoration failure. The user subsequently closed it normally;
+  pixels, cold bootstrap, update/restart and Flatpak remain unaccepted there.
+  Windows published bytes and the installed Windows app remain unchanged. No
+  Mac jobs were run.
+- Final Flatpak data/signature inspection `39372222973` passed. Native run
+  `39372656055` refused accessibility input because the bus peer was the Flatpak
+  proxy, not the launcher process. No button action occurred. Bounded proxy and
+  trust-restoration diagnostics are being added; neither attribution nor native
+  acceptance may be inferred from a matching application name or user ID.
 
 The entries below retain earlier checkpoints and their narrower scopes.
 
