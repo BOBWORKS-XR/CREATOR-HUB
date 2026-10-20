@@ -17,6 +17,7 @@ import re
 import secrets
 import select
 import signal
+import socket
 import stat
 import subprocess
 import sys
@@ -79,6 +80,8 @@ TLS_TRUST = Path("/etc/ssl/certs")
 TLS_CONFIG = (b"[req]\nprompt=no\ndistinguished_name=dn\nx509_extensions=ext\n[dn]\nCN=api.github.com\n"
               b"[ext]\nsubjectAltName=DNS:api.github.com,DNS:github.com\nbasicConstraints=critical,CA:TRUE\n"
               b"keyUsage=critical,digitalSignature,keyEncipherment,keyCertSign\nextendedKeyUsage=serverAuth\n")
+HTML_SCENARIO = "deb-native-cancel"
+HTML_DRIVER_VERSION = "2.1.0"
 
 
 def require(value, message):
@@ -573,10 +576,16 @@ def request(env, profile_raw, api_raw):
     node = Path(env["CONTROLLER_NODE"])
     node_raw = read(node, 128 * 1024**2, mode=0o755)
     require(node_raw[:4] == b"\x7fELF", "Native workflow-provisioned Node executable required")
-    return {"schemaVersion": 1, "scenario": scenario, "context": {key: env[key] for key in ENVIRONMENT}, "nodeImage": pin(node_raw),
+    result = {"schemaVersion": 1, "scenario": scenario, "context": {key: env[key] for key in ENVIRONMENT}, "nodeImage": pin(node_raw),
             "profile": pin(profile_raw), "api": pin(api_raw), "verifier": verifier,
             "sources": {name: pin(read(HERE / name, 2 * 1024**2)) for name in SOURCES},
             **FALSE}
+    if scenario == HTML_SCENARIO:
+        driver = Path(env["RUNNER_TEMP"]) / "native-linux-production-016-driver/bin/tauri-driver"
+        body = read(driver, 64 * 1024**2, mode=0o755)
+        require(body[:4] == b"\x7fELF", "Native pinned-workflow WebDriver tool required")
+        result["htmlDriver"] = {"version": HTML_DRIVER_VERSION, "pin": pin(body)}
+    return result
 
 
 def private_target_qualification():
@@ -738,6 +747,11 @@ def outcome(scenario, evidence):
     require(evidence.get("privateTargetQualification") == private_target_qualification()
             and evidence.get("oldRetirementHelperRestored") is (scenario == "deb-approve"), "Private target must disclose the old helper; no fix-retention/public017 qualification")
     require(scenario in SCENARIOS and all(evidence.get(n) is True for n in ("initial16Verified", "nativeConfirmationObserved", "settingsPreserved", "runtimeSurvived", "normalFinalClose")), "Full initial/consent/preservation/close proof required")
+    if scenario == HTML_SCENARIO:
+        html = evidence.get("htmlWebDriver", {})
+        require(html.get("probePassed") is True and type(html.get("inputCountAtProbe")) is int and html["inputCountAtProbe"] == 0
+                and html.get("detached") is True and html.get("toolsClosedAfterRootExit") is True,
+                "Attached HTML compatibility and independent normal Root close required")
     if scenario.endswith("native-cancel"):
         require(evidence.get("nativeActions") == ["Not now"] and evidence.get("systemActions") == []
                 and evidence.get("oldSelectionUnchanged") is True and evidence.get("initialRootSurvived") is True
@@ -1252,6 +1266,295 @@ class Surface:
     def close(self):
         self.recheck(full=True)
         self.x11.close_window(self.window, self.helper.bound_window(self.request, self.x11))
+
+
+def html_automation_environment(env):
+    require(not any(key.startswith(("TAURI_", "WEBKIT_")) for key in env), "No inherited automation configuration")
+    # Reserve no authority: the released reservation must subsequently be owned by the exact Root.
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as reservation:
+        reservation.bind(("127.0.0.1", 0))
+        port = reservation.getsockname()[1]
+    require(type(port) is int and 1024 <= port <= 65535 and port not in (4444, 4445), "One private automation endpoint required")
+    return {**env, "TAURI_WEBVIEW_AUTOMATION": "true", "WEBKIT_INSPECTOR_SERVER": "127.0.0.1:" + str(port)}, port
+
+
+def bind_html_owner(surface):
+    """Bind only the native container and WebKit root, never enumerate HTML descendants."""
+    frame = wait(surface.native_frame)
+    reference = surface.references.identity(frame, surface)
+    require(surface.references.window in (None, reference), "Native frame wire identity changed")
+    surface.references.window = reference
+    pending, seen, web_roots = [(frame, 0)], set(), []
+    while pending:
+        node, depth = pending.pop()
+        require(depth < 8 and len(seen) < 16, "Bounded native WebView ownership envelope required")
+        node.clear_cache(); surface.node(node)
+        reference = tuple(surface.references.identity(node, surface))
+        require(reference not in seen, "Cyclic native WebView envelope")
+        if depth:
+            parent = node.get_parent()
+            require(parent is not None and tuple(surface.references.identity(parent, surface)) in seen,
+                    "Native WebView parent escaped bound frame")
+        seen.add(reference)
+        if node.get_process_id() != surface.pid:
+            require(surface.renderer is not None and node.get_process_id() == surface.renderer["pid"], "Unbound WebKit owner")
+            web_roots.append(reference)
+            continue
+        require(node.get_toolkit_name() == "gtk" and int(node.get_role()) in (20, 23), "Unknown native container before WebView")
+        pending.extend((child, depth + 1) for child in reversed(surface.helper.fresh_close_children(node, 8)))
+    require(len(web_roots) == 1 and surface.renderer is not None, "One bound WebKit root required")
+    surface.recheck(full=True)
+    return {"frame": surface.references.window, "webRoot": list(web_roots[0]), "renderer": surface.renderer}
+
+
+class HtmlPages:
+    """Standard WebDriver elements only; attach to the original Popen, never launch a replacement."""
+    def __init__(self, surface, original, pages, driver_pin, port, env, evidence):
+        self.surface, self.original, self.pages = surface, original, pages
+        self.driver_pin, self.port, self.env, self.evidence = driver_pin, port, env, evidence
+        self.child = self.logs = self.backend = self.driver_record = None
+        self.detached, self.probed = False, False
+        self.started = self.probe_started = self.detach_started = self.tools_stopping = self.input_unknown = False
+        self.session_sent = self.detach_sent = False
+        self.armed_element = None
+        self.expected_modal = None
+        self.d = pages.Driver()
+        self.d.guard = self.guard
+        self.transport = self.d.request
+        self.d.request = self.request
+
+    def request(self, method, route, payload=None, limit=131072):
+        require(not self.detached, "Detached HTML adapter cannot send commands")
+        if (method, route) == ("GET", "/status"):
+            require(not self.session_sent and payload is None, "Status is only a pre-attachment read")
+        elif (method, route) == ("POST", "/session"):
+            require(not self.session_sent and not self.d.session and payload == {"capabilities": {"alwaysMatch": {
+                "webkitgtk:browserOptions": {"targetAddress": "127.0.0.1:" + str(self.port)}, "unhandledPromptBehavior": "ignore"}}},
+                "One target-only attachment capability body required")
+            self.session_sent = True
+        else:
+            require(self.session_sent and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", self.d.session), "One established HTML session required")
+            prefix = "/session/" + self.d.session
+            require(route == prefix or route.startswith(prefix + "/"), "Foreign HTML session route refused")
+            suffix = route[len(prefix):]
+            if method == "GET":
+                require(payload is None and (suffix in ("/window/handles", "/title", "/url") or re.fullmatch(
+                    r"/element/[A-Za-z0-9_-]{1,128}/(?:text|name|displayed|enabled|attribute/(?:type|open|aria-busy|disabled|aria-pressed))", suffix)),
+                    "Only fixed HTML metadata reads permitted")
+            elif (method, suffix) == ("POST", "/elements"):
+                require(type(payload) is dict and set(payload) == {"using", "value"} and payload["using"] == "css selector"
+                        and type(payload["value"]) is str and 0 < len(payload["value"]) <= 512, "Bounded CSS-only element lookup required")
+            elif method == "POST" and self.armed_element is not None and suffix == "/element/" + self.armed_element + "/click":
+                require(self.probed and self.input_unknown and payload == {}, "One armed HTML input required")
+                self.armed_element = None
+            elif method == "DELETE" and not suffix:
+                require(self.detach_started and not self.detach_sent and payload is None, "One explicit remote detach only")
+                self.detach_sent = True
+            else:
+                raise RuntimeError("WebDriver route outside finite HTML adapter")
+        return self.transport(method, route, payload, limit=limit)
+
+    def endpoint_ready(self):
+        require(self.original.pid == self.surface.pid and self.original.poll() is None, "Original owned Popen changed/exited")
+        self.surface.recheck(full=True)
+        current = windows(self.surface.x11)
+        require(self.surface.window in current and len(current) <= (2 if self.expected_modal else 1), "Foreign/modal window before HTML operation")
+        for window in current:
+            if window == self.surface.window:
+                continue
+            require(self.expected_modal == "Update Creator Hub", "Unexpected HTML/native transition")
+            request = self.surface.helper.Request("snapshot", self.surface.pid, self.surface.record["startTime"],
+                self.surface.record["executable"], self.surface.record["kernelImageSha256"], window, self.expected_modal, "ALERT",
+                gtk_message_info_frame=self.surface.x11.frame_rectangle(window))
+            observed = self.surface.helper.bound_window(request, self.surface.x11)
+            previous = self.evidence.get("expectedNativeModal")
+            require(previous is None or observed == previous, "Expected native confirmation changed")
+            self.evidence["expectedNativeModal"] = observed
+        return self.pages.listener(self.surface.pid, self.port)
+
+    def root_guard(self):
+        require(self.endpoint_ready(), "Automation endpoint is not owned by the bound Root")
+
+    def tool_guard(self):
+        require(self.child is not None and self.child.poll() is None
+                and kernel_record(self.child.pid, self.surface.native, self.surface.helper) == self.driver_record,
+                "Owned WebDriver changed/exited")
+        self.logs.pump()
+        require(not any(row["truncated"] for row in self.logs.metadata().values()), "WebDriver log overflow")
+        if self.backend is not None:
+            require(kernel_record(self.backend["pid"], self.surface.native, self.surface.helper) == self.backend
+                    and self.pages.listener(self.backend["pid"], 4445), "Owned WebKitWebDriver changed/exited")
+
+    def guard(self):
+        self.tool_guard(); self.root_guard()
+        require(self.pages.listener(self.child.pid, 4444), "Owned intermediary listener changed")
+
+    def start(self):
+        require(not self.started, "One HTML attachment attempt only")
+        self.started = True
+        self.evidence.update(probeReadOnly=True, probePassed=False, inputAttempts=[], detached=False, nativeAcceptance=False, **FALSE)
+        self.evidence["phase"] = "native-envelope"
+        self.evidence["ownership"] = bind_html_owner(self.surface)
+        self.evidence["phase"] = "root-endpoint"
+        wait(self.endpoint_ready)
+        driver = BASE / "scripts/tauri-driver"
+        bound(driver, self.driver_pin, 64 * 1024**2, uid=0, mode=0o755)
+        native = self.pages.record("/usr/bin/WebKitWebDriver")
+        require(native["uid"] == native["gid"] == 0 and native["mode"] == 0o755, "Protected WebKitWebDriver required")
+        require(run_tool(["/usr/bin/dpkg", "--verify", "webkit2gtk-driver"]) == b"", "System WebKitWebDriver package differs")
+        self.evidence["phase"] = "driver-launch"
+        self.child = subprocess.Popen([str(driver), "--native-driver", "/usr/bin/WebKitWebDriver"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=self.env)
+        self.logs = self.surface.native.Capture(self.child, BASE / "result", "html-driver")
+        self.driver_record = kernel_record(self.child.pid, self.surface.native, self.surface.helper)
+        require(self.driver_record["parentPid"] == os.getpid() and self.driver_record["uids"] == [UID] * 4
+                and self.driver_record["kernelImageSha256"] == self.driver_pin["sha256"], "Intermediary image/parent/UID differs")
+        def available():
+            self.tool_guard(); self.root_guard()
+            candidates = [row for row in self.pages.subtree(self.child.pid, self.surface.helper, self.surface.native).values()
+                          if row["executable"] == "/usr/bin/WebKitWebDriver" and row["parentPid"] == self.child.pid]
+            require(len(candidates) <= 1 and (self.backend is None or len(candidates) == 1), "Native driver missing or duplicated")
+            if not candidates:
+                return False
+            current = kernel_record(candidates[0]["pid"], self.surface.native, self.surface.helper)
+            require(current["uids"] == [UID] * 4 and current["kernelImageSha256"] == native["sha256"]
+                    and (self.backend is None or current == self.backend), "Native driver image/identity differs")
+            self.backend = current
+            return self.pages.listener(self.child.pid, 4444) and self.pages.listener(current["pid"], 4445)
+        wait(available)
+        self.evidence["phase"] = "driver-status"
+        wait(lambda: self.d.request("GET", "/status")["ready"] is True)
+        # WebKit's targetAddress branch connects instead of calling spawnv. No tauri:options/binary fallback.
+        self.evidence["phase"] = "attach-session"
+        result = self.d.request("POST", "/session", {"capabilities": {"alwaysMatch": {
+            "webkitgtk:browserOptions": {"targetAddress": "127.0.0.1:" + str(self.port)}, "unhandledPromptBehavior": "ignore"}}})
+        self.d.session = result["sessionId"]
+        require(type(self.d.session) is str and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", self.d.session), "Bounded WebDriver session required")
+        self.probe()
+
+    def probe(self):
+        require(not self.probe_started and not self.evidence["inputAttempts"], "One no-input compatibility probe required")
+        self.probe_started = True; self.evidence["phase"] = "probe-document"
+        self.guard()
+        handles = self.d.call("GET", "/window/handles")
+        require(type(handles) is list and len(handles) == 1 and type(handles[0]) is str
+                and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", handles[0]), "One original product document required")
+        require(self.d.call("GET", "/title") == "Creator Hub" and self.d.call("GET", "/url") in ("tauri://localhost", "tauri://localhost/"),
+                "Attached document identity/origin differs")
+        self.evidence["phase"] = "probe-readiness"
+        wait(lambda: self.optional("#platform-status") == "Linux")
+        wait(lambda: self.optional(".footer-version") == "0.1.16")
+        require(self.d.read("#page-title") == "CREATOR HUB" and not self.d.elements("iframe,object,embed"), "Original native document required")
+        self.guard(); phase_processes(self.surface)
+        self.probed = True
+        self.evidence.update(probePassed=True, inputCountAtProbe=0, originalRoot=self.surface.record,
+                             driver=self.driver_record, nativeDriver=self.backend, endpointPort=self.port, phase="probe-complete")
+
+    def optional(self, selector, endpoint="text"):
+        rows = self.d.elements(selector)
+        require(len(rows) <= 1, "Ambiguous fixed HTML control")
+        return self.d.call("GET", "/element/" + rows[0] + "/" + endpoint) if rows else None
+
+    def click(self, selector, actions, label):
+        require(self.probed and not self.detached and not self.input_unknown, "HTML input unqualified/unknown; no retry")
+        controls = {"usage-terms-checkbox": "#usage-terms-checkbox", "usage-terms-continue": "#usage-terms-continue",
+                    "convergence-later": "#convergence-later", "suite-trigger": "#suite-trigger",
+                    "view-mcp": '#suite-menu [data-view="mcp"]', "view-setup": '#suite-menu [data-view="setup"]',
+                    "view-home": '#suite-menu [data-view="hub"]', "hub-update-button": "#hub-update-button"}
+        require(controls.get(label) == selector, "Only finite source-bound HTML actions permitted")
+        element = self.d.element(selector)
+        prefix = "/element/" + element + "/"
+        require(self.d.call("GET", prefix + "name") == ("input" if label == "usage-terms-checkbox" else "button")
+                and self.d.call("GET", prefix + "displayed") is True
+                and self.d.call("GET", prefix + "enabled") is True, "HTML control not actionable/source-bound")
+        if label == "usage-terms-checkbox":
+            require(self.d.call("GET", prefix + "attribute/type") == "checkbox", "Actual terms checkbox required")
+        require(self.d.element(selector) == element, "HTML target changed before input")
+        self.guard()
+        actions.append(label); self.evidence["inputAttempts"].append(label)
+        self.evidence.update(phase="html-input", control=label)
+        self.input_unknown = True
+        self.armed_element = element
+        if label == "hub-update-button":
+            self.expected_modal = "Update Creator Hub"
+        self.d.call("POST", "/element/" + element + "/click", {})
+        self.input_unknown = False
+        self.evidence["phase"] = "html-input-returned"
+
+    def startup(self, home, report):
+        def phase(name): report["startupPhase"] = name
+        actions = report["startupUi"]
+        phase("wait-usage-terms")
+        wait(lambda: self.optional("#usage-terms-dialog", "attribute/open") is not None)
+        phase("usage-terms-checkbox"); self.click("#usage-terms-checkbox", actions, "usage-terms-checkbox")
+        phase("usage-terms-continue"); self.click("#usage-terms-continue", actions, "usage-terms-continue")
+        phase("wait-usage-terms-dismissed"); wait(lambda: self.optional("#usage-terms-dialog", "attribute/open") is None)
+        phase("wait-convergence-offer"); wait(lambda: self.optional("#convergence-dialog", "attribute/open") is not None)
+        wait(lambda: self.optional("#convergence-dialog", "attribute/aria-busy") == "false")
+        require(self.d.read("#convergence-later") == "Not now", "Unexpected migration/recovery action")
+        phase("convergence-later"); self.click("#convergence-later", actions, "convergence-later")
+        phase("wait-convergence-dismissed"); wait(lambda: self.optional("#convergence-dialog", "attribute/open") is None)
+        phase("wait-projects-ready")
+        wait(lambda: self.optional("#view-projects", "attribute/aria-busy") == "false")
+        require(self.d.read("#projects-home-title") == "Projects", "Direct Projects home required")
+        for label in ("Open selected-project", "Open other-project"):
+            selector = '#project-list button[aria-label="' + label + '"]'
+            require(self.d.read(selector, "displayed") is True and self.d.read(selector, "enabled") is True, "Fixture project action unavailable")
+        require(self.d.read("#refresh-projects", "enabled") is True and parse(read(home / PREFS))["autoDownload"] is False,
+                "Projects readiness/preferences differ")
+        phase("complete")
+
+    def direct_pages(self, actions):
+        phase_processes(self.surface)
+        for feature, heading in (("mcp", "Creator Works MCP"), ("setup", "Project Setup")):
+            self.click("#suite-trigger", [], "suite-trigger")
+            selector = '#suite-menu [data-view="' + feature + '"]'
+            self.click(selector, actions, "view-" + feature)
+            prefix = "#feature-" + feature
+            wait(lambda: self.optional(prefix, "displayed") is True and self.optional(prefix, "attribute/aria-busy") == "false", 60)
+            require(self.d.read(prefix + " h2") == heading and self.d.read(prefix + ' [data-field="status"]') == "Ready"
+                    and not self.d.read(prefix + ' [data-field="error"]')
+                    and self.d.read(prefix + ' [data-field="controls"]', "attribute/disabled") is None, "Direct feature not Ready")
+            require(not self.d.elements("iframe,object,embed") and len(self.d.call("GET", "/window/handles")) == 1, "Separate feature document refused")
+            if feature == "mcp":
+                selected = prefix + ' .feature-project[data-selected="true"] .feature-project-select'
+                other = prefix + ' .feature-project[data-selected="false"] .feature-project-select'
+                require(self.d.read(selected, "attribute/aria-pressed") == "true"
+                        and self.d.read(other, "attribute/aria-pressed") == "false"
+                        and self.d.read(selected + " .feature-project-info strong") == "Selected update project"
+                        and self.d.read(other + " .feature-project-info strong") == "Other update project", "Selected MCP project did not survive")
+            phase_processes(self.surface)
+
+    def home(self):
+        self.click("#suite-trigger", [], "suite-trigger")
+        self.click('#suite-menu [data-view="hub"]', [], "view-home")
+        wait(lambda: self.optional("#view-projects", "attribute/aria-busy") == "false")
+        require(self.d.read("#projects-home-title") == "Projects", "Projects home missing")
+
+    def detach(self):
+        require(self.probed and not self.detach_started and not self.input_unknown, "One qualified attachment release only")
+        self.detach_started = True; self.evidence["phase"] = "detach"
+        self.d.call("DELETE", "")
+        self.guard()
+        self.detached = True; self.evidence["detached"] = True
+
+    def finish_tools(self):
+        require(self.detached and not self.tools_stopping and self.original.poll() == 0, "Tool teardown requires independently observed normal Root exit")
+        self.tool_guard()
+        self.tools_stopping = True
+        self.child.terminate(); self.child.wait(timeout=10)
+        self.retain_logs(); self.logs.close(); self.logs = None
+        self.evidence["toolsClosedAfterRootExit"] = True
+
+    def retain_logs(self):
+        self.logs.pump()
+        metadata = self.logs.metadata()
+        self.evidence["logs"] = metadata
+        require(set(metadata) == {"stdout", "stderr"}, "Only owned WebDriver logs permitted")
+        for name, row in metadata.items():
+            raw = read(BASE / "result" / ("html-driver." + name), self.surface.native.MAX_LOG, uid=UID)
+            row["file"] = pin(raw)
+            require(len(raw) == row["retainedBytes"] and row["truncated"] is False, "WebDriver log incomplete/overflowed")
 
 
 def field_text(surface, source_id):
@@ -1870,6 +2173,7 @@ def native_session(env):
               "privateTargetQualification": private_target_qualification(), "oldRetirementHelperRestored": False, **FALSE}
     portable = scenario.startswith("portable-")
     x11, surface, replacement, agent, runtime, wm, initial = helper.X11(), None, None, None, None, None, None
+    html = None
     failure = None
     try:
         wm = subprocess.Popen(["/usr/bin/openbox", "--sm-disable"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -1882,6 +2186,11 @@ def native_session(env):
                    "XDG_DATA_HOME": str(home / "data"), "XDG_CACHE_HOME": str(home / "cache"), "XDG_RUNTIME_DIR": env["XDG_RUNTIME_DIR"],
                    "TMPDIR": env["TMPDIR"], "GDK_BACKEND": "x11", "NO_AT_BRIDGE": "0", "HTTPS_PROXY": proxy,
                    "NO_PROXY": "localhost,127.0.0.1,::1", **{k: env[k] for k in ("DISPLAY", "DBUS_SESSION_BUS_ADDRESS", "XAUTHORITY") if k in env}}
+        if scenario == HTML_SCENARIO:
+            keys(original_request["htmlDriver"], ("version", "pin"))
+            require(original_request["htmlDriver"]["version"] == HTML_DRIVER_VERSION, "Fixed reviewed WebDriver version required")
+            validate_pin(original_request["htmlDriver"]["pin"], 64 * 1024**2)
+            automation_env, automation_port = html_automation_environment(app_env)
         runtime = subprocess.Popen(["/usr/bin/python3", "-I", "-S", "-c", "import sys; sys.stdin.buffer.read()"], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                    env={k: v for k, v in app_env.items() if k not in ("HTTPS_PROXY", "NO_PROXY")})
         unrelated = kernel_record(runtime.pid, native, helper)
@@ -1910,19 +2219,32 @@ def native_session(env):
             old = wait(lambda: one_root_child(parent_pid, expected, executable, native, helper))
         else:
             report["installed16"] = verify_installed(review, "16")
-            initial = subprocess.Popen(["/usr/bin/creator-hub"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=app_env)
+            initial = subprocess.Popen(["/usr/bin/creator-hub"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                       env=automation_env if scenario == HTML_SCENARIO else app_env)
             expected, executable, parent_pid = profile["baseline"]["hub"], "/usr/bin/creator-hub", os.getpid()
             old = phase_identity(kernel_record(initial.pid, native, helper), expected, executable, parent_pid, UID)
         report["initialRoot"] = old; save(BASE / "result/root.json", old)
         old_bus = verify_bus(old, bus, polkit, GLib, portable=portable)
         surface = Surface(old, x11, helper, native, Atspi, manifest=manifest, generation_dir=generation_dir, inventory=inventory)
-        startup_ui(surface, home, first=not portable, actions=report["startupUi"], progress=report)
-        direct_pages(surface, report["initialPageActionAttempts"])
+        if scenario == HTML_SCENARIO:
+            html = HtmlPages(surface, initial, pages, original_request["htmlDriver"]["pin"], automation_port, app_env,
+                             report.setdefault("htmlWebDriver", {}))
+            html.start()  # Mandatory runtime compatibility proof, with zero UI inputs before it returns.
+            html.startup(home, report)
+            html.direct_pages(report["initialPageActionAttempts"])
+        else:
+            startup_ui(surface, home, first=not portable, actions=report["startupUi"], progress=report)
+            direct_pages(surface, report["initialPageActionAttempts"])
         report["initialBitmap"] = phase_bitmap(surface, "initial-bitmap")
         first_journal = journal(home, diagnostics=report["journalDiagnostics"])
-        navigate_home(surface)
-        wait(lambda: field_text(surface, "hub-update-status") in ("Version 0.1.17 is available.", "Version 0.1.17 is ready to install."), 90)
-        require(surface.source("hub-update-button")[0]["enabled"], "Actual Update Hub action is not enabled")
+        if html is not None:
+            html.home()
+            wait(lambda: html.optional("#hub-update-status") in ("Version 0.1.17 is available.", "Version 0.1.17 is ready to install."), 90)
+            require(html.d.read("#hub-update-button", "enabled") is True, "Actual Update Hub action is not enabled")
+        else:
+            navigate_home(surface)
+            wait(lambda: field_text(surface, "hub-update-status") in ("Version 0.1.17 is available.", "Version 0.1.17 is ready to install."), 90)
+            require(surface.source("hub-update-button")[0]["enabled"], "Actual Update Hub action is not enabled")
         before[TERMS] = fingerprint(home / TERMS)
         preserved(home, before)
         old_store = fingerprint(home / STORE / "current.json") if portable else None
@@ -1930,7 +2252,10 @@ def native_session(env):
         generations = set(p.name for p in (home / STORE / "generations").iterdir()) if portable else None
         baseline = children(parent_pid)
         report["initial16Verified"] = True
-        surface.click("hub-update-button", [])
+        if html is not None:
+            html.click("#hub-update-button", [], "hub-update-button")
+        else:
+            surface.click("hub-update-button", [])
         modal = Surface(old, x11, helper, native, Atspi, title="Update Creator Hub", dialog=True)
         report["nativeConfirmationObserved"] = True
         try:
@@ -1939,6 +2264,9 @@ def native_session(env):
         finally:
             modal.bus.close_sync(None)
         wait(lambda: modal.window not in windows(x11), 30)
+        if html is not None:
+            html.expected_modal = None
+            html.guard()
         if scenario in ("deb-auth-cancel", "deb-approve"):
             authorize(surface, agent, agent_record, parent, endpoint, system, GLib, Atspi, polkit, flow, helper, native, secret, report)
         if scenario.endswith("approve"):
@@ -1989,9 +2317,13 @@ def native_session(env):
             else:
                 report["installedAfterCancel"] = verify_installed(review, "16")
             report["oldSelectionUnchanged"] = report["initialRootSurvived"] = True
+            if html is not None:
+                html.detach()  # Remote-session deletion must leave this same Popen alive.
             surface.close(); wait(lambda: initial.poll() is not None)
             require(initial.returncode == 0, "Cancelled original Root/selector did not close normally")
             report["normalFinalClose"] = True
+            if html is not None:
+                html.finish_tools()
         report["after"] = preserved(home, before); report["settingsPreserved"] = True
         require(kernel_record(runtime.pid, native, helper) == unrelated and runtime.poll() is None, "Unrelated EOF-only runtime changed/exited")
         report["runtimeSurvived"] = True
@@ -2014,6 +2346,19 @@ def native_session(env):
                           "axParentDiagnostic": getattr(current, "ax_parent_diagnostic", None),
                           "axSnapshotDiagnostic": getattr(current, "ax_snapshot_diagnostic", None)})
                     current.bus.close_sync(None)
+                except Exception as error:
+                    failure = failure or error
+                    report["captureRefused"] = True
+        if html is not None and html.logs is not None:
+            try:
+                html.evidence["lastRequest"] = html.d.last_request
+                html.retain_logs()
+            except Exception as error:
+                failure = failure or error
+                report["captureRefused"] = True
+            finally:
+                try:
+                    html.logs.close()
                 except Exception as error:
                     failure = failure or error
                     report["captureRefused"] = True
@@ -2715,6 +3060,9 @@ def broker(env):
     verifier_tool, verifier_evidence = offline_verifier(env)
     require(verifier_evidence == sealed["verifier"], "Verifier receipt changed before protected handoff")
     write(BASE / "scripts/verify-package-input", bound(verifier_tool, sealed["verifier"]["tool"]["pin"], 64 * 1024**2, mode=0o755), 0o755)
+    if scenario == HTML_SCENARIO:
+        driver = Path(env["RUNNER_TEMP"]) / "native-linux-production-016-driver/bin/tauri-driver"
+        write(BASE / "scripts/tauri-driver", bound(driver, sealed["htmlDriver"]["pin"], 64 * 1024**2, mode=0o755), 0o755)
     copy_inputs(source, BASE / "inputs", profile)
     stage(BASE / "inputs", env)  # independently repeat ZIP, signature and native package checks as root
     review_raw = read(BASE / "inputs/review.json", 2 * 1024**2, uid=0, mode=0o600)
@@ -2863,6 +3211,7 @@ def export_evidence(env):
     owner = destination.parent.stat().st_uid
     destination.mkdir(mode=0o700); os.chown(destination, owner, owner)
     names = ("broker.json", "request.json", "review.json", "result/report.json", "result/original-ui.json", "result/successor-ui.json", "session.stdout", "session.stderr",
+             "result/html-driver.stdout", "result/html-driver.stderr",
              "result/initial-bitmap/root-window.png", "result/successor-bitmap/root-window.png", "result/bootstrap-failure-ui.json",
              "result/bootstrap-failure-bitmap/root-window.png", "result/transport-diagnostic.json",
              "result/portable-ancestry-before-launch.json", "result/portable-ancestry-after-refusal.json")

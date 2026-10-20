@@ -18,7 +18,7 @@ import sys
 import tarfile
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from types import ModuleType, SimpleNamespace
 import zipfile
 
@@ -1581,6 +1581,11 @@ class Pure(unittest.TestCase):
                         "oldRetirementHelperRestored": scenario == "deb-approve"}
             if scenario.endswith("approve"):
                 evidence.update(dict.fromkeys(("oldNormalExit", "automaticRestartObserved", "installed17Verified", "fresh17UiVersion", "directPagesObserved"), True)); evidence["automaticSuccessor"] = {"pid": 2}
+            if scenario == M.HTML_SCENARIO:
+                evidence["htmlWebDriver"] = dict(probePassed=True, inputCountAtProbe=0, detached=True, toolsClosedAfterRootExit=True)
+                for missing in evidence["htmlWebDriver"]:
+                    incomplete = copy.deepcopy(evidence); incomplete["htmlWebDriver"].pop(missing)
+                    with self.assertRaises(RuntimeError): M.outcome(scenario, incomplete)
             self.assertTrue(M.outcome(scenario, evidence))
             with self.assertRaises(RuntimeError): M.outcome(scenario, {**evidence, "normalFinalClose": False})
             with self.assertRaises(RuntimeError): M.outcome(scenario, {**evidence, "releaseReady": True})
@@ -2669,6 +2674,382 @@ class StartupPartialEvidence(unittest.TestCase):
         pages = [n for n in ast.walk(session) if isinstance(n, ast.Call) and ast.unparse(n.func) == "direct_pages"]
         self.assertEqual(sorted(ast.unparse(n.args[1]) for n in pages),
                          ["report['initialPageActionAttempts']", "report['successorPageActionAttempts']"])
+
+
+class HtmlAttachmentTests(unittest.TestCase):
+    def fixture(self):
+        pages_module = M.load("native-linux-integrated-pages")
+        surface = SimpleNamespace(pid=12, window=20, record={"pid": 12}, recheck=Mock(), native=SimpleNamespace(), helper=object(), x11=object())
+        original = Mock(pid=12); original.poll.return_value = None
+        child = Mock(pid=51); child.poll.return_value = None
+        logs = Mock(); logs.metadata.return_value = {"stdout": {"truncated": False}, "stderr": {"truncated": False}}
+        surface.native.Capture = Mock(return_value=logs)
+        records = {51: dict(pid=51, parentPid=os.getpid(), uids=[M.UID] * 4, kernelImageSha256="a" * 64),
+                   52: dict(pid=52, parentPid=51, uids=[M.UID] * 4, executable="/usr/bin/WebKitWebDriver", kernelImageSha256="b" * 64)}
+        pages = SimpleNamespace(Driver=pages_module.Driver,
+            record=Mock(return_value=dict(uid=0, gid=0, mode=0o755, sha256="b" * 64)),
+            listener=Mock(return_value=True), subtree=Mock(return_value={52: records[52]}))
+        html = M.HtmlPages(surface, original, pages, {"size": 4, "sha256": "a" * 64}, 41000, {"HOME": "/fixed"}, {})
+        state = SimpleNamespace(html=html, surface=surface, original=original, child=child, pages=pages,
+            records=records, logs=logs, requests=[], selectors={}, changed={}, input_error=None, delete_effect=None)
+        def response(request, timeout):
+            self.assertEqual(timeout, 15)
+            route = request.full_url.removeprefix("http://127.0.0.1:4444")
+            body = None if request.data is None else M.parse(request.data)
+            state.requests.append((request.method, route, body))
+            route = route.removeprefix("/session/owned-session")
+            if request.method == "GET" and route == "/status": value = {"ready": True}
+            elif request.method == "POST" and route == "/session": value = {"sessionId": "owned-session"}
+            elif request.method == "GET" and route in ("/window/handles", "/title", "/url"):
+                value = {"/window/handles": ["owned-window"], "/title": "Creator Hub", "/url": "tauri://localhost/"}[route]
+                value = state.changed.get(route, value)
+            elif request.method == "POST" and route == "/elements":
+                selector = body["value"]
+                token = "e-" + hashlib.sha256(selector.encode()).hexdigest()[:16]
+                state.selectors[token] = selector
+                value = [] if selector == "iframe,object,embed" else [{"element-6066-11e4-a52e-4f735466cecf": token}]
+                value = state.changed.get(selector + ":elements", value)
+            elif route.startswith("/element/"):
+                token, endpoint = route[len("/element/"):].split("/", 1)
+                selector = state.selectors[token]
+                if request.method == "POST":
+                    self.assertEqual(endpoint, "click")
+                    if state.input_error is not None: raise state.input_error
+                    value = None
+                elif endpoint == "text":
+                    value = {"#platform-status": "Linux", ".footer-version": "0.1.16", "#page-title": "CREATOR HUB"}.get(selector, "")
+                elif endpoint in ("displayed", "enabled"): value = True
+                elif endpoint == "name": value = "input" if selector == "#usage-terms-checkbox" else "button"
+                elif endpoint == "attribute/type": value = "checkbox"
+                else: raise AssertionError("Unmodeled read endpoint: " + endpoint)
+                value = state.changed.get(selector + ":" + endpoint, value)
+            elif request.method == "DELETE" and route == "":
+                if state.delete_effect is not None: state.delete_effect()
+                value = None
+            else: raise AssertionError("Unmodeled finite WebDriver route: " + route)
+            raw = json.dumps({"value": value}).encode()
+            result = Mock(status=200, headers={"Content-Length": str(len(raw))})
+            result.read.return_value = raw
+            result.__enter__ = Mock(return_value=result); result.__exit__ = Mock(return_value=False)
+            return result
+        html.d.http = SimpleNamespace(open=response)
+        return state
+
+    @contextmanager
+    def native_stubs(self, state):
+        with patch.object(M, "bind_html_owner", return_value={"frame": [":1.1", "/frame"], "webRoot": [":1.2", "/web"]}), \
+                patch.object(M, "windows", return_value=[20]), patch.object(M, "bound", return_value=b"\x7fELF"), \
+                patch.object(M, "run_tool", return_value=b""), patch.object(M.subprocess, "Popen", return_value=state.child), \
+                patch.object(M, "kernel_record", side_effect=lambda pid, *_: copy.deepcopy(state.records[pid])), \
+                patch.object(M, "phase_processes") as inventory, \
+                patch.object(M, "wait", side_effect=lambda check, *args, **kwargs: self.once(check)):
+            yield inventory
+
+    def once(self, check):
+        value = check(); self.assertTrue(value); return value
+
+    def test_no_input_probe_uses_real_driver_http_contract_and_exact_remote_attachment(self):
+        state = self.fixture()
+        with self.native_stubs(state) as inventory:
+            state.html.start()
+        self.assertTrue(state.html.probed); self.assertTrue(state.html.evidence["probePassed"])
+        self.assertEqual(state.html.evidence["inputCountAtProbe"], 0)
+        self.assertEqual(state.html.evidence["inputAttempts"], [])
+        self.assertFalse(state.html.evidence["releaseReady"])
+        sessions = [row[2] for row in state.requests if row[:2] == ("POST", "/session")]
+        self.assertEqual(sessions, [{"capabilities": {"alwaysMatch": {
+            "webkitgtk:browserOptions": {"targetAddress": "127.0.0.1:41000"}, "unhandledPromptBehavior": "ignore"}}}])
+        self.assertFalse(any("/click" in route or "execute" in route or route.endswith("/url") and method == "POST"
+                             for method, route, _ in state.requests))
+        self.assertNotIn("tauri:options", json.dumps(sessions)); self.assertNotIn("binary", json.dumps(sessions))
+        self.assertEqual(state.original.pid, state.surface.pid)
+        inventory.assert_called_once_with(state.surface)
+        self.assertGreaterEqual(state.surface.recheck.call_count, len(state.requests) * 2)
+        with self.assertRaises(RuntimeError): state.html.start()
+
+    def test_foreign_or_missing_document_and_nested_document_fail_before_any_input(self):
+        for route, value in (("/title", "Other app"), ("/url", "https://foreign.example/"),
+                             ("/window/handles", []), ("/window/handles", ["one", "two"]),
+                             ("#page-title:text", "Other"),
+                             ("iframe,object,embed:elements", [{"element-6066-11e4-a52e-4f735466cecf": "foreign"}])):
+            state = self.fixture(); state.changed[route] = value
+            with self.subTest(route=route), self.native_stubs(state), self.assertRaises(RuntimeError): state.html.start()
+            self.assertFalse(state.html.evidence["probePassed"])
+            self.assertEqual(state.html.evidence["inputAttempts"], [])
+            self.assertFalse(any(path.endswith("/click") for _, path, _ in state.requests))
+            with self.assertRaises(RuntimeError): state.html.click("#suite-trigger", [], "suite-trigger")
+
+    def test_finite_route_boundary_refuses_script_navigation_foreign_sessions_and_unarmed_inputs(self):
+        state = self.fixture()
+        with self.assertRaises(RuntimeError): state.html.d.request("GET", "/status")
+        self.assertEqual(state.requests, [])
+        with self.native_stubs(state):
+            state.html.start()
+            before = len(state.requests)
+            prefix = "/session/owned-session"
+            for method, route, payload in (
+                    ("POST", prefix + "/execute/sync", {"script": "forbidden"}),
+                    ("POST", prefix + "/url", {"url": "https://foreign.example"}),
+                    ("POST", prefix + "/actions", {}), ("DELETE", prefix + "/window", None),
+                    ("POST", prefix + "/back", {}), ("GET", "/session/foreign/title", None),
+                    ("GET", prefix + "/element/e/attribute/value", None),
+                    ("POST", prefix + "/element/e/click", {}), ("DELETE", prefix, None),
+                    ("POST", prefix + "/elements", {"using": "xpath", "value": "//button"}),
+                    ("POST", "/session", {"capabilities": {"alwaysMatch": {}}})):
+                with self.subTest(route=route), self.assertRaises(RuntimeError):
+                    state.html.d.request(method, route, payload)
+            self.assertEqual(len(state.requests), before)
+            state.html.detach()
+            after = len(state.requests)
+            with self.assertRaises(RuntimeError): state.html.d.call("GET", "/title")
+            self.assertEqual(len(state.requests), after)
+
+    def test_changed_launch_capabilities_and_uncertain_attach_never_get_a_fallback_attempt(self):
+        for options in ({"binary": "/usr/bin/creator-hub"}, {"args": []}, {"targetAddress": "127.0.0.1:9"}):
+            state = self.fixture()
+            with self.assertRaises(RuntimeError):
+                state.html.d.request("POST", "/session", {"capabilities": {"alwaysMatch": {"webkitgtk:browserOptions": options}}})
+            self.assertEqual(state.requests, []); self.assertFalse(state.html.session_sent)
+        state = self.fixture()
+        original_transport = state.html.transport
+        def interrupted(method, route, *args, **kwargs):
+            if (method, route) == ("POST", "/session"):
+                raise RuntimeError("No compatible remote session")
+            return original_transport(method, route, *args, **kwargs)
+        with self.native_stubs(state), patch.object(state.html, "transport", side_effect=interrupted):
+            with self.assertRaisesRegex(RuntimeError, "No compatible remote session"):
+                state.html.start()
+            self.assertTrue(state.html.session_sent)
+            self.assertFalse(state.html.probed)
+            self.assertEqual(M.subprocess.Popen.call_count, 1)
+            self.assertEqual(M.subprocess.Popen.call_args.args[0],
+                             [str(M.BASE / "scripts/tauri-driver"), "--native-driver", "/usr/bin/WebKitWebDriver"])
+            with self.assertRaises(RuntimeError): state.html.start()
+            self.assertEqual(M.subprocess.Popen.call_count, 1)
+        state.original.terminate.assert_not_called(); state.original.kill.assert_not_called()
+
+    def test_own_root_endpoint_modal_renderer_and_popen_changes_are_fatal(self):
+        for defect in ("pid", "exit", "endpoint", "foreign-window", "modal", "root-or-renderer"):
+            state = self.fixture()
+            if defect == "pid": state.original.pid = 13
+            if defect == "exit": state.original.poll.return_value = 0
+            if defect == "endpoint": state.pages.listener.return_value = False
+            if defect == "root-or-renderer": state.surface.recheck.side_effect = RuntimeError("Bound renderer changed")
+            with self.subTest(defect=defect), patch.object(M, "windows", return_value=[21] if defect == "foreign-window" else [20, 21] if defect == "modal" else [20]):
+                with self.assertRaises(RuntimeError): state.html.root_guard()
+            self.assertEqual(state.requests, [])
+
+    def test_wrong_driver_image_or_parent_never_reaches_session_creation(self):
+        for defect in ("driver-image", "driver-parent", "driver-uid", "native-image", "native-uid"):
+            state = self.fixture()
+            target = state.records[52 if defect.startswith("native") else 51]
+            target[{"driver-image": "kernelImageSha256", "native-image": "kernelImageSha256",
+                    "driver-parent": "parentPid", "driver-uid": "uids", "native-uid": "uids"}[defect]] = (
+                [0] * 4 if defect.endswith("uid") else 999 if defect.endswith("parent") else "c" * 64)
+            with self.subTest(defect=defect), self.native_stubs(state), self.assertRaises(RuntimeError): state.html.start()
+            self.assertFalse(any(route == "/session" for _, route, _ in state.requests))
+
+    def test_only_finite_stable_enabled_actual_html_buttons_receive_one_click(self):
+        for defect in (None, "hidden", "disabled", "tag", "ambiguous", "replacement", "unknown-selector"):
+            state = self.fixture()
+            with self.native_stubs(state): state.html.start()
+            actions = []
+            selector = "#suite-trigger"
+            if defect == "hidden": state.changed[selector + ":displayed"] = False
+            if defect == "disabled": state.changed[selector + ":enabled"] = False
+            if defect == "tag": state.changed[selector + ":name"] = "a"
+            if defect == "ambiguous": state.changed[selector + ":elements"] = [{"element-6066-11e4-a52e-4f735466cecf": "a"}, {"element-6066-11e4-a52e-4f735466cecf": "b"}]
+            if defect == "replacement":
+                with self.native_stubs(state):
+                    original = state.html.d.element(selector)
+                state.html.d.element = Mock(side_effect=[original, "replaced-element"])
+            if defect == "unknown-selector": selector = "#foreign"
+            with self.native_stubs(state):
+                if defect is None:
+                    state.html.click(selector, actions, "suite-trigger")
+                    self.assertEqual(actions, ["suite-trigger"])
+                else:
+                    with self.assertRaises(RuntimeError): state.html.click(selector, actions, "suite-trigger")
+                    self.assertEqual(actions, [])
+            self.assertEqual(sum(route.endswith("/click") for _, route, _ in state.requests), 0 if defect else 1)
+
+    def test_uncertain_input_preserves_exception_and_blocks_another_attempt(self):
+        state = self.fixture()
+        with self.native_stubs(state): state.html.start()
+        error = OSError("synthetic transport interruption"); state.input_error = error; actions = []
+        with self.native_stubs(state):
+            with self.assertRaises(OSError) as raised: state.html.click("#suite-trigger", actions, "suite-trigger")
+            self.assertIs(raised.exception, error)
+            with self.assertRaises(RuntimeError): state.html.click("#suite-trigger", actions, "suite-trigger")
+        self.assertEqual(actions, ["suite-trigger"])
+        self.assertEqual(sum(route.endswith("/click") for _, route, _ in state.requests), 1)
+
+    def test_detach_does_not_close_root_and_tool_signals_require_its_zero_exit(self):
+        state = self.fixture()
+        with self.native_stubs(state):
+            state.html.start(); state.html.detach()
+            self.assertTrue(state.html.detached); self.assertIsNone(state.original.poll())
+            with self.assertRaises(RuntimeError): state.html.detach()
+            with self.assertRaises(RuntimeError): state.html.finish_tools()
+            state.child.terminate.assert_not_called()
+            state.original.poll.return_value = 1
+            with self.assertRaises(RuntimeError): state.html.finish_tools()
+            state.original.poll.return_value = 0
+            with patch.object(state.html, "retain_logs"):
+                state.html.finish_tools()
+        state.original.terminate.assert_not_called(); state.original.kill.assert_not_called()
+        state.child.terminate.assert_called_once(); self.assertTrue(state.html.evidence["toolsClosedAfterRootExit"])
+        for defect in ("exit", "pid", "renderer-or-bus"):
+            state = self.fixture()
+            with self.subTest(defect=defect), self.native_stubs(state):
+                state.html.start()
+                def changed():
+                    if defect == "exit": state.original.poll.return_value = 0
+                    elif defect == "pid": state.original.pid = 13
+                    else: state.surface.recheck.side_effect = RuntimeError("Original renderer/bus changed during detach")
+                state.delete_effect = changed
+                with self.assertRaises(RuntimeError): state.html.detach()
+                self.assertFalse(state.html.detached)
+                with self.assertRaises(RuntimeError): state.html.detach()
+                with self.assertRaises(RuntimeError): state.html.finish_tools()
+                self.assertEqual(sum(method == "DELETE" for method, _, _ in state.requests), 1)
+                state.child.terminate.assert_not_called()
+                state.original.terminate.assert_not_called(); state.original.kill.assert_not_called()
+
+    def test_child_only_automation_configuration_never_mutates_parent_or_copies_unknown_flags(self):
+        original = {"HOME": "/fixed", "HTTPS_PROXY": "http://127.0.0.1:1"}; before = dict(original)
+        reservation = Mock(); reservation.getsockname.return_value = ("127.0.0.1", 41000)
+        reservation.__enter__ = Mock(return_value=reservation); reservation.__exit__ = Mock(return_value=False)
+        with patch.object(M.socket, "socket", return_value=reservation) as opened:
+            actual, port = M.html_automation_environment(original)
+            self.assertEqual(original, before); self.assertEqual(port, 41000)
+            self.assertEqual(actual, {**before, "TAURI_WEBVIEW_AUTOMATION": "true", "WEBKIT_INSPECTOR_SERVER": "127.0.0.1:41000"})
+            reservation.bind.assert_called_once_with(("127.0.0.1", 0))
+            for key in ("TAURI_WEBVIEW_AUTOMATION", "WEBKIT_INSPECTOR_SERVER", "WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS"):
+                with self.assertRaises(RuntimeError): M.html_automation_environment({**original, key: "foreign"})
+            self.assertEqual(opened.call_count, 1)
+
+    def test_owned_log_digests_preserve_eof_counts_and_overflow_refusal(self):
+        for defect in (None, "overflow", "size", "foreign-file"):
+            state = self.fixture(); state.surface.native.MAX_LOG = 262144
+            state.html.logs = state.logs
+            state.logs.metadata.return_value = {name: dict(bytes=3, retainedBytes=3, eof=True, truncated=False)
+                                                for name in ("stdout", "stderr")}
+            if defect == "overflow": state.logs.metadata.return_value["stderr"].update(bytes=300000, truncated=True)
+            if defect == "size": state.logs.metadata.return_value["stderr"]["retainedBytes"] = 2
+            with self.subTest(defect=defect), patch.object(M, "read", side_effect=RuntimeError("owned file replaced") if defect == "foreign-file" else None,
+                                                          return_value=b"log") as reader:
+                if defect:
+                    with self.assertRaises(RuntimeError): state.html.retain_logs()
+                else:
+                    state.html.retain_logs()
+                    self.assertTrue(state.html.evidence["logs"]["stdout"]["eof"])
+                    self.assertEqual(state.html.evidence["logs"]["stdout"]["file"], M.pin(b"log"))
+                self.assertTrue(all(call.kwargs == {"uid": M.UID} and call.args[1] == 262144 for call in reader.call_args_list))
+
+    def test_expected_update_modal_is_xres_bound_not_a_general_second_window_exception(self):
+        state = self.fixture()
+        state.surface.record.update(startTime="100", executable="/usr/bin/creator-hub", kernelImageSha256="a" * 64)
+        state.surface.x11 = Mock(); state.surface.helper = Mock()
+        state.surface.helper.bound_window.return_value = {"pid": 12, "title": "Update Creator Hub", "client": 4}
+        state.html.expected_modal = "Update Creator Hub"
+        with patch.object(M, "windows", return_value=[20, 21]):
+            state.html.root_guard()
+            self.assertEqual(state.surface.helper.Request.call_args.args[1:3], (12, "100"))
+            self.assertEqual(state.surface.helper.Request.call_args.args[-2:], ("Update Creator Hub", "ALERT"))
+            state.surface.helper.bound_window.return_value = {"pid": 13, "title": "Update Creator Hub", "client": 4}
+            with self.assertRaises(RuntimeError): state.html.root_guard()
+        state.html.expected_modal = None
+        with patch.object(M, "windows", return_value=[20, 21]), self.assertRaises(RuntimeError): state.html.root_guard()
+        state.surface.helper.bound_window.side_effect = RuntimeError("foreign PID/title/unmapped/XRes")
+        state.html.expected_modal = "Update Creator Hub"
+        with patch.object(M, "windows", return_value=[20, 21]), self.assertRaises(RuntimeError): state.html.root_guard()
+
+    def test_native_ownership_envelope_stops_at_verified_webkit_root_not_menu_descendants(self):
+        for defect in (None, "foreign", "parent", "cycle", "two-webviews", "unknown-gtk"):
+            frame, filler, web = [Mock() for _ in range(3)]
+            references = {id(frame): [":1.1", "/frame"], id(filler): [":1.1", "/filler"], id(web): [":1.2", "/web"]}
+            for node, pid, role, parent in ((frame, 12, 23, None), (filler, 12, 20, frame), (web, 13, 20, filler)):
+                node.get_process_id.return_value = pid; node.get_role.return_value = role
+                node.get_parent.return_value = parent; node.get_toolkit_name.return_value = "gtk"
+            extra = Mock(); references[id(extra)] = [":1.2", "/extra"]
+            extra.get_process_id.return_value = 13; extra.get_parent.return_value = filler
+            children = {id(frame): [filler], id(filler): [web]}
+            if defect == "foreign": web.get_process_id.return_value = 99
+            if defect == "parent": web.get_parent.return_value = extra
+            if defect == "cycle": children[id(filler)] = [frame]
+            if defect == "two-webviews": children[id(filler)] = [web, extra]
+            if defect == "unknown-gtk": filler.get_role.return_value = 43
+            surface = SimpleNamespace(pid=12, renderer=None, native_frame=Mock(return_value=frame), recheck=Mock(),
+                references=SimpleNamespace(window=None, identity=lambda node, _: references[id(node)]), helper=SimpleNamespace())
+            def bound(node):
+                pid = node.get_process_id()
+                M.require(pid in (12, 13), "Foreign renderer identity")
+                if pid == 13: surface.renderer = {"pid": 13}
+            surface.node = Mock(side_effect=bound)
+            def known_children(node, limit):
+                self.assertEqual(node.get_process_id(), 12, "Never enumerate WebKit HTML, including phantom MENU")
+                return children[id(node)]
+            surface.helper.fresh_close_children = Mock(side_effect=known_children)
+            with self.subTest(defect=defect), patch.object(M, "wait", side_effect=lambda check: check()):
+                if defect:
+                    with self.assertRaises(RuntimeError): M.bind_html_owner(surface)
+                else:
+                    result = M.bind_html_owner(surface)
+                    self.assertEqual(result["webRoot"], [":1.2", "/web"])
+                    self.assertEqual(surface.node.call_count, 3)
+                    self.assertEqual(surface.helper.fresh_close_children.call_count, 2)
+                    surface.recheck.assert_called_once_with(full=True)
+
+    def test_changed_root_renderer_or_bus_at_probe_completion_cannot_enable_clicks(self):
+        state = self.fixture()
+        with self.native_stubs(state) as inventory:
+            inventory.side_effect = RuntimeError("Fresh Root/renderer/bus proof failed")
+            with self.assertRaises(RuntimeError): state.html.start()
+            with self.assertRaises(RuntimeError): state.html.click("#suite-trigger", [], "suite-trigger")
+        self.assertFalse(state.html.probed); self.assertEqual(state.html.evidence["inputAttempts"], [])
+
+    def test_tampered_pinned_driver_stops_before_tool_launch_or_session(self):
+        state = self.fixture()
+        with self.native_stubs(state), patch.object(M, "bound", side_effect=RuntimeError("Independent bytes differ")), \
+                patch.object(M.subprocess, "Popen") as launch, self.assertRaises(RuntimeError):
+            state.html.start()
+        launch.assert_not_called(); self.assertEqual(state.requests, [])
+
+    def test_native_close_is_existing_xres_wm_delete_without_ax_tree_or_html_input(self):
+        surface = object.__new__(M.Surface)
+        surface.recheck, surface.x11 = Mock(), Mock()
+        surface.helper, surface.request, surface.window = Mock(), object(), 20
+        surface.walk = Mock(side_effect=AssertionError("HTML traversal must not be used to close"))
+        surface.snapshot = Mock(side_effect=AssertionError("No HTML snapshot before normal close"))
+        surface.close()
+        surface.recheck.assert_called_once_with(full=True)
+        surface.x11.close_window.assert_called_once_with(20, surface.helper.bound_window.return_value)
+        surface.walk.assert_not_called(); surface.snapshot.assert_not_called()
+        surface.recheck.side_effect = RuntimeError("Root/window/bus changed")
+        with self.assertRaises(RuntimeError): surface.close()
+        self.assertEqual(surface.x11.close_window.call_count, 1)
+
+    def test_workflow_and_scope_keep_other_lanes_and_native_gtk_untouched(self):
+        source = (HERE / "native-linux-production-016-update.py").read_text()
+        workflow = (HERE.parent / ".github/workflows/native-linux-production-016-update.yml").read_text()
+        self.assertIn("if scenario == HTML_SCENARIO:", source)
+        self.assertIn("HTML_SCENARIO = \"deb-native-cancel\"", source)
+        self.assertIn("if: inputs.scenario == 'deb-native-cancel'", workflow)
+        self.assertIn('cargo install tauri-driver --version 2.1.0 --locked --root "$RUNNER_TEMP/native-linux-production-016-driver"', workflow)
+        self.assertLess(workflow.index("Bind independent profile"), workflow.index("cargo install tauri-driver"))
+        self.assertLess(workflow.index("cargo install tauri-driver"), workflow.index("update.py stage"))
+        self.assertIn("webkit2gtk-driver", workflow)
+        self.assertIn('modal.dialog_action(question(portable)', source)
+        self.assertIn('require(initial.returncode == 0, "Cancelled original Root/selector did not close normally")', source)
+        self.assertIn('"result/html-driver.stdout", "result/html-driver.stderr"', source)
+        tree = ast.parse(source)
+        html = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "HtmlPages")
+        literals = [n.value for n in ast.walk(html) if isinstance(n, ast.Constant) and isinstance(n.value, str)]
+        for forbidden in ("/execute/sync", "/execute/async", "__TAURI_INTERNALS__", "invoke", "application", "binary"):
+            self.assertNotIn(forbidden, literals)
+        self.assertNotIn('surface.snapshot(', ast.unparse(html))
+        self.assertIn("range(1, 9)", source)
 
 
 class GenuineGiBinding(unittest.TestCase):
