@@ -2,6 +2,44 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { publishDraft } = require('./publish-hub-draft.cjs');
 const { RELEASE_NOT_VISIBLE } = require('./check-release-feed.cjs');
+
+test('canonical Linux016 dispatch uses only the finite Linux worker', async t => {
+  const linux = require('./publish-linux-016-hub-draft.cjs'), calls = [];
+  const options = { platform: 'linux-x86_64', receipt: 'TEST ONLY', sha256: 'a'.repeat(64), intent: 'TEST ONLY' };
+  const actions = { checkReadiness: () => { throw Error('Windows route must not execute'); } };
+  t.mock.method(linux, 'publish', async (received, services) => {
+    assert.equal(received, options); assert.equal(services, actions); calls.push('linux'); return { ready: false };
+  });
+  assert.equal((await publishDraft('0.1.16', actions, options)).ready, false);
+  assert.deepEqual(calls, ['linux']);
+  await assert.rejects(publishDraft('0.1.17', actions, options), /Only Linux 0.1.16/);
+  assert.deepEqual(calls, ['linux']);
+});
+
+test('canonical Linux source-only or unsupported qualification fails before API, intent or write', async t => {
+  const fs = require('node:fs'), path = require('node:path'), os = require('node:os');
+  const linux = require('./linux-016-release-qualification.cjs'), { fixture } = require('./linux-016-release-qualification.test.cjs');
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'canonical-linux016-held-'));
+  t.after(() => fs.rmSync(directory, { recursive: true }));
+  const receipt = path.join(directory, 'synthetic.json'), bytes = Buffer.from(JSON.stringify(fixture()) + '\n');
+  fs.writeFileSync(receipt, bytes, { flag: 'wx' });
+  const options = { platform: 'linux-x86_64', receipt, sha256: linux.hash(bytes), intent: path.join(directory, 'never-created.json') };
+  const calls = [], services = { request: async () => { calls.push('request'); }, readFeed: async () => { calls.push('feed'); },
+    download: async () => { calls.push('download'); }, publish: async () => { calls.push('write'); } };
+  await assert.rejects(publishDraft('0.1.16', services, options), /Unqualified portable checks/);
+  assert.deepEqual(calls, []); assert.equal(fs.existsSync(options.intent), false);
+  assert.equal(fs.existsSync(options.intent + '.outcome.json'), false);
+});
+
+test('Linux-only publication flags cannot alter the Windows CLI route', () => {
+  const { spawnSync } = require('node:child_process');
+  for (const flags of [['--sha256', 'a'.repeat(64)], ['--intent', 'TEST-NO-WRITE.json']]) {
+    const result = spawnSync(process.execPath, [require.resolve('./publish-hub-draft.cjs'), '0.1.14', '--platform', 'windows-x86_64', ...flags],
+      { encoding: 'utf8', timeout: 10000, windowsHide: true });
+    assert.equal(result.status, 1); assert.match(result.stderr, /Linux publication options require linux-x86_64/);
+    assert.equal(result.stdout, '');
+  }
+});
 test('source-only consolidation blocks the publisher before inspecting or writing GitHub', async () => {
   const calls = [];
   await assert.rejects(publishDraft('0.1.13', {

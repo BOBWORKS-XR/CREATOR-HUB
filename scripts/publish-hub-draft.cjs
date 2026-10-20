@@ -12,10 +12,15 @@ function checkReadiness(version, options) {
   const root = path.resolve(__dirname, '..');
   const manifest = JSON.parse(fs.readFileSync(path.join(root, 'modules/suite.json'), 'utf8'));
   checkSources(root, manifest);
-  return assertReleaseReady(manifest, { version, platform: options.platform, receiptPath: options.receipt });
+  return assertReleaseReady(manifest, { version, platform: options.platform, receiptPath: options.receipt,
+    ...(options.platform === 'linux-x86_64' ? { sha256: options.sha256 } : {}) });
 }
 
 async function publishDraft(version, actions = {}, options = {}) {
+  if (options.platform === 'linux-x86_64') {
+    if (version !== '0.1.16') throw Error('Only Linux 0.1.16 has a finite publication route.');
+    return require('./publish-linux-016-hub-draft.cjs').publish(options, actions);
+  }
   const qualification = await (actions.checkReadiness || checkReadiness)(version, options);
   await (actions.verifyQualification || verifyRemote)(qualification);
   const inspectDraft = actions.checkDraft || checkDraft;
@@ -38,10 +43,12 @@ async function publishDraft(version, actions = {}, options = {}) {
   }
   return { preflight, live, ready: false, next: 'Run Public Hub self-update acceptance for this exact release before promoting latest or announcing readiness.' };
 }
-module.exports = { publishDraft };
+module.exports = { publishDraft, checkReadiness };
 if (require.main === module) {
   (async () => {
-    const { values, positionals } = parseArgs({ options: { receipt: { type: 'string' }, platform: { type: 'string' } }, allowPositionals: true });
+    const { values, positionals } = parseArgs({ options: { receipt: { type: 'string' }, platform: { type: 'string' },
+      sha256: { type: 'string' }, intent: { type: 'string' } }, allowPositionals: true });
+    if (values.platform !== 'linux-x86_64' && (values.sha256 !== undefined || values.intent !== undefined)) throw Error('Linux publication options require linux-x86_64.');
     if (positionals.length !== 1) throw Error('Usage: publish-hub-draft.cjs VERSION --platform windows-x86_64 --receipt REVIEWED-QUALIFICATION');
     return publishDraft(positionals[0], {}, values);
   })().then(result => console.log(JSON.stringify(result)), error => {

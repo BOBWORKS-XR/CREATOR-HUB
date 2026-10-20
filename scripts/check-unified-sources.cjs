@@ -34,6 +34,17 @@ function assertReleaseReady(manifest, intent = {}) {
   validateManifest(manifest);
   if (!intent.receiptPath) throw Error('Source consolidation is not a unified release. Built-in packaging and legacy migration acceptance are still required.');
   const directory = intent.root || root;
+  if (intent.platform === 'linux-x86_64') {
+    if (intent.version !== '0.1.16') throw Error('Only Linux 0.1.16 has a finite qualification route.');
+    const linux = require('./linux-016-release-qualification.cjs');
+    const reviewed = linux.loadQualification(path.resolve(directory, intent.receiptPath), intent.sha256);
+    for (const file of ['package.json', 'src-tauri/tauri.conf.json']) {
+      if (JSON.parse(fs.readFileSync(path.join(directory, file), 'utf8')).version !== intent.version) throw Error('Publication version differs from the current source identity.');
+    }
+    const lines = fs.readFileSync(path.join(directory, 'src-tauri/src/catalog-key.pub'), 'utf8').trim().split(/\r?\n/);
+    if (lines.length !== 2 || !lines[0].startsWith('untrusted comment: ') || lines[1] !== linux.PUBLIC_KEY) throw Error('Production descriptor key differs from the qualification.');
+    return reviewed;
+  }
   const reviewed = qualification.loadQualification(path.resolve(directory, intent.receiptPath), intent);
   for (const file of ['package.json', 'src-tauri/tauri.conf.json']) {
     if (JSON.parse(fs.readFileSync(path.join(directory, file), 'utf8')).version !== intent.version) throw Error('Publication version differs from the current source identity.');
@@ -89,14 +100,16 @@ module.exports = { validateManifest, assertReleaseReady, checkSources, checkRemo
 if (require.main === module) {
   (async () => {
     const { values: flags } = parseArgs({ options: { 'verify-imports': { type: 'boolean' }, release: { type: 'boolean' },
-      receipt: { type: 'string' }, version: { type: 'string' }, platform: { type: 'string' }, 'verify-draft': { type: 'boolean' } } });
-    if (!flags.release && ['receipt', 'version', 'platform', 'verify-draft'].some(key => flags[key] !== undefined)) throw Error('Qualification options require --release.');
+      receipt: { type: 'string' }, version: { type: 'string' }, platform: { type: 'string' }, sha256: { type: 'string' }, 'verify-draft': { type: 'boolean' } } });
+    if (!flags.release && ['receipt', 'version', 'platform', 'sha256', 'verify-draft'].some(key => flags[key] !== undefined)) throw Error('Qualification options require --release.');
+    if (flags.sha256 !== undefined && flags.platform !== 'linux-x86_64') throw Error('Linux qualification digest requires linux-x86_64.');
     const manifest = JSON.parse(fs.readFileSync(path.join(root, 'modules/suite.json'), 'utf8'));
     const result = checkSources(root, manifest);
     if (flags['verify-imports']) verifyImports(root, manifest);
     if (flags.release) {
-      const reviewed = assertReleaseReady(manifest, { receiptPath: flags.receipt, version: flags.version, platform: flags.platform });
-      result.publication = flags['verify-draft'] ? await qualification.verifyRemote(reviewed)
+      const reviewed = assertReleaseReady(manifest, { receiptPath: flags.receipt, version: flags.version, platform: flags.platform, sha256: flags.sha256 });
+      const verifier = flags.platform === 'linux-x86_64' ? require('./linux-016-release-qualification.cjs') : qualification;
+      result.publication = flags['verify-draft'] ? await verifier.verifyRemote(reviewed)
         : { version: reviewed.version, platform: reviewed.platform, scope: 'local-qualification-only', ready: false };
     }
     console.log(JSON.stringify(result));
