@@ -926,7 +926,14 @@ class Session:
                 and self.native.native_process(self.owned["pid"], self.helper) == self.owned and self.pages.listener(self.child.pid, 4444), "Owned process/socket changed")
         self.backend_guard()
         self.evidence["processSamples"] = self.evidence.get("processSamples", 0) + 1
-        self.evidence["lastNativeProcesses"] = native_process_inventory(self.native, self.helper)
+        try:
+            self.evidence["lastNativeProcesses"] = native_process_inventory(self.native, self.helper)
+        except PermissionError as error:
+            try:
+                self.evidence["processInventoryRefusal"] = inventory_permission_capture(error, self.helper)
+            except Exception as capture_error:
+                self.evidence["processInventoryRefusal"] = {"errno": error.errno, "readOnly": True, "stable": False, "unavailable": type(capture_error).__name__}
+            raise
 
     def guard(self):
         self.process_guard()
@@ -1091,6 +1098,46 @@ def native_process_inventory(native, helper):
         found.append({"pid": identity["pid"], "startTime": identity["startTime"], "executable": identity["executable"],
                       "argvSha256": digest(command), "legacyBackend": False})
     return sorted(found, key=lambda row: row["pid"])
+
+
+def inventory_permission_capture(error, helper):
+    result = {"errno": error.errno, "readOnly": True, "stable": False, "before": None, "after": None}
+    match = re.fullmatch(r"/proc/([1-9][0-9]{0,9})/exe", str(error.filename))
+    if not match:
+        return {**result, "unavailable": "Unexpected failed proc path"}
+    result["pid"] = pid = int(match[1])
+    path, directory = Path(f"/proc/{pid}"), None
+    try:
+        directory = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+        def read(leaf, limit):
+            before = os.stat(leaf, dir_fd=directory, follow_symlinks=False)
+            require(stat.S_ISREG(before.st_mode) and before.st_nlink == 1 and 0 <= before.st_size <= limit, "Nonordinary proc observation")
+            with os.fdopen(os.open(leaf, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK, dir_fd=directory), "rb") as stream:
+                require(metadata_stamp(os.fstat(stream.fileno())) == metadata_stamp(before), "Proc observation replaced before read")
+                raw = stream.read(limit + 1)
+                require(len(raw) <= limit and metadata_stamp(os.fstat(stream.fileno())) == metadata_stamp(before), "Proc observation changed/oversized")
+            require(metadata_stamp(os.stat(leaf, dir_fd=directory, follow_symlinks=False)) == metadata_stamp(before), "Proc observation pathname changed")
+            return raw
+        for phase in ("before", "after"):
+            info = os.fstat(directory)
+            require(stat.S_ISDIR(info.st_mode) and metadata_stamp(info) == metadata_stamp(path.lstat()), "Proc directory identity changed")
+            process = read("stat", 4096).decode("utf-8")
+            start = helper.parse_start(process, pid)
+            status, ids = read("status", 16384), {}
+            for field in ("Uid", "Gid"):
+                matches = re.findall(rb"^" + field.encode() + rb":\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s*$", status, re.M)
+                require(len(matches) == 1, "Exact proc credential tuple unavailable")
+                ids[field] = [int(value) for value in matches[0]]
+            require(metadata_stamp(os.fstat(directory)) == metadata_stamp(info) == metadata_stamp(path.lstat()), "Proc directory changed during observation")
+            result[phase] = {"procDirectory": metadata_row(str(path), info), "startTime": start,
+                             "parentPid": int(process[process.rfind(")") + 2:].split()[1]), **ids}
+        result["stable"] = result["before"] == result["after"]
+    except Exception as capture_error:
+        result["unavailable"] = type(capture_error).__name__
+    finally:
+        if directory is not None:
+            os.close(directory)
+    return result
 
 
 def verified_route(home, binding):

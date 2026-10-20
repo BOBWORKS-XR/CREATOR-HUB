@@ -2,6 +2,7 @@
 import ast
 import copy
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -342,6 +343,150 @@ class MetadataTests(unittest.TestCase):
             parsed.extend(M.metadata_paths(database, raw))
         self.assertTrue(any(row["path"] == "/usr/share/dict/words" for row in parsed))
         self.assertEqual(len(parsed), 30)
+
+
+@contextmanager
+def permission_capture_fixture(*, statuses=None, starts=("12345", "12345"), failure=None):
+    uid = f"Uid:\t{M.UID}\t{M.UID}\t{M.UID}\t{M.UID}\n".encode()
+    gid = f"Gid:\t{M.UID}\t{M.UID}\t{M.UID}\t{M.UID}\n".encode()
+    fixture = SimpleNamespace(opened=[], reads=[], fds={}, phase=0, helper=M.load("native-unix-window"))
+    status = list(statuses or (b"Name:\tDO_NOT_RETAIN\n" + uid + gid,) * 2)
+    directory = SimpleNamespace(st_dev=1, st_ino=5152, st_mode=M.stat.S_IFDIR | 0o555, st_uid=M.UID, st_gid=M.UID,
+                                st_nlink=9, st_size=0, st_mtime_ns=2, st_ctime_ns=3)
+    regular = SimpleNamespace(**{**vars(directory), "st_ino": 600, "st_mode": M.stat.S_IFREG | 0o444, "st_nlink": 1})
+    def info(leaf):
+        if leaf == "stat" and failure == "symlink":
+            return SimpleNamespace(**{**vars(regular), "st_mode": M.stat.S_IFLNK | 0o777})
+        if leaf == "stat" and failure == "hardlink":
+            return SimpleNamespace(**{**vars(regular), "st_nlink": 2})
+        return copy.copy(regular)
+    def opened(path, flags, *, dir_fd=None):
+        assert flags & M.os.O_NOFOLLOW and flags & M.os.O_CLOEXEC and flags & M.os.O_NONBLOCK
+        if dir_fd is None:
+            assert path.as_posix() == "/proc/5152" and flags & M.os.O_DIRECTORY
+            fd, path = 90, path.as_posix()
+        else:
+            assert dir_fd == 90 and path in ("stat", "status")
+            fd = 100 + len(fixture.opened)
+        fixture.opened.append(str(path)); fixture.fds[fd] = str(path)
+        return fd
+    def named(path, *, dir_fd=None, follow_symlinks=False):
+        assert follow_symlinks is False
+        assert (dir_fd is None and path.as_posix() == "/proc/5152") or (dir_fd == 90 and path in ("stat", "status"))
+        value = copy.copy(directory) if dir_fd is None else info(path)
+        if (dir_fd is None and failure == "dir-replaced") or (path == "stat" and failure == "path-replaced" and path in fixture.reads):
+            value.st_ino += 1
+        return value
+    def fstat(fd):
+        if fd == 90:
+            return copy.copy(directory)
+        value = info(fixture.fds[fd])
+        if failure == "fd-replaced": value.st_ino += 1
+        return value
+    def fdopen(fd, mode):
+        assert mode == "rb"
+        leaf = fixture.fds[fd]
+        if leaf == "stat":
+            raw = ("5152 (DO_NOT_RETAIN) " + " ".join(["S", "4000", *["0"] * 17, starts[fixture.phase]])).encode()
+        else:
+            raw = status[fixture.phase]; fixture.phase += 1
+            if failure == "oversized": raw += b"x" * 16385
+            if failure == "missing-uid": raw = gid
+        class Stream(io.BytesIO):
+            def fileno(self): return fd
+            def read(self, limit=-1):
+                assert limit == (4097 if leaf == "stat" else 16385)
+                fixture.reads.append(leaf); return super().read(limit)
+            def close(self):
+                fixture.fds.pop(fd, None); super().close()
+        return Stream(raw)
+    with ExitStack() as stack:
+        stack.enter_context(patch.multiple(M.os, O_DIRECTORY=0x10000, O_NOFOLLOW=0x20000, O_CLOEXEC=0x40000, O_NONBLOCK=0x80000, create=True))
+        for name, value in (("open", opened), ("stat", named), ("lstat", named), ("fstat", fstat), ("fdopen", fdopen),
+                            ("close", lambda fd: fixture.fds.pop(fd))):
+            stack.enter_context(patch.object(M.os, name, value))
+        stack.enter_context(patch.object(M.subprocess, "run", side_effect=AssertionError("No command execution")))
+        yield fixture
+        assert not fixture.fds, "Permission diagnostic leaked an FD"
+
+
+class PermissionCaptureTests(unittest.TestCase):
+    def test_only_exact_failed_pid_is_read_and_only_parsed_kernel_identity_is_exported(self):
+        with permission_capture_fixture() as f:
+            result = M.inventory_permission_capture(PermissionError(13, "synthetic", "/proc/5152/exe"), f.helper)
+            self.assertEqual(f.opened, ["/proc/5152", "stat", "status", "stat", "status"])
+            self.assertEqual(f.reads, ["stat", "status", "stat", "status"])
+        self.assertEqual(result["pid"], 5152)
+        self.assertEqual(result["errno"], 13)
+        self.assertTrue(result["readOnly"])
+        self.assertTrue(result["stable"])
+        self.assertEqual(result["before"], result["after"])
+        self.assertEqual(result["before"]["Uid"], [M.UID] * 4)
+        self.assertEqual(result["before"]["Gid"], [M.UID] * 4)
+        self.assertEqual(result["before"]["startTime"], "12345")
+        self.assertEqual(result["before"]["parentPid"], 4000)
+        self.assertEqual(result["before"]["procDirectory"]["uid"], M.UID)
+        self.assertNotIn("DO_NOT_RETAIN", json.dumps(result))
+        self.assertLess(len(json.dumps(result).encode()), 4096)
+
+    def test_mixed_credentials_are_captured_but_changes_or_reused_pid_are_not_stable(self):
+        mixed = f"Uid:\t{M.UID}\t0\t0\t0\nGid:\t{M.UID}\t0\t0\t0\n".encode()
+        same = f"Uid:\t{M.UID}\t{M.UID}\t{M.UID}\t{M.UID}\nGid:\t{M.UID}\t{M.UID}\t{M.UID}\t{M.UID}\n".encode()
+        for statuses, starts, stable in (((mixed, mixed), ("12345", "12345"), True),
+                                        ((same, mixed), ("12345", "12345"), False),
+                                        ((same, same), ("12345", "54321"), False)):
+            with permission_capture_fixture(statuses=statuses, starts=starts) as f:
+                result = M.inventory_permission_capture(PermissionError(13, "synthetic", "/proc/5152/exe"), f.helper)
+            self.assertIs(result["stable"], stable)
+            self.assertIsNotNone(result["before"]); self.assertIsNotNone(result["after"])
+
+    def test_redirects_changed_fds_oversize_or_missing_fields_only_make_capture_unavailable(self):
+        for failure in ("symlink", "hardlink", "fd-replaced", "dir-replaced", "path-replaced", "oversized", "missing-uid"):
+            with self.subTest(failure=failure), permission_capture_fixture(failure=failure) as f:
+                result = M.inventory_permission_capture(PermissionError(13, "synthetic", "/proc/5152/exe"), f.helper)
+                self.assertFalse(result["stable"])
+                self.assertEqual(result["unavailable"], "RuntimeError")
+                self.assertNotIn("DO_NOT_RETAIN", json.dumps(result))
+                if failure in ("symlink", "hardlink", "fd-replaced", "dir-replaced"):
+                    self.assertFalse(f.reads)
+
+    def test_nonexact_failure_paths_do_not_trigger_any_proc_reads(self):
+        for path in (None, "/proc/0/exe", "/proc/../5152/exe", "/proc/5152/cmdline", "/proc/5152/exe (deleted)", "/tmp/5152/exe"):
+            with self.subTest(path=path), patch.object(M.os, "open") as opened:
+                result = M.inventory_permission_capture(PermissionError(13, "synthetic", path), Mock())
+                self.assertFalse(result["stable"])
+                self.assertIn("unavailable", result)
+                opened.assert_not_called()
+
+    def test_startup_always_retains_capture_and_reraises_the_identical_inventory_exception(self):
+        for capture in ({"stable": True, "pid": 5152}, {"stable": False, "pid": 5152}, RuntimeError("capture failed")):
+            with self.subTest(capture=capture), tempfile.TemporaryDirectory() as temporary:
+                original = PermissionError(13, "synthetic", "/proc/5152/exe")
+                log = Mock(); log.metadata.return_value = {"stderr": {"truncated": False}}
+                def start(session):
+                    session.logs, session.helper = log, Mock()
+                    session.driver_identity, session.owned = {"pid": 11}, {"pid": 13}
+                    session.child = Mock(pid=11); session.child.poll.return_value = None
+                    session.native = SimpleNamespace(native_process=lambda pid, helper: session.driver_identity if pid == 11 else session.owned)
+                    session.pages = SimpleNamespace(listener=lambda *args: True)
+                    session.backend_guard = lambda: None
+                    session.evidence["root"] = session.owned
+                    session.process_guard()
+                options = {"side_effect": capture} if isinstance(capture, Exception) else {"return_value": capture}
+                with patch.object(M.Session, "start", start), patch.object(M, "native_process_inventory", side_effect=original), \
+                     patch.object(M, "inventory_permission_capture", **options), self.assertRaises(PermissionError) as raised:
+                    M.Session(Path(temporary).resolve(), binding())
+                self.assertIs(raised.exception, original)
+                file = Path(temporary) / "session.json"
+                receipt = json.loads(file.read_bytes())
+                self.assertEqual(receipt["startupRefused"]["type"], "PermissionError")
+                self.assertEqual(receipt["root"], {"pid": 13})
+                if isinstance(capture, Exception):
+                    self.assertEqual(receipt["processInventoryRefusal"]["unavailable"], "RuntimeError")
+                else:
+                    self.assertEqual(receipt["processInventoryRefusal"], capture)
+                self.assertFalse(receipt["normalCloseObserved"])
+                self.assertLess(file.stat().st_size, 4096)
 
 
 class ControllerTests(unittest.TestCase):
