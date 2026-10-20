@@ -1,0 +1,637 @@
+"""Pure capture contracts. No download, Hub execution or native acceptance occurs here."""
+import ast
+import gzip
+import importlib.util
+import io
+import json
+import os
+from pathlib import Path
+import re
+import shlex
+import stat
+import subprocess
+import sys
+import tarfile
+import tempfile
+import types
+import unittest
+from unittest import mock
+import urllib.error
+
+sys.dont_write_bytecode = True
+HERE = Path(__file__).resolve().parent
+SPEC = importlib.util.spec_from_file_location("hub_capture_under_test", HERE / "native-linux-unity-hub-registry-capture.py")
+C = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(C)
+
+
+class Response(io.BytesIO):
+    def __init__(self, raw, url, status=200, length=None):
+        super().__init__(raw)
+        self.url, self.status = url, status
+        self.headers = {} if length is None else {"Content-Length": str(length)}
+
+    def geturl(self):
+        return self.url
+
+
+class CaptureTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        # Windows pure byte fixtures do not establish Linux no-follow/UID behavior.
+        for name in ("O_NOFOLLOW", "O_CLOEXEC", "O_NONBLOCK"):
+            if not hasattr(C.os, name):
+                patch = mock.patch.object(C.os, name, 0, create=True)
+                patch.start()
+                self.addCleanup(patch.stop)
+
+    def env(self):
+        return {"GITHUB_ACTIONS": "true", "GITHUB_REPOSITORY": C.REPO, "GITHUB_REPOSITORY_ID": C.REPO_ID,
+                "GITHUB_REF": C.BRANCH, "GITHUB_WORKFLOW_REF": C.WORKFLOW, "GITHUB_EVENT_NAME": "workflow_dispatch",
+                "RUNNER_ENVIRONMENT": "github-hosted", "RUNNER_OS": "Linux", "RUNNER_ARCH": "X64",
+                "UNITY_HUB_CAPTURE_REQUEST": C.REQUEST, "GITHUB_SHA": "a" * 40,
+                "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "1", "RUNNER_TEMP": str(self.root),
+                "GITHUB_WORKSPACE": str(HERE.parent)}
+
+    def admit(self, env=None, **kwargs):
+        C.admission(self.env() if env is None else env, system="Linux", machine="x86_64", uid=1001, euid=1001, **kwargs)
+
+    def index(self, override=None, duplicate=False):
+        fields = {"Package": C.PACKAGE, "Version": C.VERSION, "Architecture": "amd64", "Filename": C.DEB_MEMBER,
+                  "Size": str(C.PINS["deb"][0]), "SHA256": C.PINS["deb"][1], "Installed-Size": "514709",
+                  "Depends": "libgtk-3-0", "Pre-Depends": "", "Recommends": ""}
+        fields.update(override or {})
+        raw = ("\n".join(name + ": " + value for name, value in fields.items()) + "\n\n").encode()
+        if duplicate:
+            raw *= 2
+        zipped = gzip.compress(raw, mtime=0)
+        release = ("Suite: stable\nCodename: stable\nOrigin: Artifactory\nDate: Tue, 13 Oct 2026 21:12:32 UTC\nSHA256:\n "
+                   + C.pin(zipped)["sha256"] + " " + str(len(zipped)) + " main/binary-amd64/Packages.gz\n").encode()
+        pins = {"packages": (len(zipped), C.pin(zipped)["sha256"]), "packages-raw": (len(raw), C.pin(raw)["sha256"])}
+        return release, zipped, pins
+
+    def tar(self, members):
+        path = self.root / "payload.tar"
+        with tarfile.open(path, "w", format=tarfile.USTAR_FORMAT) as archive:
+            for name, kind, value, mode in members:
+                entry = tarfile.TarInfo(name)
+                entry.mode, entry.uid, entry.gid = mode, 0, 0
+                entry.type = kind
+                if kind == tarfile.REGTYPE:
+                    entry.size = len(value)
+                    archive.addfile(entry, io.BytesIO(value))
+                else:
+                    entry.linkname = value
+                    archive.addfile(entry)
+        return path
+
+    def test_exact_manual_context(self):
+        self.admit()
+
+    def test_every_fixed_authority_field_is_required(self):
+        for field in ("GITHUB_ACTIONS", "GITHUB_REPOSITORY", "GITHUB_REPOSITORY_ID", "GITHUB_REF", "GITHUB_WORKFLOW_REF",
+                      "GITHUB_EVENT_NAME", "RUNNER_ENVIRONMENT", "RUNNER_OS", "RUNNER_ARCH", "UNITY_HUB_CAPTURE_REQUEST"):
+            with self.subTest(field=field), self.assertRaises(RuntimeError):
+                self.admit({**self.env(), field: "foreign"})
+
+    def test_run_and_source_format(self):
+        for field, value in (("GITHUB_SHA", "A" * 40), ("GITHUB_RUN_ID", "0"), ("GITHUB_RUN_ATTEMPT", "01")):
+            with self.subTest(field=field), self.assertRaises(RuntimeError):
+                self.admit({**self.env(), field: value})
+
+    def test_root_other_platform_and_uid_transition_refused(self):
+        for system, machine, uid, euid in (("Windows", "x86_64", 1, 1), ("Linux", "arm64", 1, 1),
+                                          ("Linux", "x86_64", 0, 0), ("Linux", "x86_64", 1, 0)):
+            with self.subTest(system=system, uid=uid), self.assertRaises(RuntimeError):
+                C.admission(self.env(), system=system, machine=machine, uid=uid, euid=euid)
+
+    def test_injection_and_proxy_variables_refused_even_empty(self):
+        for name in ("LD_PRELOAD", "DYLD_INSERT_LIBRARIES", "PYTHONPATH", "SSL_CERT_FILE", "CURL_CA_BUNDLE",
+                     "UNITY_NO_CONSENT_PROMPT", "ELECTRON_DISABLE_SANDBOX", "CHROME_FLAGS", "https_proxy", "FLATPAK_ID"):
+            with self.subTest(name=name), self.assertRaises(RuntimeError):
+                self.admit({**self.env(), name: ""})
+
+    def test_private_closed_environment(self):
+        value = C.environment(self.root)
+        self.assertEqual(value["HOME"], str(self.root / "home"))
+        self.assertEqual(value["XDG_CONFIG_HOME"], str(self.root / "home/config"))
+        self.assertEqual(set(value), {"PATH", "LANG", "LC_ALL", "HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME",
+                                      "XDG_CACHE_HOME", "XDG_RUNTIME_DIR", "TMPDIR"})
+
+    def test_wrapper_restores_private_environment_after_dbus_and_xvfb(self):
+        args = C.session_command(self.root)
+        self.assertEqual(args[:4], ["/usr/bin/dbus-run-session", "--", "/usr/bin/xvfb-run", "-a"])
+        position = args.index("/usr/bin/env")
+        for name, value in C.environment(self.root).items():
+            self.assertIn(name + "=" + value, args[position + 1:])
+        self.assertEqual(args[-2:], [str(HERE / "native-linux-unity-hub-registry-capture.py"), "observe"])
+
+    def test_all_qualification_flags_are_false(self):
+        self.assertGreaterEqual(len(C.FALSE), 8)
+        self.assertTrue(all(value is False for value in C.FALSE.values()))
+
+    def test_bounded_read_and_create_only_evidence(self):
+        path = self.root / "evidence.json"
+        C.write_new(path, b"abc")
+        self.assertEqual(C.read(path, 3, C.pin(b"abc")), b"abc")
+        with self.assertRaises(RuntimeError):
+            C.read(path, 2)
+        with self.assertRaises(FileExistsError):
+            C.write_new(path, b"replacement")
+        self.assertEqual(path.read_bytes(), b"abc")
+
+    def test_json_limit_precedes_write(self):
+        path = self.root / "too-large.json"
+        with self.assertRaises(RuntimeError):
+            C.save(path, {"value": "x" * 100}, 20)
+        self.assertFalse(path.exists())
+
+    def test_source_gate_binds_exact_five_files(self):
+        with mock.patch.object(C, "file_pin", return_value=C.pin(b"source")) as check:
+            result = C.source_gate(self.env())
+        self.assertEqual(set(result), set(C.SOURCES))
+        self.assertEqual(check.call_count, 5)
+
+    def test_empty_desktop_uses_local_reader_not_nonempty_root_helper(self):
+        _helper, native = C.helpers()
+        x11 = mock.Mock()
+        x11.property.return_value = (33, 32, [])
+        with self.assertRaisesRegex(RuntimeError, "WM client inventory unavailable"):
+            native.client_ids(x11)
+        self.assertEqual(C.wm_client_ids(x11), [])
+        self.assertEqual(x11.property.call_args.args[1], "_NET_CLIENT_LIST_STACKING")
+
+    def test_nonempty_inventory_matches_unchanged_real_helper_contract(self):
+        _helper, native = C.helpers()
+        x11 = mock.Mock()
+        x11.property.return_value = (33, 32, [100, 200])
+        self.assertEqual(C.wm_client_ids(x11), native.client_ids(x11))
+
+    def test_local_inventory_rejects_missing_malformed_duplicate_or_unbounded_ids(self):
+        for value in (None, (6, 32, []), (33, 8, []), (33, 32), (33, 32, ""), (33, 32, [1, 1]),
+                      (33, 32, [0]), (33, 32, [True]), (33, 32, [2**32]), (33, 32, list(range(1, 34)))):
+            with self.subTest(value=value), self.assertRaises(RuntimeError):
+                x11 = mock.Mock()
+                x11.property.return_value = value
+                C.wm_client_ids(x11)
+
+    def test_real_request_parser_rejects_numeric_pid_and_accepts_strings(self):
+        helper, _native = C.helpers()
+        args = ["snapshot", "123", "456", str(self.root / "owned-hub"), C.pin(b"image")["sha256"], "100", "Unity Hub", "FRAME"]
+        request = helper.Request.parse(args)
+        self.assertEqual((request.pid, request.window, request.start), (123, 100, "456"))
+        with self.assertRaises(TypeError):
+            helper.Request.parse([args[0], 123, *args[2:]])
+
+    def test_fixed_prerequisites_are_checked_without_launch_or_gui_initialization(self):
+        gi, repository = types.ModuleType("gi"), types.ModuleType("gi.repository")
+        gi.require_version = mock.Mock()
+        repository.Atspi, repository.Gdk, repository.GdkX11 = mock.Mock(), mock.Mock(), mock.Mock()
+        gi.repository = repository
+        with mock.patch.dict(sys.modules, {"gi": gi, "gi.repository": repository}), \
+                mock.patch.object(C, "admission") as admit, \
+                mock.patch.object(C, "system_tool", return_value=C.pin(b"system")) as check, \
+                mock.patch.object(C.subprocess, "Popen") as launch:
+            value = C.prerequisites(self.env())
+        admit.assert_called_once_with(self.env())
+        self.assertEqual([call.args[0] for call in check.call_args_list], [*C.SYSTEM_TOOLS, *C.GUI_TOOLS])
+        self.assertEqual(gi.require_version.call_args_list, [mock.call("Atspi", "2.0"), mock.call("Gdk", "3.0"), mock.call("GdkX11", "3.0")])
+        repository.Gdk.init.assert_not_called()
+        launch.assert_not_called()
+        self.assertFalse(value["candidateExecuted"])
+        self.assertTrue(all(value[name] is False for name in C.FALSE))
+
+    def test_prerequisite_authority_refusal_precedes_every_tool(self):
+        with mock.patch.object(C, "admission", side_effect=RuntimeError("not an admitted runner")), \
+                mock.patch.object(C, "system_tool") as check, self.assertRaises(RuntimeError):
+            C.prerequisites(self.env())
+        check.assert_not_called()
+
+    def test_prerequisite_missing_tool_refuses_before_gi_import_or_launch(self):
+        gi = types.ModuleType("gi")
+        gi.require_version = mock.Mock()
+        with mock.patch.dict(sys.modules, {"gi": gi}), mock.patch.object(C, "admission"), \
+                mock.patch.object(C, "system_tool", side_effect=FileNotFoundError("missing tool")), \
+                mock.patch.object(C.subprocess, "Popen") as launch, self.assertRaises(FileNotFoundError):
+            C.prerequisites(self.env())
+        gi.require_version.assert_not_called()
+        launch.assert_not_called()
+
+    def test_direct_pinned_download_without_network(self):
+        raw = b"fixed public metadata"
+        opener = mock.Mock()
+        opener.open.return_value = Response(raw, C.URLS["key"][0], length=len(raw))
+        with mock.patch.object(C.urllib.request, "build_opener", return_value=opener), \
+                mock.patch.dict(C.PINS, {"key": (len(raw), C.pin(raw)["sha256"])}):
+            self.assertEqual(C.download("key", self.root / "key"), C.pin(raw))
+        self.assertEqual(opener.open.call_count, 1)
+
+    def test_only_exact_observed_official_redirect(self):
+        raw = b"key"
+        opener = mock.Mock()
+        redirect = urllib.error.HTTPError(C.URLS["key"][0], 302, "Found", {"Location": C.URLS["key"][1]}, io.BytesIO())
+        opener.open.side_effect = [redirect, Response(raw, C.URLS["key"][1])]
+        with mock.patch.object(C.urllib.request, "build_opener", return_value=opener), \
+                mock.patch.dict(C.PINS, {"key": (len(raw), C.pin(raw)["sha256"])}):
+            C.download("key", self.root / "key")
+        self.assertEqual(opener.open.call_args_list[1].args[0], C.URLS["key"][1])
+
+    def test_foreign_redirect_refused_before_file_creation(self):
+        opener = mock.Mock()
+        opener.open.side_effect = urllib.error.HTTPError(C.URLS["key"][0], 302, "Found",
+                                                       {"Location": "https://example.invalid/key"}, io.BytesIO())
+        with mock.patch.object(C.urllib.request, "build_opener", return_value=opener), self.assertRaises(RuntimeError):
+            C.download("key", self.root / "key")
+        self.assertFalse((self.root / "key").exists())
+        self.assertEqual(opener.open.call_count, 1)
+
+    def test_wrong_download_bytes_retain_failed_evidence(self):
+        opener = mock.Mock()
+        opener.open.return_value = Response(b"bad", C.URLS["key"][0])
+        with mock.patch.object(C.urllib.request, "build_opener", return_value=opener), \
+                mock.patch.dict(C.PINS, {"key": (3, C.pin(b"key")["sha256"])}), self.assertRaises(RuntimeError):
+            C.download("key", self.root / "key")
+        self.assertEqual((self.root / "key").read_bytes(), b"bad")
+
+    def test_no_unknown_download_role(self):
+        with mock.patch.object(C.urllib.request, "build_opener") as opener, self.assertRaises(RuntimeError):
+            C.download("user-url", self.root / "key")
+        opener.assert_not_called()
+
+    def test_signed_index_exact_candidate(self):
+        release, zipped, pins = self.index()
+        with mock.patch.dict(C.PINS, pins):
+            value = C.index_binding(release, zipped)
+        self.assertEqual((value["Package"], value["Version"], value["Architecture"]), ("unityhub", "3.22.3", "amd64"))
+
+    def test_signed_index_wrong_candidate_metadata(self):
+        for field, value in (("Version", "3.22.2"), ("Architecture", "arm64"), ("Filename", "other.deb"),
+                             ("Size", "1"), ("SHA256", "0" * 64), ("Installed-Size", "1")):
+            release, zipped, pins = self.index({field: value})
+            with self.subTest(field=field), mock.patch.dict(C.PINS, pins), self.assertRaises(RuntimeError):
+                C.index_binding(release, zipped)
+
+    def test_duplicate_candidate_refused(self):
+        release, zipped, pins = self.index(duplicate=True)
+        with mock.patch.dict(C.PINS, pins), self.assertRaises(RuntimeError):
+            C.index_binding(release, zipped)
+
+    def test_duplicate_deb822_field_and_body_refused(self):
+        for raw in (b"Package: unityhub\nPackage: other\n", b"Package: unityhub\n\nbody"):
+            with self.subTest(raw=raw), self.assertRaises(RuntimeError):
+                C.stanza(raw)
+
+    def test_stale_release_and_wrong_index_pin_refused(self):
+        release, zipped, pins = self.index()
+        for bad in (release.replace(b"13 Oct", b"12 Oct"), release.replace(C.pin(zipped)["sha256"].encode(), b"0" * 64)):
+            with mock.patch.dict(C.PINS, pins), self.assertRaises(RuntimeError):
+                C.index_binding(bad, zipped)
+
+    def test_second_gzip_member_refused_even_with_matching_outer_hash(self):
+        release, zipped, pins = self.index()
+        new = zipped + gzip.compress(b"unexpected", mtime=0)
+        release = release.replace(C.pin(zipped)["sha256"].encode(), C.pin(new)["sha256"].encode()).replace(
+            (" " + str(len(zipped)) + " ").encode(), (" " + str(len(new)) + " ").encode())
+        pins["packages"] = (len(new), C.pin(new)["sha256"])
+        with mock.patch.dict(C.PINS, pins), self.assertRaises(RuntimeError):
+            C.index_binding(release, new)
+
+    def test_gpg_uses_new_private_public_only_keyring(self):
+        fingerprint = C.FINGERPRINT
+        status = ("[GNUPG:] VALIDSIG " + fingerprint + " 2026-10-13 1 0 4 0 1 10 01 " + fingerprint + "\n").encode()
+        def read(path, *_args):
+            return status if path.name == "apt-signature.stderr" else b"public bytes"
+        with mock.patch.object(C, "download") as download, mock.patch.object(C, "read", side_effect=read), \
+                mock.patch.object(C, "run_tool", side_effect=[self.root / "ring", self.root / "cleartext"]) as tool, \
+                mock.patch.object(C, "index_binding", return_value={"verified": True}):
+            self.assertEqual(C.verify_metadata(self.root), {"verified": True})
+        self.assertEqual([call.args[0] for call in download.call_args_list], ["key", "inrelease", "packages"])
+        self.assertIn("--no-options", tool.call_args_list[0].args[2])
+        self.assertEqual(tool.call_args_list[0].kwargs["body"], b"public bytes")
+        self.assertIn(str(self.root / "ring"), tool.call_args_list[1].args[2])
+
+    def test_foreign_or_expired_signature_never_reaches_index_parser(self):
+        good = "[GNUPG:] VALIDSIG " + C.FINGERPRINT + " 2026 1 0 4 0 1 10 01 " + C.FINGERPRINT + "\n"
+        for status in (good.replace(C.FINGERPRINT, "0" * 40), good + "[GNUPG:] EXPKEYSIG key\n", good + good):
+            with self.subTest(status=status[:60]), mock.patch.object(C, "download"), \
+                    mock.patch.object(C, "read", side_effect=lambda path, *_: status.encode() if path.name == "apt-signature.stderr" else b"public"), \
+                    mock.patch.object(C, "run_tool", return_value=self.root / "output"), \
+                    mock.patch.object(C, "index_binding") as parse, self.assertRaises(RuntimeError):
+                C.verify_metadata(self.root)
+            parse.assert_not_called()
+
+    def test_safe_inventory_and_expected_chrome_sandbox_mode(self):
+        path = self.tar([("opt", tarfile.DIRTYPE, "", 0o755), ("opt/unityhub", tarfile.DIRTYPE, "", 0o755),
+                         ("opt/unityhub/chrome-sandbox", tarfile.REGTYPE, b"sandbox", 0o4755)])
+        records = C.inventory(path)
+        self.assertEqual(records["opt/unityhub/chrome-sandbox"]["mode"], 0o4755)
+        self.assertEqual(records["opt/unityhub/chrome-sandbox"]["sha256"], C.pin(b"sandbox")["sha256"])
+
+    def test_archive_unsafe_paths(self):
+        for name in ("../escape", "/absolute", "a/../b", "a//b", "a\\b", "a\nname"):
+            with self.subTest(name=name), self.assertRaises(RuntimeError):
+                C.inventory(self.tar([(name, tarfile.REGTYPE, b"x", 0o644)]))
+
+    def test_hardlink_device_and_unreviewed_special_mode_refused(self):
+        for kind, mode in ((tarfile.LNKTYPE, 0o644), (tarfile.CHRTYPE, 0o600), (tarfile.REGTYPE, 0o4755),
+                           (tarfile.REGTYPE, 0o2755), (tarfile.REGTYPE, 0o1755)):
+            with self.subTest(kind=kind, mode=mode), self.assertRaises(RuntimeError):
+                C.inventory(self.tar([("foreign", kind, b"x" if kind == tarfile.REGTYPE else "target", mode)]))
+
+    def test_duplicate_archive_entry_refused(self):
+        with self.assertRaises(RuntimeError):
+            C.inventory(self.tar([("file", tarfile.REGTYPE, b"a", 0o644), ("file", tarfile.REGTYPE, b"b", 0o644)]))
+
+    def test_link_escape_unresolved_cycle_and_write_through_refused(self):
+        cases = [[("link", tarfile.SYMTYPE, "../escape", 0o777)],
+                 [("link", tarfile.SYMTYPE, "missing", 0o777)],
+                 [("a", tarfile.SYMTYPE, "b", 0o777), ("b", tarfile.SYMTYPE, "a", 0o777)],
+                 [("dir", tarfile.REGTYPE, b"x", 0o644), ("dir/file", tarfile.REGTYPE, b"x", 0o644)]]
+        for members in cases:
+            with self.subTest(members=members), self.assertRaises(RuntimeError):
+                C.inventory(self.tar(members))
+
+    def test_no_unbounded_member_or_entry_count(self):
+        path = self.tar([("file", tarfile.REGTYPE, b"xx", 0o644)])
+        for name, bound in (("MAX_FILE", 1), ("MAX_TAR", 1), ("MAX_ENTRIES", 0)):
+            with self.subTest(name=name), mock.patch.object(C, name, bound), self.assertRaises(RuntimeError):
+                C.inventory(path)
+
+    def test_normal_launch_only_no_wrapper_or_sandbox_flags(self):
+        records = {"usr/share/applications/unityhub.desktop": {"kind": "file"},
+                   "opt/unityhub/unityhub": {"kind": "file", "mode": 0o755, "size": 20, "sha256": "0" * 64}}
+        path = self.root / "opt/unityhub/unityhub"
+        path.parent.mkdir(parents=True)
+        head = bytearray(20)
+        head[:7], head[16:20] = b"\x7fELF\x02\x01\x01", b"\x03\x00\x3e\x00"
+        path.write_bytes(head)
+        for command in ("/opt/unityhub/unityhub %U", "/opt/unityhub/unityhub --no-sandbox", "/usr/bin/env /opt/unityhub/unityhub"):
+            desktop = ("[Desktop Entry]\nName=Unity Hub\nType=Application\nExec=" + command + "\n").encode()
+            with self.subTest(command=command), mock.patch.object(C, "read", return_value=desktop), \
+                    mock.patch.object(C, "file_pin", return_value={"size": 20, "sha256": "0" * 64}):
+                if command.endswith("%U"):
+                    self.assertEqual(C.launch_image(self.root, records)["relative"], "opt/unityhub/unityhub")
+                else:
+                    with self.assertRaises(RuntimeError):
+                        C.launch_image(self.root, records)
+
+    def test_stage_metadata_refusal_precedes_installer_download_and_tools(self):
+        def mkdir(path):
+            path.mkdir()
+        with mock.patch.object(C, "admission"), mock.patch.object(C, "source_gate", return_value={}), \
+                mock.patch.object(C, "root_path", return_value=self.root / "stage"), \
+                mock.patch.object(C, "private_directory", side_effect=mkdir), \
+                mock.patch.object(C, "verify_metadata", side_effect=RuntimeError("signature refusal")), \
+                mock.patch.object(C, "download") as download, mock.patch.object(C, "run_tool") as tool, \
+                self.assertRaisesRegex(RuntimeError, "signature refusal"):
+            C.stage(self.env())
+        download.assert_not_called()
+        tool.assert_not_called()
+        report = json.loads((self.root / "stage/evidence/stage.json").read_text())
+        self.assertFalse(report["stageComplete"])
+        self.assertFalse(report["candidateExecuted"])
+        self.assertTrue(all(report[name] is False for name in C.FALSE))
+
+    def test_missing_gui_dependency_is_retained_without_launch(self):
+        (self.root / "evidence").mkdir()
+        with mock.patch.object(C, "review_stage", return_value=(self.root, {})), \
+                mock.patch.object(C, "system_tool", side_effect=RuntimeError("missing prerequisite")), \
+                mock.patch.object(C.subprocess, "Popen") as launch, self.assertRaisesRegex(RuntimeError, "missing prerequisite"):
+            C.session(self.env())
+        launch.assert_not_called()
+        report = json.loads((self.root / "evidence/session.json").read_text())
+        self.assertIn("missing prerequisite", report["refusal"])
+        self.assertTrue((self.root / "evidence/session-attempt.json").exists())
+
+    def test_consumed_session_attempt_prevents_second_launch(self):
+        (self.root / "evidence").mkdir()
+        C.write_new(self.root / "evidence/session-attempt.json", b"{}")
+        with mock.patch.object(C, "review_stage", return_value=(self.root, {})), \
+                mock.patch.object(C.subprocess, "Popen") as launch, self.assertRaises(FileExistsError):
+            C.session(self.env())
+        launch.assert_not_called()
+
+    def observe_fixture(self, *, bitmap_error=None, changed_before_close=False):
+        """Mocks only: no ELF, display, native imports, screenshot or input is executed."""
+        (self.root / "evidence").mkdir()
+        C.save(self.root / "evidence/session-attempt.json", {"attemptConsumed": True})
+        env = {**self.env(), **C.environment(self.root), "DISPLAY": ":99", "DBUS_SESSION_BUS_ADDRESS": "unix:mock"}
+        staged = {"image": {"relative": "opt/unityhub/unityhub", **C.pin(b"mock")}, "sources": {"fixture": C.pin(b"source")}}
+        helper, native, wm, child, x11 = (mock.Mock() for _ in range(5))
+        wm.poll.return_value = None
+        alive = [True]
+        child.pid = 123
+        child.poll.side_effect = lambda: None if alive[0] else 0
+        process = {"pid": 123, "parentPid": os.getpid(), "uids": [1001] * 4, "startTime": "456",
+                   "executable": str(self.root / "image/opt/unityhub/unityhub"), "kernelImageSha256": staged["image"]["sha256"]}
+        bound = {"pid": 123, "mapped": True, "client": 10, "title": "Unity Hub"}
+        clients = iter([[], [100], []])
+        x11.property.side_effect = lambda _window, name: (33, 32, next(clients)) if name == "_NET_CLIENT_LIST_STACKING" else (33, 32, [1])
+        x11.inspect.return_value = bound
+        helper.X11.return_value = x11
+        real_helper, _real_native = C.helpers()
+        helper.Request.parse = mock.Mock(wraps=real_helper.Request.parse)
+        helper.perform.return_value = {"actionCount": 0, "nodes": []}
+        native.client_ids.side_effect = AssertionError("Nonempty-only Root helper must not gate this local desktop")
+        native.native_process.return_value = process
+        native.bitmap.return_value = {"mockOnly": True}
+        if bitmap_error:
+            native.bitmap.side_effect = bitmap_error
+        def close(*_args):
+            self.assertTrue((self.root / "evidence/normal-close-intent.json").exists())
+            alive[0] = False
+        x11.close_window.side_effect = close
+        if changed_before_close:
+            native.native_process.side_effect = [process, process, process, {**process, "startTime": "999"}]
+        gi, repository = types.ModuleType("gi"), types.ModuleType("gi.repository")
+        gi.require_version = mock.Mock()
+        repository.Atspi, repository.Gdk = mock.Mock(), mock.Mock()
+        gi.repository = repository
+        real_file_pin = C.file_pin
+        def image_pin(path, limit, wanted=None):
+            return C.pin(b"mock") if path == self.root / "image/opt/unityhub/unityhub" else real_file_pin(path, limit, wanted)
+        with mock.patch.dict(sys.modules, {"gi": gi, "gi.repository": repository}), \
+                mock.patch.object(C, "review_stage", return_value=(self.root, staged)), \
+                mock.patch.object(C, "helpers", return_value=(helper, native)), \
+                mock.patch.object(C, "sandbox_observation", return_value={"readOnly": True}), \
+                mock.patch.object(C, "system_tool"), mock.patch.object(C, "file_pin", side_effect=image_pin), \
+                mock.patch.object(C.os, "getuid", return_value=1001, create=True), \
+                mock.patch.object(C, "source_gate", return_value=staged["sources"]), \
+                mock.patch.object(C, "Drain") as output, mock.patch.object(C, "wait_exit", return_value=0), \
+                mock.patch.object(C.subprocess, "Popen", side_effect=[wm, child]) as launch:
+            output.return_value.metadata.return_value = {}
+            failure = None
+            try:
+                C.observe(env)
+            except RuntimeError as error:
+                failure = error
+        report = json.loads((self.root / "evidence/observation.json").read_text())
+        return report, failure, helper, x11, launch
+
+    def test_mocked_first_run_snapshot_only_then_one_owned_normal_close(self):
+        report, failure, helper, x11, launch = self.observe_fixture()
+        self.assertIsNone(failure)
+        self.assertTrue(report["observationCaptured"])
+        self.assertTrue(report["normalCloseObserved"])
+        self.assertTrue(all(report[name] is False for name in C.FALSE))
+        self.assertEqual(helper.Request.parse.call_args.args[0][0], "snapshot")
+        self.assertTrue(all(type(value) is str for value in helper.Request.parse.call_args.args[0]))
+        helper.perform.assert_called_once()
+        x11.close_window.assert_called_once_with(100, mock.ANY)
+        self.assertEqual(launch.call_args_list[1].args[0], [str(self.root / "image/opt/unityhub/unityhub")])
+        x11.dispose.assert_called_once()
+
+    def test_mocked_bitmap_failure_stays_failed_with_one_normal_close(self):
+        report, failure, helper, x11, _launch = self.observe_fixture(bitmap_error=RuntimeError("no owned pixels"))
+        self.assertIsNotNone(failure)
+        self.assertIn("no owned pixels", report["refusal"])
+        self.assertFalse(report["observationCaptured"])
+        self.assertTrue(report["normalCloseObserved"])
+        x11.close_window.assert_called_once()
+        helper.perform.assert_called_once()
+
+    def test_mocked_changed_identity_blocks_normal_close_no_retry(self):
+        report, failure, _helper, x11, _launch = self.observe_fixture(changed_before_close=True)
+        self.assertIsNotNone(failure)
+        self.assertIn("guard changed", report["teardownRefusal"])
+        self.assertFalse(report["normalCloseAttempted"])
+        self.assertFalse(report["normalCloseObserved"])
+        x11.close_window.assert_not_called()
+
+    def test_missing_native_prerequisite_retains_observation_without_launch(self):
+        (self.root / "evidence").mkdir()
+        C.save(self.root / "evidence/session-attempt.json", {})
+        env = {**self.env(), **C.environment(self.root), "DISPLAY": ":99", "DBUS_SESSION_BUS_ADDRESS": "unix:mock"}
+        with mock.patch.object(C, "review_stage", return_value=(self.root, {"sources": {}})), \
+                mock.patch.object(C, "helpers", side_effect=ImportError("missing prerequisite")), \
+                mock.patch.object(C, "source_gate", return_value={}), \
+                mock.patch.object(C.subprocess, "Popen") as launch, self.assertRaises(ImportError):
+            C.observe(env)
+        launch.assert_not_called()
+        report = json.loads((self.root / "evidence/observation.json").read_text())
+        self.assertFalse(report["candidateExecuted"])
+        self.assertIn("missing prerequisite", report["refusal"])
+
+    def test_sandbox_metadata_is_read_only_not_operational_proof(self):
+        with mock.patch("builtins.open", mock.mock_open(read_data="1024\n")):
+            value = C.sandbox_observation(self.root)
+        self.assertIsNone(value["chromeSandbox"])
+        self.assertTrue(value["readOnly"])
+        for field in ("userNamespaceOperationProven", "settingsChanged", "sandboxDisabled"):
+            self.assertFalse(value[field])
+
+    def test_ax_redacts_unknown_text_and_never_claims_add_or_login_success(self):
+        def node(name):
+            return dict(name=name, role="push button", showing=True, enabled=True, sensitive=True, defunct=False, busy=False)
+        nodes = C.sanitize_ax({"actionCount": 0, "nodes": [node("Sign in"), node("person@example.invalid")]})
+        self.assertEqual(nodes[0]["label"], "Sign in")
+        self.assertIsNone(nodes[1]["label"])
+        self.assertNotIn("person@", json.dumps(nodes))
+        self.assertEqual(C.classify_ax(nodes), "sign-in-surface-observed-no-interaction")
+        self.assertEqual(C.classify_ax(C.sanitize_ax({"actionCount": 0, "nodes": [node("Projects"), node("Add")]})),
+                         "projects-and-add-visible-not-tested")
+
+    def test_ax_input_or_excess_nodes_refused(self):
+        for value in ({"actionCount": 1, "nodes": []}, {"actionCount": 0, "nodes": [{}] * 513}):
+            with self.assertRaises(RuntimeError):
+                C.sanitize_ax(value)
+
+    def test_wait_deadline_never_signals_or_retries(self):
+        child, output = mock.Mock(), mock.Mock()
+        child.poll.return_value = None
+        with mock.patch.object(C.time, "monotonic", side_effect=[0, 0, 2]), self.assertRaisesRegex(RuntimeError, "no retry"):
+            C.wait_exit(child, output, 1)
+        child.kill.assert_not_called()
+        child.terminate.assert_not_called()
+
+    def test_wait_requires_exit_and_complete_owned_streams(self):
+        child, output = mock.Mock(), mock.Mock()
+        child.poll.return_value = 0
+        child.wait.return_value = 0
+        output.complete.side_effect = [False, True]
+        with mock.patch.object(C.time, "monotonic", side_effect=[0, 0, 0]):
+            self.assertEqual(C.wait_exit(child, output, 1), 0)
+        self.assertEqual(output.pump.call_count, 2)
+
+    def test_owned_output_overflow_is_explicit_and_bounded(self):
+        child, selector = mock.Mock(), mock.Mock()
+        child.stdout.fileno.return_value = 100
+        child.stderr.fileno.return_value = 101
+        with mock.patch.object(C.selectors, "DefaultSelector", return_value=selector), mock.patch.object(C.os, "set_blocking", create=True):
+            output = C.Drain(child, self.root, "owned", stdout_limit=3)
+        row = output.rows["stdout"]
+        selector.select.return_value = [(types.SimpleNamespace(data=row, fd=100, fileobj=child.stdout), None)]
+        try:
+            with mock.patch.object(C.os, "read", side_effect=[b"abc", b"d", b""]):
+                for _ in range(3):
+                    output.pump(0)
+            with self.assertRaisesRegex(RuntimeError, "partial evidence retained"):
+                output.check()
+            evidence = output.metadata()["stdout"]
+            self.assertEqual(evidence["bytesSeen"], 4)
+            self.assertEqual(evidence["retainedBytes"], 3)
+            self.assertTrue(evidence["overflow"])
+            self.assertTrue(evidence["eof"])
+            self.assertEqual(evidence["file"], C.pin(b"abc"))
+        finally:
+            output.close()
+
+    def test_extracted_sandbox_is_reported_not_promoted_to_root(self):
+        info = types.SimpleNamespace(st_mode=stat.S_IFREG | 0o4755, st_uid=1001, st_gid=1001)
+        with mock.patch("builtins.open", mock.mock_open(read_data="1024\n")), \
+                mock.patch.object(C.os.path, "lexists", return_value=True), mock.patch.object(Path, "lstat", return_value=info):
+            value = C.sandbox_observation(self.root)
+        self.assertEqual(value["chromeSandbox"], {"uid": 1001, "gid": 1001, "mode": 0o4755, "rootOwned4755": False})
+        self.assertFalse(value["userNamespaceOperationProven"])
+        self.assertFalse(value["settingsChanged"])
+
+    def test_python310_syntax_and_exact_helper_api(self):
+        source = (HERE / "native-linux-unity-hub-registry-capture.py").read_text(encoding="utf8")
+        ast.parse(source, feature_version=(3, 10))
+        ast.parse(Path(__file__).read_text(encoding="utf8"), feature_version=(3, 10))
+        self.assertIn('helper.Request.parse(["snapshot"', source)
+        self.assertIn('native.bitmap(request, root / "evidence", helper, x11)', source)
+        self.assertLess(source.index('write_new(root / "evidence/normal-close-intent.json"'), source.index('x11.close_window(request.window, bound)'))
+        self.assertNotIn(".kill(", source)
+        self.assertNotIn(".terminate(", source)
+        self.assertNotIn("--no-sandbox", source)
+        self.assertNotIn("--disable-setuid-sandbox", source)
+        self.assertNotIn("os.chmod", source)
+        self.assertNotIn("os.chown", source)
+
+    def test_workflow_registration_skips_and_manual_gate_precedes_native(self):
+        workflow = (HERE.parent / ".github/workflows/linux-unity-hub-registry-capture.yml").read_text(encoding="utf8")
+        self.assertIn("branches: [validation/linux-unity-hub-registry-capture]", workflow)
+        self.assertIn("github.event_name == 'workflow_dispatch'", workflow)
+        self.assertIn("github.ref == '" + C.BRANCH + "'", workflow)
+        self.assertIn("github.workflow_ref == '" + C.WORKFLOW + "'", workflow)
+        self.assertIn("default: inspect-only", workflow)
+        self.assertIn("contents: read", workflow)
+        self.assertIn("persist-credentials: false", workflow)
+        self.assertLess(workflow.index("native-linux-unity-hub-registry-capture.test.py"), workflow.index("native-linux-unity-hub-registry-capture.py stage"))
+        self.assertLess(workflow.index("native-linux-unity-hub-registry-capture.test.py"), workflow.index("sudo apt-get update"))
+        self.assertLess(workflow.index("sudo apt-get update"), workflow.index("native-linux-unity-hub-registry-capture.py prerequisites"))
+        self.assertLess(workflow.index("native-linux-unity-hub-registry-capture.py prerequisites"), workflow.index("native-linux-unity-hub-registry-capture.py stage"))
+        self.assertLess(workflow.index("native-linux-unity-hub-registry-capture.py stage"), workflow.index("native-linux-unity-hub-registry-capture.py session"))
+        commands = workflow.replace("\\\n", " ").splitlines()
+        sudo_commands = [shlex.split(line.strip()) for line in commands if "sudo" in line]
+        self.assertEqual(sudo_commands, [["sudo", "apt-get", "update"],
+            ["sudo", "apt-get", "install", "-y", "--no-install-recommends", "xvfb", "openbox", "xauth", "dbus-x11",
+             "python3-gi", "gir1.2-gtk-3.0", "gir1.2-atspi-2.0", "at-spi2-core", "libx11-6", "libxres1"]])
+        tool_check = re.search(r"for tool in ([^\n]+); do", "\n".join(commands))
+        self.assertIsNotNone(tool_check)
+        self.assertEqual(shlex.split(tool_check.group(1)), ["/usr/bin/python3", "/usr/bin/gpg", "/usr/bin/gpgv",
+            "/usr/bin/dpkg-deb", "/usr/bin/xauth", "/usr/bin/dbus-run-session", "/usr/bin/xvfb-run", "/usr/bin/Xvfb", "/usr/bin/openbox"])
+        self.assertIn('test -x "$tool"', workflow)
+        for forbidden in ("no-sandbox", "cargo ", "npm ", "contents: write", "sysctl", "chmod", "chown", "unshare", "dpkg --install"):
+            self.assertNotIn(forbidden, workflow)
+        self.assertNotIn("/inputs/", workflow)
+        self.assertNotIn("/home/", workflow)
+        for stream in ("hub.stdout", "hub.stderr", "session.stdout", "session.stderr"):
+            self.assertIn("/evidence/" + stream, workflow)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,0 +1,68 @@
+name: Official Linux Unity Hub first-run observation only
+
+on:
+  push:
+    branches: [validation/linux-unity-hub-registry-capture]
+  workflow_dispatch:
+    inputs:
+      execution_request:
+        description: Observe one official Hub 3.22.3 first run in a new disposable profile; no Add, sign-in or discovery acceptance
+        required: true
+        default: inspect-only
+        type: choice
+        options:
+          - inspect-only
+          - observe-official-hub-3.22.3
+
+permissions:
+  contents: read
+
+jobs:
+  capture:
+    if: >-
+      github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.repository_id == '1364807512' &&
+      github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/validation/linux-unity-hub-registry-capture' &&
+      github.workflow_ref == 'BOBWORKS-XR/CREATOR-HUB/.github/workflows/linux-unity-hub-registry-capture.yml@refs/heads/validation/linux-unity-hub-registry-capture' &&
+      inputs.execution_request == 'observe-official-hub-3.22.3'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    env:
+      UNITY_HUB_CAPTURE_REQUEST: ${{ inputs.execution_request }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Mandatory pure authority, parser, Python 3.10 and workflow tests
+        run: /usr/bin/python3 -I -B scripts/native-linux-unity-hub-registry-capture.test.py
+      - name: Provision only the fixed disposable-runner GUI observation prerequisites
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends xvfb openbox xauth dbus-x11 python3-gi \
+            gir1.2-gtk-3.0 gir1.2-atspi-2.0 at-spi2-core libx11-6 libxres1
+          for tool in /usr/bin/python3 /usr/bin/gpg /usr/bin/gpgv /usr/bin/dpkg-deb /usr/bin/xauth \
+            /usr/bin/dbus-run-session /usr/bin/xvfb-run /usr/bin/Xvfb /usr/bin/openbox; do
+            test -x "$tool"
+          done
+          /usr/bin/python3 -I -B scripts/native-linux-unity-hub-registry-capture.py prerequisites
+      - name: Verify exact signed public metadata and extract the authenticated DEB without installing
+        run: /usr/bin/python3 -I -B scripts/native-linux-unity-hub-registry-capture.py stage
+      - name: Observe normal sandbox startup with existing GUI prerequisites only
+        run: /usr/bin/python3 -I -B scripts/native-linux-unity-hub-registry-capture.py session
+      - name: Retain bounded owned observation and public package evidence only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-unity-hub-registry-capture-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/linux-unity-hub-registry-capture/evidence/*.json
+            ${{ runner.temp }}/linux-unity-hub-registry-capture/evidence/*.png
+            ${{ runner.temp }}/linux-unity-hub-registry-capture/evidence/hub.stdout
+            ${{ runner.temp }}/linux-unity-hub-registry-capture/evidence/hub.stderr
+            ${{ runner.temp }}/linux-unity-hub-registry-capture/evidence/openbox.stdout
+            ${{ runner.temp }}/linux-unity-hub-registry-capture/evidence/openbox.stderr
+            ${{ runner.temp }}/linux-unity-hub-registry-capture/evidence/session.stdout
+            ${{ runner.temp }}/linux-unity-hub-registry-capture/evidence/session.stderr
+          if-no-files-found: warn
+          retention-days: 7
