@@ -28,6 +28,7 @@ PROXY_RUNTIME = Path('/home/runner/work/_temp/native-linux-production-016-flatpa
 PROXY_UID = 1001
 ROOT_WORKER_SECONDS = 5
 PROBE_OPERATION = 'flatpak-uid-inventory-probe-1001'
+ROOT_DIAGNOSTIC_ACTIVE = False
 
 
 def require(value):
@@ -725,6 +726,166 @@ def inventory_diagnostic(value):
     return bounded(value, 2048)
 
 
+def mixed_numeric_identity(row, kind=None):
+    require(type(row) is dict)
+    return dict(pid=row['pid'], parentPid=row.get('parentPid'), startTime=row.get('startTime'),
+                uids=copy.deepcopy(row.get('uids')), state=row.get('state'),
+                heldKind=kind if kind in (None, 'python', 'sudo') else 'other')
+
+
+def mixed_diagnostic(value):
+    require(type(value) is dict and set(value) == {'readOnly', 'inputPermitted', 'authorityGranted', 'releaseReady',
+        'subjectPid', 'observedUids', 'heldMembership', 'heldKind', 'caller', 'heldChain', 'postFailure'}
+        and value['readOnly'] is True and all(value[k] is False for k in ('inputPermitted', 'authorityGranted', 'releaseReady'))
+        and (value['subjectPid'] is None or type(value['subjectPid']) is int and 1 < value['subjectPid'] < 2**31)
+        and (value['observedUids'] is None or type(value['observedUids']) is list and len(value['observedUids']) == 4
+            and all(type(uid) is int and 0 <= uid < 2**32 for uid in value['observedUids']))
+        and (value['heldMembership'] is None or type(value['heldMembership']) is bool)
+        and value['heldKind'] in (None, 'python', 'sudo', 'other')
+        and type(value['heldChain']) is list and len(value['heldChain']) <= 5)
+    def identity(row):
+        require(type(row) is dict and set(row) == {'pid', 'parentPid', 'startTime', 'uids', 'state', 'heldKind'}
+            and type(row['pid']) is int and 1 < row['pid'] < 2**31
+            and (row['parentPid'] is None or type(row['parentPid']) is int and 0 <= row['parentPid'] < 2**31)
+            and (row['startTime'] is None or type(row['startTime']) is str and re.fullmatch(r'[0-9]{1,20}', row['startTime']))
+            and (row['uids'] is None or type(row['uids']) is list and len(row['uids']) == 4
+                and all(type(uid) is int and 0 <= uid < 2**32 for uid in row['uids']))
+            and row['state'] in (None, 'R', 'S', 'D', 'Z', 'X', 'x', 'T', 't', 'K', 'W', 'P', 'I', 'other')
+            and row['heldKind'] in (None, 'python', 'sudo', 'other'))
+    identity(value['caller'])
+    for row in value['heldChain']: identity(row)
+    require(len({row['pid'] for row in value['heldChain']}) == len(value['heldChain']))
+    post = value['postFailure']
+    require(type(post) is dict and set(post) == {'postFailureReadOnly', 'classification', 'stage', 'unavailable',
+        'before', 'after', 'procIdentity', 'kernelImage', 'fixedSudoImage', 'fixedSudoSha256', 'live', 'cleanupConfirmed'}
+        and post['postFailureReadOnly'] is True and post['classification'] in ('verifiedsudo', 'other', 'unavailable')
+        and post['stage'] in ('root-worker-only', 'budget', 'pidfd', 'proc-directory', 'identity-before',
+            'fixed-sudo-image', 'kernel-image', 'identity-after', 'stability', 'complete', 'cleanup')
+        and post['unavailable'] in (None, 'ValueError', 'KeyError', 'TypeError', 'RuntimeError', 'PermissionError',
+            'FileNotFoundError', 'ProcessLookupError', 'OSError', 'OtherError')
+        and (post['live'] is None or type(post['live']) is bool) and type(post['cleanupConfirmed']) is bool
+        and (post['fixedSudoSha256'] is None or type(post['fixedSudoSha256']) is str
+            and re.fullmatch(r'[a-f0-9]{64}', post['fixedSudoSha256'])))
+    for key in ('before', 'after'):
+        if post[key] is not None: identity(post[key])
+    for key in ('procIdentity', 'kernelImage', 'fixedSudoImage'):
+        require(post[key] is None or type(post[key]) is list and len(post[key]) == 9
+                and all(type(n) is int and 0 <= n < 2**64 for n in post[key]))
+    require(post['classification'] == 'unavailable' or post['stage'] == 'complete' and post['unavailable'] is None
+        and post['live'] is True and post['cleanupConfirmed'] is True and post['before'] == post['after']
+        and post['before'] is not None and post['procIdentity'] is not None and post['kernelImage'] is not None
+        and post['fixedSudoImage'] is not None and post['fixedSudoSha256'] is not None
+        and post['before']['pid'] == value['subjectPid'] and post['before']['uids'] == value['observedUids']
+        and ((post['kernelImage'] == post['fixedSudoImage']) == (post['classification'] == 'verifiedsudo')))
+    return bounded(value, 6144)
+
+
+def mixed_post_failure(chain, pid, ids):
+    """One post-refusal kernel snapshot, not original-failure image proof or admission."""
+    value = dict(postFailureReadOnly=True, classification='unavailable', stage='root-worker-only', unavailable=None,
+        before=None, after=None, procIdentity=None, kernelImage=None, fixedSudoImage=None,
+        fixedSudoSha256=None, live=None, cleanupConfirmed=True)
+    if not ROOT_DIAGNOSTIC_ACTIVE:
+        return value
+    fds, owned_image = [], None
+    try:
+        value['stage'] = 'budget'; chain.budget()
+        require(type(pid) is int and 1 < pid < 2**31 and type(ids) is list and len(ids) == 4
+                and all(type(uid) is int and 0 <= uid < 2**31 for uid in ids))
+        held = chain.held.get(pid)
+        value['stage'] = 'pidfd'
+        if held is None:
+            pidfd = os.pidfd_open(pid); fds.append(pidfd)
+        else:
+            pidfd = held['pidfd']
+        require(not select.select([pidfd], [], [], 0)[0]); chain.budget()
+        value['stage'] = 'proc-directory'
+        if held is None:
+            directory = os.open(f'/proc/{pid}', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC); fds.append(directory)
+        else:
+            directory = held['directory']
+        stamp = os.fstat(directory)
+        require(stat.S_ISDIR(stamp.st_mode))
+        proc_stamp = ProxyAssociationProc.stamp(stamp)
+        require(proc_stamp == ProxyAssociationProc.stamp(os.stat(f'/proc/{pid}', follow_symlinks=False)))
+        value['procIdentity'] = list(proc_stamp)
+        def identity(label):
+            chain.budget()
+            raw, _ = ProxyAssociationProc.read_at(directory, 'stat', 4096)
+            status, _ = ProxyAssociationProc.read_at(directory, 'status', 16384)
+            text = raw.decode('utf-8'); tail = text[text.rfind(')') + 2:].split()
+            found = re.findall(rb'^Uid:\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s*$', status, re.M)
+            row = probe_hop_detail(pid, tail, found)
+            value[label] = mixed_numeric_identity(row)
+            require(text.startswith(str(pid) + ' (') and len(tail) >= 20 and row['parentPid'] is not None
+                    and row['startTime'] is not None and row['uids'] == ids and row['state'] in ('R', 'S', 'D', 'I', 'T', 't', 'K', 'W', 'P'))
+            return value[label]
+        value['stage'] = 'identity-before'; value['before'] = identity('before')
+        if held is not None:
+            require(all(value['before'][k] == held['row'][k] for k in ('pid', 'parentPid', 'startTime', 'uids')))
+        value['stage'] = 'fixed-sudo-image'; chain.budget()
+        image = chain.images.get('sudo')
+        if image is None:
+            owned_image = image = InvocationImage('sudo', chain.budget)
+        image.check()
+        value['fixedSudoSha256'], value['fixedSudoImage'] = image.digest, list(image.identity)
+        value['stage'] = 'kernel-image'; chain.budget()
+        kernel = os.open('exe', os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=directory); fds.append(kernel)
+        observed = os.fstat(kernel)
+        require(stat.S_ISREG(observed.st_mode) and observed.st_nlink > 0 and 0 < observed.st_size <= 64 * 1024**2)
+        kernel_stamp = ProxyAssociationProc.stamp(observed)
+        require(kernel_stamp == ProxyAssociationProc.stamp(os.stat('exe', dir_fd=directory)))
+        value['kernelImage'] = list(kernel_stamp)
+        value['stage'] = 'identity-after'; value['after'] = identity('after')
+        value['stage'] = 'stability'
+        require(value['after'] == value['before']
+                and kernel_stamp == ProxyAssociationProc.stamp(os.fstat(kernel))
+                == ProxyAssociationProc.stamp(os.stat('exe', dir_fd=directory))
+                and proc_stamp == ProxyAssociationProc.stamp(os.fstat(directory))
+                == ProxyAssociationProc.stamp(os.stat(f'/proc/{pid}', follow_symlinks=False)))
+        image.check(); chain.budget()
+        value['live'] = not bool(select.select([pidfd], [], [], 0)[0]); require(value['live'])
+        chain.budget()
+        value.update(classification='verifiedsudo' if kernel_stamp == image.identity else 'other', stage='complete')
+    except Exception as error:
+        value['unavailable'] = type(error).__name__ if type(error) in (ValueError, KeyError, TypeError, RuntimeError,
+            PermissionError, FileNotFoundError, ProcessLookupError, OSError) else 'OtherError'
+        if getattr(error, 'invocation_cleanup_failed', False) is True:
+            value['cleanupConfirmed'] = False
+    finally:
+        def cleanup_failure(error):
+            value.update(classification='unavailable', cleanupConfirmed=False)
+            if value['unavailable'] is None:
+                value.update(stage='cleanup', unavailable=type(error).__name__ if type(error) in (
+                    ValueError, KeyError, TypeError, RuntimeError, PermissionError, FileNotFoundError,
+                    ProcessLookupError, OSError) else 'OtherError')
+        for fd in reversed(fds):
+            try: os.close(fd)
+            except Exception as error: cleanup_failure(error)
+        if owned_image is not None:
+            try: owned_image.close()
+            except Exception as error: cleanup_failure(error)
+    return value
+
+
+def capture_mixed_failure(error, chain, pid, ids, membership, kind):
+    try:
+        if getattr(error, 'proxy_mixed_attempted', False): return
+        error.proxy_mixed_attempted = True
+        require(len(chain.held) <= 5)
+        value = dict(readOnly=True, inputPermitted=False, authorityGranted=False, releaseReady=False,
+            subjectPid=pid if type(pid) is int and 1 < pid < 2**31 else None,
+            observedUids=list(ids) if type(ids) is list and len(ids) == 4
+                and all(type(uid) is int and 0 <= uid < 2**32 for uid in ids) else None,
+            heldMembership=membership, heldKind=kind if kind in (None, 'python', 'sudo') else 'other',
+            caller=mixed_numeric_identity(chain.caller, 'python'),
+            heldChain=[mixed_numeric_identity(held['row'], held['kind']) for held in chain.held.values()])
+        value['postFailure'] = mixed_post_failure(chain, pid, ids)
+        error.proxy_mixed_diagnostic = mixed_diagnostic(value)
+    except Exception:
+        pass
+
+
 def root_process(pid, full=False, *, probe_diagnostic=None):
     """Read kernel proc identity only; no cmdline, environment or candidate imports."""
     require(type(pid) is int and 1 < pid < 2**31)
@@ -1031,8 +1192,13 @@ class InvocationChain:
 
     def mixed_process(self, pid, ids):
         _inventory_predicate = 'mixed-membership'
-        require(type(pid) is int and pid in self.held and self.held[pid]['kind'] == 'sudo'
-                and type(ids) is list and all(type(uid) is int for uid in ids) and ids == [PROXY_UID, 0, 0, 0])
+        held_membership, held_kind = None, None
+        try:
+            require(type(pid) is int and (held_membership := pid in self.held) and (held_kind := self.held[pid]['kind']) == 'sudo'
+                    and type(ids) is list and all(type(uid) is int for uid in ids) and ids == [PROXY_UID, 0, 0, 0])
+        except Exception as error:
+            capture_mixed_failure(error, self, pid, ids, held_membership, held_kind)
+            raise
         self.recheck()
         _inventory_predicate = 'mixed-identity'
         row = self.held[pid]['row']; require(row['uids'] == ids)
@@ -1244,6 +1410,7 @@ INVENTORY_FAILURE_FUNCTIONS = (
 def root_snapshot_main():
     # This sole root entry point imports only stdlib and reads only fixed proc/runtime paths.
     # A missing stdin EOF cannot leave a privileged helper alive indefinitely.
+    global ROOT_DIAGNOSTIC_ACTIVE
     signal.signal(signal.SIGALRM, lambda *_: os._exit(124))
     signal.setitimer(signal.ITIMER_REAL, ROOT_WORKER_SECONDS)
     try:
@@ -1259,7 +1426,11 @@ def root_snapshot_main():
         probe = sys.argv[1:] == ['root-inventory-probe']
         (probe_request if probe else root_request)(request, time.monotonic_ns())
         protected_tool(request['codeSha256'])
-        data = inventory_probe(request) if probe else association_snapshot(request)
+        ROOT_DIAGNOSTIC_ACTIVE = True
+        try:
+            data = inventory_probe(request) if probe else association_snapshot(request)
+        finally:
+            ROOT_DIAGNOSTIC_ACTIVE = False
         protected_tool(request['codeSha256'])
         answer = dict(request=request, ok=True, snapshot=data)
         sys.stdout.write(json.dumps(bounded(answer), allow_nan=False, ensure_ascii=True))
@@ -1278,6 +1449,12 @@ def root_snapshot_main():
         if type(detail) is dict:
             try:
                 refusal['inventoryFailure'] = inventory_diagnostic(detail)
+            except Exception:
+                pass
+        detail = getattr(error, 'proxy_mixed_diagnostic', None)
+        if type(detail) is dict:
+            try:
+                refusal['mixedFailure'] = mixed_diagnostic(detail)
             except Exception:
                 pass
         sys.stdout.write(json.dumps(refusal))

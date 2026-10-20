@@ -475,6 +475,285 @@ class InventoryFailureTests(unittest.TestCase):
             self.assertNotIn('PRIVATE', out.getvalue()); self.assertLess(len(out.getvalue()), 2300)
 
 
+class MixedPostFailureTests(unittest.TestCase):
+    @contextmanager
+    def fixture(self, failure=None, *, fresh=False, held=False, active=True):
+        pid = 1686
+        row = dict(pid=pid, parentPid=20, startTime='123', uids=[1001, 0, 0, 0], state='S')
+        caller = dict(pid=19, parentPid=18, startTime='19', uids=[1001] * 4, state='S')
+        worker = dict(pid=21, parentPid=20, startTime='21', uids=[0] * 4, state='R')
+        supervisor = dict(pid=20, parentPid=19, startTime='20', uids=[1001, 0, 0, 0], state='S')
+        system = invocation_stat(50, stat.S_IFREG | 0o4755)
+        directory = invocation_stat(51, stat.S_IFDIR | 0o555, 0)
+        state = SimpleNamespace(reads=[], events=[], closes=[], checks=0, budgets=0, selections=0, row=row,
+                                image=system, directory=directory, stat_reads=0, fail=failure)
+        def budget():
+            state.budgets += 1; state.events.append('budget')
+            if failure == 'deadline-before' or failure == 'deadline-after' and state.checks == 2:
+                raise ValueError('PRIVATE_EXPIRED')
+        def checked():
+            state.checks += 1; state.events.append('fixed-check'); budget()
+            if failure == 'fixed-before' or failure == 'fixed-after' and state.checks == 2:
+                raise ValueError('PRIVATE_FIXED_IMAGE')
+        image = SimpleNamespace(identity=M.ProxyAssociationProc.stamp(system), digest='b' * 64,
+                                check=Mock(side_effect=checked), close=Mock())
+        chain = SimpleNamespace(budget=budget, caller=caller, images={} if fresh else {'sudo': image},
+            held={21: dict(row=worker, kind='python'), 20: dict(row=supervisor, kind='sudo'), 19: dict(row=caller, kind='python')})
+        if held: chain.held[pid] = dict(row=copy.deepcopy(row), kind='python', directory=7, pidfd=9)
+        state.chain, state.reference = chain, image
+        def opened(name, flags, **kw):
+            state.events.append(('open', name))
+            if failure == 'permission': raise PermissionError('PRIVATE_PROC_PATH')
+            self.assertIn(name, (f'/proc/{pid}', 'exe'))
+            return 8 if name == 'exe' else 7
+        def fstat(fd):
+            if fd == 7: return directory
+            self.assertEqual(fd, 8)
+            if failure == 'nonregular': return invocation_stat(50, stat.S_IFIFO | 0o644)
+            if failure == 'unlinked': return SimpleNamespace(**{**vars(system), 'st_nlink': 0})
+            if failure == 'oversize': return invocation_stat(50, system.st_mode, 64 * 1024**2 + 1)
+            if failure == 'kernel-change' and state.stat_reads == 2:
+                return invocation_stat(999, system.st_mode)
+            return invocation_stat(999, stat.S_IFREG | 0o755) if failure == 'other' else system
+        def named(name, **kw):
+            if name == 'exe': return fstat(8)
+            self.assertEqual(name, f'/proc/{pid}')
+            if failure == 'directory-change' and state.stat_reads == 2:
+                return invocation_stat(999, directory.st_mode, 0)
+            return directory
+        def read(fd, name, maximum):
+            self.assertEqual(fd, 7); state.reads.append(name); state.events.append(('read', name))
+            ids = list(row['uids'])
+            if name == 'stat':
+                state.stat_reads += 1
+                parent, start, kind = row['parentPid'], row['startTime'], row['state']
+                if failure == 'start-after' and state.stat_reads == 2: start = '999'
+                if failure == 'parent-after' and state.stat_reads == 2: parent = 99
+                if failure == 'dead': kind = 'Z'
+                return (f'{pid} (PRIVATE_COMM) {kind} {parent} ' + '0 ' * 17 + start + '\n').encode(), []
+            if failure == 'uid-before' or failure == 'uid-after' and state.stat_reads == 2: ids = [1001, 0, 1001, 0]
+            return ('Uid:\t' + ' '.join(map(str, ids)) + '\n').encode(), []
+        def selected(fds, *args):
+            self.assertEqual(fds, [9]); state.selections += 1
+            return ([9] if failure == 'exited-before' or failure == 'exited-after' and state.selections == 2 else [], [], [])
+        def closed(fd):
+            state.closes.append(fd)
+            if failure == 'close': raise OSError('PRIVATE_CLOSE')
+        with ExitStack() as stack:
+            for name in ('O_DIRECTORY', 'O_NOFOLLOW', 'O_CLOEXEC', 'O_NONBLOCK'):
+                stack.enter_context(patch.object(M.os, name, 0, create=True))
+            stack.enter_context(patch.object(M, 'ROOT_DIAGNOSTIC_ACTIVE', active))
+            state.factory = stack.enter_context(patch.object(M, 'InvocationImage', return_value=image))
+            state.pidfd = stack.enter_context(patch.object(M.os, 'pidfd_open', return_value=9, create=True))
+            state.opens = stack.enter_context(patch.object(M.os, 'open', side_effect=opened))
+            stack.enter_context(patch.object(M.os, 'close', side_effect=closed))
+            stack.enter_context(patch.object(M.os, 'fstat', side_effect=fstat))
+            stack.enter_context(patch.object(M.os, 'stat', side_effect=named))
+            stack.enter_context(patch.object(M.os, 'readlink', side_effect=AssertionError('No executable path read')))
+            stack.enter_context(patch.object(M.os, 'read', side_effect=AssertionError('No candidate bytes')))
+            stack.enter_context(patch.object(M.os, 'pread', side_effect=AssertionError('No candidate bytes'), create=True))
+            stack.enter_context(patch.object(M.ProxyAssociationProc, 'read_at', side_effect=read))
+            stack.enter_context(patch.object(M.select, 'select', side_effect=selected))
+            yield state
+
+    def capture(self, state):
+        error = ValueError('PRIVATE_ORIGINAL_REFUSAL')
+        M.capture_mixed_failure(error, state.chain, 1686, [1001, 0, 0, 0], False, None)
+        return error, error.proxy_mixed_diagnostic
+
+    def test_exact_refused_pid_snapshot_verifies_fixed_sudo_but_never_grants_original_membership(self):
+        with self.fixture() as state:
+            original, value = self.capture(state)
+            self.assertFalse(value['heldMembership']); self.assertIsNone(value['heldKind'])
+            self.assertEqual(value['subjectPid'], 1686); self.assertEqual(value['observedUids'], [1001, 0, 0, 0])
+            self.assertEqual([r['pid'] for r in value['heldChain']], [21, 20, 19])
+            self.assertEqual(value['caller']['pid'], 19)
+            self.assertEqual([r['parentPid'] for r in value['heldChain']], [20, 19, 18])
+            post = value['postFailure']
+            self.assertTrue(post['postFailureReadOnly']); self.assertEqual(post['classification'], 'verifiedsudo')
+            self.assertEqual(post['before'], post['after']); self.assertTrue(post['live'])
+            self.assertEqual(post['fixedSudoImage'], post['kernelImage']); self.assertEqual(post['fixedSudoSha256'], 'b' * 64)
+            self.assertEqual(state.reads, ['stat', 'status', 'stat', 'status'])
+            self.assertEqual(state.closes, [8, 7, 9]); state.factory.assert_not_called(); state.reference.close.assert_not_called()
+            self.assertEqual(state.selections, 2); self.assertNotIn('PRIVATE', M.json.dumps(value))
+            for name in ('inputPermitted', 'authorityGranted', 'releaseReady'): self.assertIs(value[name], False)
+            M.capture_mixed_failure(original, state.chain, 20, [0] * 4, True, 'sudo')
+            self.assertIs(original.proxy_mixed_diagnostic, value); self.assertEqual(len(state.reads), 4)
+
+    def test_other_image_metadata_is_not_hashed_or_adopted_and_fresh_reference_is_fixed_sudo_only(self):
+        with self.fixture('other', fresh=True) as state:
+            _, value = self.capture(state)
+            self.assertEqual(value['postFailure']['classification'], 'other')
+            self.assertNotEqual(value['postFailure']['kernelImage'], value['postFailure']['fixedSudoImage'])
+            state.factory.assert_called_once_with('sudo', state.chain.budget); state.reference.close.assert_called_once()
+            self.assertEqual(state.reads, ['stat', 'status', 'stat', 'status'])
+
+    def test_real_image_constructor_cleanup_failure_is_retained_without_replacing_original_refusal(self):
+        image_class = M.InvocationImage
+        for cleanup_fails in (False, True):
+            with self.subTest(cleanup_fails=cleanup_fails), self.fixture(fresh=True) as state:
+                proc_open, proc_fstat, proc_stat = M.os.open.side_effect, M.os.fstat.side_effect, M.os.stat.side_effect
+                with InvocationImageTests().fixture() as package:
+                    package_open, package_fstat, package_stat = M.os.open.side_effect, M.os.fstat.side_effect, M.os.stat.side_effect
+                    package.file.st_mode = stat.S_IFREG | 0o755
+                    def opened(name, flags, **kw):
+                        return (proc_open if name in ('/proc/1686', 'exe') else package_open)(name, flags, **kw)
+                    def fstat(fd): return (proc_fstat if fd in (7, 8) else package_fstat)(fd)
+                    def named(name, **kw):
+                        return (proc_stat if name in ('/proc/1686', 'exe') else package_stat)(name, **kw)
+                    def closed(fd):
+                        if cleanup_fails and fd == 4: raise OSError('PRIVATE_IMAGE_CLOSE')
+                    package.close.side_effect = closed
+                    with patch.object(M, 'InvocationImage', image_class), patch.object(M.os, 'open', side_effect=opened), \
+                            patch.object(M.os, 'fstat', side_effect=fstat), patch.object(M.os, 'stat', side_effect=named):
+                        original, value = self.capture(state)
+                    post = value['postFailure']
+                    self.assertEqual(post['classification'], 'unavailable')
+                    self.assertEqual(post['stage'], 'fixed-sudo-image'); self.assertEqual(post['unavailable'], 'ValueError')
+                    self.assertIs(post['cleanupConfirmed'], not cleanup_fails)
+                    self.assertEqual([call.args[0] for call in package.close.call_args_list], [4, 3, 2, 1, 7, 9])
+                    self.assertEqual(package.reads, []); self.assertEqual(state.reads, ['stat', 'status'])
+                    self.assertIsNone(post['fixedSudoImage']); self.assertIsNone(post['kernelImage'])
+                    self.assertEqual(str(original), 'PRIVATE_ORIGINAL_REFUSAL'); self.assertNotIn('PRIVATE', M.json.dumps(value))
+                    for name in ('inputPermitted', 'authorityGranted', 'releaseReady'): self.assertIs(value[name], False)
+                    state.factory.assert_not_called(); state.reference.close.assert_not_called()
+
+    def test_post_failure_reads_are_disabled_outside_root_worker_and_held_fds_are_never_closed(self):
+        with self.fixture(active=False) as state:
+            _, value = self.capture(state)
+            self.assertEqual(value['postFailure']['stage'], 'root-worker-only')
+            self.assertEqual(value['postFailure']['classification'], 'unavailable')
+            self.assertEqual(state.budgets, 0); state.opens.assert_not_called(); state.pidfd.assert_not_called()
+            self.assertEqual(state.reads, [])
+        with self.fixture(held=True) as state:
+            value = M.mixed_post_failure(state.chain, 1686, [1001, 0, 0, 0])
+            self.assertEqual(value['classification'], 'verifiedsudo')
+            self.assertEqual(state.closes, [8]); state.pidfd.assert_not_called()
+            self.assertEqual([call.args[0] for call in state.opens.call_args_list], ['exe'])
+
+    def test_fd_uid_start_parent_image_liveness_permission_and_deadline_negatives_never_qualify(self):
+        cases = ('uid-before', 'uid-after', 'start-after', 'parent-after', 'dead', 'kernel-change', 'directory-change',
+                 'fixed-before', 'fixed-after', 'exited-before', 'exited-after', 'permission', 'deadline-before', 'deadline-after',
+                 'nonregular', 'unlinked', 'oversize', 'close')
+        for failure in cases:
+            with self.subTest(failure=failure), self.fixture(failure) as state:
+                original, value = self.capture(state)
+                post = value['postFailure']
+                self.assertEqual(post['classification'], 'unavailable'); self.assertLessEqual(state.stat_reads, 2)
+                self.assertLessEqual(state.selections, 2); self.assertNotIn('PRIVATE', M.json.dumps(value))
+                self.assertEqual(str(original), 'PRIVATE_ORIGINAL_REFUSAL')
+                if failure == 'uid-before': self.assertEqual(post['before']['uids'], [1001, 0, 1001, 0])
+                if failure == 'dead': self.assertEqual(post['before']['state'], 'Z')
+                if failure == 'deadline-before': state.pidfd.assert_not_called(); state.opens.assert_not_called()
+                if failure == 'close': self.assertFalse(post['cleanupConfirmed']); self.assertEqual(state.closes, [8, 7, 9])
+
+    def test_held_pid_reuse_is_unavailable_without_reopening_or_closing_the_original_chain_fds(self):
+        with self.fixture(held=True) as state:
+            state.chain.held[1686]['row']['startTime'] = '122'
+            post = M.mixed_post_failure(state.chain, 1686, [1001, 0, 0, 0])
+            self.assertEqual(post['classification'], 'unavailable'); self.assertEqual(post['before']['startTime'], '123')
+            self.assertEqual(post['stage'], 'identity-before'); state.opens.assert_not_called(); state.pidfd.assert_not_called()
+            self.assertEqual(state.closes, []); self.assertEqual(state.reads, ['stat', 'status'])
+
+    def test_successful_post_failure_image_capture_still_raises_the_original_membership_refusal(self):
+        for failure in (None, 'other', 'permission', 'deadline-before'):
+            with self.subTest(failure=failure), self.fixture(failure) as state:
+                state.chain.recheck = Mock(side_effect=AssertionError('No admission after refusal'))
+                with self.assertRaisesRegex(ValueError, 'Finite diagnostic contract refused') as caught:
+                    M.InvocationChain.mixed_process(state.chain, 1686, [1001, 0, 0, 0])
+                state.chain.recheck.assert_not_called()
+                detail = caught.exception.proxy_mixed_diagnostic
+                self.assertFalse(detail['heldMembership']); self.assertIsNone(detail['heldKind'])
+                self.assertEqual(detail['postFailure']['classification'], 'verifiedsudo' if failure is None else
+                                 'other' if failure == 'other' else 'unavailable')
+
+    def test_post_snapshot_final_deadline_is_strict_at_boundary_and_never_extended(self):
+        for delta in (-1, 0, 1):
+            with self.subTest(delta=delta), self.fixture() as state:
+                clock = [1]
+                state.chain.budget = lambda: M.require(clock[0] < 100)
+                original = state.reference.check.side_effect
+                def check():
+                    original()
+                    if state.checks == 2: clock[0] = 100 + delta
+                state.reference.check.side_effect = check
+                post = M.mixed_post_failure(state.chain, 1686, [1001, 0, 0, 0])
+                self.assertEqual(post['classification'], 'verifiedsudo' if delta == -1 else 'unavailable')
+                self.assertEqual(state.stat_reads, 2); self.assertEqual(state.closes, [8, 7, 9])
+
+    def test_original_guard_evaluation_order_and_lookup_counts_are_unchanged(self):
+        class Held(dict):
+            def __contains__(self, key): events.append(('contains', key)); return super().__contains__(key)
+            def __getitem__(self, key): events.append(('getitem', key)); return super().__getitem__(key)
+        for pid, ids, expected, membership, kind in (
+                (True, [1001, 0, 0, 0], [], None, None),
+                (1686, [1001, 0, 0, 0], [('contains', 1686)], False, None),
+                (21, [1001, 0, 0, 0], [('contains', 21), ('getitem', 21)], True, 'python'),
+                (20, (1001, 0, 0, 0), [('contains', 20), ('getitem', 20)], True, 'sudo')):
+            events = []
+            chain = M.InvocationChain.__new__(M.InvocationChain)
+            chain.held = Held({20: {'kind': 'sudo'}, 21: {'kind': 'python'}})
+            with self.subTest(pid=pid), patch.object(M, 'capture_mixed_failure') as capture, \
+                    patch.object(chain, 'recheck', side_effect=AssertionError('No retry/recheck after refusal')):
+                with self.assertRaises(ValueError) as caught: chain.mixed_process(pid, ids)
+                self.assertEqual(events, expected)
+                capture.assert_called_once_with(caught.exception, chain, pid, ids, membership, kind)
+
+    def test_snapshot_or_serialization_failure_cannot_replace_original_and_valid_calls_do_not_capture(self):
+        with invocation_fixture() as state, M.InvocationChain(state.caller) as held, \
+                patch.object(M, 'capture_mixed_failure') as capture:
+            held.mixed_process(20, [1001, 0, 0, 0]); capture.assert_not_called()
+        for function in ('mixed_post_failure', 'mixed_diagnostic'):
+            with self.subTest(function=function), self.fixture() as state, \
+                    patch.object(M, function, side_effect=OSError('PRIVATE_SECONDARY')):
+                error = ValueError('PRIVATE_ORIGINAL')
+                M.capture_mixed_failure(error, state.chain, 1686, [1001, 0, 0, 0], False, None)
+                self.assertFalse(hasattr(error, 'proxy_mixed_diagnostic')); self.assertEqual(str(error), 'PRIVATE_ORIGINAL')
+
+    def test_root_entry_gates_reads_after_source_admission_transports_typed_capture_and_resets_on_refusal(self):
+        with self.fixture() as state:
+            error, detail = self.capture(state)
+        error.proxy_snapshot_stage = 'complete-uid-inventory'
+        for source_fails in (False, True):
+            output, events = io.StringIO(), []
+            def protected(*args):
+                self.assertFalse(M.ROOT_DIAGNOSTIC_ACTIVE); events.append('source')
+                if source_fails: raise PermissionError('PRIVATE_SOURCE')
+            def failed_probe(request):
+                self.assertTrue(M.ROOT_DIAGNOSTIC_ACTIVE); events.append('probe'); raise error
+            with self.subTest(source_fails=source_fails), ExitStack() as stack:
+                stack.enter_context(patch.object(M, 'ROOT_DIAGNOSTIC_ACTIVE', False))
+                for name in ('SIGALRM', 'ITIMER_REAL'): stack.enter_context(patch.object(M.signal, name, 0, create=True))
+                for name in ('signal', 'setitimer'): stack.enter_context(patch.object(M.signal, name, create=True))
+                for name in ('getuid', 'geteuid'): stack.enter_context(patch.object(M.os, name, return_value=0, create=True))
+                stack.enter_context(patch.dict(M.os.environ, {'SUDO_UID': '1001'}))
+                stack.enter_context(patch.object(M, 'PROXY_TOOL', Path(M.__file__)))
+                stack.enter_context(patch.object(M.sys, 'argv', ['observer.py', 'root-inventory-probe']))
+                stack.enter_context(patch.object(M.sys, 'stdin', SimpleNamespace(buffer=io.BytesIO(b'{"codeSha256":"fixed"}'))))
+                stack.enter_context(patch.object(M.sys, 'stdout', output))
+                stack.enter_context(patch.object(M, 'probe_request'))
+                stack.enter_context(patch.object(M, 'protected_tool', side_effect=protected))
+                probe = stack.enter_context(patch.object(M, 'inventory_probe', side_effect=failed_probe))
+                with self.assertRaises(SystemExit) as raised: M.root_snapshot_main()
+                if not source_fails: self.assertIs(raised.exception.__context__, error)
+                self.assertFalse(M.ROOT_DIAGNOSTIC_ACTIVE)
+                self.assertEqual(probe.call_count, 0 if source_fails else 1)
+            result = M.json.loads(output.getvalue())
+            self.assertEqual(result['ok'], False)
+            self.assertEqual(result.get('mixedFailure'), None if source_fails else detail)
+            self.assertNotIn('PRIVATE', output.getvalue()); self.assertLess(len(output.getvalue()), 6144)
+
+    def test_post_snapshot_has_no_sampling_retry_execution_or_candidate_content_read_calls(self):
+        source = Path(M.__file__).read_text()
+        node = next(n for n in ast.parse(source).body if isinstance(n, ast.FunctionDef) and n.name == 'mixed_post_failure')
+        text = ast.get_source_segment(source, node)
+        self.assertFalse(any(isinstance(n, ast.While) for n in ast.walk(node)))
+        for forbidden in ('readlink(', 'os.read(', 'os.pread(', 'subprocess', 'cmdline', 'environ', '.recheck(', 'sleep(', 'kill('):
+            self.assertNotIn(forbidden, text)
+        self.assertEqual(text.count("identity('before')"), 1); self.assertEqual(text.count("identity('after')"), 1)
+        self.assertIn("InvocationImage('sudo', chain.budget)", text)
+
+
 class InvocationImageTests(unittest.TestCase):
     @contextmanager
     def fixture(self, kind='sudo'):

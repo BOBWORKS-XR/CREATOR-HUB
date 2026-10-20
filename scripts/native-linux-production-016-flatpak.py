@@ -1232,9 +1232,58 @@ def attributed_warm_activation(record, client, admitted, owner, *, association_v
 ROOT_WORKERS_UNKNOWN = []
 
 
+def mixed_worker_diagnostic(value):
+    def check(test): require(test, 'Typed post-failure mixed diagnostic required')
+    check(type(value) is dict and set(value) == {'readOnly', 'inputPermitted', 'authorityGranted', 'releaseReady',
+        'subjectPid', 'observedUids', 'heldMembership', 'heldKind', 'caller', 'heldChain', 'postFailure'}
+        and value['readOnly'] is True and all(value[k] is False for k in ('inputPermitted', 'authorityGranted', 'releaseReady'))
+        and (value['subjectPid'] is None or type(value['subjectPid']) is int and 1 < value['subjectPid'] < 2**31)
+        and (value['observedUids'] is None or type(value['observedUids']) is list and len(value['observedUids']) == 4
+            and all(type(uid) is int and 0 <= uid < 2**32 for uid in value['observedUids']))
+        and (value['heldMembership'] is None or type(value['heldMembership']) is bool)
+        and value['heldKind'] in (None, 'python', 'sudo', 'other')
+        and type(value['heldChain']) is list and len(value['heldChain']) <= 5)
+    def identity(row):
+        check(type(row) is dict and set(row) == {'pid', 'parentPid', 'startTime', 'uids', 'state', 'heldKind'}
+            and type(row['pid']) is int and 1 < row['pid'] < 2**31
+            and (row['parentPid'] is None or type(row['parentPid']) is int and 0 <= row['parentPid'] < 2**31)
+            and (row['startTime'] is None or type(row['startTime']) is str and re.fullmatch(r'[0-9]{1,20}', row['startTime']))
+            and (row['uids'] is None or type(row['uids']) is list and len(row['uids']) == 4
+                and all(type(uid) is int and 0 <= uid < 2**32 for uid in row['uids']))
+            and row['state'] in (None, 'R', 'S', 'D', 'Z', 'X', 'x', 'T', 't', 'K', 'W', 'P', 'I', 'other')
+            and row['heldKind'] in (None, 'python', 'sudo', 'other'))
+    identity(value['caller'])
+    for row in value['heldChain']: identity(row)
+    check(len({row['pid'] for row in value['heldChain']}) == len(value['heldChain']))
+    post = value['postFailure']
+    check(type(post) is dict and set(post) == {'postFailureReadOnly', 'classification', 'stage', 'unavailable',
+        'before', 'after', 'procIdentity', 'kernelImage', 'fixedSudoImage', 'fixedSudoSha256', 'live', 'cleanupConfirmed'}
+        and post['postFailureReadOnly'] is True and post['classification'] in ('verifiedsudo', 'other', 'unavailable')
+        and post['stage'] in ('root-worker-only', 'budget', 'pidfd', 'proc-directory', 'identity-before',
+            'fixed-sudo-image', 'kernel-image', 'identity-after', 'stability', 'complete', 'cleanup')
+        and post['unavailable'] in (None, 'ValueError', 'KeyError', 'TypeError', 'RuntimeError', 'PermissionError',
+            'FileNotFoundError', 'ProcessLookupError', 'OSError', 'OtherError')
+        and (post['live'] is None or type(post['live']) is bool) and type(post['cleanupConfirmed']) is bool
+        and (post['fixedSudoSha256'] is None or type(post['fixedSudoSha256']) is str
+            and re.fullmatch(r'[a-f0-9]{64}', post['fixedSudoSha256'])))
+    for key in ('before', 'after'):
+        if post[key] is not None: identity(post[key])
+    for key in ('procIdentity', 'kernelImage', 'fixedSudoImage'):
+        check(post[key] is None or type(post[key]) is list and len(post[key]) == 9
+            and all(type(n) is int and 0 <= n < 2**64 for n in post[key]))
+    check(post['classification'] == 'unavailable' or post['stage'] == 'complete' and post['unavailable'] is None
+        and post['live'] is True and post['cleanupConfirmed'] is True and post['before'] == post['after']
+        and post['before'] is not None and post['procIdentity'] is not None and post['kernelImage'] is not None
+        and post['fixedSudoImage'] is not None and post['fixedSudoSha256'] is not None
+        and post['before']['pid'] == value['subjectPid'] and post['before']['uids'] == value['observedUids']
+        and ((post['kernelImage'] == post['fixedSudoImage']) == (post['classification'] == 'verifiedsudo')))
+    check(len(json_bytes(value)) <= 6144)
+    return copy.deepcopy(value)
+
+
 def root_worker_refusal(answer):
     error = RuntimeError('Complete protected root snapshot unavailable; no input')
-    if type(answer) is dict and answer.get('ok') is False and set(answer) <= {'ok', 'unavailable', 'stage', 'pid', 'probeCaller', 'inventoryFailure'}:
+    if type(answer) is dict and answer.get('ok') is False and set(answer) <= {'ok', 'unavailable', 'stage', 'pid', 'probeCaller', 'inventoryFailure', 'mixedFailure'}:
         value = dict(readOnly=True, inputPermitted=False, authorityGranted=False, releaseReady=False)
         if answer.get('unavailable') in ('ValueError', 'KeyError', 'TypeError', 'RuntimeError', 'PermissionError',
                                         'FileNotFoundError', 'ProcessLookupError', 'OSError'):
@@ -1295,6 +1344,10 @@ def root_worker_refusal(answer):
                 'Bounded observed process required')
             require(len(json_bytes(detail)) <= 2048, 'Bounded inventory failure required')
             value['inventoryFailure'] = copy.deepcopy(detail)
+        except Exception:
+            pass
+        try:
+            value['mixedFailure'] = mixed_worker_diagnostic(answer.get('mixedFailure'))
         except Exception:
             pass
         error.root_proxy_diagnostic = value

@@ -1081,6 +1081,79 @@ class RootInventoryPreflightTests(unittest.TestCase):
             releaseReady=False, type='PermissionError', stage='complete-uid-inventory', pid=1912))
         self.assertIn('no input', str(error)); self.assertNotIn('PRIVATE', str(error.root_proxy_diagnostic))
 
+    def mixed_failure(self):
+        def row(pid, parent, uids, kind):
+            return dict(pid=pid, parentPid=parent, startTime=str(pid), uids=uids, state='S', heldKind=kind)
+        before = row(1686, 20, [1001, 0, 0, 0], None)
+        image = [1, 50, stat.S_IFREG | 0o4755, 0, 0, 1, 64, 1, 1]
+        return dict(readOnly=True, inputPermitted=False, authorityGranted=False, releaseReady=False,
+            subjectPid=1686, observedUids=[1001, 0, 0, 0], heldMembership=False, heldKind=None,
+            caller=row(19, 18, [1001] * 4, 'python'),
+            heldChain=[row(21, 20, [0] * 4, 'python'), row(20, 19, [1001, 0, 0, 0], 'sudo'), row(19, 18, [1001] * 4, 'python')],
+            postFailure=dict(postFailureReadOnly=True, classification='verifiedsudo', stage='complete', unavailable=None,
+                before=before, after=copy.deepcopy(before), procIdentity=[1, 51, stat.S_IFDIR | 0o555, 0, 0, 1, 0, 1, 1],
+                kernelImage=image, fixedSudoImage=list(image), fixedSudoSha256='b' * 64, live=True, cleanupConfirmed=True))
+
+    def test_mixed_post_refusal_metadata_survives_receipt_but_never_becomes_inventory_or_input(self):
+        detail = self.mixed_failure()
+        with self.fixture() as state:
+            state.worker.side_effect = None
+            state.worker.return_value = SimpleNamespace(returncode=1, stderr=b'', stdout=M.json_bytes(dict(ok=False,
+                unavailable='ValueError', stage='complete-uid-inventory', inventoryFailure=self.inventory_failure(), mixedFailure=detail)))
+            with self.assertRaisesRegex(RuntimeError, 'no input'): M.root_inventory_preflight(Path('/fixed'))
+            state.worker.assert_called_once()
+            report = state.reports[0][1]
+            self.assertFalse(report['inventoryProbed']); self.assertNotIn('inventory', report)
+            self.assertEqual(report['workerCleanup']['mixedFailure'], detail)
+            for name in M.GATES: self.assertIs(report[name], False)
+            self.assertEqual(detail['postFailure']['classification'], 'verifiedsudo')
+            self.assertFalse(detail['heldMembership']); self.assertIsNone(detail['heldKind'])
+
+    def test_mixed_schema_privacy_types_bounds_and_classification_are_closed_in_both_validators(self):
+        with self.fixture() as state:
+            M.root_inventory_preflight(Path('/fixed'))
+            validators = (M.mixed_worker_diagnostic, state.module.mixed_diagnostic)
+            mutations = (
+                lambda v: v.update(argv='PRIVATE'), lambda v: v.update(subjectPid=True),
+                lambda v: v.update(observedUids=[True] * 4), lambda v: v.update(heldMembership=1),
+                lambda v: v.update(heldKind='PRIVATE'), lambda v: v.update(authorityGranted=True),
+                lambda v: v.update(heldChain=v['heldChain'] * 2),
+                lambda v: v['caller'].update(executable='PRIVATE'), lambda v: v['caller'].update(pid=True),
+                lambda v: v['caller'].update(startTime='1' * 4096), lambda v: v['caller'].update(uids=[2**32] * 4),
+                lambda v: v['heldChain'][0].update(parentPid=True), lambda v: v['heldChain'][0].update(state='PRIVATE'),
+                lambda v: v['postFailure'].update(extra='PRIVATE'), lambda v: v['postFailure'].update(postFailureReadOnly=False),
+                lambda v: v['postFailure'].update(classification='PRIVATE'), lambda v: v['postFailure'].update(stage='PRIVATE'),
+                lambda v: v['postFailure'].update(unavailable='PRIVATE'), lambda v: v['postFailure'].update(live=False),
+                lambda v: v['postFailure'].update(cleanupConfirmed=False), lambda v: v['postFailure'].update(fixedSudoSha256='PRIVATE'),
+                lambda v: v['postFailure'].update(kernelImage=[True] * 9),
+                lambda v: v['postFailure']['fixedSudoImage'].__setitem__(1, 999),
+                lambda v: v['postFailure']['after'].update(startTime='999'),
+                lambda v: v['postFailure']['before'].update(pid=999),
+                lambda v: v['postFailure'].update(classification='other'))
+            for validate in validators:
+                value = self.mixed_failure(); detached = validate(value)
+                value['heldChain'][0]['pid'] = 999; self.assertEqual(detached['heldChain'][0]['pid'], 21)
+                for mutate in mutations:
+                    changed = self.mixed_failure(); mutate(changed)
+                    with self.subTest(validate=validate.__name__, mutate=mutate), self.assertRaises((ValueError, RuntimeError)):
+                        validate(changed)
+            for mutate in mutations:
+                changed = self.mixed_failure(); mutate(changed)
+                error = M.root_worker_refusal(dict(ok=False, unavailable='ValueError', stage='complete-uid-inventory', mixedFailure=changed))
+                self.assertNotIn('mixedFailure', error.root_proxy_diagnostic)
+                self.assertNotIn('PRIVATE', str(error.root_proxy_diagnostic)); self.assertIn('no input', str(error))
+
+    def test_post_failure_serialization_refusal_preserves_original_failure_and_accepts_unavailable_only_as_data(self):
+        answer = dict(ok=False, unavailable='ValueError', stage='complete-uid-inventory', mixedFailure=self.mixed_failure())
+        with patch.object(M, 'json_bytes', side_effect=OSError('PRIVATE_SERIALIZATION')):
+            error = M.root_worker_refusal(answer)
+        self.assertEqual(error.root_proxy_diagnostic, dict(readOnly=True, inputPermitted=False, authorityGranted=False,
+            releaseReady=False, type='ValueError', stage='complete-uid-inventory'))
+        detail = self.mixed_failure()
+        detail['postFailure'].update(classification='unavailable', stage='identity-before', unavailable='PermissionError',
+            before=None, after=None, procIdentity=None, kernelImage=None, fixedSudoImage=None, fixedSudoSha256=None, live=None)
+        self.assertEqual(M.mixed_worker_diagnostic(detail), detail)
+
     def test_probe_accepts_only_before_expiry_including_after_final_protected_source_check(self):
         for delta in (-1, 0, 1, 'protected-check'):
             with self.subTest(delta=delta), self.fixture() as state:
