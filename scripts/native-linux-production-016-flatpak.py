@@ -507,6 +507,16 @@ def trust_view():
 def trust_difference(before, after, certificate_absent):
     require(type(before) is dict and type(after) is dict and max(len(before), len(after)) <= 4096,
             'Bounded trust diagnostic snapshots required')
+    require(type(certificate_absent) is bool and all(type(name) is str for name in before.keys() | after.keys()),
+            'Trust diagnostic snapshot names and certificate state')
+    def bundle_pin(snapshot):
+        value = snapshot.get('system/ca-certificates.crt')
+        if not (type(value) is dict and 'link' not in value and type(value.get('size')) is int
+                and 0 < value['size'] <= 2 * 1024 * 1024 and type(value.get('sha256')) is str
+                and re.fullmatch(r'[a-f0-9]{64}', value['sha256'])):
+            return None
+        return {key: value[key] for key in ('size', 'sha256')}
+    original_bundle, current_bundle = bundle_pin(before), bundle_pin(after)
     def entry(value):
         if value is None:
             return None
@@ -525,15 +535,17 @@ def trust_difference(before, after, certificate_absent):
         return result
     rows, counts = [], dict.fromkeys(('added', 'removed', 'changed'), 0)
     for name in sorted(before.keys() | after.keys()):
-        require(type(name) is str and re.fullmatch(r'(?:local|system)/[A-Za-z0-9_./+-]{1,240}', name)
-                and '..' not in name.split('/'), 'Bounded relative trust entry name')
         if name in before and name in after and before[name] == after[name]:
             continue
         kind = 'added' if name not in before else 'removed' if name not in after else 'changed'
         counts[kind] += 1
         if len(rows) < 64:
-            rows.append({'name': name, 'change': kind, 'before': entry(before.get(name)), 'after': entry(after.get(name))})
+            display = {'name': name} if re.fullmatch(r'(?:local|system)/[A-Za-z0-9_./+-]{1,240}', name) and '..' not in name.split('/') else {
+                'nameRedacted': True, 'nameSha256': hashlib.sha256(name.encode()).hexdigest()}
+            rows.append({**display, 'change': kind, 'before': entry(before.get(name)), 'after': entry(after.get(name))})
     result = {'schemaVersion': 1, 'readOnly': True, 'cleanupVerified': False, 'temporaryCertificateAbsent': certificate_absent,
+              'bundle': {'before': original_bundle, 'after': current_bundle,
+                         'bytesEqual': original_bundle is not None and original_bundle == current_bundle},
               'beforeSha256': hashlib.sha256(json_bytes(before)).hexdigest(), 'afterSha256': hashlib.sha256(json_bytes(after)).hexdigest(),
               'counts': counts, 'complete': sum(counts.values()) == len(rows), 'entries': rows}
     require(len(json_bytes(result)) <= 65536, 'Trust diagnostic output bound')
@@ -842,6 +854,34 @@ def proxy_process_io(pid, runtime, uid):
     return {'namespacePids': ids, 'mountNamespace': mount, 'sockets': sockets, 'unixRows': unix, 'runtimeObjects': objects}
 
 
+PROXY_CAPTURE_STAGES = ('expected-launch', 'current-launch', 'client-identity', 'launch-identity', 'subtree',
+                        'subtree-membership', 'proxy-identity', 'subtree-records', 'client-io', 'proxy-io',
+                        'subtree-recheck', 'final-identities', 'output-bound')
+
+
+def proxy_process_snapshot(row):
+    require(type(row) is dict and all(type(row.get(key)) is int and 0 < row[key] <= 2147483647
+            for key in ('pid', 'parentPid')) and type(row.get('startTime')) is str
+            and re.fullmatch(r'[1-9][0-9]{0,19}', row['startTime']), 'Bounded diagnostic process tuple')
+    require(type(row.get('uids')) is list and len(row['uids']) == 4 and all(type(uid) is int and 0 <= uid <= 2147483647
+            for uid in row['uids']), 'Bounded diagnostic process UIDs')
+    fields = ('st_dev', 'st_ino', 'st_size', 'st_mode', 'st_uid', 'st_gid', 'st_mtime_ns', 'st_ctime_ns')
+    require(type(row.get('image')) is dict and 'st_size' in row['image'], 'Diagnostic image metadata required')
+    image = {key: row['image'][key] for key in fields if key in row['image']}
+    require(all(type(value) is str and re.fullmatch(r'[0-9]{1,20}', value) for value in image.values()), 'Bounded image metadata')
+    path = row.get('executable')
+    require(type(path) is str and 0 < len(path) <= 4096, 'Bounded diagnostic executable path')
+    result = {key: row[key] for key in ('pid', 'parentPid', 'startTime')}
+    result.update(uids=list(row['uids']), image=image, executableSha256=hashlib.sha256(path.encode()).hexdigest(), verified=False)
+    if path in ('/usr/bin/flatpak', '/usr/bin/bwrap', '/usr/libexec/flatpak-bwrap',
+                '/usr/bin/xdg-dbus-proxy', '/app/bin/creator-hub-flatpak-activate'):
+        result['executable'] = path
+    if 'kernelImageSha256' in row:
+        require(type(row['kernelImageSha256']) is str and re.fullmatch(r'[a-f0-9]{64}', row['kernelImageSha256']), 'Diagnostic kernel image hash')
+        result['kernelImageSha256'] = row['kernelImageSha256']
+    return result
+
+
 def consent_text(generation):
     require(re.fullmatch(r"[a-f0-9]{64}", generation), "Exact signed generation required")
     return ("Install Creator Hub native support 0.1.16?\n\nThis installs and registers the verified generation " + generation +
@@ -888,6 +928,7 @@ class Session:
         self.children, self.captures, self.fds = [], [], []
         self.portal_client = None
         self.flatpak_launch = None
+        self.flatpak_popen = None
         self.bootstrap_proxy = None
         self.report = {"schemaVersion": 1, "profile": PROFILE, "phase": "starting", **GATES}
 
@@ -937,40 +978,72 @@ class Session:
 
     def proxy_attribution(self, client, peer):
         result = {'readOnly': True, 'stable': False, 'inputPermitted': False, 'qualified': False, 'peerPairingProven': False}
+        result['proofProgress'] = dict.fromkeys(('currentLaunchRecorded', 'clientStable', 'currentLaunchMatchesExpected',
+            'subtreeCaptured', 'subtreeContainsClientAndPeer', 'proxyImageMatched', 'subtreeRechecked', 'finalIdentitiesRechecked'), False)
+        stage = 'expected-launch'
         try:
             launch = self.flatpak_launch
             require(launch is not None and peer['uid'] == os.getuid(), 'Owned Flatpak launch diagnostic only')
+            result['expectedLaunch'] = proxy_process_snapshot(launch)
+            popen = self.flatpak_popen
+            require(type(popen) is dict and set(popen) == {'pid', 'startTime'} and popen['pid'] == launch['pid']
+                    and type(popen['pid']) is int and 1 < popen['pid'] <= 2147483647
+                    and type(popen['startTime']) is str and re.fullmatch(r'[1-9][0-9]{0,19}', popen['startTime']), 'Independent owned Popen tuple required')
+            result['popenIdentity'] = {**popen, 'verified': False}
+            stage = 'current-launch'
+            observed = self.native.native_process(popen['pid'], self.helper, False)
+            require(observed['uids'] == [os.getuid()] * 4 and 0 < int(observed['image']['st_size']) <= 64 * 1024 * 1024,
+                    'Bounded same-user current launch diagnostic')
+            current = self.native.native_process(popen['pid'], self.helper)
+            result['currentLaunch'] = proxy_process_snapshot(current)
+            require({key: value for key, value in current.items() if key != 'kernelImageSha256'} == observed,
+                    'Current launch changed during diagnostic image capture')
+            result['proofProgress']['currentLaunchRecorded'] = True
+            stage = 'client-identity'
             self.stable(client)
+            result['proofProgress']['clientStable'] = True
+            stage = 'launch-identity'
             require(self.native.native_process(launch['pid'], self.helper, False) == launch, 'Diagnostic launch changed')
+            require(current['pid'] == popen['pid'] and current['startTime'] == popen['startTime']
+                    and observed == launch, 'Current diagnostic launch differs from recorded Popen/launch tuple')
+            result['proofProgress']['currentLaunchMatchesExpected'] = True
+            stage = 'subtree'
             tree = P.subtree(launch['pid'], self.helper, self.native)
+            result['proofProgress']['subtreeCaptured'] = True
+            stage = 'subtree-membership'
             require(len(tree) <= 16 and client['pid'] in tree and peer['pid'] in tree, 'AX peer outside bounded owned launch')
+            result['proofProgress']['subtreeContainsClientAndPeer'] = True
+            stage = 'proxy-identity'
             require(tree[peer['pid']]['executable'] == '/usr/bin/xdg-dbus-proxy', 'Only owned proxy diagnostic')
             proxy = self.native.native_process(peer['pid'], self.helper)
             require(0 < int(proxy['image']['st_size']) <= 64 * 1024 * 1024
                     and {k: v for k, v in proxy.items() if k != 'kernelImageSha256'} == tree[peer['pid']], 'Diagnostic proxy identity changed')
-            known_images = ('/usr/bin/flatpak', '/usr/bin/bwrap', '/usr/libexec/flatpak-bwrap',
-                            '/usr/bin/xdg-dbus-proxy', '/app/bin/creator-hub-flatpak-activate')
-            rows = []
-            for row in sorted(tree.values(), key=lambda r: r['pid']):
-                value = {key: row[key] for key in ('pid', 'parentPid', 'startTime', 'uids', 'image')}
-                value['executableSha256'] = hashlib.sha256(row['executable'].encode()).hexdigest()
-                if row['executable'] in known_images:
-                    value['executable'] = row['executable']
-                rows.append(value)
+            result['proofProgress']['proxyImageMatched'] = True
+            stage = 'subtree-records'
+            rows = [proxy_process_snapshot(row) for row in sorted(tree.values(), key=lambda r: r['pid'])]
             result.update(launch={'pid': launch['pid'], 'startTime': launch['startTime']}, peer=peer, subtree=rows, processes=[])
             for process in (client, proxy):
+                stage = 'client-io' if process is client else 'proxy-io'
                 result['processes'].append({'pid': process['pid'], 'kernelImageSha256': process['kernelImageSha256'],
                                            **proxy_process_io(process['pid'], str(self.root / 'runtime'), os.getuid())})
+            stage = 'subtree-recheck'
             require(P.subtree(launch['pid'], self.helper, self.native) == tree, 'Diagnostic launch topology changed')
+            result['proofProgress']['subtreeRechecked'] = True
+            stage = 'final-identities'
             self.stable(client); self.stable(proxy)
             require(self.native.native_process(launch['pid'], self.helper, False) == launch, 'Diagnostic launch identity changed')
+            result['proofProgress']['finalIdentitiesRechecked'] = True
+            stage = 'output-bound'
             require(len(json_bytes(result)) <= 65536, 'Bounded proxy attribution output')
             result['stable'] = True
         except Exception as error:
-            result['unavailable'] = type(error).__name__
+            result['failureStage'] = stage
+            result['unavailable'] = type(error).__name__ if type(error) in (
+                RuntimeError, PermissionError, FileNotFoundError, ProcessLookupError, ValueError, KeyError, TypeError, OSError) else 'OtherError'
         if len(json_bytes(result)) > 65536:
-            return {'readOnly': True, 'stable': False, 'inputPermitted': False, 'qualified': False,
-                    'peerPairingProven': False, 'unavailable': 'OutputLimit'}
+            return {key: value for key, value in {**result, 'stable': False, 'unavailable': 'OutputLimit'}.items()
+                    if key in ('readOnly', 'stable', 'inputPermitted', 'qualified', 'peerPairingProven', 'unavailable',
+                               'failureStage', 'proofProgress', 'popenIdentity', 'expectedLaunch', 'currentLaunch')}
         return result
 
     def click_dialog(self, process, labels, buttons, action, phase, title="Creator Hub"):
@@ -1077,6 +1150,7 @@ class Session:
         require(action in ("Cancel", "Open Creator Hub", "Get Native Hub"), "Finite launcher action")
         child = self.launch(["/usr/bin/flatpak", "run", "--user", REF], phase)
         start = self.helper.parse_start(self.helper.Proc().stat(child.pid), child.pid)
+        self.flatpak_popen = {'pid': child.pid, 'startTime': start}
         found = {}
         def discover():
             nonlocal found

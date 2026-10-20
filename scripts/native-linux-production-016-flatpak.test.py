@@ -827,6 +827,65 @@ class DiagnosticTests(unittest.TestCase):
         self.assertEqual(len(limited['entries']), 64); self.assertFalse(limited['complete'])
         self.assertLess(len(M.json_bytes(limited)), 65536)
 
+    def test_trust_diff_skips_unchanged_unicode_names_and_redacts_changed_unknown_names(self):
+        name = 'system/NetLock_Arany_=Class_Gold=_F\u0151tan\u00fas\u00edtv\u00e1ny.pem'
+        private = 'system/DO-NOT-RETAIN=\u00e9.pem'
+        before = {name: {'link': '/private/UNCHANGED-TARGET'}}
+        after = {**before, private: {'link': '/private/CHANGED-TARGET'},
+                 'system/creator-production-bootstrap016.pem': {'link': str(M.TLS_DESTINATION)}}
+        result = M.trust_difference(before, after, True)
+        self.assertEqual(result['counts'], {'added': 2, 'removed': 0, 'changed': 0})
+        self.assertTrue(result['complete'])
+        redacted = next(row for row in result['entries'] if row.get('nameRedacted'))
+        self.assertNotIn('name', redacted)
+        self.assertEqual(redacted['nameSha256'], hashlib.sha256(private.encode()).hexdigest())
+        self.assertNotIn('DO-NOT-RETAIN', json.dumps(result))
+        self.assertNotIn('CHANGED-TARGET', json.dumps(result))
+        self.assertNotIn('UNCHANGED-TARGET', json.dumps(result))
+        limited = M.trust_difference({}, {f'system/{n}=DO-NOT-RETAIN\u00e9.pem': {'link': 'private'} for n in range(100)}, True)
+        self.assertEqual(limited['counts']['added'], 100)
+        self.assertEqual(len(limited['entries']), 64)
+        self.assertFalse(limited['complete'])
+        self.assertNotIn('DO-NOT-RETAIN', json.dumps(limited))
+        self.assertLess(len(M.json_bytes(limited)), 65536)
+
+    def test_trust_bundle_pins_and_certificate_absence_do_not_depend_on_entry_names(self):
+        bundle = {**pin(b'original bundle'), 'mode': 0o644, 'uid': 0, 'gid': 0}
+        before = {'system/ca-certificates.crt': bundle, 'local/unchanged=\u00e9.crt': bundle}
+        for changed in (False, True):
+            after = {**before, 'system/unknown=\u00e9.pem': {'link': 'private/DO-NOT-RETAIN'}}
+            if changed:
+                after['system/ca-certificates.crt'] = {**bundle, **pin(b'different bundle')}
+            result = M.trust_difference(before, after, not changed)
+            self.assertEqual(result['bundle']['before'], pin(b'original bundle'))
+            self.assertEqual(result['bundle']['after'], pin(b'different bundle' if changed else b'original bundle'))
+            self.assertIs(result['bundle']['bytesEqual'], not changed)
+            self.assertIs(result['temporaryCertificateAbsent'], not changed)
+            self.assertFalse(result['cleanupVerified'])
+        missing = M.trust_difference({}, {}, True)
+        self.assertEqual(missing['bundle'], {'before': None, 'after': None, 'bytesEqual': False})
+        redirected = M.trust_difference(before, {**before, 'system/ca-certificates.crt': {'link': '/private/DO-NOT-RETAIN'}}, True)
+        self.assertEqual(redirected['bundle'], {'before': pin(b'original bundle'), 'after': None, 'bytesEqual': False})
+        self.assertEqual(redirected['counts']['changed'], 1)
+        self.assertNotIn('DO-NOT-RETAIN', json.dumps(redirected))
+
+    def test_cleanup_with_unchanged_unicode_ca_still_retains_diff_and_original_refusal(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            before = {'system/unchanged=\u00e9.pem': {'link': 'private/DO-NOT-RETAIN'}}
+            after = {**before, 'system/creator-production-bootstrap016.pem': {'link': str(M.TLS_DESTINATION)}}
+            arm = {'before': before, 'certificate': pin(b'public')}
+            with patch.object(M, 'regular', return_value=b'arm'), patch.object(M, 'bound'), \
+                    patch.object(M, 'protected_trust_parent'), patch.object(M.os.path, 'lexists', return_value=False), \
+                    patch.object(M, 'trust_view', return_value=after), patch.object(M, 'command') as command:
+                with self.assertRaisesRegex(RuntimeError, '^CI trust before-image was not restored$'):
+                    M.cleanup_owned_tls(root, arm, b'arm')
+                command.assert_not_called()
+            result = json.loads((root / 'tls-trust-diff-1-gtk.json').read_text())
+            self.assertTrue(result['temporaryCertificateAbsent'])
+            self.assertEqual(result['counts']['added'], 1)
+            self.assertFalse(result['cleanupVerified'])
+
     def test_cleanup_retains_first_two_diffs_but_still_raises_original_refusal(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve(); before = {'system/old.pem': {'link': 'original'}}
@@ -874,6 +933,7 @@ class DiagnosticTests(unittest.TestCase):
                  (14, 13, '/app/bin/creator-hub-flatpak-activate'))}
         session = object.__new__(M.Session); session.root = Path('/private/fixture'); session.helper = None
         session.flatpak_launch = copy.deepcopy(rows[10])
+        session.flatpak_popen = {'pid': 10, 'startTime': '10'}
         def process(pid, helper, full=True):
             value = copy.deepcopy(rows[pid])
             if full: value['kernelImageSha256'] = str(pid % 10) * 64
@@ -892,6 +952,127 @@ class DiagnosticTests(unittest.TestCase):
         self.assertEqual([(r['pid'], r['parentPid']) for r in result['subtree']], [(10, 9), (11, 10), (12, 11), (13, 10), (14, 13)])
         self.assertEqual(io_capture.call_count, 2)
         with self.assertRaises(RuntimeError): M.ax_identity(peer, 12, client, [14, 2], 1001)
+
+    def test_proxy_capture_distinguishes_previously_ambiguous_failure_stages(self):
+        for failure in ('client-identity', 'launch-identity', 'subtree'):
+            session, rows, client, peer = self.proxy_fixture()
+            process = session.native.native_process
+            launch_reads = []
+            def read(pid, helper, full=True):
+                if pid == 10 and not full:
+                    launch_reads.append(pid)
+                    if failure == 'launch-identity' and len(launch_reads) == 2:
+                        raise RuntimeError('/private/DO-NOT-RETAIN')
+                if failure == 'client-identity' and pid == 14:
+                    raise RuntimeError('/private/DO-NOT-RETAIN')
+                return process(pid, helper, full)
+            session.native.native_process = read
+            with self.subTest(failure=failure), patch.object(M.os, 'getuid', return_value=1001, create=True), \
+                    patch.object(M.P, 'subtree', side_effect=RuntimeError('/private/DO-NOT-RETAIN') if failure == 'subtree' else None,
+                                 return_value=rows):
+                result = session.proxy_attribution(client, peer)
+            self.assertEqual(result['failureStage'], failure)
+            self.assertIn(result['failureStage'], M.PROXY_CAPTURE_STAGES)
+            self.assertEqual(result['unavailable'], 'RuntimeError')
+            self.assertFalse(result['expectedLaunch']['verified'])
+            self.assertFalse(result['currentLaunch']['verified'])
+            self.assertEqual(result['popenIdentity'], {'pid': 10, 'startTime': '10', 'verified': False})
+            self.assertEqual(result['currentLaunch']['kernelImageSha256'], '0' * 64)
+            self.assertTrue(result['proofProgress']['currentLaunchRecorded'])
+            self.assertFalse(result['proofProgress']['subtreeCaptured'])
+            self.assertFalse(result['stable']); self.assertFalse(result['inputPermitted'])
+            self.assertNotIn('DO-NOT-RETAIN', json.dumps(result))
+
+    def test_proxy_capture_retains_redacted_partial_launch_records_without_blessing_replacement(self):
+        session, rows, client, peer = self.proxy_fixture()
+        session.flatpak_launch['executable'] = '/private/DO-NOT-RETAIN/expected'
+        rows[10]['executable'] = '/private/DO-NOT-RETAIN/current'
+        with patch.object(M.os, 'getuid', return_value=1001, create=True), patch.object(M.P, 'subtree') as subtree:
+            result = session.proxy_attribution(client, peer)
+        self.assertEqual(result['failureStage'], 'launch-identity')
+        self.assertFalse(result['proofProgress']['currentLaunchMatchesExpected'])
+        self.assertTrue(result['proofProgress']['clientStable'])
+        self.assertNotIn('executable', result['expectedLaunch'])
+        self.assertNotIn('executable', result['currentLaunch'])
+        self.assertEqual(result['currentLaunch']['executableSha256'], hashlib.sha256(rows[10]['executable'].encode()).hexdigest())
+        self.assertNotIn('DO-NOT-RETAIN', json.dumps(result))
+        self.assertFalse(result['currentLaunch']['verified']); self.assertFalse(result['qualified'])
+        subtree.assert_not_called()
+
+    def test_proxy_launch_capture_requires_independent_popen_and_bounds_current_image_reads(self):
+        for failure in ('missing-popen', 'wrong-pid', 'reused-start', 'foreign-uid', 'oversize-image'):
+            session, rows, client, peer = self.proxy_fixture()
+            process = session.native.native_process
+            if failure == 'missing-popen': session.flatpak_popen = None
+            if failure == 'wrong-pid': session.flatpak_popen['pid'] = 999
+            if failure == 'reused-start': rows[10]['startTime'] = '99'
+            if failure == 'foreign-uid': rows[10]['uids'] = [1002] * 4
+            if failure == 'oversize-image': rows[10]['image'] = {'st_size': str(64 * 1024 * 1024 + 1)}
+            session.native.native_process = Mock(side_effect=process)
+            with self.subTest(failure=failure), patch.object(M.os, 'getuid', return_value=1001, create=True), \
+                    patch.object(M.P, 'subtree') as subtree:
+                result = session.proxy_attribution(client, peer)
+            self.assertFalse(result['stable']); self.assertFalse(result['inputPermitted']); self.assertFalse(result['qualified'])
+            self.assertFalse(result['expectedLaunch']['verified'])
+            subtree.assert_not_called()
+            if failure in ('missing-popen', 'wrong-pid'):
+                self.assertEqual(result['failureStage'], 'expected-launch')
+                session.native.native_process.assert_not_called()
+            elif failure == 'reused-start':
+                self.assertEqual(result['failureStage'], 'launch-identity')
+                self.assertEqual(result['currentLaunch']['startTime'], '99')
+                self.assertFalse(result['currentLaunch']['verified'])
+            else:
+                self.assertEqual(result['failureStage'], 'current-launch')
+                self.assertNotIn('currentLaunch', result)
+                self.assertEqual(session.native.native_process.call_args_list, [unittest.mock.call(10, None, False)])
+
+    def test_proxy_snapshot_copies_only_bounded_public_metadata_and_fixed_stage_categories(self):
+        session, rows, _, _ = self.proxy_fixture()
+        row = rows[10]
+        row['executable'] = '/private/DO-NOT-RETAIN'
+        row['rawArgv'] = ['DO-NOT-RETAIN']
+        row['image']['private'] = 'DO-NOT-RETAIN'
+        result = M.proxy_process_snapshot(row)
+        self.assertNotIn('DO-NOT-RETAIN', json.dumps(result))
+        self.assertFalse(result['verified'])
+        row['uids'][0] = 999
+        row['image']['st_size'] = '999'
+        self.assertEqual(result['uids'], [1001] * 4)
+        self.assertEqual(result['image'], {'st_size': '64'})
+        for mutation in ('path-limit', 'metadata-limit', 'uid-type'):
+            invalid = copy.deepcopy(row)
+            if mutation == 'path-limit': invalid['executable'] = 'x' * 4097
+            if mutation == 'metadata-limit': invalid['image']['st_size'] = '1' * 21
+            if mutation == 'uid-type': invalid['uids'][0] = True
+            with self.subTest(mutation=mutation), self.assertRaises(RuntimeError):
+                M.proxy_process_snapshot(invalid)
+        source = ast.parse((HERE / 'native-linux-production-016-flatpak.py').read_text(encoding='utf8'))
+        capture = next(node for node in ast.walk(source) if isinstance(node, ast.FunctionDef) and node.name == 'proxy_attribution')
+        stages = set()
+        for node in ast.walk(capture):
+            if isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id == 'stage' for target in node.targets):
+                if isinstance(node.value, ast.Constant): stages.add(node.value.value)
+                else: stages.update((node.value.body.value, node.value.orelse.value))
+        self.assertEqual(stages, set(M.PROXY_CAPTURE_STAGES))
+
+    def test_proxy_capture_partial_owned_subtree_progress_is_bounded_and_not_input_authority(self):
+        session, rows, client, peer = self.proxy_fixture()
+        rows[11]['executable'] = '/private/DO-NOT-RETAIN'
+        class PrivateFailure(RuntimeError):
+            pass
+        with patch.object(M.os, 'getuid', return_value=1001, create=True), patch.object(M.P, 'subtree', return_value=rows), \
+                patch.object(M, 'proxy_process_io', side_effect=PrivateFailure('/private/DO-NOT-RETAIN')):
+            result = session.proxy_attribution(client, peer)
+        self.assertEqual(result['failureStage'], 'client-io')
+        self.assertEqual(result['unavailable'], 'OtherError')
+        self.assertTrue(result['proofProgress']['subtreeCaptured'])
+        self.assertTrue(result['proofProgress']['subtreeContainsClientAndPeer'])
+        self.assertFalse(result['proofProgress']['subtreeRechecked'])
+        self.assertEqual(len(result['subtree']), 5)
+        self.assertNotIn('DO-NOT-RETAIN', json.dumps(result)); self.assertNotIn('PrivateFailure', json.dumps(result))
+        self.assertLess(len(M.json_bytes(result)), 65536)
+        self.assertFalse(result['stable']); self.assertFalse(result['qualified']); self.assertFalse(result['inputPermitted'])
 
     def test_proxy_capture_refuses_foreign_reused_denied_or_oversize_topology_without_raw_error(self):
         for failure in ('foreign', 'reuse', 'denied', 'oversize'):
@@ -918,7 +1099,8 @@ class DiagnosticTests(unittest.TestCase):
             result = session.proxy_attribution(client, peer)
         self.assertEqual(result['unavailable'], 'OutputLimit'); self.assertFalse(result['stable'])
         self.assertFalse(result['inputPermitted']); self.assertFalse(result['qualified']); self.assertFalse(result['peerPairingProven'])
-        self.assertNotIn('DO-NOT-RETAIN', json.dumps(result)); self.assertLess(len(M.json_bytes(result)), 1024)
+        self.assertNotIn('DO-NOT-RETAIN', json.dumps(result)); self.assertLess(len(M.json_bytes(result)), 4096)
+        self.assertFalse(result['expectedLaunch']['verified']); self.assertFalse(result['currentLaunch']['verified'])
 
     def test_proxy_proc_reader_captures_only_owned_socket_fds_and_runtime_objects(self):
         runtime = '/private/fixture/runtime'
