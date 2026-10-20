@@ -6,6 +6,7 @@ disposable-CI-only; no signing, command relay, automatic recovery or forced app 
 """
 import hashlib
 import base64
+import ctypes
 from contextlib import contextmanager
 import importlib.util
 import io
@@ -15,7 +16,10 @@ from pathlib import Path
 import platform
 import re
 import select
+import secrets
+import socket
 import stat
+import struct
 import subprocess
 import sys
 import tarfile
@@ -42,6 +46,11 @@ REF = "app/com.creatorworks.hub/x86_64/stable"
 NAME = "com.creatorworks.hub.Host"
 RUNTIME = "runtime/org.gnome.Platform/x86_64/50"
 PORTAL_URL = "https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/download/v0.1.16/Creator.Hub.Native.Support_0.1.16_amd64.AppImage"
+PORTAL_PROVIDERS = {
+    'permissions': ('/usr/libexec/xdg-permission-store', 'org.freedesktop.impl.portal.PermissionStore'),
+    'gtk': ('/usr/libexec/xdg-desktop-portal-gtk', 'org.freedesktop.impl.portal.desktop.gtk'),
+    'portal': ('/usr/libexec/xdg-desktop-portal', 'org.freedesktop.portal.Desktop'),
+}
 DESCRIPTOR = "creator-hub-linux-x86_64-portable.json"
 MANIFEST = "creator-hub-linux-x86_64-0.1.16.portable-manifest.json"
 ARCHIVE = "creator-hub-linux-x86_64-0.1.16.appdir.tar.gz"
@@ -1129,6 +1138,7 @@ class Session:
         self.flatpak_popen = None
         self.flatpak_origin, self.flatpak_child, self.launcher_keys, self.portal_calls = None, None, [], None
         self.bootstrap_proxy = None
+        self.real_portal = None
         self.report = {"schemaVersion": 1, "profile": PROFILE, "phase": "starting", **GATES}
 
     def launch(self, args, label, *, env=None):
@@ -1400,6 +1410,9 @@ class Session:
             self.absent_installation()
             return 'native-support-absent'
         if action == 'Get Native Hub':
+            if getattr(self, 'real_portal', None) is not None:
+                self.wait(lambda: self.real_portal.state == 'complete')
+                self.real_portal.complete()
             require(type(self.portal_calls) is list and len(self.portal_calls) == 1
                     and self.portal_calls[0] == {'url': PORTAL_URL, 'browserOpened': False, 'downloadAttempted': False, 'senderUid': os.getuid()}
                     and not self.windows(), "Exact guarded portal capture and no new window required")
@@ -1576,6 +1589,8 @@ class Session:
         self.wait(initial_window_ready)
         self.portal_client = client if action == "Get Native Hub" else None
         try:
+            if action == 'Get Native Hub' and getattr(self, 'real_portal', None) is not None:
+                self.real_portal.arm(client)
             self.launcher_keyboard(client, 'disclosure', action, phase, terminal=not missing)
             if missing:
                 self.wait(lambda: any(self.x11.inspect(window)["pid"] == client["pid"] for window in self.windows()))
@@ -1740,6 +1755,371 @@ def verify_registration(root, review):
     require(not (store / "pending.json").exists() and not (store / "activation-v1/pending.json").exists(), "Interrupted native transaction requires explicit review")
 
 
+def portal_desktop(source, nonce):
+    require(type(source) is str and source.startswith('/') and len(source) <= 4096
+            and not any(ord(c) < 32 or c in '%\\"`$' for c in source), 'Fixed absolute desktop worker source required')
+    require(type(nonce) is str and re.fullmatch('[a-f0-9]{64}', nonce), 'One capture nonce required')
+    return ('[Desktop Entry]\nType=Application\nName=Owned URL capture\nNoDisplay=true\nTerminal=false\n'
+            'DBusActivatable=false\nMimeType=x-scheme-handler/https;\nExec=/usr/bin/python3 -I -S -B "' + source
+            + '" _portal_capture ' + nonce + ' %u\n').encode('utf8')
+
+
+def portal_worker_args(args):
+    require(type(args) is list and len(args) == 3 and args[0] == '_portal_capture'
+            and type(args[1]) is str and re.fullmatch('[a-f0-9]{64}', args[1]) and args[2] == PORTAL_URL,
+            'Only the exact one-shot public URL capture is allowed')
+    return args[1]
+
+
+def portal_frame(frame, kind, nonce):
+    fields = {'kind', 'nonce'} | ({'url'} if kind == 'ready' else set())
+    require(kind in ('ready', 'ack', 'complete', 'release') and type(frame) is dict and set(frame) == fields
+            and frame['kind'] == kind and frame['nonce'] == nonce
+            and (kind != 'ready' or frame['url'] == PORTAL_URL), 'Exact single-use capture frame required')
+
+
+def portal_worker_identity(process, credentials, parent, python, digest, uid, gid):
+    require(type(credentials) is tuple and len(credentials) == 3 and all(type(n) is int for n in credentials)
+            and credentials == (process['pid'], uid, gid)
+            and process['uids'] == [uid] * 4 and process['parentPid'] == parent
+            and process['executable'] == python and process['kernelImageSha256'] == digest,
+            'Capture worker kernel credentials/image/exact portal parent differ')
+
+
+def portal_socket_path(root):
+    path = root / 'runtime/portal-capture.sock'
+    require(len(os.fsencode(path)) < 108, 'Bounded private UNIX socket path required')
+    return str(path)
+
+
+def portal_worker(root, args):
+    nonce = portal_worker_args(args)
+    with socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as channel:
+        channel.settimeout(30)
+        channel.connect(portal_socket_path(root))
+        credentials = struct.unpack('3i', channel.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
+        require(credentials[1:] == (os.getuid(), os.getgid()), 'Capture server must be the same private-session identity')
+        channel.sendall(json_bytes({'kind': 'ready', 'nonce': nonce, 'url': PORTAL_URL}))
+        portal_frame(parse(channel.recv(4097)), 'ack', nonce)
+        channel.sendall(json_bytes({'kind': 'complete', 'nonce': nonce}))
+        # Remain live until the controller has rechecked credentials, image, argv and parent.
+        portal_frame(parse(channel.recv(4097)), 'release', nonce)
+
+
+def portal_provider(role):
+    require(role in PORTAL_PROVIDERS, 'Only fixed native portal providers allowed')
+    if role == 'portal':
+        # GLib 2.72 gdesktopappinfo.c uses G_SPAWN_SEARCH_PATH without DO_NOT_REAP.
+        # Its default-handler spawn double-forks. Keep its orphan under this
+        # exact owned portal, rather than accepting PID 1 or a name/UID exemption.
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.prctl.argtypes = [ctypes.c_int, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong]
+        libc.prctl.restype = ctypes.c_int
+        require(libc.prctl(36, 1, 0, 0, 0) == 0, 'Portal subreaper setup refused')
+        enabled = ctypes.c_int(0)
+        require(libc.prctl(37, ctypes.addressof(enabled), 0, 0, 0) == 0 and enabled.value == 1,
+                'Portal subreaper readback refused')
+    path = PORTAL_PROVIDERS[role][0]
+    os.execve(path, [path], dict(os.environ))
+
+
+class PortalImage(K.HeldImage):
+    """Held package image from a finite protected system path, never a caller path."""
+    def __init__(self, role):
+        require(role in (*PORTAL_PROVIDERS, 'python'), 'Only fixed portal system images allowed')
+        original = Path('/usr/bin/python3' if role == 'python' else PORTAL_PROVIDERS[role][0])
+        self.fd, self.parents, self.alias = None, [], None
+        try:
+            if role == 'python':
+                link = original.lstat()
+                target = os.readlink(original)
+                require(stat.S_ISLNK(link.st_mode) and link.st_uid == link.st_gid == 0
+                        and re.fullmatch(r'python3\.[0-9]{1,2}', target), 'Protected system Python alias required')
+                self.alias = original, P.stamp(link), target
+                original = original.parent / target
+            self.path = str(original)
+            parent = None
+            for name in ('/', *original.parts[1:-1]):
+                fd = os.open(name, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_DIRECTORY,
+                             **({'dir_fd': parent} if parent is not None else {}))
+                self.parents.append((parent, name, fd, K.ProtectedBwrap.directory_stamp(os.fstat(fd))))
+                parent = fd
+            self.name = original.name
+            self.fd = os.open(self.name, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+            self.identity = K.image_stamp(os.fstat(self.fd))
+            self.pin = self.snapshot()
+        except Exception:
+            self.close()
+            raise
+
+    def recheck(self):
+        require(self.fd is not None and self.parents, 'Portal image binding is closed')
+        for parent, name, fd, expected in self.parents:
+            info = os.fstat(fd)
+            require(stat.S_ISDIR(info.st_mode) and info.st_uid == info.st_gid == 0 and not info.st_mode & 0o022
+                    and K.ProtectedBwrap.directory_stamp(info) == expected == K.ProtectedBwrap.directory_stamp(
+                        os.stat(name, follow_symlinks=False, **({'dir_fd': parent} if parent is not None else {}))),
+                    'Protected portal image ancestry changed')
+        info = os.fstat(self.fd)
+        require(stat.S_ISREG(info.st_mode) and info.st_uid == info.st_gid == 0 and info.st_mode & 0o111
+                and not info.st_mode & 0o7022 and info.st_nlink >= 1 and K.image_stamp(info) == self.identity
+                == K.image_stamp(os.stat(self.name, dir_fd=self.parents[-1][2], follow_symlinks=False)),
+                'Protected portal package image changed')
+        if self.alias:
+            name, stamp, target = self.alias
+            require(P.stamp(name.lstat()) == stamp and os.readlink(name) == target, 'System Python alias changed')
+
+    def snapshot(self):
+        self.recheck()
+        result = super().snapshot()
+        self.recheck()
+        return result
+
+    def close(self):
+        try:
+            super().close()
+        finally:
+            while self.parents:
+                os.close(self.parents.pop()[2])
+
+
+class PortalProvider:
+    def __init__(self, session, role, image, bus):
+        self.session, self.role, self.image, self.bus = session, role, image, bus
+        self.process, self.owner = None, None
+        env = {**session.app_env, **lab_environment(session.root)}
+        if role == 'portal':
+            env['XDG_DESKTOP_PORTAL_DIR'] = str(session.root / 'portal-backends')
+        self.child = session.launch(['/usr/bin/python3', '-I', '-S', '-B', str(Path(__file__).resolve()), '_portal_provider', role],
+                                    'real-portal-' + role, env=env)
+        self.start = session.helper.parse_start(session.helper.Proc().stat(self.child.pid), self.child.pid)
+
+    def bind(self):
+        require(self.child.poll() is None, 'Owned portal provider exited during startup')
+        current = self.session.native.native_process(self.child.pid, self.session.helper, False)
+        require(current['pid'] == self.child.pid and current['startTime'] == self.start
+                and current['parentPid'] == os.getpid() and current['uids'] == [os.getuid()] * 4,
+                'Original portal Popen continuity changed')
+        if current['executable'] != self.image.path:
+            require(current['executable'] == str(Path('/usr/bin/python3').resolve(strict=True)), 'Unexpected portal startup image')
+            return False
+        self.image.recheck()
+        actual = self.session.native.native_process(self.child.pid, self.session.helper)
+        require({k: v for k, v in actual.items() if k != 'kernelImageSha256'} == current
+                and (actual['image'], actual['kernelImageSha256']) == self.image.pin,
+                'Portal kernel image differs from held package bytes')
+        owner = self.bus_owner()
+        if owner is None:
+            return False
+        require(owner['pid'] == self.child.pid and owner['uid'] == os.getuid(), 'Portal name is not the exact owned provider')
+        self.process, self.owner = actual, owner
+        self.guard()
+        return True
+
+    def bus_owner(self):
+        from gi.repository import Gio, GLib
+        def query(method, value, kind):
+            return self.bus.call_sync('org.freedesktop.DBus', '/org/freedesktop/DBus', 'org.freedesktop.DBus', method,
+                GLib.Variant('(s)', (value,)), GLib.VariantType.new(kind), Gio.DBusCallFlags.NONE, 3000, None).unpack()[0]
+        name = PORTAL_PROVIDERS[self.role][1]
+        if not query('NameHasOwner', name, '(b)'):
+            return None
+        owner = query('GetNameOwner', name, '(s)')
+        require(type(owner) is str and re.fullmatch(r':[0-9]+\.[0-9]+', owner), 'One unique portal bus owner required')
+        result = {'name': owner, 'pid': query('GetConnectionUnixProcessID', owner, '(u)'),
+                  'uid': query('GetConnectionUnixUser', owner, '(u)')}
+        require(query('GetNameOwner', name, '(s)') == owner, 'Portal owner changed during query')
+        return result
+
+    def guard(self):
+        require(self.child.poll() is None and self.process is not None and self.owner is not None,
+                'Original bound portal provider must remain live')
+        self.image.recheck()
+        self.session.stable(self.process)
+        require(self.bus_owner() == self.owner, 'Bound portal provider bus owner changed')
+
+
+class RealPortalCapture:
+    def __init__(self, session):
+        from gi.repository import Gio
+        self.session, self.providers, self.images, self.files = session, {}, {}, {}
+        self.listener, self.channel, self.worker_image, self.source_fd = None, None, None, None
+        self.state, self.connections, self.armed = 'starting', 0, False
+        self.receipt = {'mechanism': 'real-xdg-desktop-portal', 'workerCompleted': False,
+                        'browserOpened': False, 'downloadAttempted': False, 'releaseReady': False}
+        self.nonce, self.client = secrets.token_hex(32), None
+        self.calls = []; session.portal_calls = self.calls
+        try:
+            self.source = Path(__file__).resolve(strict=True)
+            raw = regular(self.source, 1024 * 1024)
+            self.source_fd = os.open(self.source, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+            self.source_stamp = P.stamp(os.fstat(self.source_fd))
+            require(self.source_stamp == P.stamp(self.source.lstat()), 'Capture source changed before binding')
+            self.source_pin = {'size': len(raw), 'sha256': hashlib.sha256(raw).hexdigest()}
+            applications = session.root / 'home/data/applications'
+            applications.mkdir(mode=0o700)
+            desktop = applications / 'creator-hub-owned-url-capture.desktop'
+            mime = session.root / 'home/config/mimeapps.list'
+            self.files = {desktop: portal_desktop(str(self.source), self.nonce), mime:
+                b'[Default Applications]\nx-scheme-handler/https=creator-hub-owned-url-capture.desktop;\n'}
+            backend = session.root / 'portal-backends'
+            backend.mkdir(mode=0o700)
+            self.files[backend / 'gtk.portal'] = (b'[portal]\nDBusName=org.freedesktop.impl.portal.desktop.gtk\n'
+                b'Interfaces=org.freedesktop.impl.portal.AppChooser;\nUseIn=creator-hub-ci\n')
+            for path, data in self.files.items():
+                output(path, data)
+            # Explicit default and content-type registration; no BROWSER or portal recursion overrides.
+            command(['/usr/bin/update-desktop-database', str(applications)], env=session.app_env)
+            require(command(['/usr/bin/dpkg', '--verify', 'xdg-desktop-portal', 'xdg-desktop-portal-gtk'],
+                            env=session.app_env) == b'', 'Installed real portal package verification failed')
+            self.protected_state()
+            runtime = session.root / 'runtime'
+            info = runtime.lstat()
+            require(runtime.resolve(strict=True) == runtime and stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid()
+                    and stat.S_IMODE(info.st_mode) == 0o700, 'Canonical private capture runtime required')
+            self.runtime_stamp = K.ProtectedBwrap.directory_stamp(info)
+            self.listener = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+            self.listener.setsockopt(socket.SOL_SOCKET, socket.SO_PASSCRED, 1)
+            address = portal_socket_path(session.root)
+            require(not os.path.lexists(address), 'Existing capture endpoint refused')
+            self.listener.bind(address); os.chmod(address, 0o600)
+            self.socket_stamp = P.stamp(Path(address).lstat())
+            self.listener.listen(2); self.listener.setblocking(False)
+            bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+            for role in PORTAL_PROVIDERS:
+                image = self.images[role] = PortalImage(role)
+                provider = self.providers[role] = PortalProvider(session, role, image, bus)
+                session.wait(provider.bind)
+            self.images['python'] = PortalImage('python')
+            self.state = 'listening'
+            self.guard()
+        except Exception as error:
+            try:
+                save(session.root / 'real-portal-gtk.json', {**self.evidence(), 'error': str(error)[:512]})
+            except Exception:
+                pass
+            self.close()
+            raise
+
+    def protected_state(self):
+        self.session.snapshot_preserved()
+        self.session.absent_installation()
+        for path, data in self.files.items():
+            require(regular(path, 8192, 0o600) == data, 'Private browser configuration changed')
+        require(P.stamp(os.fstat(self.source_fd)) == self.source_stamp == P.stamp(self.source.lstat())
+                and {'size': len(raw := regular(self.source, 1024 * 1024)), 'sha256': hashlib.sha256(raw).hexdigest()} == self.source_pin,
+                'Exact capture source changed')
+
+    def guard(self):
+        for provider in self.providers.values():
+            provider.guard()
+        if self.listener is not None:
+            runtime = self.session.root / 'runtime'
+            require(runtime.resolve(strict=True) == runtime and K.ProtectedBwrap.directory_stamp(runtime.lstat()) == self.runtime_stamp
+                    and P.stamp(Path(portal_socket_path(self.session.root)).lstat()) == self.socket_stamp,
+                    'Owned capture endpoint changed')
+
+    def arm(self, client):
+        require(self.state == 'listening' and not self.armed and self.connections == 0, 'One explicit portal scenario only')
+        self.guard(); self.protected_state(); self.session.stable(client)
+        self.client, self.armed, self.deadline = dict(client), True, time.monotonic() + 30
+
+    def worker_guard(self):
+        self.guard(); self.protected_state()
+        python = self.images['python']; python.recheck()
+        actual = self.session.native.native_process(self.credentials[0], self.session.helper)
+        portal_worker_identity(actual, self.credentials, self.providers['portal'].child.pid, python.path, python.pin[1],
+                               os.getuid(), os.getgid())
+        require(actual == self.worker and (actual['image'], actual['kernelImageSha256']) == self.worker_image.snapshot() == python.pin,
+                'Held capture worker identity changed')
+        args = ['/usr/bin/python3', '-I', '-S', '-B', str(self.source), '_portal_capture', self.nonce, PORTAL_URL]
+        with open(f'/proc/{actual["pid"]}/cmdline', 'rb', buffering=0) as stream:
+            raw = stream.read(8193)
+        require(len(raw) <= 8192 and raw == b'\0'.join(os.fsencode(arg) for arg in args) + b'\0',
+                'Capture worker exact source/argv differ')
+        self.session.stable(actual)
+
+    def receive(self):
+        try:
+            raw, controls, flags, _ = self.channel.recvmsg(4097, socket.CMSG_SPACE(12), socket.MSG_CMSG_CLOEXEC)
+        except BlockingIOError:
+            return None
+        for level, kind, data in controls:
+            if level == socket.SOL_SOCKET and kind == socket.SCM_RIGHTS:
+                for offset in range(0, len(data) - len(data) % 4, 4):
+                    os.close(struct.unpack('i', data[offset:offset + 4])[0])
+        require(not flags & (socket.MSG_TRUNC | socket.MSG_CTRUNC) and len(raw) <= 4096 and len(controls) == 1
+                and controls[0][:2] == (socket.SOL_SOCKET, socket.SCM_CREDENTIALS) and len(controls[0][2]) == 12
+                and struct.unpack('3i', controls[0][2]) == self.credentials,
+                'Exact per-message worker credentials and bounded packet required')
+        return parse(raw)
+
+    def poll(self):
+        self.guard()
+        try:
+            channel, _ = self.listener.accept()
+        except BlockingIOError:
+            channel = None
+        if channel is not None:
+            self.connections += 1
+            if not (self.armed and self.state == 'listening' and self.connections == 1):
+                channel.close()
+                raise RuntimeError('Unexpected or repeated default-handler invocation')
+            self.channel = channel; channel.setblocking(False)
+            channel.setsockopt(socket.SOL_SOCKET, socket.SO_PASSCRED, 1)
+            self.credentials = struct.unpack('3i', channel.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
+            require(self.credentials[1:] == (os.getuid(), os.getgid()), 'Foreign capture peer credentials')
+            observed = self.session.native.native_process(self.credentials[0], self.session.helper, False)
+            python = self.images['python']
+            require(observed['uids'] == [os.getuid()] * 4 and observed['parentPid'] == self.providers['portal'].child.pid
+                    and observed['executable'] == python.path and observed['image'] == python.pin[0]
+                    and 0 < int(observed['image']['st_size']) <= K.MAX_IMAGE, 'Only the bounded exact portal worker may be hashed')
+            self.worker = self.session.native.native_process(self.credentials[0], self.session.helper)
+            require({k: v for k, v in self.worker.items() if k != 'kernelImageSha256'} == observed,
+                    'Capture worker changed before binding its image')
+            self.worker_image = K.HeldImage(self.credentials[0])
+            self.worker_guard()
+            self.state = 'await-ready'
+        if self.state in ('await-ready', 'await-complete'):
+            frame = self.receive()
+            if frame is not None:
+                self.worker_guard()
+                kind = 'ready' if self.state == 'await-ready' else 'complete'
+                portal_frame(frame, kind, self.nonce)
+                if kind == 'ready':
+                    self.channel.sendall(json_bytes({'kind': 'ack', 'nonce': self.nonce}))
+                    self.state = 'await-complete'
+                else:
+                    self.worker_guard()
+                    self.receipt.update(workerCompleted=True, worker=self.worker, credentials=list(self.credentials),
+                        portalParent=self.providers['portal'].process, source=self.source_pin,
+                        protectedStateVerified=True, invocationCount=self.connections)
+                    self.channel.sendall(json_bytes({'kind': 'release', 'nonce': self.nonce}))
+                    self.state = 'complete'
+                    self.channel.close(); self.channel = None
+                    self.calls.append({'url': PORTAL_URL, 'browserOpened': False, 'downloadAttempted': False, 'senderUid': os.getuid()})
+        require(not self.armed or self.state == 'complete' or time.monotonic() <= self.deadline,
+                'Independent real-portal capture completion deadline')
+
+    def complete(self):
+        self.poll()
+        require(self.armed and self.state == 'complete' and self.connections == 1 and len(self.calls) == 1
+                and self.receipt['workerCompleted'] is True, 'Launcher exit alone is not portal capture completion')
+        self.protected_state()
+
+    def close(self):
+        for value in (self.channel, self.listener, self.worker_image, *self.images.values()):
+            if value is not None:
+                value.close()
+        self.channel, self.listener, self.worker_image = None, None, None
+        if self.source_fd is not None:
+            os.close(self.source_fd); self.source_fd = None
+
+    def evidence(self):
+        return {**self.receipt, 'state': self.state, 'invocationCount': self.connections,
+                'providers': {role: {'process': provider.process, 'owner': provider.owner} for role, provider in self.providers.items()}}
+
+
 def portal_capture(session):
     from gi.repository import Gio, GLib
     bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
@@ -1794,20 +2174,22 @@ def run_session(root, review):
     verified_review(root, review, headless=True)
     Gdk.init([])
     session = Session(root, review)
-    wm, portal_bus, portal_id, feed = None, None, None, None
+    wm, feed = None, None
     try:
         feed = bootstrap_feed(root)
         session.bootstrap_proxy = feed.proxy
         wm = session.launch(["/usr/bin/openbox", "--sm-disable"], "wm")
         session.wait(lambda: session.x11.property(session.x11.x.XDefaultRootWindow(session.x11.display), "_NET_SUPPORTING_WM_CHECK"))
         require(not session.windows() and session.host_owner() is None, "Fresh session already has an app/Host1")
-        portal_bus, portal_id, calls = portal_capture(session)
+        session.real_portal = RealPortalCapture(session)
+        calls = session.real_portal.calls
         original_wait = session.wait
         def wait(test, seconds=30):
             def check():
                 context = GLib.MainContext.default()
                 while context.pending():
                     context.iteration(False)
+                session.real_portal.poll()
                 return test()
             original_wait(check, seconds)
         session.wait = wait
@@ -1818,6 +2200,7 @@ def run_session(root, review):
         session.report["phase"] = "missing-host"
         session.flatpak("Open Creator Hub", "missing-host", missing=True); session.absent_installation()
         session.report["missingHostAccepted"] = True
+        session.report['phase'] = 'portal-only'
         session.flatpak("Get Native Hub", "portal-only"); session.wait(lambda: len(calls) == 1)
         require(calls[0]["url"] == PORTAL_URL and not session.windows(), "Portal must only capture, never open browser/window")
         save(root / "portal-capture.json", {"calls": calls, "publicDownloadAccepted": False})
@@ -1869,8 +2252,9 @@ def run_session(root, review):
         session.report["disposableTeardownRequired"] = session.report.get("phase") != "complete" or any(child.poll() is None for child in session.children)
         session.report["logs"] = [capture.metadata() for capture in session.captures]
         save(root / "report.json", session.report)
-        if portal_bus is not None:
-            portal_bus.unregister_object(portal_id)
+        if session.real_portal is not None:
+            save(root / 'real-portal-gtk.json', session.real_portal.evidence())
+            session.real_portal.close()
         for capture in session.captures:
             capture.close()
         for fd in session.fds:
@@ -1955,13 +2339,29 @@ def session(root):
 def main():
     admission(os.environ, sys.platform, platform.machine() if sys.platform == "linux" else "", os.getuid() if hasattr(os, "getuid") else None)
     require(os.getuid() == os.geteuid(), "No privileged identity transition")
-    require(len(sys.argv) == 2 and sys.argv[1] in ("stage", "session", "_run", "_tls_guard", "tls-cleanup"), "Only fixed native controller modes")
+    args = sys.argv[1:]
+    capture = bool(args) and args[0] == '_portal_capture'
+    provider = len(args) == 2 and args[0] == '_portal_provider' and args[1] in PORTAL_PROVIDERS
+    if capture:
+        portal_worker_args(args)
+    else:
+        require(provider or len(args) == 1 and args[0] in ("stage", "session", "_run", "_tls_guard", "tls-cleanup"),
+                "Only fixed native controller modes")
     root = locations()
     if sys.argv[1] == 'tls-cleanup':
         verify_tls_cleanup(root); return
     before = root.lstat()
     require(root.resolve(strict=True) == root and stat.S_ISDIR(before.st_mode) and before.st_uid == os.getuid()
             and stat.S_IMODE(before.st_mode) == 0o700, "Owned private input root required")
+    if provider or capture:
+        require(os.environ.get('EXECUTION_REQUEST') == REQUEST and os.environ.get('HOME') == str(root / 'home')
+                and os.environ.get('XDG_RUNTIME_DIR') == str(root / 'runtime') and os.environ.get('DISPLAY')
+                and os.environ.get('DBUS_SESSION_BUS_ADDRESS', '').startswith('unix:'), 'Private native portal worker role required')
+        if capture:
+            portal_worker(root, args)
+        else:
+            portal_provider(args[1])
+        return
     if sys.argv[1] == "stage":
         stage(root)
     elif sys.argv[1] == "session":

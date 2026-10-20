@@ -1244,8 +1244,9 @@ class ControllerTests(unittest.TestCase):
         def run():
             with patch.dict(M.os.environ, environment, clear=True), patch.dict(sys.modules, modules), \
                     patch.object(M, 'verified_review'), patch.object(M, 'Session', return_value=session), \
-                    patch.object(M, 'portal_capture', return_value=(SimpleNamespace(unregister_object=lambda *args: None),
-                        1, [{"url": M.PORTAL_URL}])), patch.object(M, 'verify_registration'), patch.object(M, 'command'), \
+                    patch.object(M, 'RealPortalCapture', return_value=SimpleNamespace(calls=[{'url': M.PORTAL_URL}],
+                        poll=lambda: None, evidence=lambda: {'synthetic': True}, close=lambda: None)), \
+                    patch.object(M, 'verify_registration'), patch.object(M, 'command'), \
                     patch.object(M, 'bootstrap_feed', return_value=SimpleNamespace(proxy='http://127.0.0.1:12345', finish=lambda: None)), \
                     patch.object(M, 'finish_bootstrap_feed'), \
                     patch.object(M.os, 'readlink', return_value='mnt:[synthetic]'), patch.object(Path, 'read_bytes', read_bytes):
@@ -1884,6 +1885,332 @@ class DiagnosticTests(unittest.TestCase):
             self.assertLess(len(M.json_bytes(result)), 16384)
             if failure == 'oversized':
                 self.assertEqual(calls, [False], 'Oversized peer image was hashed')
+
+
+class RealPortalTests(unittest.TestCase):
+    @contextmanager
+    def capture_fixture(self, frames=None):
+        capture = object.__new__(M.RealPortalCapture)
+        events, channel = [], Mock()
+        channel.getsockopt.return_value = M.struct.pack('3i', 31, 1001, 1001)
+        channel.sendall.side_effect = lambda raw: events.append(('send', M.parse(raw)['kind']))
+        listener = Mock()
+        listener.accept.side_effect = [(channel, None), BlockingIOError(), BlockingIOError(), BlockingIOError()]
+        worker = {'pid': 31, 'parentPid': 20, 'startTime': '300', 'uids': [1001] * 4,
+                  'executable': '/usr/bin/python3.10', 'image': {'st_size': '64'}, 'kernelImageSha256': 'a' * 64}
+        def native_process(_pid, _helper, full=True):
+            return {key: copy.deepcopy(value) for key, value in worker.items() if full or key != 'kernelImageSha256'}
+        capture.session = SimpleNamespace(native=SimpleNamespace(native_process=native_process), helper=None)
+        capture.images = {'python': SimpleNamespace(path=worker['executable'], pin=(worker['image'], 'a' * 64))}
+        capture.providers = {'portal': SimpleNamespace(child=SimpleNamespace(pid=20), process={'pid': 20, 'startTime': '200'})}
+        capture.source_pin, capture.nonce = pin(b'exact source'), 'a' * 64
+        capture.listener, capture.channel = listener, None
+        capture.worker_image, capture.state = None, 'listening'
+        capture.connections, capture.armed, capture.deadline = 0, True, 100
+        capture.calls, capture.receipt = [], {'workerCompleted': False}
+        capture.guard = Mock(side_effect=lambda: events.append(('guard', 'provider')))
+        capture.protected_state = Mock(side_effect=lambda: events.append(('guard', 'settings')))
+        capture.worker_guard = Mock(side_effect=lambda: events.append(('guard', 'worker')))
+        capture.receive = Mock(side_effect=frames if frames is not None else [
+            {'kind': 'ready', 'nonce': capture.nonce, 'url': M.PORTAL_URL}, {'kind': 'complete', 'nonce': capture.nonce}])
+        with patch.object(M.os, 'getuid', return_value=1001, create=True), \
+                patch.object(M.os, 'getgid', return_value=1001, create=True), \
+                patch.object(M.socket, 'SO_PEERCRED', 17, create=True), patch.object(M.socket, 'SO_PASSCRED', 16, create=True), \
+                patch.object(M.time, 'monotonic', return_value=1), patch.object(M.K, 'HeldImage', return_value=Mock()):
+            yield capture, channel, events
+
+    def test_desktop_handler_is_explicit_and_only_accepts_the_expected_url(self):
+        raw = M.portal_desktop('/owned/source/controller.py', 'a' * 64)
+        self.assertIn(b'Exec=/usr/bin/python3 -I -S -B "/owned/source/controller.py" _portal_capture ', raw)
+        self.assertIn(b'DBusActivatable=false\n', raw)
+        self.assertIn(b'MimeType=x-scheme-handler/https;\n', raw)
+        self.assertNotIn(b'BROWSER', raw)
+        for source in ('relative.py', '/owned/%u.py', '/owned/line\nbreak.py'):
+            with self.subTest(source=source), self.assertRaises(RuntimeError):
+                M.portal_desktop(source, 'a' * 64)
+        for args in (['_portal_capture', 'a' * 64, M.PORTAL_URL + '?extra'],
+                     ['_portal_capture', 'a' * 64, 'https://other.invalid/'],
+                     ['_portal_capture', 'short', M.PORTAL_URL],
+                     ['_portal_capture', 'a' * 64, M.PORTAL_URL, 'extra']):
+            with self.subTest(args=args), self.assertRaises(RuntimeError):
+                M.portal_worker_args(args)
+        self.assertEqual(M.portal_worker_args(['_portal_capture', 'a' * 64, M.PORTAL_URL]), 'a' * 64)
+
+    def test_portal_parent_is_exact_not_a_provider_name_or_uid_exemption(self):
+        process = {'pid': 31, 'startTime': '300', 'parentPid': 20, 'uids': [1001] * 4,
+                   'executable': '/usr/bin/python3.10', 'kernelImageSha256': 'a' * 64, 'image': {}}
+        M.portal_worker_identity(process, (31, 1001, 1001), 20, '/usr/bin/python3.10', 'a' * 64, 1001, 1001)
+        M.portal_worker_identity(process, (31, 1001, 2000), 20, '/usr/bin/python3.10', 'a' * 64, 1001, 2000)
+        for key, changed in (('parentPid', 1), ('parentPid', 21), ('uids', [1002] * 4),
+                             ('executable', '/usr/bin/xdg-dbus-proxy'), ('kernelImageSha256', 'b' * 64)):
+            with self.subTest(key=key, changed=changed), self.assertRaises(RuntimeError):
+                M.portal_worker_identity({**process, key: changed}, (31, 1001, 1001), 20, '/usr/bin/python3.10', 'a' * 64, 1001, 1001)
+        for credentials in ((32, 1001, 1001), (31, 1002, 1001), (31, 1001, 1002)):
+            with self.assertRaises(RuntimeError):
+                M.portal_worker_identity(process, credentials, 20, '/usr/bin/python3.10', 'a' * 64, 1001, 1001)
+
+    def test_worker_frames_are_finite_and_replay_is_not_completion(self):
+        M.portal_frame({'kind': 'ready', 'nonce': 'a' * 64, 'url': M.PORTAL_URL}, 'ready', 'a' * 64)
+        M.portal_frame({'kind': 'complete', 'nonce': 'a' * 64}, 'complete', 'a' * 64)
+        for frame, kind in (({'kind': 'ready', 'nonce': 'a' * 64, 'url': M.PORTAL_URL}, 'complete'),
+                            ({'kind': 'complete', 'nonce': 'b' * 64}, 'complete'),
+                            ({'kind': 'complete', 'nonce': 'a' * 64, 'extra': True}, 'complete')):
+            with self.assertRaises(RuntimeError):
+                M.portal_frame(frame, kind, 'a' * 64)
+
+    def test_real_worker_must_finish_bounded_handshake_before_any_success(self):
+        with self.capture_fixture() as (capture, channel, events):
+            capture.poll()
+            self.assertEqual(capture.state, 'await-complete')
+            self.assertEqual(capture.calls, [])
+            self.assertFalse(capture.receipt['workerCompleted'])
+            self.assertEqual(M.parse(channel.sendall.call_args.args[0])['kind'], 'ack')
+            capture.poll()
+            self.assertEqual(capture.state, 'complete')
+            self.assertEqual([row for row in events if row[0] == 'send'], [('send', 'ack'), ('send', 'release')])
+            for index, row in enumerate(events):
+                if row[0] == 'send':
+                    self.assertEqual(events[index - 1], ('guard', 'worker'))
+            self.assertTrue(capture.receipt['workerCompleted'])
+            self.assertTrue(capture.receipt['protectedStateVerified'])
+            self.assertEqual(capture.receipt['portalParent'], {'pid': 20, 'startTime': '200'})
+            self.assertEqual(capture.calls, [{'url': M.PORTAL_URL, 'browserOpened': False,
+                                             'downloadAttempted': False, 'senderUid': 1001}])
+            capture.complete()
+
+    def test_launcher_exit_without_worker_or_ack_without_complete_is_not_success(self):
+        for frames in ([None], [{'kind': 'ready', 'nonce': 'a' * 64, 'url': M.PORTAL_URL}, None]):
+            with self.subTest(frames=frames), self.capture_fixture(frames) as (capture, channel, _):
+                if len(frames) == 2:
+                    capture.poll()
+                with self.assertRaisesRegex(RuntimeError, 'exit alone'):
+                    capture.complete()
+                self.assertFalse(capture.receipt['workerCompleted']); self.assertEqual(capture.calls, [])
+                self.assertNotIn('release', [M.parse(call.args[0])['kind'] for call in channel.sendall.call_args_list])
+
+    def test_duplicate_or_unarmed_invocation_stops_without_a_second_ack(self):
+        with self.capture_fixture() as (capture, channel, _):
+            capture.poll(); capture.poll()
+            other = Mock()
+            capture.listener.accept.side_effect = None
+            capture.listener.accept.return_value = (other, None)
+            with self.assertRaisesRegex(RuntimeError, 'repeated'):
+                capture.poll()
+            other.close.assert_called_once(); other.sendall.assert_not_called()
+            self.assertEqual(len(capture.calls), 1)
+            self.assertEqual(channel.sendall.call_count, 2)
+        with self.capture_fixture() as (capture, channel, _):
+            capture.armed = False
+            with self.assertRaises(RuntimeError):
+                capture.poll()
+            channel.close.assert_called_once(); channel.sendall.assert_not_called()
+
+    def test_unknown_changed_identity_and_settings_stop_before_ack_or_release(self):
+        for stage in ('ready', 'complete'):
+            for failure in ('worker', 'provider'):
+                with self.subTest(stage=stage, failure=failure), self.capture_fixture() as (capture, channel, _):
+                    if stage == 'complete':
+                        capture.poll()
+                    guard = capture.worker_guard if failure == 'worker' else capture.guard
+                    guard.side_effect = RuntimeError('bound evidence changed')
+                    before = channel.sendall.call_count
+                    with self.assertRaisesRegex(RuntimeError, 'bound evidence changed'):
+                        capture.poll()
+                    self.assertEqual(channel.sendall.call_count, before)
+                    self.assertFalse(capture.receipt['workerCompleted']); self.assertEqual(capture.calls, [])
+        with self.capture_fixture() as (capture, channel, _):
+            capture.poll()
+            capture.protected_state.side_effect = RuntimeError('settings changed')
+            capture.worker_guard.side_effect = lambda: capture.protected_state()
+            with self.assertRaisesRegex(RuntimeError, 'settings changed'):
+                capture.complete()
+            self.assertEqual(capture.calls, [])
+
+    def test_foreign_peer_and_replayed_ready_never_complete(self):
+        for credentials in ((32, 1002, 1001), (31, 1001, 2000)):
+            with self.subTest(credentials=credentials), self.capture_fixture() as (capture, channel, _):
+                channel.getsockopt.return_value = M.struct.pack('3i', *credentials)
+                with self.assertRaises(RuntimeError):
+                    capture.poll()
+                channel.sendall.assert_not_called(); self.assertEqual(capture.calls, [])
+        with self.capture_fixture([{'kind': 'ready', 'nonce': 'a' * 64, 'url': M.PORTAL_URL}] * 2) as (capture, channel, _):
+            capture.poll()
+            with self.assertRaises(RuntimeError):
+                capture.poll()
+            self.assertEqual(channel.sendall.call_count, 1); self.assertEqual(capture.calls, [])
+
+    def test_unknown_or_oversized_peer_is_refused_before_executable_hashing(self):
+        for changed in ({'parentPid': 1}, {'executable': '/foreign'}, {'uids': [2000] * 4},
+                        {'image': {'st_size': str(M.K.MAX_IMAGE + 1)}}):
+            with self.subTest(changed=changed), self.capture_fixture() as (capture, channel, _):
+                native = capture.session.native.native_process
+                calls = []
+                def observe(pid, helper, full=True):
+                    calls.append(full)
+                    self.assertFalse(full, 'Unqualified worker was hashed')
+                    return {**native(pid, helper, False), **changed}
+                capture.session.native.native_process = observe
+                with self.assertRaises(RuntimeError):
+                    capture.poll()
+                self.assertEqual(calls, [False]); channel.sendall.assert_not_called()
+
+    def test_receive_requires_per_message_kernel_credentials_and_rejects_fds_or_truncation(self):
+        capture = object.__new__(M.RealPortalCapture)
+        capture.channel, capture.credentials = Mock(), (31, 1001, 1001)
+        raw = M.json_bytes({'kind': 'complete', 'nonce': 'a' * 64})
+        with patch.object(M.socket, 'SCM_CREDENTIALS', 2, create=True), \
+                patch.object(M.socket, 'MSG_CMSG_CLOEXEC', 0x40000000, create=True), \
+                patch.object(M.socket, 'CMSG_SPACE', return_value=32, create=True), \
+                patch.object(M.socket, 'MSG_CTRUNC', 8, create=True), \
+                patch.object(M.socket, 'SCM_RIGHTS', 1, create=True), patch.object(M.os, 'close') as close:
+            valid = (M.socket.SOL_SOCKET, M.socket.SCM_CREDENTIALS, M.struct.pack('3i', *capture.credentials))
+            capture.channel.recvmsg.return_value = (raw, [valid], 0, None)
+            self.assertEqual(capture.receive(), M.parse(raw))
+            cases = [(raw, [], 0, None), (b'', [], 0, None), (raw, [valid], M.socket.MSG_TRUNC, None),
+                     (raw, [valid], M.socket.MSG_CTRUNC, None), (raw, [valid, valid], 0, None),
+                     (raw, [(M.socket.SOL_SOCKET, 2, M.struct.pack('3i', 32, 1001, 1001))], 0, None),
+                     (raw, [(M.socket.SOL_SOCKET, 1, M.struct.pack('i', 90))], 0, None)]
+            for packet in cases:
+                with self.subTest(packet=packet), self.assertRaises(RuntimeError):
+                    capture.channel.recvmsg.return_value = packet
+                    capture.receive()
+            close.assert_called_once_with(90)
+            capture.channel.recvmsg.side_effect = BlockingIOError()
+            self.assertIsNone(capture.receive())
+
+    def test_exact_worker_argv_and_source_are_rechecked_while_peer_is_held(self):
+        worker = {'pid': 31, 'parentPid': 20, 'startTime': '300', 'uids': [1001] * 4,
+                  'executable': '/usr/bin/python3.10', 'image': {}, 'kernelImageSha256': 'a' * 64}
+        capture = object.__new__(M.RealPortalCapture)
+        capture.guard, capture.protected_state = Mock(), Mock()
+        capture.credentials, capture.worker = (31, 1001, 1001), copy.deepcopy(worker)
+        capture.providers = {'portal': SimpleNamespace(child=SimpleNamespace(pid=20))}
+        python = SimpleNamespace(path=worker['executable'], pin=({}, 'a' * 64), recheck=Mock())
+        capture.images, capture.worker_image = {'python': python}, Mock(snapshot=lambda: python.pin)
+        capture.source, capture.nonce = Path('/owned/controller.py'), 'b' * 64
+        native = SimpleNamespace(native_process=Mock(return_value=copy.deepcopy(worker)))
+        capture.session = SimpleNamespace(native=native, helper=None, stable=Mock())
+        argv = ['/usr/bin/python3', '-I', '-S', '-B', str(capture.source), '_portal_capture', capture.nonce, M.PORTAL_URL]
+        raw = b'\0'.join(os.fsencode(arg) for arg in argv) + b'\0'
+        source = Mock(); source.__enter__ = Mock(return_value=source); source.__exit__ = Mock(return_value=False)
+        with patch('builtins.open', return_value=source), patch.object(M.os, 'getuid', return_value=1001, create=True), \
+                patch.object(M.os, 'getgid', return_value=1001, create=True):
+            source.read.return_value = raw
+            capture.worker_guard()
+            capture.session.stable.assert_called_once_with(worker)
+            for changed in (raw + b'extra\0', raw.replace(b'controller.py', b'other.py'), raw.replace(b'-B', b'-c')):
+                source.read.return_value = changed
+                with self.assertRaisesRegex(RuntimeError, 'source/argv'):
+                    capture.worker_guard()
+            source.read.return_value = raw
+            for field, value in (('parentPid', 1), ('startTime', '301'), ('kernelImageSha256', 'c' * 64)):
+                native.native_process.return_value = {**worker, field: value}
+                with self.subTest(field=field), self.assertRaises(RuntimeError):
+                    capture.worker_guard()
+
+    def test_provider_owner_and_kernel_bytes_are_exact_owned_popen_not_name_only(self):
+        provider = object.__new__(M.PortalProvider)
+        process = {'pid': 20, 'parentPid': 10, 'startTime': '200', 'uids': [1001] * 4,
+                   'image': {}, 'kernelImageSha256': 'a' * 64, 'executable': '/usr/libexec/xdg-desktop-portal'}
+        stripped = {key: value for key, value in process.items() if key != 'kernelImageSha256'}
+        provider.child, provider.start = SimpleNamespace(pid=20, poll=lambda: None), '200'
+        provider.image = SimpleNamespace(path=process['executable'], pin=({}, 'a' * 64), recheck=Mock())
+        provider.session = SimpleNamespace(helper=None, stable=Mock(), native=SimpleNamespace(
+            native_process=lambda _pid, _helper, full=True: copy.deepcopy(process if full else stripped)))
+        provider.bus_owner = Mock(return_value={'name': ':1.10', 'pid': 20, 'uid': 1001})
+        with patch.object(M.os, 'getuid', return_value=1001, create=True), patch.object(M.os, 'getpid', return_value=10):
+            self.assertTrue(provider.bind())
+            for owner in ({'name': ':1.11', 'pid': 21, 'uid': 1001}, {'name': ':1.10', 'pid': 20, 'uid': 1002}):
+                provider.bus_owner.return_value = owner
+                with self.assertRaises(RuntimeError):
+                    provider.bind()
+            provider.bus_owner.return_value = provider.owner
+            for field, value in (('startTime', '201'), ('kernelImageSha256', 'c' * 64), ('image', {'changed': True})):
+                provider.session.native.native_process = lambda _pid, _helper, full=True: (
+                    {**process, field: value} if full else copy.deepcopy(stripped))
+                with self.subTest(field=field), self.assertRaises(RuntimeError):
+                    provider.bind()
+
+    def test_only_portal_has_source_bound_subreaper_and_no_worker_exec_or_network(self):
+        calls, value = [], SimpleNamespace(value=0)
+        def prctl(operation, *_):
+            calls.append(operation)
+            if operation == 37:
+                value.value = 1
+            return 0
+        libc = SimpleNamespace(prctl=Mock(side_effect=prctl))
+        with patch.object(M.ctypes, 'CDLL', return_value=libc), patch.object(M.ctypes, 'c_int', return_value=value), \
+                patch.object(M.ctypes, 'addressof', return_value=1), patch.object(M.os, 'execve') as execute:
+            M.portal_provider('portal')
+            self.assertEqual(calls, [36, 37])
+            execute.assert_called_once_with('/usr/libexec/xdg-desktop-portal', ['/usr/libexec/xdg-desktop-portal'], dict(os.environ))
+            calls.clear(); execute.reset_mock()
+            M.portal_provider('gtk')
+            self.assertEqual(calls, [])
+            with self.assertRaises(RuntimeError):
+                M.portal_provider('/untrusted/provider')
+        source = (HERE / 'native-linux-production-016-flatpak.py').read_text('utf8')
+        tree = ast.parse(source)
+        worker = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == 'portal_worker')
+        worker_source = ast.get_source_segment(source, worker)
+        self.assertIn('socket.AF_UNIX', worker_source)
+        for forbidden in ('AF_INET', 'execve', 'subprocess', 'write(', 'command(', 'urllib', 'BROWSER'):
+            self.assertNotIn(forbidden, worker_source)
+        session = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == 'run_session')
+        self.assertIn('RealPortalCapture(session)', ast.get_source_segment(source, session))
+        self.assertNotIn('= portal_capture(session)', ast.get_source_segment(source, session))
+        workflow = (HERE.parent / '.github/workflows/native-linux-production-016-flatpak.yml').read_text('utf8')
+        self.assertIn('xdg-desktop-portal xdg-desktop-portal-gtk desktop-file-utils', workflow)
+
+    def test_capture_worker_waits_for_both_acknowledgements_without_network_or_retry(self):
+        for fault in (None, 'foreign-server', 'wrong-ack', 'wrong-release', 'timeout'):
+            with self.subTest(fault=fault):
+                channel = Mock()
+                channel.__enter__ = Mock(return_value=channel); channel.__exit__ = Mock(return_value=False)
+                credentials = (41, 2000 if fault == 'foreign-server' else 1001, 1001)
+                channel.getsockopt.return_value = M.struct.pack('3i', *credentials)
+                nonce = 'a' * 64
+                channel.recv.side_effect = [M.json_bytes({'kind': 'wrong' if fault == 'wrong-ack' else 'ack', 'nonce': nonce}),
+                                           M.json_bytes({'kind': 'wrong' if fault == 'wrong-release' else 'release', 'nonce': nonce})]
+                if fault == 'timeout':
+                    channel.recv.side_effect = TimeoutError('bounded ACK deadline')
+                with patch.object(M.socket, 'socket', return_value=channel) as factory, \
+                        patch.object(M.socket, 'AF_UNIX', 1, create=True), \
+                        patch.object(M.socket, 'SO_PEERCRED', 17, create=True), \
+                        patch.object(M.socket, 'SOCK_SEQPACKET', 5, create=True), \
+                        patch.object(M.os, 'getuid', return_value=1001, create=True), \
+                        patch.object(M.os, 'getgid', return_value=1001, create=True):
+                    if fault:
+                        with self.assertRaises((RuntimeError, TimeoutError)):
+                            M.portal_worker(Path('/private'), ['_portal_capture', nonce, M.PORTAL_URL])
+                    else:
+                        M.portal_worker(Path('/private'), ['_portal_capture', nonce, M.PORTAL_URL])
+                    factory.assert_called_once_with(M.socket.AF_UNIX, M.socket.SOCK_SEQPACKET)
+                channel.connect.assert_called_once_with(M.portal_socket_path(Path('/private')))
+                sent = [M.parse(call.args[0])['kind'] for call in channel.sendall.call_args_list]
+                self.assertEqual(sent, [] if fault == 'foreign-server' else ['ready'] if fault in ('wrong-ack', 'timeout')
+                                 else ['ready', 'complete'])
+
+    def test_portal_image_recheck_refuses_writable_substitution_or_redirected_ancestry(self):
+        image = object.__new__(M.PortalImage)
+        directory = SimpleNamespace(st_dev=1, st_ino=2, st_mode=stat.S_IFDIR | 0o755, st_uid=0, st_gid=0)
+        content = SimpleNamespace(st_dev=1, st_ino=3, st_size=64, st_mode=stat.S_IFREG | 0o755, st_uid=0, st_gid=0,
+                                  st_mtime_ns=1, st_ctime_ns=2, st_nlink=1)
+        image.fd, image.name, image.alias = 11, 'xdg-desktop-portal', None
+        image.parents = [(None, '/', 10, M.K.ProtectedBwrap.directory_stamp(directory))]
+        image.identity = M.K.image_stamp(content)
+        with patch.object(M.os, 'fstat', side_effect=lambda fd: directory if fd == 10 else content), \
+                patch.object(M.os, 'stat', side_effect=lambda name, **_: directory if name == '/' else content):
+            image.recheck()
+            for field, changed in (('st_mode', stat.S_IFREG | 0o777), ('st_uid', 1001), ('st_ino', 4), ('st_nlink', 0)):
+                value = SimpleNamespace(**{**vars(content), field: changed})
+                with self.subTest(field=field), patch.object(M.os, 'fstat', side_effect=lambda fd: directory if fd == 10 else value), \
+                        self.assertRaises(RuntimeError):
+                    image.recheck()
+            for field, changed in (('st_mode', stat.S_IFDIR | 0o777), ('st_ino', 99), ('st_uid', 1001)):
+                value = SimpleNamespace(**{**vars(directory), field: changed})
+                with self.subTest(field=field), patch.object(M.os, 'stat', return_value=value), self.assertRaises(RuntimeError):
+                    image.recheck()
 
 
 class AliasCleanupTests(unittest.TestCase):
