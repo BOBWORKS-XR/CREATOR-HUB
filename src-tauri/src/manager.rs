@@ -353,9 +353,11 @@ mod private_linux_cache {
         fn fixture() -> tempfile::TempDir {
             let temporary = tempfile::Builder::new()
                 .prefix("creator-hub-cache-test-")
+                .permissions(fs::Permissions::from_mode(0o700))
                 .tempdir_in(Path::new("/tmp").canonicalize().unwrap())
                 .unwrap();
             assert_eq!(temporary.path().canonicalize().unwrap(), temporary.path());
+            assert_eq!(mode(temporary.path()), 0o700);
             temporary
         }
 
