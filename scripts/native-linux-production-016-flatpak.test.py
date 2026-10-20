@@ -14,7 +14,7 @@ import sys
 import tarfile
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 import zipfile
 import warnings
 from types import SimpleNamespace
@@ -805,6 +805,218 @@ class ControllerTests(unittest.TestCase):
         for block in blocks:
             result = subprocess.run([str(bash), '-n'], input=block, text=True, capture_output=True, timeout=10)
             self.assertEqual(result.returncode, 0, result.stderr)
+
+
+class DiagnosticTests(unittest.TestCase):
+    def test_trust_diff_keeps_only_bounded_public_metadata_and_never_claims_cleanup(self):
+        before = {'system/original.pem': {'link': '/private/DO-NOT-RETAIN'},
+                  'system/ca-certificates.crt': {**pin(b'old'), 'mode': 0o644, 'uid': 0, 'gid': 0}}
+        after = {'system/creator-production-bootstrap016.pem': {'link': str(M.TLS_DESTINATION)},
+                 'system/12345678.0': {'link': 'creator-production-bootstrap016.pem'},
+                 'system/ca-certificates.crt': {**pin(b'changed'), 'mode': 0o644, 'uid': 0, 'gid': 0}}
+        original = copy.deepcopy((before, after))
+        result = M.trust_difference(before, after, True)
+        self.assertEqual(result['counts'], {'added': 2, 'removed': 1, 'changed': 1})
+        self.assertTrue(result['complete']); self.assertTrue(result['temporaryCertificateAbsent'])
+        self.assertFalse(result['cleanupVerified']); self.assertTrue(result['readOnly'])
+        self.assertNotIn('DO-NOT-RETAIN', json.dumps(result))
+        self.assertEqual(next(r for r in result['entries'] if r['name'].endswith('original.pem'))['before']['targetSha256'],
+                         hashlib.sha256(b'/private/DO-NOT-RETAIN').hexdigest())
+        self.assertEqual((before, after), original)
+        limited = M.trust_difference({}, {f'system/{n}.pem': {'link': 'unknown'} for n in range(100)}, False)
+        self.assertEqual(len(limited['entries']), 64); self.assertFalse(limited['complete'])
+        self.assertLess(len(M.json_bytes(limited)), 65536)
+
+    def test_cleanup_retains_first_two_diffs_but_still_raises_original_refusal(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve(); before = {'system/old.pem': {'link': 'original'}}
+            after = {**before, 'system/creator-production-bootstrap016.pem': {'link': str(M.TLS_DESTINATION)}}
+            arm = {'before': before, 'certificate': pin(b'public')}
+            with patch.object(M, 'regular', return_value=b'arm'), patch.object(M, 'bound'), \
+                    patch.object(M, 'protected_trust_parent'), patch.object(M.os.path, 'lexists', return_value=False), \
+                    patch.object(M, 'trust_view', return_value=after), patch.object(M, 'command') as command:
+                for _ in range(3):
+                    with self.assertRaisesRegex(RuntimeError, 'CI trust before-image was not restored'):
+                        M.cleanup_owned_tls(root, arm, b'arm')
+                command.assert_not_called()
+            files = sorted(root.iterdir())
+            self.assertEqual([f.name for f in files], ['tls-trust-diff-1-gtk.json', 'tls-trust-diff-2-gtk.json'])
+            self.assertTrue(all(json.loads(f.read_text())['counts']['added'] == 1 for f in files))
+            with patch.object(M, 'regular', return_value=b'arm'), patch.object(M, 'bound'), \
+                    patch.object(M, 'protected_trust_parent'), patch.object(M.os.path, 'lexists', return_value=False), \
+                    patch.object(M, 'trust_view', return_value=after), patch.object(M, 'trust_difference', side_effect=RuntimeError('DO-NOT-RETAIN')):
+                with self.assertRaisesRegex(RuntimeError, '^CI trust before-image was not restored$'):
+                    M.cleanup_owned_tls(root, arm, b'arm')
+
+    def test_runtime_path_filter_does_not_export_foreign_names_or_arguments(self):
+        runtime = '/private/fixture/runtime'
+        for name in ('/run/flatpak/at-spi-bus', '/run/flatpak/bus',
+                     runtime + '/.dbus-proxy/a11y-bus-proxy-Ab1234', '/run/user/1001/.dbus-proxy/session-bus-proxy-ABC123'):
+            self.assertEqual(M.proxy_runtime_path(name, runtime, 1001), name)
+        for name in ('/private/DO-NOT-RETAIN', runtime + '/.dbus-proxy/../secret', 'unix:path=/private/secret',
+                     '/run/user/1002/.dbus-proxy/a11y-bus-proxy-Ab1234'):
+            self.assertIsNone(M.proxy_runtime_path(name, runtime, 1001))
+        raw = (b'Num RefCount Protocol Flags Type St Inode Path\n'
+               b'0000: 00000002 00000000 00010000 0001 01 50 /private/DO-NOT-RETAIN\n'
+               b'0000: 00000002 00000000 00010000 0001 01 51 /private/fixture/runtime/.dbus-proxy/a11y-bus-proxy-Ab1234\n'
+               b'0000: 00000002 00000000 00010000 0001 01 52 /private/FOREIGN-ROW\n')
+        rows = M.proxy_unix_rows(raw, {50, 51}, runtime, 1001)
+        self.assertEqual([r['inode'] for r in rows], [50, 51]); self.assertNotIn('DO-NOT-RETAIN', json.dumps(rows))
+        self.assertNotIn('FOREIGN-ROW', json.dumps(rows)); self.assertIn('pathSha256', rows[0])
+        self.assertEqual(rows[1]['runtimePath'], runtime + '/.dbus-proxy/a11y-bus-proxy-Ab1234')
+        with self.assertRaises(RuntimeError): M.proxy_unix_rows(b'x' * (512 * 1024 + 1), set(), runtime, 1001)
+
+    def proxy_fixture(self):
+        rows = {pid: {'pid': pid, 'parentPid': parent, 'startTime': str(pid), 'uids': [1001] * 4,
+                      'executable': image, 'image': {'st_size': '64'}} for pid, parent, image in
+                ((10, 9, '/usr/bin/flatpak'), (11, 10, '/usr/bin/bwrap'),
+                 (12, 11, '/usr/bin/xdg-dbus-proxy'), (13, 10, '/usr/bin/bwrap'),
+                 (14, 13, '/app/bin/creator-hub-flatpak-activate'))}
+        session = object.__new__(M.Session); session.root = Path('/private/fixture'); session.helper = None
+        session.flatpak_launch = copy.deepcopy(rows[10])
+        def process(pid, helper, full=True):
+            value = copy.deepcopy(rows[pid])
+            if full: value['kernelImageSha256'] = str(pid % 10) * 64
+            return value
+        session.native = SimpleNamespace(native_process=process)
+        return session, rows, process(14, None), {'owner': ':1.0', 'pid': 12, 'uid': 1001}
+
+    def test_proxy_capture_records_exact_owned_topology_without_granting_input(self):
+        session, rows, client, peer = self.proxy_fixture()
+        details = {'namespacePids': [14, 2], 'sockets': [], 'unixRows': [], 'runtimeObjects': []}
+        with patch.object(M.P, 'subtree', return_value=rows), patch.object(M, 'proxy_process_io', return_value=details) as io_capture, \
+                patch.object(M.os, 'getuid', return_value=1001, create=True):
+            result = session.proxy_attribution(client, peer)
+        self.assertTrue(result['stable']); self.assertFalse(result['inputPermitted']); self.assertFalse(result['qualified'])
+        self.assertEqual(result['launch']['pid'], 10); self.assertEqual(result['peer']['pid'], 12)
+        self.assertEqual([(r['pid'], r['parentPid']) for r in result['subtree']], [(10, 9), (11, 10), (12, 11), (13, 10), (14, 13)])
+        self.assertEqual(io_capture.call_count, 2)
+        with self.assertRaises(RuntimeError): M.ax_identity(peer, 12, client, [14, 2], 1001)
+
+    def test_proxy_capture_refuses_foreign_reused_denied_or_oversize_topology_without_raw_error(self):
+        for failure in ('foreign', 'reuse', 'denied', 'oversize'):
+            session, rows, client, peer = self.proxy_fixture()
+            changed = copy.deepcopy(rows)
+            if failure == 'foreign': peer['pid'] = 999
+            if failure == 'reuse': changed[12]['startTime'] = 'reused'
+            if failure == 'oversize': rows.update({n: {**rows[11], 'pid': n} for n in range(20, 40)})
+            captures = [rows, changed] if failure == 'reuse' else [rows, rows]
+            with self.subTest(failure=failure), patch.object(M.P, 'subtree', side_effect=captures), \
+                    patch.object(M, 'proxy_process_io', side_effect=PermissionError('DO-NOT-RETAIN') if failure == 'denied' else None,
+                                 return_value={'sockets': [], 'runtimeObjects': []}) as capture, \
+                    patch.object(M.os, 'getuid', return_value=1001, create=True):
+                result = session.proxy_attribution(client, peer)
+            self.assertFalse(result['stable']); self.assertFalse(result['inputPermitted']); self.assertFalse(result['qualified'])
+            self.assertNotIn('DO-NOT-RETAIN', json.dumps(result))
+            if failure in ('foreign', 'oversize'): capture.assert_not_called()
+
+    def test_proxy_capture_drops_oversize_payload_instead_of_retaining_a_failed_trace(self):
+        session, rows, client, peer = self.proxy_fixture()
+        with patch.object(M.P, 'subtree', return_value=rows), \
+                patch.object(M, 'proxy_process_io', return_value={'sockets': [], 'private': 'DO-NOT-RETAIN' * 10000}), \
+                patch.object(M.os, 'getuid', return_value=1001, create=True):
+            result = session.proxy_attribution(client, peer)
+        self.assertEqual(result['unavailable'], 'OutputLimit'); self.assertFalse(result['stable'])
+        self.assertFalse(result['inputPermitted']); self.assertFalse(result['qualified']); self.assertFalse(result['peerPairingProven'])
+        self.assertNotIn('DO-NOT-RETAIN', json.dumps(result)); self.assertLess(len(M.json_bytes(result)), 1024)
+
+    def test_proxy_proc_reader_captures_only_owned_socket_fds_and_runtime_objects(self):
+        runtime = '/private/fixture/runtime'
+        status = b'Name:\tDO-NOT-RETAIN\nNSpid:\t14\t2\n'
+        unix = (b'Num RefCount Protocol Flags Type St Inode Path\n'
+                b'0000: 00000002 00000000 00010000 0001 01 50 /private/DO-NOT-RETAIN\n'
+                b'0000: 00000002 00000000 00010000 0001 01 51 /private/fixture/runtime/.dbus-proxy/a11y-bus-proxy-Ab1234\n')
+        for mutation in ('none', 'fd-replaced', 'namespace-changed', 'too-many-fds'):
+            opened, link_reads, mount_reads = {}, {}, []
+            def info(file):
+                name = file.as_posix(); mode = stat.S_IFLNK if '/fd/' in name else stat.S_IFSOCK if '/root/' in name else stat.S_IFREG
+                return SimpleNamespace(st_dev=1, st_ino=5, st_size=0, st_mode=mode | 0o600,
+                                       st_uid=1001, st_gid=1001, st_mtime_ns=1, st_ctime_ns=2)
+            def open_file(file, flags):
+                name = file.as_posix(); self.assertIn(name, ('/proc/14/status', '/proc/14/net/unix'))
+                self.assertEqual(flags, M.os.O_RDONLY | M.os.O_NOFOLLOW | M.os.O_CLOEXEC | M.os.O_NONBLOCK)
+                descriptor = 10000 + len(opened); opened[descriptor] = file; return descriptor
+            def stream(descriptor, mode):
+                self.assertEqual(mode, 'rb'); file = opened[descriptor]
+                class Stream(io.BytesIO):
+                    def fileno(self): return descriptor
+                    def close(self): opened.pop(descriptor, None); super().close()
+                return Stream(status if file.name == 'status' else unix)
+            def readlink(file):
+                name = file.as_posix(); link_reads[name] = link_reads.get(name, 0) + 1
+                if name.endswith('/ns/mnt'):
+                    mount_reads.append(name)
+                    return 'mnt:[11]' if mutation == 'namespace-changed' and len(mount_reads) > 1 else 'mnt:[10]'
+                if name.endswith('/fd/0'): return '/private/DO-NOT-RETAIN'
+                return 'socket:[99]' if mutation == 'fd-replaced' and link_reads[name] > 1 else 'socket:[50]' if name.endswith('/3') else 'socket:[51]'
+            class Scan:
+                def __enter__(self):
+                    return iter(SimpleNamespace(name=str(n)) for n in (range(129) if mutation == 'too-many-fds' else (0, 3, 4)))
+                def __exit__(self, *_): pass
+            with self.subTest(mutation=mutation), patch.object(Path, 'lstat', info), \
+                    patch.object(M.os, 'O_NOFOLLOW', 0x100000, create=True), patch.object(M.os, 'O_CLOEXEC', 0x200000, create=True), \
+                    patch.object(M.os, 'O_NONBLOCK', 0x400000, create=True), patch.object(M.os, 'open', side_effect=open_file), \
+                    patch.object(M.os, 'fdopen', side_effect=stream), patch.object(M.os, 'fstat', side_effect=lambda fd: info(opened[fd])), \
+                    patch.object(M.os, 'readlink', side_effect=readlink), patch.object(M.os, 'scandir', return_value=Scan()):
+                if mutation == 'none':
+                    value = M.proxy_process_io(14, runtime, 1001)
+                    self.assertEqual(value['namespacePids'], [14, 2])
+                    self.assertEqual(value['sockets'], [{'fd': 3, 'inode': 50}, {'fd': 4, 'inode': 51}])
+                    self.assertEqual(len(value['runtimeObjects']), 3)
+                    self.assertTrue(all(v['socket'] for v in value['runtimeObjects']))
+                    self.assertNotIn('DO-NOT-RETAIN', json.dumps(value))
+                else:
+                    with self.assertRaises(RuntimeError): M.proxy_process_io(14, runtime, 1001)
+            self.assertFalse(opened, 'Diagnostic proc reader leaked an FD')
+
+    def test_real_dialog_refusal_stays_action_free_even_with_stable_proxy_diagnostics(self):
+        session, rows, client, peer = self.proxy_fixture()
+        app = SimpleNamespace(app=SimpleNamespace(bus_name=':1.0'), path='/org/a11y/atspi/accessible/root',
+                              clear_cache=lambda: None, get_process_id=lambda: 12, get_name=lambda: 'creator-hub-flatpak-activate')
+        refs, bus = SimpleNamespace(resolve=lambda _: peer), Mock()
+        session.native.native_ax_references = lambda: (refs, bus)
+        session.native.process_uids = lambda _: [1001] * 4
+        session.helper = SimpleNamespace(children=lambda *_: [app])
+        session.owned_window = Mock(side_effect=AssertionError('No input may be reached'))
+        def wait(check, seconds):
+            self.assertFalse(check()); raise RuntimeError('Read-only readiness deadline; no mutation retried')
+        session.wait = wait
+        atspi = SimpleNamespace(init=lambda: None, set_timeout=lambda *_: None, get_desktop=lambda _: None)
+        modules = {'gi': SimpleNamespace(require_version=lambda *_: None), 'gi.repository': SimpleNamespace(Atspi=atspi)}
+        with tempfile.TemporaryDirectory() as directory:
+            session.root = Path(directory).resolve()
+            with patch.dict(sys.modules, modules), patch.object(Path, 'read_bytes', return_value=b'NSpid:\t14\t2\n'), \
+                    patch.object(M.os, 'getuid', return_value=1001, create=True), patch.object(M.P, 'subtree', return_value=rows), \
+                    patch.object(M, 'proxy_process_io', return_value={'sockets': [], 'runtimeObjects': []}):
+                with self.assertRaisesRegex(RuntimeError, 'Read-only readiness deadline'):
+                    session.click_dialog(client, [], [], 'Cancel', 'disclosure-cancel')
+            evidence = json.loads((session.root / 'disclosure-cancel-gtk.json').read_text())
+        self.assertFalse(evidence['actionAttempted']); self.assertFalse(evidence['actionReturned'])
+        self.assertTrue(evidence['proxyAttribution']['stable']); self.assertFalse(evidence['proxyAttribution']['qualified'])
+        self.assertFalse(evidence['proxyAttribution']['peerPairingProven'])
+        session.owned_window.assert_not_called(); bus.close_sync.assert_called_once_with(None)
+
+    def test_existing_portal_pid_refusal_captures_proxy_but_still_returns_access_denied(self):
+        session, rows, client, peer = self.proxy_fixture()
+        session.portal_client, session.report = client, {}
+        callback, bus = [], Mock()
+        def call(*args):
+            return SimpleNamespace(unpack=lambda: (1001 if args[3] == 'GetConnectionUnixUser' else 12 if args[3] == 'GetConnectionUnixProcessID' else 1,))
+        bus.call_sync.side_effect = call
+        bus.register_object.side_effect = lambda *args: callback.append(args[2]) or 1
+        gio = SimpleNamespace(bus_get_sync=lambda *_: bus, BusType=SimpleNamespace(SESSION=1), DBusCallFlags=SimpleNamespace(NONE=0),
+                              DBusNodeInfo=SimpleNamespace(new_for_xml=lambda _: SimpleNamespace(interfaces=[None])))
+        glib = SimpleNamespace(Variant=lambda _, value: SimpleNamespace(unpack=lambda: value), VariantType=SimpleNamespace(new=lambda v: v))
+        modules = {'gi.repository': SimpleNamespace(Gio=gio, GLib=glib)}
+        with patch.dict(sys.modules, modules), patch.object(M.os, 'getuid', return_value=1001, create=True), \
+                patch.object(M.P, 'subtree', return_value=rows), patch.object(M, 'proxy_process_io', return_value={'sockets': [], 'runtimeObjects': []}):
+            _, _, calls = M.portal_capture(session)
+            invocation = Mock()
+            callback[0](bus, ':1.0', '', '', 'OpenURI', SimpleNamespace(unpack=lambda: ('', M.PORTAL_URL, {})), invocation)
+        self.assertEqual(calls, []); invocation.return_value.assert_not_called()
+        invocation.return_dbus_error.assert_called_once_with('org.freedesktop.DBus.Error.AccessDenied', 'Portal sender is not the bound signed launcher')
+        self.assertTrue(session.report['portalAttribution']['stable']); self.assertFalse(session.report['portalAttribution']['inputPermitted'])
+        self.assertFalse(session.report['portalAttribution']['qualified']); self.assertFalse(session.report['portalAttribution']['peerPairingProven'])
 
 
 if __name__ == '__main__':

@@ -504,6 +504,42 @@ def trust_view():
     return result
 
 
+def trust_difference(before, after, certificate_absent):
+    require(type(before) is dict and type(after) is dict and max(len(before), len(after)) <= 4096,
+            'Bounded trust diagnostic snapshots required')
+    def entry(value):
+        if value is None:
+            return None
+        require(type(value) is dict, 'Trust diagnostic entry shape')
+        if 'link' in value:
+            target = value['link']; require(type(target) is str and len(target) <= 4096, 'Bounded trust link')
+            result = {'kind': 'link', 'targetSha256': hashlib.sha256(target.encode()).hexdigest()}
+            if target in (str(TLS_DESTINATION), '../../usr/local/share/ca-certificates/' + TLS_DESTINATION.name,
+                          TLS_DESTINATION.stem + '.pem'):
+                result['ownedCandidateTarget'] = target
+            return result
+        result = {key: value[key] for key in ('directory', 'mode', 'uid', 'gid', 'size', 'sha256') if key in value}
+        require(all(type(v) is int for k, v in result.items() if k not in ('directory', 'sha256'))
+                and ('directory' not in result or type(result['directory']) is bool)
+                and ('sha256' not in result or re.fullmatch(r'[a-f0-9]{64}', result['sha256'])), 'Public trust diagnostic metadata only')
+        return result
+    rows, counts = [], dict.fromkeys(('added', 'removed', 'changed'), 0)
+    for name in sorted(before.keys() | after.keys()):
+        require(type(name) is str and re.fullmatch(r'(?:local|system)/[A-Za-z0-9_./+-]{1,240}', name)
+                and '..' not in name.split('/'), 'Bounded relative trust entry name')
+        if name in before and name in after and before[name] == after[name]:
+            continue
+        kind = 'added' if name not in before else 'removed' if name not in after else 'changed'
+        counts[kind] += 1
+        if len(rows) < 64:
+            rows.append({'name': name, 'change': kind, 'before': entry(before.get(name)), 'after': entry(after.get(name))})
+    result = {'schemaVersion': 1, 'readOnly': True, 'cleanupVerified': False, 'temporaryCertificateAbsent': certificate_absent,
+              'beforeSha256': hashlib.sha256(json_bytes(before)).hexdigest(), 'afterSha256': hashlib.sha256(json_bytes(after)).hexdigest(),
+              'counts': counts, 'complete': sum(counts.values()) == len(rows), 'entries': rows}
+    require(len(json_bytes(result)) <= 65536, 'Trust diagnostic output bound')
+    return result
+
+
 def tls_arm(root):
     raw = regular(root / 'lab-tls/armed.json', 512 * 1024, 0o600)
     arm = parse(raw)
@@ -546,7 +582,20 @@ def cleanup_owned_tls(root, arm, armed_bytes):
         command(['/usr/bin/sudo', '-n', '/usr/bin/python3', '-B', '-c', TLS_REMOVE,
                  str(TLS_DESTINATION), arm['certificate']['sha256']], env=lab_environment(root))
         command(['/usr/bin/sudo', '-n', '/usr/sbin/update-ca-certificates'], env=lab_environment(root))
-    require(not os.path.lexists(TLS_DESTINATION) and trust_view() == arm['before'], 'CI trust before-image was not restored')
+    absent, after = not os.path.lexists(TLS_DESTINATION), trust_view()
+    if not absent or after != arm['before']:
+        # Diagnostics never remove aliases or replace the original cleanup refusal.
+        try:
+            difference = trust_difference(arm['before'], after, absent)
+            for number in (1, 2):
+                try:
+                    save(root / f'tls-trust-diff-{number}-gtk.json', difference)
+                    break
+                except FileExistsError:
+                    continue
+        except Exception:
+            pass
+    require(absent and after == arm['before'], 'CI trust before-image was not restored')
     result = {'schemaVersion': 1, 'profile': '016-bootstrap', 'cleanupVerified': True,
               'publicDiscovery': False, 'releaseReady': False, 'scope': 'disposable-github-ci-only'}
     receipt = root / 'tls-cleanup.json'
@@ -711,6 +760,88 @@ def ax_identity(peer, reported, process, namespaces, uid):
             "AX connection is not the exact kernel-bound client; no input permitted")
 
 
+def proxy_runtime_path(value, runtime, uid):
+    # Flatpak 1.12.7 common/flatpak-run.c create_proxy_socket/add_a11y_dbus_args.
+    # https://github.com/flatpak/flatpak/blob/1.12.7/common/flatpak-run.c#L883-L899
+    if value in ('/run/flatpak/at-spi-bus', '/run/flatpak/bus'):
+        return value
+    for prefix in (runtime, f'/run/user/{uid}'):
+        if re.fullmatch(re.escape(prefix) + r'/\.dbus-proxy/(?:a11y|session|system)-bus-proxy-[A-Za-z0-9]{6}', value):
+            return value
+    return None
+
+
+def proxy_unix_rows(raw, inodes, runtime, uid):
+    require(type(raw) is bytes and len(raw) <= 512 * 1024, 'Bounded UNIX socket diagnostic')
+    lines = raw.decode('utf-8').splitlines()
+    require(0 < len(lines) <= 4096 and lines[0].split() == ['Num', 'RefCount', 'Protocol', 'Flags', 'Type', 'St', 'Inode', 'Path'],
+            'Known kernel UNIX socket table header required')
+    rows, seen = [], set()
+    for line in lines[1:]:
+        fields = line.split(None, 7)
+        if len(fields) < 7 or not fields[6].isdigit() or int(fields[6]) not in inodes:
+            continue
+        inode = int(fields[6]); require(inode not in seen and len(rows) < 128, 'Duplicate/oversize owned socket rows')
+        require(all(re.fullmatch(r'[a-fA-F0-9]+', fields[n]) for n in (3, 4, 5)), 'Known UNIX socket fields')
+        seen.add(inode); row = {'inode': inode, 'flags': fields[3], 'type': fields[4], 'state': fields[5]}
+        if len(fields) == 8:
+            name = fields[7]; require(len(name) <= 4096, 'Bounded socket name')
+            row['pathSha256'] = hashlib.sha256(name.encode()).hexdigest()
+            known = proxy_runtime_path(name, runtime, uid)
+            if known is not None:
+                row['runtimePath'] = known
+        rows.append(row)
+    return rows
+
+
+def proxy_process_io(pid, runtime, uid):
+    require(type(pid) is int and 1 < pid <= 2147483647, 'Exact diagnostic process required')
+    root = Path(f'/proc/{pid}')
+    def read(file, limit):
+        before = file.lstat(); require(stat.S_ISREG(before.st_mode), 'Kernel diagnostic file required')
+        fd = os.open(file, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+        with os.fdopen(fd, 'rb') as stream:
+            require(P.stamp(os.fstat(stream.fileno())) == P.stamp(before), 'Diagnostic FD changed')
+            raw = stream.read(limit + 1)
+            require(len(raw) <= limit and P.stamp(os.fstat(stream.fileno())) == P.stamp(before), 'Kernel diagnostic bound/identity')
+        require(P.stamp(file.lstat()) == P.stamp(before), 'Kernel diagnostic pathname changed')
+        return raw
+    ids = namespace_ids(read(root / 'status', 16384), pid)
+    mount = os.readlink(root / 'ns/mnt'); require(re.fullmatch(r'mnt:\[[0-9]+\]', mount), 'Kernel mount namespace')
+    def fd_names():
+        names = []
+        with os.scandir(root / 'fd') as entries:
+            for item in entries:
+                require(len(names) < 128 and re.fullmatch(r'[0-9]{1,10}', item.name), 'Bounded diagnostic FD table')
+                names.append(item.name)
+        return sorted(names, key=int)
+    names, sockets = fd_names(), []
+    for name in names:
+        file = root / 'fd' / name; before = file.lstat()
+        require(stat.S_ISLNK(before.st_mode), 'Kernel FD link required')
+        target = os.readlink(file)
+        require(len(target) <= 4096 and P.stamp(file.lstat()) == P.stamp(before) and os.readlink(file) == target, 'Diagnostic FD link changed')
+        match = re.fullmatch(r'socket:\[([0-9]{1,20})\]', target)
+        if match:
+            sockets.append({'fd': int(name), 'inode': int(match[1])})
+    unix = proxy_unix_rows(read(root / 'net/unix', 512 * 1024), {r['inode'] for r in sockets}, runtime, uid)
+    paths = {'/run/flatpak/at-spi-bus', '/run/flatpak/bus'} | {r['runtimePath'] for r in unix if 'runtimePath' in r}
+    require(len(paths) <= 8, 'Bounded source-profile runtime socket paths')
+    objects = []
+    for path in sorted(paths):
+        file = Path(f'/proc/{pid}/root' + path)
+        try:
+            before = file.lstat()
+        except FileNotFoundError:
+            objects.append({'path': path, 'present': False}); continue
+        require(P.stamp(file.lstat()) == P.stamp(before), 'Runtime socket metadata changed')
+        objects.append({'path': path, 'present': True, 'socket': stat.S_ISSOCK(before.st_mode), 'dev': before.st_dev,
+                        'ino': before.st_ino, 'mode': before.st_mode, 'uid': before.st_uid, 'gid': before.st_gid})
+    require(fd_names() == names and os.readlink(root / 'ns/mnt') == mount
+            and namespace_ids(read(root / 'status', 16384), pid) == ids, 'Kernel diagnostic namespace/FD table changed')
+    return {'namespacePids': ids, 'mountNamespace': mount, 'sockets': sockets, 'unixRows': unix, 'runtimeObjects': objects}
+
+
 def consent_text(generation):
     require(re.fullmatch(r"[a-f0-9]{64}", generation), "Exact signed generation required")
     return ("Install Creator Hub native support 0.1.16?\n\nThis installs and registers the verified generation " + generation +
@@ -756,6 +887,7 @@ class Session:
         self.x11, self.driver = self.helper.X11(), P.Driver()
         self.children, self.captures, self.fds = [], [], []
         self.portal_client = None
+        self.flatpak_launch = None
         self.bootstrap_proxy = None
         self.report = {"schemaVersion": 1, "profile": PROFILE, "phase": "starting", **GATES}
 
@@ -803,6 +935,44 @@ class Session:
         self.x11.close_window(window, self.helper.bound_window(request, self.x11))
         self.wait(lambda: bool(select.select([fd], [], [], 0)[0]) and not Path(f'/proc/{process["pid"]}').exists())
 
+    def proxy_attribution(self, client, peer):
+        result = {'readOnly': True, 'stable': False, 'inputPermitted': False, 'qualified': False, 'peerPairingProven': False}
+        try:
+            launch = self.flatpak_launch
+            require(launch is not None and peer['uid'] == os.getuid(), 'Owned Flatpak launch diagnostic only')
+            self.stable(client)
+            require(self.native.native_process(launch['pid'], self.helper, False) == launch, 'Diagnostic launch changed')
+            tree = P.subtree(launch['pid'], self.helper, self.native)
+            require(len(tree) <= 16 and client['pid'] in tree and peer['pid'] in tree, 'AX peer outside bounded owned launch')
+            require(tree[peer['pid']]['executable'] == '/usr/bin/xdg-dbus-proxy', 'Only owned proxy diagnostic')
+            proxy = self.native.native_process(peer['pid'], self.helper)
+            require(0 < int(proxy['image']['st_size']) <= 64 * 1024 * 1024
+                    and {k: v for k, v in proxy.items() if k != 'kernelImageSha256'} == tree[peer['pid']], 'Diagnostic proxy identity changed')
+            known_images = ('/usr/bin/flatpak', '/usr/bin/bwrap', '/usr/libexec/flatpak-bwrap',
+                            '/usr/bin/xdg-dbus-proxy', '/app/bin/creator-hub-flatpak-activate')
+            rows = []
+            for row in sorted(tree.values(), key=lambda r: r['pid']):
+                value = {key: row[key] for key in ('pid', 'parentPid', 'startTime', 'uids', 'image')}
+                value['executableSha256'] = hashlib.sha256(row['executable'].encode()).hexdigest()
+                if row['executable'] in known_images:
+                    value['executable'] = row['executable']
+                rows.append(value)
+            result.update(launch={'pid': launch['pid'], 'startTime': launch['startTime']}, peer=peer, subtree=rows, processes=[])
+            for process in (client, proxy):
+                result['processes'].append({'pid': process['pid'], 'kernelImageSha256': process['kernelImageSha256'],
+                                           **proxy_process_io(process['pid'], str(self.root / 'runtime'), os.getuid())})
+            require(P.subtree(launch['pid'], self.helper, self.native) == tree, 'Diagnostic launch topology changed')
+            self.stable(client); self.stable(proxy)
+            require(self.native.native_process(launch['pid'], self.helper, False) == launch, 'Diagnostic launch identity changed')
+            require(len(json_bytes(result)) <= 65536, 'Bounded proxy attribution output')
+            result['stable'] = True
+        except Exception as error:
+            result['unavailable'] = type(error).__name__
+        if len(json_bytes(result)) > 65536:
+            return {'readOnly': True, 'stable': False, 'inputPermitted': False, 'qualified': False,
+                    'peerPairingProven': False, 'unavailable': 'OutputLimit'}
+        return result
+
     def click_dialog(self, process, labels, buttons, action, phase, title="Creator Hub"):
         import gi
         gi.require_version("Atspi", "2.0")
@@ -845,6 +1015,8 @@ class Session:
                                 require(0 < int(record["image"]["st_size"]) <= 64 * 1024 * 1024, "Bounded diagnostic image")
                                 diagnostic["unadmittedPeers"].append({"wire": peer, "reportedPid": app.get_process_id(),
                                     "kernel": self.native.native_process(peer["pid"], self.helper), "inputPermitted": False})
+                                if process['executable'] == '/app/bin/creator-hub-flatpak-activate' and 'proxyAttribution' not in diagnostic:
+                                    diagnostic['proxyAttribution'] = self.proxy_attribution(process, peer)
                             except Exception as error:
                                 diagnostic["unadmittedPeers"].append({"error": str(error)[:240], "inputPermitted": False})
                         continue
@@ -916,6 +1088,7 @@ class Session:
         row = [row for row in found.values() if row["executable"] == "/app/bin/creator-hub-flatpak-activate"][0]
         client = self.process(row["pid"], self.review["flatpak"]["files"]["creator-hub-flatpak-activate"]["sha256"])
         require(client["parentPid"] in found and int(client["startTime"]) >= int(start), "Launcher left this exact owned Flatpak launch")
+        self.flatpak_launch = dict(found[child.pid])
         disclosure = self.disclosure()
         self.wait(lambda: any(self.x11.inspect(window)["pid"] == client["pid"] for window in self.windows()))
         self.portal_client = client if action == "Get Native Hub" else None
@@ -1083,6 +1256,7 @@ def portal_capture(session):
     require(result == 1, "Fresh private portal name required; no replacement")
     calls = []
     def method(connection, sender, path, interface, name, parameters, invocation):
+        uid, pid = None, None
         try:
             require(name == "OpenURI" and len(calls) == 0 and re.fullmatch(r":[0-9]+\.[0-9]+", sender), "Only one fixed portal capture")
             parent, uri, options = parameters.unpack()
@@ -1096,6 +1270,11 @@ def portal_capture(session):
             calls.append({"url": uri, "browserOpened": False, "downloadAttempted": False, "senderUid": uid})
             invocation.return_value(GLib.Variant("(o)", ("/org/freedesktop/portal/desktop/request/production_016/captured",)))
         except Exception as error:
+            if uid == os.getuid() and type(pid) is int and session.portal_client is not None and 'portalAttribution' not in session.report:
+                try:
+                    session.report['portalAttribution'] = session.proxy_attribution(session.portal_client, {'owner': sender, 'pid': pid, 'uid': uid})
+                except Exception:
+                    pass
             invocation.return_dbus_error("org.freedesktop.DBus.Error.AccessDenied", str(error)[:512])
     registration = bus.register_object("/org/freedesktop/portal/desktop", info.interfaces[0], method, None, None)
     return bus, registration, calls
