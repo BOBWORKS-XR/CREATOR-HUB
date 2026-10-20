@@ -241,7 +241,7 @@ test('production ZIP maps only the fixed DEB member to a safe basename, without 
   assert.throws(() => base.stageZip(zip, path.join(root, 'old'), { [p.DEB_MEMBER]: base.record(data) }, base.MAIN_ALLOWED,
     (cmd, args, opts) => execFileSync(PYTHON, args, { ...opts, stdio: 'pipe' })));
 });
-function selectorFixture(t) {
+function selectorFixture(t, linked = false) {
   const c = candidate(t), source = path.join(c.root, 'checkout'), output = path.join(c.root, 'output'); fs.mkdirSync(source); fs.mkdirSync(output);
   const files = { 'native/linux-portable-deployment/Cargo.toml': Buffer.from('synthetic Cargo source'),
     'native/linux-portable-deployment/Cargo.lock': Buffer.from('synthetic locked dependencies'),
@@ -261,7 +261,13 @@ function selectorFixture(t) {
     if (command === tools.cargo && args[0] === 'metadata') return JSON.stringify({ packages: [{ name: 'creator-hub-linux-portable-deployment', version: '0.1.0',
       features: { default: [], 'experimental-restart': [] }, dependencies: [], targets: [{ name: 'creator-hub-portable-selector', kind: ['bin'] }] }] });
     if (command === tools.cargo && args[0] === 'build') {
-      const target = args[args.indexOf('--target-dir') + 1]; put(target, `${p.TARGET}/release/creator-hub-portable-selector`, elf(), 0o755); return '';
+      const target = args[args.indexOf('--target-dir') + 1], name = `${p.TARGET}/release/creator-hub-portable-selector`;
+      const file = put(target, name, elf(), 0o755);
+      if (linked) {
+        const deps = path.join(path.dirname(file), 'deps'); fs.mkdirSync(deps);
+        fs.linkSync(file, path.join(deps, 'creator-hub-portable-selector-synthetic'));
+      }
+      return '';
     }
     assert.fail(`Unexpected tool action: ${command} ${args.join(' ')}`);
   };
@@ -277,6 +283,75 @@ test('selector build is a separate locked restart-enabled owned tool with source
   assert.ok(builds[0].args.includes('--locked') && builds[0].args.includes('--no-default-features'));
   assert.equal(builds[0].args[builds[0].args.indexOf('--bin') + 1], 'creator-hub-portable-selector');
   assert.equal(builds[0].args[builds[0].args.indexOf('--features') + 1], 'experimental-restart');
+});
+function selectorIdentity(file) {
+  const stat = fs.lstatSync(file, { bigint: true });
+  return [stat.dev, stat.ino, stat.mode, stat.nlink, stat.size, stat.mtimeNs, stat.ctimeNs, stat.birthtimeNs];
+}
+test('hardlinked Cargo selector becomes a fresh strict single-link copy without changing the original', t => {
+  const c = selectorFixture(t, true), compiled = path.join(c.output, 'selector-target', p.TARGET, 'release/creator-hub-portable-selector');
+  let before;
+  const result = p.buildSelector(c.source, c.output, c.pins, (command, args, options) => {
+    const value = c.run(command, args, options);
+    if (command === c.tools.cargo && args[0] === 'build') {
+      assert.equal(fs.lstatSync(compiled).nlink, 2); before = selectorIdentity(compiled);
+      assert.throws(() => finite.read(compiled, 32 * 1024 * 1024), /Bounded ordinary file required/);
+    }
+    return value;
+  });
+  assert.equal(result.file, path.join(c.output, 'selector-output/creator-hub-portable-selector'));
+  assert.deepEqual(finite.read(result.file, 32 * 1024 * 1024), elf());
+  assert.equal(fs.lstatSync(result.file).nlink, 1); assert.notEqual(fs.lstatSync(result.file).ino, fs.lstatSync(compiled).ino);
+  if (process.platform !== 'win32') assert.equal(fs.lstatSync(result.file).mode & 0o7777, 0o755);
+  assert.deepEqual(result.proof.executable, base.record(elf())); assert.equal(result.proof.releaseReady, false);
+  assert.deepEqual(selectorIdentity(compiled), before); assert.deepEqual(fs.readFileSync(compiled), elf());
+  assert.throws(() => finite.read(compiled, 32 * 1024 * 1024), /Bounded ordinary file required/);
+});
+test('selector refuses an existing fresh-copy destination without adopting or overwriting it', t => {
+  const c = selectorFixture(t, true), file = put(c.output, 'selector-output/creator-hub-portable-selector', Buffer.from('foreign copy'));
+  assert.throws(() => p.buildSelector(c.source, c.output, c.pins, c.run), error => error.code === 'EEXIST');
+  assert.equal(fs.readFileSync(file, 'utf8'), 'foreign copy');
+});
+test('selector fresh-copy write refuses a destination appearing after directory creation', t => {
+  const c = selectorFixture(t, true), file = path.join(c.output, 'selector-output/creator-hub-portable-selector'), write = fs.writeFileSync;
+  let raced = false;
+  t.mock.method(fs, 'writeFileSync', (destination, body, options) => {
+    if (destination === file && !raced) {
+      raced = true; write(file, 'foreign raced copy', { flag: 'wx' }); assert.equal(options.flag, 'wx');
+    }
+    return write(destination, body, options);
+  });
+  assert.throws(() => p.buildSelector(c.source, c.output, c.pins, c.run), error => error.code === 'EEXIST');
+  assert.ok(raced); assert.equal(fs.readFileSync(file, 'utf8'), 'foreign raced copy');
+});
+test('selector capture refuses changes to the original Cargo inode or link count', t => {
+  for (const change of ['identity', 'links']) {
+    const c = selectorFixture(t, true), compiled = path.join(c.output, 'selector-target', p.TARGET, 'release/creator-hub-portable-selector');
+    const read = finite.read; let changed = false;
+    const mock = t.mock.method(finite, 'read', (file, maximum, allowHardlinks) => {
+      const bytes = read(file, maximum, allowHardlinks);
+      if (file === compiled && allowHardlinks && !changed) {
+        changed = true;
+        if (change === 'links') fs.linkSync(compiled, path.join(path.dirname(compiled), 'extra-link'));
+        else { fs.renameSync(compiled, `${compiled}.kept`); fs.writeFileSync(compiled, bytes, { flag: 'wx' }); }
+      }
+      return bytes;
+    });
+    assert.throws(() => p.buildSelector(c.source, c.output, c.pins, c.run), /Cargo selector output identity changed/);
+    assert.ok(changed); mock.mock.restore();
+  }
+});
+test('selector refuses original Cargo bytes changing after the fresh copy is written', t => {
+  const c = selectorFixture(t, true), compiled = path.join(c.output, 'selector-target', p.TARGET, 'release/creator-hub-portable-selector');
+  const copy = path.join(c.output, 'selector-output/creator-hub-portable-selector'), write = fs.writeFileSync;
+  let changed = false;
+  t.mock.method(fs, 'writeFileSync', (file, body, options) => {
+    const result = write(file, body, options);
+    if (file === copy && !changed) { changed = true; write(compiled, Buffer.concat([elf(), Buffer.from('changed')])); }
+    return result;
+  });
+  assert.throws(() => p.buildSelector(c.source, c.output, c.pins, c.run), /Cargo selector output identity changed|Cargo selector output bytes changed/);
+  assert.ok(changed); assert.deepEqual(fs.readFileSync(copy), elf());
 });
 test('selector source drift, compiler mismatch and foreign Cargo path dependencies refuse before accepted output', t => {
   const c = selectorFixture(t); fs.writeFileSync(path.join(c.source, 'src-tauri/src/catalog-key.pub'), 'changed public source');

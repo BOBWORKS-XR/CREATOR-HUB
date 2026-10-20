@@ -421,15 +421,32 @@ function buildSelector(root, output, pins, run) {
   assert.ok(pkg.dependencies.every(d => !d.path), 'Selector build cannot compile Root or private path dependencies');
   assert.equal(pkg.targets.filter(t => t.name === 'creator-hub-portable-selector' && t.kind.includes('bin')).length, 1);
   run(toolFiles.cargo.path, args, options);
-  const file = path.join(target, TARGET, 'release/creator-hub-portable-selector'), bytes = read(file, 32 * 1024 * 1024);
-  require('./flatpak-package.cjs').validateElf(bytes);
+  const compiled = path.join(target, TARGET, 'release/creator-hub-portable-selector'), finite = require('./flatpak-package.cjs');
+  const identity = () => {
+    const stat = fs.lstatSync(compiled, { bigint: true });
+    return [stat.dev, stat.ino, stat.mode, stat.nlink, stat.size, stat.mtimeNs, stat.ctimeNs, stat.birthtimeNs];
+  };
+  const before = identity();
+  // Cargo may hardlink its owned output to target/deps; transport inputs remain single-link only.
+  const capture = () => {
+    assert.deepEqual(identity(), before, 'Cargo selector output identity changed');
+    const bytes = finite.read(compiled, 32 * 1024 * 1024, true);
+    assert.deepEqual(identity(), before, 'Cargo selector output identity changed'); return bytes;
+  };
+  const bytes = capture(); finite.validateElf(bytes);
+  const file = path.join(output, 'selector-output/creator-hub-portable-selector');
+  fs.mkdirSync(path.dirname(file), { mode: 0o700 });
+  fs.writeFileSync(file, bytes, { flag: 'wx', mode: 0o755 }); fs.chmodSync(file, 0o755);
+  const copied = read(file, 32 * 1024 * 1024), executable = record(copied); finite.validateElf(copied);
+  assert.deepEqual(executable, record(bytes), 'Fresh selector copy bytes differ');
   for (const [name, expected] of Object.entries(sources)) {
     exact(path.join(root, name), expected); exact(path.join(source, name), expected);
   }
   for (const item of Object.values(toolFiles)) exact(item.path, { size: item.size, sha256: item.sha256 });
+  assert.deepEqual(record(capture()), executable, 'Cargo selector output bytes changed');
   return { file, proof: { schemaVersion: 1, sourceCommit: pins.sourceCommit, sourceTree: pins.sourceTree, sources,
     publicKeySource: sources[SELECTOR_SOURCES[1]], target: TARGET, features: ['experimental-restart'],
-    toolchain: SELECTOR_TOOLCHAIN, compiler, cargo, toolFiles, arguments: args, executable: record(bytes),
+    toolchain: SELECTOR_TOOLCHAIN, compiler, cargo, toolFiles, arguments: args, executable,
     rootRecompiled: false, privateModulesRecompiled: false, nativeExecution: false, releaseReady: false } };
 }
 function attachSelector(root, before, selector) {
