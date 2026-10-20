@@ -374,6 +374,46 @@ class Pure(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "^Exact isolated native home required$"):
                     M.native_session(env)
 
+    def test_final_session_env_restores_observed_runner_config_drift_and_preserves_pam_bus_display(self):
+        context = {**environment(), "GITHUB_WORKSPACE": str(HERE.parent), "RUNNER_TEMP": "/runner/temp", "CONTROLLER_NODE": "/usr/bin/node"}
+        command = M.system_session_command(context)
+        actual = dict(value[len("--setenv="):].split("=", 1) for value in command if value.startswith("--setenv="))
+        home = M.BASE / "result/home"
+        expected = {key: str(home / leaf) for key, leaf in {"HOME": ".", "XDG_CONFIG_HOME": "config", "XDG_DATA_HOME": "data", "XDG_CACHE_HOME": "cache"}.items()}
+        actual.update(XDG_CONFIG_HOME="/home/runner/.config", XDG_SESSION_ID="fixture-session", XDG_RUNTIME_DIR="/run/user/21314",
+                      DBUS_SESSION_BUS_ADDRESS="unix:path=/fixture/session-bus", DISPLAY=":99", XAUTHORITY="/fixture/xauthority")
+        self.assertEqual(hashlib.sha256(actual["XDG_CONFIG_HOME"].encode()).hexdigest(), "e2ff4a7c39c2d65a96232a967bd04842c9fedf27daddc7680b06afa98c1702ca")
+        self.assertEqual({key: value for key, value in actual.items() if key in expected and key != "XDG_CONFIG_HOME"},
+                         {key: value for key, value in expected.items() if key != "XDG_CONFIG_HOME"})
+        untouched = {key: value for key, value in actual.items() if key not in expected}
+        if "/usr/bin/env" in command:
+            stage = command[command.index("/usr/bin/env") + 1:command.index("/usr/bin/python3")]
+            actual.update(dict(value.split("=", 1) for value in stage))
+        with patch.object(M, "admission", return_value="deb-native-cancel"), \
+             patch.object(M.os, "getuid", return_value=M.UID, create=True), patch.object(M.os, "geteuid", return_value=M.UID, create=True), \
+             patch.object(M, "read", side_effect=RuntimeError("stopped at original sealed request read")) as read, patch("builtins.print"):
+            with self.assertRaisesRegex(RuntimeError, "^stopped at original sealed request read$"):
+                M.native_session(actual)
+            self.assertEqual({key: actual[key] for key in expected}, expected)
+            self.assertEqual({key: value for key, value in actual.items() if key not in expected}, untouched)
+            read.reset_mock(); actual["XDG_CONFIG_HOME"] = "/late/foreign/config"
+            with self.assertRaisesRegex(RuntimeError, "^Exact isolated native home required$"):
+                M.native_session(actual)
+            read.assert_not_called()
+
+    def test_final_four_env_assignments_follow_dbus_xvfb_and_never_clear_or_adopt_other_values(self):
+        context = {**environment(), "GITHUB_WORKSPACE": str(HERE.parent), "RUNNER_TEMP": "/runner/temp", "CONTROLLER_NODE": "/usr/bin/node",
+                   "HOME": "/caller/foreign", "XDG_CONFIG_HOME": "/caller/foreign/config"}
+        original = dict(context); command = M.system_session_command(context)
+        self.assertIn("--property=PAMName=login", command); self.assertIn("--uid=" + M.USER, command)
+        self.assertLess(command.index("/usr/bin/dbus-run-session"), command.index("/usr/bin/xvfb-run"))
+        self.assertLess(command.index("/usr/bin/xvfb-run"), command.index("/usr/bin/env"))
+        stage = command.index("/usr/bin/env"); target = command.index("/usr/bin/python3")
+        self.assertEqual(command[stage + 1:target], ["HOME=" + str(M.BASE / "result/home"), "XDG_CONFIG_HOME=" + str(M.BASE / "result/home/config"),
+                                                  "XDG_DATA_HOME=" + str(M.BASE / "result/home/data"), "XDG_CACHE_HOME=" + str(M.BASE / "result/home/cache")])
+        self.assertNotIn("-i", command[stage:target]); self.assertEqual(command[target + 1:], ["-B", str(M.BASE / "scripts" / M.Path(M.__file__).name), "session"])
+        self.assertEqual(context, original)
+
     def parent_fixture(self, *, mode=0o777, fault=None, context=None, log_error=None, guard_only=False):
         root = dict(st_dev=10, st_ino=1, st_uid=0, st_gid=0, st_mode=stat.S_IFDIR | 0o755)
         opt = {**root, "st_ino": 2, "st_mode": stat.S_IFDIR | mode}

@@ -1834,6 +1834,7 @@ def system_session_command(env):
             "--uid=" + USER, "--property=PAMName=login", "--property=Type=exec", "--property=LimitCORE=0", "--property=WorkingDirectory=" + str(BASE),
             *("--setenv=" + key + "=" + value for key, value in values.items()),
             "/usr/bin/dbus-run-session", "--", "/usr/bin/xvfb-run", "-a", "--server-args=-screen 0 1280x1000x24",
+             "/usr/bin/env", *(key + "=" + values[key] for key in ("HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME")),
             "/usr/bin/python3", "-B", str(BASE / "scripts" / Path(__file__).name), "session"]
 
 
