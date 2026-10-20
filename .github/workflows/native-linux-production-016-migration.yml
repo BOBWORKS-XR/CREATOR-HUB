@@ -85,6 +85,14 @@ jobs:
             dbus-x11 xvfb xauth openbox fonts-dejavu-core libpam-systemd policykit-1-gnome=0.105-7ubuntu3 \
             pkexec=0.105-33ubuntu0.2 polkitd=0.105-33ubuntu0.2 coreutils=8.32-4.1ubuntu1.4 passwd=1:4.8.1-2ubuntu2.2
           sudo systemctl start systemd-logind.service polkit.service
+      - name: Native exact-target dismissal fixture before SDK, tooling or candidate execution
+        timeout-minutes: 2
+        env:
+          CREATOR_NATIVE_EXACT_TARGET_FIXTURE: '1'
+        run: |
+          set -o noclobber
+          /usr/bin/timeout --signal=TERM --kill-after=5s 40s /usr/bin/python3 -B scripts/native-linux-polkit-probe.test.py --native-exact-target > "$RUNNER_TEMP/native-exact-target-observer.json"
+          test "$(wc -c < "$RUNNER_TEMP/native-exact-target-observer.json")" -le 16384
       - name: Install the locked SDK as a test tool only
         run: |
           test "$(sha256sum modules/mcp/package-lock.json | cut -d' ' -f1)" = ded7a99b78aca304253d5287cc1b884a845afde083eb32d1a2abecd14468ba60
@@ -162,4 +170,5 @@ jobs:
             ${{ runner.temp }}/native-linux-production-016-stage/binding.json
             ${{ runner.temp }}/native-linux-production-016-migration-request.json
             ${{ runner.temp }}/polkit-stock-policy-preflight.json
+            ${{ runner.temp }}/native-exact-target-observer.json
             ${{ runner.temp }}/native-linux-production-016-migration-result/

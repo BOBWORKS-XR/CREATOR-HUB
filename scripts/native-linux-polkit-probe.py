@@ -883,36 +883,69 @@ def authenticate_once(profile, guard, record, secret):
 
 
 def native_window_absence(x11, helper, target, observation):
-    """Complete bounded server tree, not an EWMH hint or swallowed X error."""
+    """One exact target query; only its request-bound BadWindow proves absence."""
     c = helper.C
     query = x11.x.XQueryTree
     query.argtypes = [c.c_void_p, c.c_ulong, c.POINTER(c.c_ulong), c.POINTER(c.c_ulong),
                       c.POINTER(c.POINTER(c.c_ulong)), c.POINTER(c.c_uint)]
     query.restype = c.c_int
     root = x11.x.XDefaultRootWindow(x11.display)
-    require(type(target) is int and target > 0 and target != root, "Exact non-root target XID required")
+    require(type(target) is int and 0 < target <= 0x1fffffff and target != root, "Exact non-root target XID required")
     observation.clear()
-    observation.update(source="complete-native-XQueryTree", root=root, target=target, complete=False)
-    pending, seen = [(root, 0, 0)], set()
-    while pending:
-        xid, expected_parent, depth = pending.pop()
-        require(xid not in seen and len(seen) < 256 and depth < 16, "Native dismissal tree exceeds bound")
-        seen.add(xid)
-        observation.update(lastQuery=xid, nodes=len(seen))
-        root_out, parent, count = c.c_ulong(), c.c_ulong(), c.c_uint()
-        children = c.POINTER(c.c_ulong)()
+    observation.update(source="exact-target-XQueryTree", root=root, target=target, complete=False)
+    # Drain through the original handler first. An old/unknown latch is never reset.
+    require(x11.error is False, "Original X error latch is set")
+    x11.sync()
+    prior = x11.error_diagnostic()
+    require(prior["latchSet"] is False and prior["events"] == [] and prior["truncated"] is False
+            and prior["captureUnavailable"] is False, "Clean original X error state required")
+    require(c.sizeof(helper.XErrorEvent) == 40 and [getattr(helper.XErrorEvent, name).offset for name in
+            ("display", "resourceid", "serial", "error_code", "request_code", "minor_code")]
+            == [8, 16, 24, 32, 33, 34], "Exact native XErrorEvent ABI required")
+    next_request = x11.x.XNextRequest
+    next_request.argtypes, next_request.restype = [c.c_void_p], c.c_ulong
+    callback_type = c.CFUNCTYPE(c.c_int, c.c_void_p, c.c_void_p)
+    serial, expected, expected_event, unknown, previous_callback = None, None, None, False, None
+    def trap(display, raw):
+        nonlocal expected, expected_event, unknown
         try:
-            require(query(x11.display, xid, c.byref(root_out), c.byref(parent), c.byref(children), c.byref(count)),
-                    "Native dismissal query failed")
-            x11.sync()
-            require(root_out.value == root and parent.value == expected_parent and count.value <= 64
-                    and len(seen) + len(pending) + count.value <= 256
-                    and (not count.value or bool(children)), "Native dismissal tree changed or exceeds bound")
-            pending.extend((children[i], xid, depth + 1) for i in range(count.value))
-        finally:
-            if children:
-                x11.x.XFree(children)
-    observation.update(complete=True, absent=target not in seen)
+            require(raw, "Missing native X error")
+            event = c.cast(raw, c.POINTER(helper.XErrorEvent)).contents
+            value = dict(errorCode=int(event.error_code), requestCode=int(event.request_code),
+                minorCode=int(event.minor_code), serial=int(event.serial), resourceId=int(event.resourceid),
+                sameDisplay=display == x11.display and event.display == x11.display)
+            require(event.type == 0 and expected is None and serial is not None and value == dict(errorCode=3, requestCode=15,
+                    minorCode=0, serial=serial, resourceId=target, sameDisplay=True), "Unmatched native X error")
+            expected_event = helper.XErrorEvent.from_buffer_copy(c.string_at(raw, 40))
+            expected = value
+            observation["expectedError"] = value
+            return 0
+        except Exception:
+            unknown = True
+            return previous_callback(display, raw) if previous_callback is not None else x11._error(display, raw)
+    handler = callback_type(trap)
+    handler_pointer = c.cast(handler, c.c_void_p).value
+    previous = x11.x.XSetErrorHandler(handler_pointer)
+    children = c.POINTER(c.c_ulong)()
+    try:
+        require(previous == c.cast(x11.handler, c.c_void_p).value, "Original X error handler changed")
+        previous_callback = callback_type(previous)
+        serial = int(next_request(x11.display))
+        require(serial > 0, "Exact next request serial required")
+        observation.update(lastQuery=target, requestSerial=serial)
+        root_out, parent, count = c.c_ulong(), c.c_ulong(), c.c_uint()
+        status = query(x11.display, target, c.byref(root_out), c.byref(parent), c.byref(children), c.byref(count))
+        x11.sync()
+        if expected is not None and status != 0:
+            previous_callback(x11.display, c.byref(expected_event))
+        require(type(status) is int and not unknown and ((status != 0 and expected is None) or (status == 0 and expected is not None)),
+                "Native dismissal query failed")
+    finally:
+        restored = x11.x.XSetErrorHandler(previous)
+        if children:
+            x11.x.XFree(children)
+        require(restored == handler_pointer, "Scoped X error handler changed")
+    observation.update(complete=True, absent=status == 0)
     return observation
 
 

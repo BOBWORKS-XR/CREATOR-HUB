@@ -1,4 +1,4 @@
-"""Pure/temp contracts only. Never launches an agent, pkexec or native session."""
+"""Pure by default; --native-exact-target runs only an isolated CI Xvfb observer test."""
 import ast
 import copy
 import contextlib
@@ -1373,57 +1373,337 @@ class RootBrokerTests(unittest.TestCase):
 
 
 class NativeDismissalTests(unittest.TestCase):
-    def fixture(self, tree):
-        c = b.load_helper().C
-        retained = []
-        def query(_display, xid, root, parent, children, count):
-            record = tree[xid]
-            if record == "error":
-                return 0
-            parent._obj.value, root._obj.value = record[0], 1
-            values = record[1]
-            count._obj.value = len(values)
-            if values:
-                data = (c.c_ulong * len(values))(*values)
-                retained.append(data)
-                c.cast(children, c.POINTER(c.POINTER(c.c_ulong)))[0] = c.cast(data, c.POINTER(c.c_ulong))
-            return 1
-        x = types.SimpleNamespace(XDefaultRootWindow=lambda _display: 1, XQueryTree=mock.Mock(side_effect=query), XFree=mock.Mock())
-        return types.SimpleNamespace(x=x, display=1, sync=mock.Mock()), types.SimpleNamespace(C=c)
+    def fixture(self, mode="present", *, changes=None, extra=False, status=None, other_root=1):
+        helper = b.load_helper()
+        c = helper.C
+        x11 = helper.X11.__new__(helper.X11)
+        x11.display, x11.error, x11.x_error_stage = 11, False, "unmarked"
+        x11.error_events, x11.error_events_truncated, x11.error_capture_unavailable = [], False, False
+        callback_type = c.CFUNCTYPE(c.c_int, c.c_void_p, c.c_void_p)
+        x11.handler = callback_type(x11._error)
+        original = c.cast(x11.handler, c.c_void_p).value
+        current, kept = [original], []
+        def set_handler(value):
+            previous, current[0] = current[0], value
+            return previous
+        def emit(values):
+            values = dict(values)
+            display = values.pop("callbackDisplay", 11)
+            args = {"type": 0, "display": 11, "resourceid": 77, "serial": 501,
+                    "error_code": 3, "request_code": 15, "minor_code": 0} | values
+            event = helper.XErrorEvent(**args)
+            callback_type(current[0])(display, c.byref(event))
+        def query(display, xid, root, parent, children, count):
+            self.assertEqual((display, xid), (11, 77))
+            if mode == "absent":
+                emit(changes or {})
+                if extra: emit({"resourceid": 77 if extra == "same" else 8388999})
+                return 0 if status is None else status
+            root._obj.value, parent._obj.value, count._obj.value = other_root, 2, 1
+            data = (c.c_ulong * 1)(88); kept.append(data)
+            c.cast(children, c.POINTER(c.POINTER(c.c_ulong)))[0] = data
+            if mode == "other-error": emit({"resourceid": 8388999})
+            return 1 if status is None else status
+        x11.x = types.SimpleNamespace(XDefaultRootWindow=mock.Mock(return_value=1),
+            XQueryTree=mock.Mock(side_effect=query), XFree=mock.Mock(), XSync=mock.Mock(),
+            XSetErrorHandler=mock.Mock(side_effect=set_handler), XNextRequest=mock.Mock(return_value=501))
+        x11.fixture_current, x11.fixture_original = current, original
+        x11.fixture_emit = emit
+        return x11, helper
 
-    def test_native_server_tree_independently_reports_present_or_absent_without_ewmh(self):
-        for present in (True, False):
-            tree = {1: (0, [2]), 2: (1, [77] if present else [])}
-            if present:
-                tree[77] = (2, [])
-            x11, helper = self.fixture(tree)
-            observed = {}
-            result = p.native_window_absence(x11, helper, 77, observed)
-            self.assertIs(result, observed)
-            self.assertTrue(result["complete"])
-            self.assertEqual(result["absent"], not present)
-            self.assertEqual(result["nodes"], 3 if present else 2)
-            self.assertEqual(x11.x.XQueryTree.call_count, result["nodes"])
-            self.assertEqual(x11.x.XFree.call_count, 2 if present else 1)
+    def test_one_exact_query_reports_present_on_either_screen_without_tree_or_ewmh(self):
+        for root in (1, 9):
+            with self.subTest(root=root):
+                x11, helper = self.fixture(other_root=root)
+                observed = {}
+                self.assertIs(p.native_window_absence(x11, helper, 77, observed), observed)
+                self.assertTrue(observed["complete"]); self.assertFalse(observed["absent"])
+                self.assertEqual(observed["source"], "exact-target-XQueryTree")
+                self.assertEqual(observed["requestSerial"], 501)
+                self.assertEqual(observed["lastQuery"], 77)
+                self.assertEqual(x11.x.XQueryTree.call_count, 1)
+                x11.x.XFree.assert_called_once()
+                self.assertEqual(x11.fixture_current[0], x11.fixture_original)
 
-    def test_unknown_query_error_parent_drift_duplicates_or_inventory_bound_never_mean_dismissed(self):
-        for tree in ({1: "error"}, {1: (0, [2]), 2: (99, [])}, {1: (0, [2, 2]), 2: (1, [])},
-                     {1: (0, list(range(2, 67)))}):
-            x11, helper = self.fixture(tree)
-            observed = {}
-            with self.subTest(tree=tree), self.assertRaises(RuntimeError):
-                p.native_window_absence(x11, helper, 77, observed)
-            self.assertFalse(observed["complete"])
-            self.assertNotIn("absent", observed)
+    def test_documented_nonzero_status_means_present_without_any_error(self):
+        for status in (1, 2, -1):
+            x11, helper = self.fixture(status=status)
+            observed = p.native_window_absence(x11, helper, 77, {})
+            self.assertTrue(observed["complete"]); self.assertFalse(observed["absent"])
 
-    def test_native_x_error_is_not_swallowed_as_a_destroyed_window(self):
-        x11, helper = self.fixture({1: (0, [])})
-        x11.sync.side_effect = RuntimeError("X resource query refused")
+    def test_only_exact_request_bound_badwindow_proves_absence_and_restores_handler(self):
+        x11, helper = self.fixture("absent")
+        observed = p.native_window_absence(x11, helper, 77, {})
+        self.assertTrue(observed["complete"]); self.assertTrue(observed["absent"])
+        self.assertEqual(observed["expectedError"], {"errorCode": 3, "requestCode": 15, "minorCode": 0,
+            "serial": 501, "resourceId": 77, "sameDisplay": True})
+        self.assertFalse(x11.error); self.assertEqual(x11.error_events, [])
+        self.assertEqual(x11.fixture_current[0], x11.fixture_original)
+        x11.x.XNextRequest.assert_called_once_with(11)
+        x11.x.XFree.assert_not_called()
+
+    def test_wrong_error_opcode_minor_serial_resource_or_display_never_means_absent(self):
+        for change in ({"type": 1}, {"error_code": 2}, {"request_code": 18}, {"minor_code": 1}, {"serial": 500},
+                       {"serial": 501 + 65536}, {"resourceid": 8388999}, {"display": 12}, {"callbackDisplay": 12}):
+            with self.subTest(change=change):
+                x11, helper = self.fixture("absent", changes=change)
+                observed = {}
+                with self.assertRaises(RuntimeError): p.native_window_absence(x11, helper, 77, observed)
+                self.assertFalse(observed["complete"]); self.assertNotIn("absent", observed)
+                self.assertTrue(x11.error); self.assertEqual(len(x11.error_events), 1)
+                self.assertEqual(x11.fixture_current[0], x11.fixture_original)
+
+    def test_extra_error_or_success_with_badwindow_never_proves_absence(self):
+        for options in ({"extra": True}, {"extra": "same"}, {"status": 1}):
+            with self.subTest(options=options):
+                x11, helper = self.fixture("absent", **options)
+                observed = {}
+                with self.assertRaises(RuntimeError): p.native_window_absence(x11, helper, 77, observed)
+                self.assertFalse(observed["complete"]); self.assertNotIn("absent", observed)
+                self.assertTrue(x11.error)
+                self.assertEqual(x11.fixture_current[0], x11.fixture_original)
+
+    def test_zero_without_error_unrelated_latch_or_query_exception_stays_unknown(self):
+        for mode in ("zero", "other-error", "exception"):
+            with self.subTest(mode=mode):
+                x11, helper = self.fixture(mode)
+                if mode == "zero": x11.x.XQueryTree.side_effect = lambda *args: 0
+                if mode == "exception": x11.x.XQueryTree.side_effect = ValueError("query unavailable")
+                observed = {}
+                with self.assertRaises((RuntimeError, ValueError)): p.native_window_absence(x11, helper, 77, observed)
+                self.assertFalse(observed["complete"]); self.assertNotIn("absent", observed)
+                self.assertEqual(x11.fixture_current[0], x11.fixture_original)
+
+    def test_existing_or_pending_error_is_never_cleared_or_reclassified(self):
+        for pending in (False, True):
+            with self.subTest(pending=pending):
+                x11, helper = self.fixture("absent")
+                if pending: x11.x.XSync.side_effect = lambda *args: setattr(x11, "error", True)
+                else: x11.error = True
+                with self.assertRaises(RuntimeError): p.native_window_absence(x11, helper, 77, {})
+                self.assertTrue(x11.error)
+                x11.x.XQueryTree.assert_not_called(); x11.x.XNextRequest.assert_not_called()
+                if not pending: x11.x.XSync.assert_not_called()
+                self.assertEqual(x11.fixture_current[0], x11.fixture_original)
+
+    def test_false_clean_diagnostic_or_foreign_handler_refuses_before_target_query(self):
+        for mode in ("events", "truncated", "unavailable", "handler"):
+            with self.subTest(mode=mode):
+                x11, helper = self.fixture("absent")
+                if mode == "events": x11.error_events = [{"synthetic": True}]
+                if mode == "truncated": x11.error_events_truncated = True
+                if mode == "unavailable": x11.error_capture_unavailable = True
+                if mode == "handler": x11.fixture_current[0] = 123
+                with self.assertRaises(RuntimeError): p.native_window_absence(x11, helper, 77, {})
+                x11.x.XQueryTree.assert_not_called()
+                self.assertEqual(x11.fixture_current[0], 123 if mode == "handler" else x11.fixture_original)
+
+    def test_invalid_target_never_sends_query(self):
+        for target in (True, 0, 1, -1, 0x20000000, "77"):
+            with self.subTest(target=target):
+                x11, helper = self.fixture()
+                with self.assertRaises(RuntimeError): p.native_window_absence(x11, helper, target, {})
+                x11.x.XQueryTree.assert_not_called(); x11.x.XNextRequest.assert_not_called()
+
+    def test_serial_failure_and_handler_drift_restore_original_and_never_complete(self):
+        for mode in ("serial-zero", "serial-exception", "handler-drift"):
+            with self.subTest(mode=mode):
+                x11, helper = self.fixture()
+                if mode == "serial-zero": x11.x.XNextRequest.return_value = 0
+                if mode == "serial-exception": x11.x.XNextRequest.side_effect = ValueError("no serial")
+                if mode == "handler-drift":
+                    def changed(*args):
+                        x11.fixture_current[0] = 123
+                        return 1
+                    x11.x.XQueryTree.side_effect = changed
+                observation = {}
+                with self.assertRaises((RuntimeError, ValueError)): p.native_window_absence(x11, helper, 77, observation)
+                self.assertFalse(observation["complete"]); self.assertNotIn("absent", observation)
+                self.assertEqual(x11.fixture_current[0], x11.fixture_original)
+
+    def test_extra_error_during_final_sync_is_forwarded_and_latched(self):
+        x11, helper = self.fixture("absent")
+        x11.x.XSync.side_effect = lambda *_: x11.fixture_emit({"resourceid": 8388999}) if x11.x.XSync.call_count == 2 else None
+        observation = {}
+        with self.assertRaises(RuntimeError): p.native_window_absence(x11, helper, 77, observation)
+        self.assertFalse(observation["complete"]); self.assertNotIn("absent", observation)
+        self.assertTrue(x11.error)
+        self.assertEqual(x11.error_events[0]["resourceId"], 8388999)
+        self.assertEqual(x11.fixture_current[0], x11.fixture_original)
+
+    def test_missing_error_payload_is_forwarded_not_used_as_absence(self):
+        x11, helper = self.fixture()
+        def malformed(*_):
+            callback = helper.C.CFUNCTYPE(helper.C.c_int, helper.C.c_void_p, helper.C.c_void_p)(x11.fixture_current[0])
+            callback(11, None)
+            return 0
+        x11.x.XQueryTree.side_effect = malformed
         observed = {}
-        with self.assertRaises(RuntimeError):
-            p.native_window_absence(x11, helper, 77, observed)
-        self.assertFalse(observed["complete"])
-        self.assertNotIn("absent", observed)
+        with self.assertRaises(RuntimeError): p.native_window_absence(x11, helper, 77, observed)
+        self.assertFalse(observed["complete"]); self.assertNotIn("absent", observed)
+        self.assertTrue(x11.error); self.assertTrue(x11.error_capture_unavailable)
+        self.assertEqual(x11.fixture_current[0], x11.fixture_original)
+
+
+def native_exact_target_admission(env, system, machine):
+    p.require(system == "linux" and machine == "x86_64", "Native Linux x86_64 fixture only")
+    expected = {"GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted", "RUNNER_OS": "Linux",
+        "RUNNER_ARCH": "X64", "GITHUB_REPOSITORY": "BOBWORKS-XR/CREATOR-HUB", "GITHUB_REPOSITORY_ID": "1364807512",
+        "GITHUB_REF": "refs/heads/validation/native-linux-production-016", "GITHUB_EVENT_NAME": "workflow_dispatch",
+        "GITHUB_WORKFLOW_REF": "BOBWORKS-XR/CREATOR-HUB/.github/workflows/native-linux-production-016-migration.yml@refs/heads/validation/native-linux-production-016",
+        "CREATOR_NATIVE_EXACT_TARGET_FIXTURE": "1"}
+    p.require(all(env.get(k) == v for k, v in expected.items()) and re.fullmatch(r"[a-f0-9]{40}", env.get("GITHUB_SHA", "")),
+              "Exact disposable native fixture context required")
+    p.require(all(re.fullmatch(r"[1-9][0-9]{0,19}", env.get(k, "")) for k in ("GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT")),
+              "Exact native fixture run/attempt required")
+    p.require(not any(k.startswith(("LD_", "DYLD_")) or k in ("PYTHONPATH", "PYTHONHOME") for k in env),
+              "Injected native fixture runtime refused")
+
+
+def native_exact_target_fixture():
+    import select
+    import socket
+    import struct
+    native_exact_target_admission(os.environ, sys.platform, p.platform.machine())
+    helper = b.load_helper(); c = helper.C
+    binary = Path("/usr/bin/Xvfb")
+    image = b.file_record(binary, 16 * 1024 * 1024, 0o755)
+    for entry in (binary, *binary.parents):
+        info = entry.lstat()
+        p.require(info.st_uid == info.st_gid == 0 and not info.st_mode & 0o022, "Protected Xvfb ancestry required")
+    result = {"schemaVersion": 1, "scope": "disposable-native-exact-target-observer", "harnessSource": os.environ["GITHUB_SHA"],
+        "runId": int(os.environ["GITHUB_RUN_ID"]), "runAttempt": int(os.environ["GITHUB_RUN_ATTEMPT"]),
+        "fixtureSha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        "probeSha256": hashlib.sha256(Path(p.__file__).read_bytes()).hexdigest(),
+        "rootHelperSha256": p.HELPERS["native-linux-root-probe.py"], "windowHelperSha256": p.HELPERS["native-unix-window.py"],
+        "observerContractPassed": False, "candidateExecuted": False, "inputPermitted": False,
+        "migrationAccepted": False, "releaseReady": False, "cases": []}
+    child = x11 = creator = server_identity = None
+    read_fd, write_fd = os.pipe()
+    try:
+        child = subprocess.Popen([str(binary), "-displayfd", str(write_fd), "-nolisten", "tcp", "-noreset",
+            "-screen", "0", "640x480x24", "-screen", "1", "640x480x24"], pass_fds=(write_fd,),
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        os.close(write_fd); write_fd = None
+        p.require(select.select([read_fd], [], [], 5)[0] == [read_fd], "Owned Xvfb readiness deadline")
+        display_number = os.read(read_fd, 16)
+        p.require(re.fullmatch(rb"[0-9]{1,5}\n", display_number), "Exact Xvfb display-fd acknowledgement required")
+        server_identity = b.native_process(child.pid, helper)
+        p.require(server_identity["parentPid"] == os.getpid() and server_identity["uids"] == [os.getuid()] * 4
+            and server_identity["executable"] == str(binary) and server_identity["kernelImageSha256"] == image["sha256"]
+            and server_identity["image"]["st_dev"] == image["device"] and server_identity["image"]["st_ino"] == image["inode"]
+            and int(server_identity["image"]["st_size"]) == image["size"],
+            "Owned protected Xvfb kernel image required")
+        result["server"] = server_identity
+        with mock.patch.dict(os.environ, {"DISPLAY": ":" + display_number.decode().strip()}):
+            x11 = helper.X11()
+        with socket.socket(fileno=os.dup(x11.x.XConnectionNumber(x11.display))) as peer:
+            p.require(struct.unpack("3i", peer.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
+                == (child.pid, os.getuid(), os.getgid()), "Exact owned Xvfb socket peer required")
+        x = x11.x
+        for name, args, returns in (
+            ("XRootWindow", [c.c_void_p, c.c_int], c.c_ulong),
+            ("XCreateSimpleWindow", [c.c_void_p, c.c_ulong, c.c_int, c.c_int, c.c_uint, c.c_uint,
+                                     c.c_uint, c.c_ulong, c.c_ulong], c.c_ulong),
+            ("XMapWindow", [c.c_void_p, c.c_ulong], c.c_int),
+            ("XUnmapWindow", [c.c_void_p, c.c_ulong], c.c_int),
+            ("XDestroyWindow", [c.c_void_p, c.c_ulong], c.c_int),
+            ("XReparentWindow", [c.c_void_p, c.c_ulong, c.c_ulong, c.c_int, c.c_int], c.c_int)):
+            getattr(x, name).argtypes, getattr(x, name).restype = args, returns
+        creator = x.XOpenDisplay((":" + display_number.decode().strip()).encode())
+        p.require(creator and creator != x11.display, "Independent owned creator connection required")
+        root0, root1 = x.XRootWindow(creator, 0), x.XRootWindow(creator, 1)
+        p.require(root0 and root1 and root0 != root1, "Two disposable native screens required")
+        def create(parent):
+            window = x.XCreateSimpleWindow(creator, parent, 1, 1, 20, 20, 0, 0, 0)
+            p.require(window, "Owned native fixture window creation failed")
+            return window
+        def barrier():
+            x.XSync(creator, 0)
+            x11.sync()
+            p.require(child.poll() is None and b.native_process(child.pid, helper) == server_identity
+                and b.file_record(binary, 16 * 1024 * 1024, 0o755) == image, "Owned Xvfb changed across barrier")
+        def observe(name, target, absent):
+            barrier()
+            observation = p.native_window_absence(x11, helper, target, {})
+            p.require(observation["complete"] is True and observation["absent"] is absent, "Native target result differs")
+            original = c.cast(x11.handler, c.c_void_p).value
+            p.require(x.XSetErrorHandler(original) == original and not x11.error and x11.error_diagnostic()["events"] == [],
+                      "Native handler restoration or clean latch differs")
+            barrier()
+            result["cases"].append({"name": name, "target": target, "observation": observation, "handlerRestored": True})
+        target, sibling, parent = create(root0), create(root0), create(root0)
+        x.XMapWindow(creator, target); barrier()
+        # A real sibling is enumerated, destroyed and acknowledged before the target query.
+        query = x.XQueryTree
+        query.argtypes = [c.c_void_p, c.c_ulong, c.POINTER(c.c_ulong), c.POINTER(c.c_ulong),
+                          c.POINTER(c.POINTER(c.c_ulong)), c.POINTER(c.c_uint)]
+        query.restype = c.c_int
+        root_out, parent_out, count = c.c_ulong(), c.c_ulong(), c.c_uint()
+        children = c.POINTER(c.c_ulong)()
+        try:
+            p.require(query(x11.display, root0, c.byref(root_out), c.byref(parent_out), c.byref(children), c.byref(count))
+                      and 0 < count.value <= 16 and sibling in [children[i] for i in range(count.value)], "Native sibling enumeration required")
+            x11.sync()
+        finally:
+            if children: x.XFree(children)
+        x.XDestroyWindow(creator, sibling); barrier()
+        observe("enumerated-non-target-destroyed-target-present", target, False)
+        x.XUnmapWindow(creator, target); barrier()
+        observe("unmapped-target-present", target, False)
+        x.XReparentWindow(creator, target, parent, 0, 0); barrier()
+        observe("reparented-target-present", target, False)
+        observe("second-screen-target-present", create(root1), False)
+        x.XDestroyWindow(creator, target); barrier()
+        observe("destroyed-target-exact-badwindow", target, True)
+        result["observerContractPassed"] = True
+    except Exception as error:
+        result["refusal"] = {"type": type(error).__name__, "message": str(error)[:1000]}
+    finally:
+        try:
+            if creator: x11.x.XCloseDisplay(creator)
+            if x11 is not None: x11.dispose()
+            if child is not None:
+                if child.poll() is None:
+                    if server_identity is not None:
+                        p.require(b.native_process(child.pid, helper) == server_identity, "Owned Xvfb cleanup identity changed")
+                    child.terminate()
+                child.wait(timeout=5)
+            result["ownedServerClosed"] = True
+        except Exception as error:
+            result["observerContractPassed"] = False
+            result["cleanupRefusal"] = {"type": type(error).__name__, "message": str(error)[:1000]}
+        os.close(read_fd)
+        if write_fd is not None: os.close(write_fd)
+    return result
+
+
+class NativeFixtureAdmissionTests(unittest.TestCase):
+    def env(self):
+        return {"GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted", "RUNNER_OS": "Linux", "RUNNER_ARCH": "X64",
+            "GITHUB_REPOSITORY": "BOBWORKS-XR/CREATOR-HUB", "GITHUB_REPOSITORY_ID": "1364807512",
+            "GITHUB_REF": "refs/heads/validation/native-linux-production-016", "GITHUB_EVENT_NAME": "workflow_dispatch",
+            "GITHUB_WORKFLOW_REF": "BOBWORKS-XR/CREATOR-HUB/.github/workflows/native-linux-production-016-migration.yml@refs/heads/validation/native-linux-production-016",
+            "CREATOR_NATIVE_EXACT_TARGET_FIXTURE": "1", "GITHUB_SHA": "a" * 40, "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "1"}
+
+    def test_native_fixture_is_explicit_and_rejects_other_platform_context_or_injection_before_spawn(self):
+        native_exact_target_admission(self.env(), "linux", "x86_64")
+        for env, system, machine in ((self.env(), "win32", "AMD64"), (self.env(), "linux", "aarch64"),
+                (self.env() | {"GITHUB_EVENT_NAME": "push"}, "linux", "x86_64"),
+                (self.env() | {"CREATOR_NATIVE_EXACT_TARGET_FIXTURE": "0"}, "linux", "x86_64"),
+                (self.env() | {"GITHUB_REF": p.BRANCH}, "linux", "x86_64"),
+                (self.env() | {"GITHUB_WORKFLOW_REF": "different"}, "linux", "x86_64"),
+                (self.env() | {"GITHUB_RUN_ID": "0"}, "linux", "x86_64"),
+                (self.env() | {"LD_LIBRARY_PATH": "/unknown"}, "linux", "x86_64")):
+            with self.subTest(env=env, system=system), mock.patch.object(subprocess, "Popen") as spawn, self.assertRaises(RuntimeError):
+                native_exact_target_admission(env, system, machine)
+            spawn.assert_not_called()
+
+    def test_native_entry_refuses_unadmitted_context_before_files_or_subprocess(self):
+        with mock.patch.dict(os.environ, {}, clear=True), mock.patch.object(p.platform, "machine", return_value="x86_64"), \
+                mock.patch.object(b, "file_record") as read, mock.patch.object(subprocess, "Popen") as spawn, self.assertRaises(RuntimeError):
+            native_exact_target_fixture()
+        read.assert_not_called(); spawn.assert_not_called()
 
 
 class WorkflowTests(unittest.TestCase):
@@ -1598,4 +1878,17 @@ class WorkflowTests(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main(verbosity=2)
+    if sys.argv[1:] == ["--native-exact-target"]:
+        try:
+            receipt = native_exact_target_fixture()
+        except Exception as error:
+            receipt = {"schemaVersion": 1, "scope": "disposable-native-exact-target-observer", "observerContractPassed": False,
+                "candidateExecuted": False, "inputPermitted": False, "migrationAccepted": False, "releaseReady": False,
+                "refusal": {"type": type(error).__name__, "message": str(error)[:1000]}}
+        raw = json.dumps(receipt)
+        p.require(len(raw.encode()) <= 16384, "Native observer receipt exceeds bound")
+        print(raw)
+        p.require(receipt["observerContractPassed"] is True and receipt.get("ownedServerClosed") is True,
+                  "Native exact-target observer fixture refused")
+    else:
+        unittest.main(verbosity=2)

@@ -110,6 +110,29 @@ test('actual reused polkit and transitive helper suites are mandatory before dow
   assert.match(suite, /^b = p\.base\(\)$/m);
 });
 
+test('real exact-target fixture is mandatory after GUI dependencies and gates SDK, tooling and broker', () => {
+  const steps = workflow.jobs.migration.steps;
+  const apt = steps.findIndex(step => step.run?.includes('sudo apt-get install'));
+  const fixtures = steps.filter(step => step.run?.includes('--native-exact-target'));
+  assert.equal(fixtures.length, 1);
+  const fixture = fixtures[0], index = steps.indexOf(fixture);
+  assert.ok(apt < index);
+  for (const next of [steps.findIndex(step => step.run?.includes('npm ci --prefix modules/mcp')),
+    steps.findIndex(step => step.uses?.startsWith('dtolnay/rust-toolchain@')),
+    steps.findIndex(step => step.name?.startsWith('Build pinned WebDriver')),
+    steps.findIndex(step => step.name?.startsWith('Fixed root broker'))]) assert.ok(index < next);
+  assert.equal(fixture.if, undefined);
+  assert.equal(fixture['continue-on-error'], undefined);
+  assert.equal(fixture['timeout-minutes'], 2);
+  assert.deepEqual(fixture.env, { CREATOR_NATIVE_EXACT_TARGET_FIXTURE: '1' });
+  assert.match(fixture.run, /^set -o noclobber$/m);
+  assert.match(fixture.run, /^\/usr\/bin\/timeout --signal=TERM --kill-after=5s 40s \/usr\/bin\/python3 -B scripts\/native-linux-polkit-probe\.test\.py --native-exact-target > "\$RUNNER_TEMP\/native-exact-target-observer\.json"$/m);
+  assert.match(fixture.run, /-le 16384/);
+  assert.doesNotMatch(fixture.run, /\|\||set \+e|sudo|broker|pkexec|\.deb/);
+  const upload = steps.find(step => step.uses === 'actions/upload-artifact@v4');
+  assert.equal(upload.with.path.split('\n').filter(line => line === '${{ runner.temp }}/native-exact-target-observer.json').length, 1);
+});
+
 test('unchanged production API/offline gate precedes any candidate execution or privilege', () => {
   const steps = workflow.jobs.migration.steps;
   const index = needle => steps.findIndex(step => step.run?.includes(needle));

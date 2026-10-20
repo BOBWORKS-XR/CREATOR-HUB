@@ -1281,7 +1281,7 @@ class Session:
             approve_connection_review(profile, guard, record)
             dismissal = record["nativeDismissal"] = {}
             try:
-                self.pages.wait(lambda: self.polkit.native_window_absence(self.x11, self.helper, window, dismissal)["absent"])
+                self.pages.wait(lambda: self.native_target_absent(window, dismissal))
             except Exception as error:
                 self.retain_dismissal_refusal(error, record, window, xres, frame)
                 raise
@@ -1289,13 +1289,21 @@ class Session:
             bus.close_sync(None)
         self.dialogs.clear()
 
+    def native_target_absent(self, target, observation):
+        self.process_guard()
+        require(self.helper.bound_window(self.request, self.x11) == self.xres, "Owned Root window changed")
+        result = self.polkit.native_window_absence(self.x11, self.helper, target, observation)
+        self.process_guard()
+        require(self.helper.bound_window(self.request, self.x11) == self.xres, "Owned Root window changed")
+        return result["absent"]
+
     def retain_dismissal_refusal(self, error, record, target, xres, frame):
         self.retain_failure(error)
         flags = {"diagnosticOnly": True, "inputPermitted": False, "authorityGranted": False, "releaseReady": False}
         try:
             # Cached bindings and the existing error latch only: never query, clear, or retry X11.
             value = {**flags, "scope": "connection-review-dismissal", "cachedBindingsOnly": True,
-                "serialSource": "XErrorEvent.serial; outbound query serial not independently sampled",
+                "serialSource": "XErrorEvent.serial; compare independently sampled nativeDismissal.requestSerial when present",
                 "root": {key: self.owned[key] for key in
                          ("pid", "parentPid", "startTime", "uids", "executable", "kernelImageSha256")},
                 "mainWindow": {"xid": self.window, "xres": self.xres},
@@ -1974,7 +1982,7 @@ class Authorization:
             else:
                 p.cancel_once(profile, guard, record)
             dismissal = {}
-            s.pages.wait(lambda: p.native_window_absence(s.x11, s.helper, windows[0]["window"], dismissal)["absent"], 30)
+            s.pages.wait(lambda: s.native_target_absent(windows[0]["window"], dismissal), 30)
             record["nativeDismissal"] = dismissal
         finally:
             bus.close_sync(None)
