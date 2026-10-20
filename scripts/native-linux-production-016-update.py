@@ -870,6 +870,7 @@ class Surface:
             require(main["pid"] == self.pid and main["title"] == TITLE and main["mapped"] and main["client"] > 0, "Foreign modal parent window")
             self.main_window = (others[0], {k: main[k] for k in ("pid", "title", "mapped", "client")})
         self.last = None
+        self.html_actions = []
 
     def find_window(self, title):
         self.stable()
@@ -1015,6 +1016,52 @@ class Surface:
         require(len(matches) == 1 and matches[0][0]["toolkit"] == "WebKitGTK", "Owned source control missing: " + source_id)
         return matches[0]
 
+    def html_action_interface(self, node, row, control):
+        require(control in {"suite-trigger", "usage-terms-checkbox", "usage-terms-continue", "convergence-later",
+                            "native-support-install", "hub-update-button", "navigation-mcp", "navigation-setup", "navigation-home"}
+                and len(self.html_actions) < 64, "Bounded fixed HTML action diagnostic required")
+        entry = {"control": control, "rowSha256": hashlib.sha256(json.dumps(row, sort_keys=True).encode()).hexdigest(),
+                 "interfacePresent": None, "count": None, "names": []}
+        self.html_actions.append(entry)
+        try:
+            interface = node.get_action_iface()
+            entry["interfacePresent"] = bool(interface)
+            return interface, entry
+        except Exception as error:
+            entry["error"] = {"stage": "interface", "type": type(error).__name__ if type(error).__name__ in
+                              ("RuntimeError", "ValueError", "TypeError", "AttributeError", "OverflowError") else "other"}
+            raise RuntimeError("Owned HTML action metadata unavailable") from None
+
+    def html_action_operands(self, interface, entry):
+        count = name = None
+        stage = "count"
+        try:
+            if interface:
+                count = interface.get_n_actions()
+                if type(count) is int and -4096 <= count <= 4096:
+                    entry["count"] = count
+                else:
+                    entry["countKind"] = "not-bounded-int"
+                # Match the original guard's short circuit; never enumerate extra actions.
+                if count == 1:
+                    stage = "name-0"
+                    name = interface.get_action_name(0)
+                    observed = {"index": 0}
+                    if type(name) is str and name in ("click", "press", "check", "uncheck", "activate", "jump", "select", ""):
+                        observed["value"] = name
+                    elif type(name) is str:
+                        observed["characters"] = len(name)
+                        if len(name) <= 4096:
+                            observed["sha256"] = hashlib.sha256(name.encode("utf8", errors="surrogatepass")).hexdigest()
+                    else:
+                        observed["kind"] = "non-string"
+                    entry["names"].append(observed)
+            return count, name
+        except Exception as error:
+            entry["error"] = {"stage": stage, "type": type(error).__name__ if type(error).__name__ in
+                              ("RuntimeError", "ValueError", "TypeError", "AttributeError", "OverflowError") else "other"}
+            raise RuntimeError("Owned HTML action metadata unavailable") from None
+
     def click(self, source_id, actions):
         require(source_id not in actions, "No repeated UI action")
         require(windows(self.x11) == [self.window], "HTML action refused while another native window is present")
@@ -1022,9 +1069,10 @@ class Surface:
         require(row["enabled"] and row["sensitive"] and not row["busy"] and row["tag"] in ("button", "input", "summary"), "Source control unavailable")
         again, current = self.source(source_id)
         require(row == again, "Source control changed before input")
-        action = current.get_action_iface()
+        action, observation = self.html_action_interface(current, again, source_id)
         names = ("check",) if source_id == "usage-terms-checkbox" else ("click", "press")
-        require(action and action.get_n_actions() == 1 and action.get_action_name(0) in names, "One reviewed source action required")
+        count, name = self.html_action_operands(action, observation)
+        require(action and count == 1 and name in names, "One reviewed source action required")
         self.recheck(full=True); actions.append(source_id)
         require(action.do_action(0), "UI action uncertain; no retry")
 
@@ -1080,8 +1128,9 @@ def direct_pages(surface, actions):
         current, current_nodes = surface.snapshot()
         matches = [n for r, n in zip(current, current_nodes) if r == row and r["reference"] == ref]
         require(len(matches) == 1, "Navigation changed before input")
-        interface = matches[0].get_action_iface(); surface.recheck(full=True)
-        require(interface and interface.get_n_actions() == 1 and interface.get_action_name(0) == "click", "Navigation action differs")
+        interface, observation = surface.html_action_interface(matches[0], row, "navigation-" + feature); surface.recheck(full=True)
+        count, name = surface.html_action_operands(interface, observation)
+        require(interface and count == 1 and name == "click", "Navigation action differs")
         actions.append("view-" + feature); require(interface.do_action(0), "Navigation uncertain; no retry")
         rows = wait(lambda: feature_ready(surface, feature), 60)
         if feature == "mcp":
@@ -1302,8 +1351,9 @@ def navigate_home(surface):
     current, current_nodes = surface.snapshot()
     matches = [node for value, node in zip(current, current_nodes) if value == row]
     require(len(matches) == 1, "Home navigation changed")
-    action = matches[0].get_action_iface(); surface.recheck(full=True)
-    require(action and action.get_n_actions() == 1 and action.get_action_name(0) == "click", "Home action differs")
+    action, observation = surface.html_action_interface(matches[0], row, "navigation-home"); surface.recheck(full=True)
+    count, name = surface.html_action_operands(action, observation)
+    require(action and count == 1 and name == "click", "Home action differs")
     require(action.do_action(0), "Home action uncertain; no retry")
     wait(lambda: surface.source("projects-home-title", optional=True))
 
@@ -1751,7 +1801,8 @@ def native_session(env):
         for current in (surface, replacement):
             if current is not None:
                 try:
-                    save(BASE / "result" / ("successor-ui.json" if current is replacement else "original-ui.json"), {"root": current.record, "snapshot": current.last})
+                    save(BASE / "result" / ("successor-ui.json" if current is replacement else "original-ui.json"),
+                         {"root": current.record, "snapshot": current.last, "htmlButtonActions": current.html_actions})
                     current.bus.close_sync(None)
                 except Exception as error:
                     failure = failure or error

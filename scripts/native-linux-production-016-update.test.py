@@ -2209,5 +2209,172 @@ class DirectMenuLabels(unittest.TestCase):
         self.assertIn("not any((r['tag'] in ('iframe', 'object', 'embed') for r in rows))", code)
 
 
+class HtmlActionDiagnostics(unittest.TestCase):
+    @staticmethod
+    def surface():
+        value = M.Surface.__new__(M.Surface)
+        value.html_actions = []
+        value.record, value.last = {"pid": 42}, []
+        return value
+
+    @staticmethod
+    def row():
+        return {"reference": [":1.4", "/owned/button"], "role": 43,
+                "tag": "button", "toolkit": "WebKitGTK", "showing": True}
+
+    def observe(self, interface, *, control="navigation-mcp"):
+        surface = self.surface()
+        node = SimpleNamespace(get_action_iface=lambda: interface)
+        held, entry = surface.html_action_interface(node, self.row(), control)
+        count, name = surface.html_action_operands(held, entry)
+        return surface, held, count, name
+
+    @staticmethod
+    def interface(count=1, name="click", fail=None):
+        calls = []
+        def invoke(stage, result):
+            calls.append(stage)
+            if fail == stage:
+                raise ValueError("SYNTHETIC_PRIVATE_ACTION_MARKER")
+            return result
+        return SimpleNamespace(get_n_actions=lambda: invoke("count", count),
+            get_action_name=lambda index: invoke("name-" + str(index), name),
+            do_action=lambda index: invoke("INPUT", True)), calls
+
+    def test_missing_interface_retains_presence_without_count_or_name_calls(self):
+        surface, interface, count, name = self.observe(None)
+        self.assertIsNone(interface); self.assertIsNone(count); self.assertIsNone(name)
+        self.assertEqual(surface.html_actions[0], {"control": "navigation-mcp",
+            "rowSha256": hashlib.sha256(json.dumps(self.row(), sort_keys=True).encode()).hexdigest(),
+            "interfacePresent": False, "count": None, "names": []})
+
+    def test_exact_single_getter_values_are_retained_without_input_or_reread(self):
+        for name in ("click", "press", "check", ""):
+            interface, calls = self.interface(name=name)
+            surface, held, count, observed = self.observe(interface)
+            self.assertIs(held, interface); self.assertEqual((count, observed), (1, name))
+            self.assertEqual(surface.html_actions[0]["names"], [{"index": 0, "value": name}])
+            self.assertEqual(calls, ["count", "name-0"])
+
+    def test_non_single_count_preserves_original_short_circuit(self):
+        for count in (0, 2, -1, 4096, 10 ** 100):
+            interface, calls = self.interface(count=count)
+            surface, _, actual, name = self.observe(interface)
+            self.assertEqual(actual, count); self.assertIsNone(name)
+            self.assertEqual(surface.html_actions[0]["names"], [])
+            self.assertEqual(calls, ["count"])
+            self.assertLess(len(json.dumps(surface.html_actions)), 1024)
+
+    def test_unknown_names_are_hash_only_and_oversized_names_are_bounded(self):
+        private = "SYNTHETIC_PRIVATE_ACTION_MARKER\n"
+        for name in (private, "x" * 4097, None, 17):
+            interface, calls = self.interface(name=name)
+            surface, _, count, actual = self.observe(interface)
+            self.assertEqual((count, actual), (1, name))
+            raw = json.dumps(surface.html_actions)
+            self.assertNotIn(private.strip(), raw); self.assertNotIn("x" * 128, raw)
+            self.assertLess(len(raw), 1024); self.assertEqual(calls, ["count", "name-0"])
+            if name == private:
+                self.assertEqual(surface.html_actions[0]["names"][0]["sha256"], hashlib.sha256(name.encode()).hexdigest())
+
+    def test_getter_exceptions_are_fatal_and_redacted_with_partial_evidence(self):
+        for stage in ("interface", "count", "name-0"):
+            surface = self.surface(); interface, calls = self.interface(fail=stage)
+            def get_interface():
+                if stage == "interface": raise ValueError("SYNTHETIC_PRIVATE_ACTION_MARKER")
+                return interface
+            with self.subTest(stage=stage), self.assertRaisesRegex(RuntimeError, "Owned HTML action metadata unavailable") as error:
+                held, entry = surface.html_action_interface(SimpleNamespace(get_action_iface=get_interface), self.row(), "navigation-mcp")
+                surface.html_action_operands(held, entry)
+            self.assertTrue(error.exception.__suppress_context__)
+            self.assertNotIn("SYNTHETIC_PRIVATE_ACTION_MARKER", str(error.exception) + json.dumps(surface.html_actions))
+            self.assertEqual(surface.html_actions[0]["error"]["stage"], stage)
+            self.assertEqual(surface.html_actions[0]["error"]["type"], "ValueError")
+            self.assertNotIn("INPUT", calls)
+
+    def test_only_fixed_controls_and_bounded_observation_count_before_queries(self):
+        surface = self.surface(); queries = []
+        node = SimpleNamespace(get_action_iface=lambda: queries.append(True))
+        with self.assertRaisesRegex(RuntimeError, "Bounded fixed HTML action diagnostic"):
+            surface.html_action_interface(node, self.row(), "PRIVATE_UNKNOWN_CONTROL")
+        surface.html_actions = [{}] * 64
+        with self.assertRaisesRegex(RuntimeError, "Bounded fixed HTML action diagnostic"):
+            surface.html_action_interface(node, self.row(), "navigation-home")
+        self.assertEqual(queries, [])
+
+    def guard_only(self, function, interface):
+        tree = ast.parse(Path(M.__file__).read_text())
+        original = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == function)
+        body = next(n for n in original.body if isinstance(n, ast.For)).body if function == "direct_pages" else original.body
+        index = next(i for i, node in enumerate(body) if "html_action_interface" in ast.unparse(node))
+        end = next(i for i in range(index, len(body)) if "Navigation action differs" in ast.unparse(body[i]) or "Home action differs" in ast.unparse(body[i]))
+        function_ast = ast.FunctionDef(name="actual_guard", args=ast.arguments(posonlyargs=[], args=[], kwonlyargs=[], kw_defaults=[], defaults=[]),
+            body=copy.deepcopy(body[index:end + 1]), decorator_list=[])
+        surface = self.surface(); events = []
+        surface.recheck = lambda full=False: events.append(("recheck", full))
+        namespace = dict(vars(M), surface=surface, matches=[SimpleNamespace(get_action_iface=lambda: interface)], row=self.row(), feature="mcp")
+        exec(compile(ast.fix_missing_locations(ast.Module(body=[function_ast], type_ignores=[])), "actual-action-guard", "exec"), namespace)
+        return namespace["actual_guard"], surface, events
+
+    def test_both_navigation_guards_still_refuse_press_before_input_and_after_root_recheck(self):
+        for function in ("direct_pages", "navigate_home"):
+            for name, passed in (("click", True), ("press", False), ("unknown", False)):
+                interface, calls = self.interface(name=name)
+                guard, surface, events = self.guard_only(function, interface)
+                if passed: guard()
+                else:
+                    with self.assertRaisesRegex(RuntimeError, "(?:Navigation|Home) action differs"): guard()
+                self.assertEqual(events, [("recheck", True)])
+                self.assertEqual(calls, ["count", "name-0"])
+                self.assertEqual(len(surface.html_actions), 1)
+
+    def test_navigation_absent_or_multi_action_interface_still_refuses_without_name_or_input(self):
+        for function in ("direct_pages", "navigate_home"):
+            for count in (None, 0, 2):
+                interface, calls = self.interface(count=count)
+                guard, surface, events = self.guard_only(function, None if count is None else interface)
+                with self.assertRaisesRegex(RuntimeError, "(?:Navigation|Home) action differs"): guard()
+                self.assertEqual(calls, [] if count is None else ["count"])
+                self.assertEqual(surface.html_actions[0]["interfacePresent"], count is not None)
+                self.assertEqual(events, [("recheck", True)])
+
+    def test_unknown_exception_class_and_message_do_not_escape(self):
+        class SYNTHETIC_PRIVATE_EXCEPTION_TYPE(Exception):
+            pass
+        def fail():
+            raise SYNTHETIC_PRIVATE_EXCEPTION_TYPE("SYNTHETIC_PRIVATE_EXCEPTION_MESSAGE")
+        surface = self.surface()
+        with self.assertRaisesRegex(RuntimeError, "Owned HTML action metadata unavailable") as error:
+            surface.html_action_interface(SimpleNamespace(get_action_iface=fail), self.row(), "navigation-home")
+        raw = json.dumps(surface.html_actions) + str(error.exception)
+        self.assertNotIn("SYNTHETIC_PRIVATE", raw)
+        self.assertEqual(surface.html_actions[0]["error"], {"stage": "interface", "type": "other"})
+
+    def test_source_click_admission_is_not_broadened_and_native_dialog_is_untouched(self):
+        tree = ast.parse(Path(M.__file__).read_text())
+        surface = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "Surface")
+        click = ast.unparse(next(n for n in surface.body if isinstance(n, ast.FunctionDef) and n.name == "click"))
+        self.assertIn("('click', 'press')", click)
+        self.assertIn("('check',)", click)
+        self.assertLess(click.index("html_action_operands"), click.index("One reviewed source action required"))
+        self.assertLess(click.index("self.recheck(full=True)"), click.index("action.do_action(0)"))
+        dialog = ast.unparse(next(n for n in surface.body if isinstance(n, ast.FunctionDef) and n.name == "dialog_action"))
+        self.assertNotIn("html_action", dialog)
+        self.assertIn("interface.get_action_name(0) == 'click'", dialog)
+
+    def test_existing_failure_ui_exports_action_metadata_without_another_walk(self):
+        tree = ast.parse(Path(M.__file__).read_text())
+        session = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "native_session")
+        final = next(n for n in session.body if isinstance(n, ast.Try)).finalbody
+        export_loop = next(n for n in final if isinstance(n, ast.For) and ast.unparse(n.target) == "current")
+        save_call = next(n for n in ast.walk(export_loop) if isinstance(n, ast.Call) and ast.unparse(n.func) == "save")
+        surface = self.surface(); interface, _ = self.interface(name="press")
+        surface, _, _, _ = self.observe(interface)
+        surface.record, surface.last = {"pid": 42}, [self.row()]
+        retained = eval(compile(ast.Expression(copy.deepcopy(save_call.args[1])), "actual-ui-export", "eval"), {"current": surface})
+        self.assertEqual(retained, {"root": surface.record, "snapshot": surface.last, "htmlButtonActions": surface.html_actions})
+        self.assertNotIn("snapshot()", ast.unparse(save_call)); self.assertNotIn("walk()", ast.unparse(save_call))
+
+
 if __name__ == "__main__":
     unittest.main()
