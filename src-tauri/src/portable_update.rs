@@ -4,7 +4,7 @@ use crate::portable_package::{
     self as package, cache_root, regular, signed_descriptor, stable,
     SignedDescriptor as Descriptor, VerifiedDownload,
 };
-use crate::{catalog, manager, platform, self_update};
+use crate::{catalog, manager, self_update};
 use creator_hub_linux_portable_deployment::{
     self as deployment, Expected, HostSession, RestartChoice, RestartDisposition, RestartReady,
     RestartReview, RestartStageOutcome, RootRestart, StagedRestart, Store,
@@ -170,10 +170,7 @@ pub(crate) fn handles(handle: &tauri::AppHandle) -> bool {
 }
 
 fn records() -> Result<PathBuf, String> {
-    let dir = manager::child_dir("hub-portable-updates")?.join("records");
-    platform::reject_links(&dir)?;
-    fs::create_dir_all(&dir).map_err(|_| "Cannot prepare portable update records.")?;
-    Ok(dir)
+    manager::prepare_linux_update_cache(manager::LinuxUpdateCache::PortableRecords)
 }
 
 fn verify_download(release: &Descriptor, directory: &Path) -> Result<VerifiedDownload, String> {

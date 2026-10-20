@@ -765,24 +765,31 @@ impl Inventory {
             report.inventory.unresolved.sort();
             report.inventory.unresolved.dedup();
         }
+        // Linux has no native Claude Desktop adapter. Keep that exact diagnostic
+        // as unknown GUI-integration risk, never absence or full-removal approval.
+        let unknown_gui_issue = |issue: &Issue| {
+            unknown_gui_integration(issue.kind)
+                || (self.context.os == Os::Linux
+                    && current.os == Os::Linux
+                    && issue.client == Some(Client::ClaudeDesktop)
+                    && issue.scope == "native-user"
+                    && issue.kind == IssueKind::UnsupportedPlatform)
+        };
         let requires_retention = report
             .inventory
             .unresolved
             .iter()
-            .any(|issue| !unknown_gui_integration(issue.kind))
+            .any(|issue| !unknown_gui_issue(issue))
             || report
                 .blockers
                 .iter()
                 .any(|blocker| blocker.kind != BlockerKind::UnknownScopes);
-        let requires_unknown_custom_gui_approval = report
-            .inventory
-            .unresolved
-            .iter()
-            .any(|issue| unknown_gui_integration(issue.kind))
-            || report
-                .blockers
-                .iter()
-                .any(|blocker| blocker.kind == BlockerKind::UnknownScopes);
+        let requires_unknown_custom_gui_approval =
+            report.inventory.unresolved.iter().any(unknown_gui_issue)
+                || report
+                    .blockers
+                    .iter()
+                    .any(|blocker| blocker.kind == BlockerKind::UnknownScopes);
         GuiRetirementReport {
             inventory: report.inventory,
             blockers: report.blockers,
@@ -1898,6 +1905,128 @@ mod tests {
             .unresolved
             .iter()
             .any(|issue| issue.kind == kind)
+    }
+
+    #[test]
+    fn gui_retirement_linux_unsupported_desktop_stays_unknown_without_blocking_gui_only_review() {
+        let f = Fixture::new(Os::Linux);
+        let gui = f.old.join("standalone");
+        f.write(&gui, "native-gui-fixture");
+        let outside_adapter = f.config("Claude/claude_desktop_config.json");
+        let untouched = b"unsupported-client-context-must-not-be-read-or-converted";
+        f.write(&outside_adapter, untouched);
+        let snapshot = gui_snapshot(&f, std::slice::from_ref(&gui));
+        assert!(snapshot.report().inventory.unresolved.iter().any(|issue| {
+            issue.client == Some(Client::ClaudeDesktop)
+                && issue.scope == "native-user"
+                && issue.kind == IssueKind::UnsupportedPlatform
+        }));
+        assert!(!snapshot
+            .report()
+            .inventory
+            .scopes
+            .iter()
+            .any(|scope| scope.client == Client::ClaudeDesktop));
+        assert_eq!(fs::read(&outside_adapter).unwrap(), untouched);
+        assert!(f.check(&f.inventory()).requires_retention);
+        assert!(
+            !snapshot.report().requires_retention,
+            "The unsupported Linux client adapter must remain explicit unknown custom-GUI risk, not a failed host-platform check: {:?}",
+            snapshot.report()
+        );
+        assert!(snapshot.report().requires_unknown_custom_gui_approval);
+        assert!(snapshot.recheck_context(&f.context).is_ok());
+        assert_eq!(fs::read(gui).unwrap(), b"native-gui-fixture");
+        assert_eq!(fs::read(outside_adapter).unwrap(), untouched);
+    }
+
+    #[test]
+    fn gui_retirement_linux_unsupported_adapter_handling_cannot_hide_other_platform_errors() {
+        let f = Fixture::new(Os::Linux);
+        for (client, scope) in [
+            (None, "operating-system"),
+            (Some(Client::Codex), "native-user"),
+            (Some(Client::ClaudeDesktop), "different-scope"),
+        ] {
+            let mut inventory = f.inventory();
+            inventory.issue(client, scope, IssueKind::UnsupportedPlatform);
+            let snapshot = GuiRetirementSnapshot::capture(
+                inventory,
+                &[f.old.join("missing-gui")],
+                &f.router,
+                &f.context,
+            );
+            assert!(snapshot.report().requires_retention, "{client:?}/{scope}");
+            assert!(snapshot.recheck_context(&f.context).is_err());
+        }
+        let unsupported = Fixture::new(Os::Unsupported);
+        let snapshot = gui_snapshot(&unsupported, &[unsupported.old.join("missing-gui")]);
+        assert!(snapshot.report().requires_retention);
+        assert!(snapshot.recheck_context(&unsupported.context).is_err());
+        for os in [Os::Windows, Os::Mac, Os::Unsupported] {
+            let f = Fixture::new(os);
+            let mut inventory = f.inventory();
+            inventory.issue(
+                Some(Client::ClaudeDesktop),
+                "native-user",
+                IssueKind::UnsupportedPlatform,
+            );
+            let snapshot = GuiRetirementSnapshot::capture(
+                inventory,
+                &[f.old.join("missing-gui")],
+                &f.router,
+                &f.context,
+            );
+            assert!(snapshot.report().requires_retention);
+            assert!(snapshot.recheck_context(&f.context).is_err());
+        }
+    }
+
+    #[test]
+    fn gui_retirement_linux_post_transfer_keeps_old_routes_and_supported_client_errors_blocking() {
+        for mode in 0..5 {
+            let f = Fixture::new(Os::Linux);
+            let gui = f.old.join("standalone");
+            f.write(&gui, "native-gui-fixture");
+            let node = f.old.join("server/runtime/node");
+            let server = f.old.join("server/creator-works-mcp.mjs");
+            let license = f.old.join("server/runtime/LICENSE");
+            for path in [&node, &server, &license] {
+                f.write(path, "retained-runtime-fixture");
+            }
+            let raw = match mode {
+                0 => json!({"mcpServers":{"creator-works":{"command":node,"args":[server]}}}).to_string(),
+                1 => "not-json".into(),
+                2 => "{\"mcpServers\":{},\"mcpServers\":{}}".into(),
+                3 => json!({"mcpServers":{"creator-works":{"command":f.router,"args":[],"type":"http"}}}).to_string(),
+                _ => json!({"mcpServers":{"custom-name":{"command":gui,"args":[]}}}).to_string(),
+            };
+            let config = f.home(".claude.json");
+            f.write(&config, &raw);
+            let snapshot = gui_snapshot(&f, std::slice::from_ref(&gui));
+            assert!(snapshot.report().requires_retention, "case {mode}");
+            assert!(snapshot.recheck_context(&f.context).is_err());
+            if mode == 1 || mode == 2 {
+                assert!(snapshot.report().inventory.unresolved.iter().any(|issue| {
+                    issue.client == Some(Client::ClaudeCode)
+                        && issue.kind == IssueKind::InvalidDocument
+                }));
+            } else {
+                let expected = match mode {
+                    0 => BlockerKind::UnverifiedCreatorRoute,
+                    3 => BlockerKind::InvalidTransport,
+                    _ => BlockerKind::InstalledCommand,
+                };
+                assert!(snapshot.report().blockers.iter().any(|blocker| {
+                    blocker.client == Client::ClaudeCode && blocker.kind == expected
+                }));
+            }
+            assert_eq!(fs::read(config).unwrap(), raw.as_bytes());
+            assert_eq!(fs::read(gui).unwrap(), b"native-gui-fixture");
+            for path in [node, server, license] {
+                assert_eq!(fs::read(path).unwrap(), b"retained-runtime-fixture");
+            }
+        }
     }
 
     #[test]
