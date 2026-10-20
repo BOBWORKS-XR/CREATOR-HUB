@@ -279,9 +279,47 @@ class Pure(unittest.TestCase):
         self.assertIn("public-tool-failure-", exporter)
         self.assertIn("baseline-dpkg-install|update-ca-certificates", exporter)
         self.assertIn("len(diagnostics) <= 8", exporter)
+        self.assertIn("tls-restore-failure-", exporter)
         broker = ast.unparse(next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "broker"))
         self.assertIn("record['tlsCleanupError']", broker)
         self.assertIn("'type': type(error).__name__", broker)
+
+    def test_exact_dpkg_and_ca_commands_get_fixed_root_path_without_losing_failure_capture(self):
+        source = (HERE.parent / "src-tauri/src/linux_update.rs").read_text()
+        self.assertEqual(re.search(r'\.env\("PATH",\s*"([^"]+)"\)', source)[1], M.ROOT_TOOL_PATH)
+        self.assertEqual(M.ROOT_TOOL_PATH, "/usr/sbin:/usr/bin:/sbin:/bin")
+        with tempfile.TemporaryDirectory() as temp, patch.object(M, "BASE", Path(temp).resolve()):
+            commands = (["/usr/bin/dpkg", "--install", str(M.BASE / "inputs/members/assembly16/native-packages/Creator Hub_0.1.16_amd64.deb")],
+                        ["/usr/sbin/update-ca-certificates"])
+            for command in commands:
+                with self.subTest(command=command):
+                    def child(actual, **options):
+                        self.assertEqual(actual, command)
+                        if options["env"] != {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LANG": "C", "LC_ALL": "C"}:
+                            options["stderr"].write(b"dpkg: error: 2 expected programs not found in PATH or not executable\n"
+                                                    if actual[0] == "/usr/bin/dpkg" else b"test CA updater: required root helper PATH missing\n")
+                            return SimpleNamespace(returncode=2)
+                        return SimpleNamespace(returncode=0)
+                    with patch.object(M.subprocess, "run", side_effect=child), patch.dict(os.environ, {"PATH": "/foreign", "PRIVATE": "not inherited"}):
+                        self.assertEqual(M.run_tool(command), b"")
+                    failure, logs = self.public_tool_failure(command, code=2, error=b"public failure retained\n")
+                    self.assertIn("Fixed tool failed:", str(failure))
+                    self.assertEqual(logs[0]["returncode"], 2)
+                    self.assertEqual(logs[0]["stderr"]["text"], "public failure retained\n")
+
+    def test_root_path_is_not_given_to_other_commands_or_supplied_input_environment(self):
+        for command, kwargs in ((["/usr/bin/dpkg", "--verify", "creator-hub"], {}),
+                                (["/usr/bin/dpkg", "--install", "/foreign.deb"], {}),
+                                (["/usr/sbin/update-ca-certificates", "--fresh"], {}),
+                                (["/usr/bin/openssl", "version"], {}),
+                                (["/usr/sbin/update-ca-certificates"], {"input": b"not a public invocation"}),
+                                (["/usr/sbin/update-ca-certificates"], {"env": {"PATH": "/explicit", "LANG": "C"}})):
+            with self.subTest(command=command, options=tuple(kwargs)):
+                def child(actual, **options):
+                    self.assertEqual(options["env"], kwargs.get("env") or {"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"})
+                    return SimpleNamespace(returncode=0)
+                with patch.object(M.subprocess, "run", side_effect=child):
+                    M.run_tool(command, **kwargs)
 
     def parent_fixture(self, *, mode=0o777, fault=None, context=None, log_error=None, guard_only=False):
         root = dict(st_dev=10, st_ino=1, st_uid=0, st_gid=0, st_mode=stat.S_IFDIR | 0o755)
@@ -1036,6 +1074,76 @@ class Pure(unittest.TestCase):
                  patch.object(M, "trust_snapshot", return_value={"original": True}), patch.object(M, "run_tool", return_value=b"") as command:
                 self.assertTrue(M.tls_cleanup_locked(environment())["originalTrustRestored"])
                 command.assert_called_once_with(["/usr/sbin/update-ca-certificates"], timeout=60)
+
+    def trust_fixture(self):
+        bundle = M.pin(b"synthetic CA bytes never exported")
+        return {"entries": {"ca-certificates.crt": {"mode": 0o644, "bytes": bundle},
+                            "root.pem": {"link": "/synthetic/target-not-exported.crt"},
+                            "java": {"kind": "directory", "mode": 0o755}}, "bundle": bundle}
+
+    def test_tls_before_image_roundtrip_keeps_exact_equality_and_no_diagnostic(self):
+        before = self.trust_fixture(); restored = M.parse(json.dumps(before, sort_keys=True).encode())
+        self.assertEqual(restored, before)
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp).resolve(); (base / "tls").mkdir()
+            with patch.object(M, "BASE", base), patch.object(M, "TLS_CERT", base / "absent.crt"), \
+                 patch.object(M, "tls_arm", return_value={"before": restored}), patch.object(M, "trust_snapshot", return_value=before), \
+                 patch.object(M, "run_tool", side_effect=AssertionError("No trust rebuild without publication")), patch("builtins.print") as printed:
+                self.assertTrue(M.tls_cleanup_locked(environment())["originalTrustRestored"])
+            printed.assert_not_called(); self.assertFalse(list(base.glob("tls-restore-failure-*.json")))
+
+    def test_tls_bundle_link_mode_and_inventory_drift_remain_refused_with_metadata_only(self):
+        before = self.trust_fixture()
+        for change in ("bundle", "regular", "link", "mode", "added", "removed"):
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as temp:
+                base = Path(temp).resolve(); (base / "tls").mkdir(); after = copy.deepcopy(before)
+                if change == "bundle": after["bundle"] = M.pin(b"changed synthetic CA bytes never exported")
+                if change == "regular": after["entries"]["ca-certificates.crt"]["bytes"] = M.pin(b"changed regular CA bytes never exported")
+                if change == "link": after["entries"]["root.pem"]["link"] = "/changed/target-not-exported.crt"
+                if change == "mode": after["entries"]["java"]["mode"] = 0o700
+                if change == "added": after["entries"]["added.pem"] = {"link": "/added/target-not-exported.crt"}
+                if change == "removed": del after["entries"]["root.pem"]
+                with patch.object(M, "BASE", base), patch.object(M, "TLS_CERT", base / "absent.crt"), \
+                     patch.object(M, "tls_arm", return_value={"before": before}), patch.object(M, "trust_snapshot", return_value=after), \
+                     patch.object(M, "run_tool", side_effect=AssertionError("No normalization or retry")), patch("builtins.print"):
+                    with self.assertRaisesRegex(RuntimeError, "Original CI trust snapshot not restored"):
+                        M.tls_cleanup_locked(environment())
+                file = next(base.glob("tls-restore-failure-*.json")); raw = file.read_bytes(); evidence = M.parse(raw)
+                self.assertTrue(evidence["certificateAbsent"])
+                self.assertEqual(evidence["beforeBundle"], before["bundle"])
+                self.assertEqual(evidence["afterBundle"], after["bundle"])
+                self.assertEqual(evidence["changeCount"], 0 if change == "bundle" else 1)
+                self.assertNotIn(b"synthetic CA bytes", raw); self.assertNotIn(b"target-not-exported", raw)
+                self.assertEqual(before, self.trust_fixture(), "Diagnostics cannot replace the original before-image")
+
+    def test_tls_difference_caps_entry_metadata_without_exposing_link_targets(self):
+        before = self.trust_fixture(); after = copy.deepcopy(before)
+        for index in range(48): after["entries"][f"added-{index:02}.pem"] = {"link": "/do-not-export/CA-target"}
+        evidence = M.trust_restore_difference(before, after, True)
+        self.assertEqual(evidence["addedCount"], 48); self.assertEqual(evidence["changeCount"], 48)
+        self.assertTrue(evidence["truncated"]); self.assertEqual(len(evidence["changes"]), 32)
+        self.assertLessEqual(len(json.dumps(evidence).encode()), 128 * 1024)
+        self.assertNotIn("do-not-export", json.dumps(evidence))
+        self.assertEqual(len(after["entries"]), 51); self.assertEqual(before, self.trust_fixture())
+
+    def test_tls_certificate_presence_and_diagnostic_write_failure_cannot_mask_or_accept_drift(self):
+        before = self.trust_fixture()
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp).resolve(); (base / "tls").mkdir()
+            with patch.object(M, "BASE", base), patch.object(M, "TLS_CERT", base / "absent.crt"), \
+                 patch.object(M, "tls_arm", return_value={"before": before}), patch.object(M, "trust_snapshot", return_value=before), \
+                 patch.object(M.os.path, "lexists", side_effect=(False, True)), patch("builtins.print"):
+                with self.assertRaisesRegex(RuntimeError, "Original CI trust snapshot not restored"):
+                    M.tls_cleanup_locked(environment())
+            file = next(base.glob("tls-restore-failure-*.json")); original = file.read_bytes()
+            self.assertFalse(M.parse(original)["certificateAbsent"])
+            after = copy.deepcopy(before); after["bundle"] = M.pin(b"changed")
+            with patch.object(M, "BASE", base), patch.object(M, "TLS_CERT", base / "absent.crt"), \
+                 patch.object(M, "tls_arm", return_value={"before": before}), patch.object(M, "trust_snapshot", return_value=after), \
+                 patch.object(M, "save", side_effect=OSError("diagnostic sink refused")), patch("builtins.print", side_effect=OSError("stderr refused")):
+                with self.assertRaisesRegex(RuntimeError, "Original CI trust snapshot not restored"):
+                    M.tls_cleanup_locked(environment())
+            self.assertEqual(file.read_bytes(), original)
 
     def test_broker_preserves_original_session_failure_through_cleanup(self):
         tree = ast.parse((HERE / "native-linux-production-016-update.py").read_text())

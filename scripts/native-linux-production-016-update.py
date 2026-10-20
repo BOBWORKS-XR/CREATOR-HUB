@@ -70,6 +70,7 @@ VERIFIER_PINS = {
     "src-tauri/src/catalog-key.pub": KEY_PIN,
 }
 MAX_ZIP, MAX_FILE, MAX_TOTAL = 768 * 1024**2, 256 * 1024**2, 512 * 1024**2
+ROOT_TOOL_PATH = "/usr/sbin:/usr/bin:/sbin:/bin"
 TLS_CERT = Path("/usr/local/share/ca-certificates/creator-production016-update.crt")
 TLS_CONFIG = (b"[req]\nprompt=no\ndistinguished_name=dn\nx509_extensions=ext\n[dn]\nCN=api.github.com\n"
               b"[ext]\nsubjectAltName=DNS:api.github.com,DNS:github.com\nbasicConstraints=critical,CA:TRUE\n"
@@ -364,16 +365,21 @@ def stage_zip(file, expected, output):
             write(target, raw)
 
 
-def public_tool_failure(argv, out, err, failure_type, returncode=None, *, input=None, env=None):
-    # Only these public, independently inspected commands may expose output.
+def public_root_tool(argv, *, input=None, env=None):
     package = BASE / "inputs/members/assembly16/native-packages/Creator Hub_0.1.16_amd64.deb"
     if input is not None or env is not None:
-        return
+        return None
     if argv == ["/usr/bin/dpkg", "--install", str(package)]:
-        tool = "baseline-dpkg-install"
-    elif argv == ["/usr/sbin/update-ca-certificates"]:
-        tool = "update-ca-certificates"
-    else:
+        return "baseline-dpkg-install"
+    if argv == ["/usr/sbin/update-ca-certificates"]:
+        return "update-ca-certificates"
+    return None
+
+
+def public_tool_failure(argv, out, err, failure_type, returncode=None, *, input=None, env=None):
+    # Only these public, independently inspected commands may expose output.
+    tool = public_root_tool(argv, input=input, env=env)
+    if tool is None:
         return
     record = {"kind": "production016-public-tool-failure", "tool": tool, "pid": os.getpid(),
               "failureType": failure_type, "returncode": returncode}
@@ -391,10 +397,11 @@ def public_tool_failure(argv, out, err, failure_type, returncode=None, *, input=
 
 
 def run_tool(argv, *, input=None, allowed=(0,), timeout=90, env=None, limit=2 * 1024**2):
+    path = ROOT_TOOL_PATH if public_root_tool(argv, input=input, env=env) else "/usr/bin:/bin"
     with __import__("tempfile").TemporaryFile() as out, __import__("tempfile").TemporaryFile() as err:
         try:
             result = subprocess.run(argv, input=input, stdin=subprocess.DEVNULL if input is None else None, stdout=out, stderr=err,
-                                    env=env or {"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"}, cwd="/", timeout=timeout, check=False)
+                                    env=env or {"PATH": path, "LANG": "C", "LC_ALL": "C"}, cwd="/", timeout=timeout, check=False)
         except Exception as error:
             public_tool_failure(argv, out, err, type(error).__name__, input=input, env=env)
             raise
@@ -1835,6 +1842,63 @@ def trust_snapshot():
     return {"entries": entries, "bundle": pin(read(folder / "ca-certificates.crt", 2 * 1024**2, uid=0, mode=0o644))}
 
 
+def trust_restore_difference(before, after, certificate_absent):
+    def byte_pin(value):
+        keys(value, ("size", "sha256"))
+        require(type(value["size"]) is int and 0 <= value["size"] <= 2 * 1024**2
+                and type(value["sha256"]) is str and re.fullmatch(r"[a-f0-9]{64}", value["sha256"]), "Invalid trust diagnostic byte pin")
+        return {"size": value["size"], "sha256": value["sha256"]}
+
+    def entry(value):
+        if value is None:
+            return None
+        if "link" in value:
+            keys(value, ("link",))
+            require(type(value["link"]) is str and len(value["link"]) <= 4096, "Bounded trust link metadata required")
+            return {"kind": "symlink", "targetBytes": pin(os.fsencode(value["link"]))}
+        require(type(value.get("mode")) is int and 0 <= value["mode"] <= 0o7777, "Invalid trust diagnostic mode")
+        if value.get("kind") == "directory":
+            keys(value, ("kind", "mode"))
+            return {"kind": "directory", "mode": value["mode"]}
+        keys(value, ("mode", "bytes"))
+        return {"kind": "regular", "mode": value["mode"], "bytes": byte_pin(value["bytes"])}
+
+    require(type(certificate_absent) is bool, "Explicit trust certificate absence required")
+    for snapshot in (before, after):
+        keys(snapshot, ("entries", "bundle"))
+        require(type(snapshot["entries"]) is dict and len(snapshot["entries"]) <= 2048
+                and all(type(name) is str and 0 < len(name) <= 255 for name in snapshot["entries"]), "Bounded trust entry metadata required")
+    record = {"kind": "production016-tls-restore-failure", "pid": os.getpid(), "certificateAbsent": certificate_absent,
+              "beforeBundle": byte_pin(before["bundle"]), "afterBundle": byte_pin(after["bundle"]),
+              "beforeEntryCount": len(before["entries"]), "afterEntryCount": len(after["entries"]),
+              "addedCount": 0, "removedCount": 0, "changedCount": 0, "changes": []}
+    for name in sorted(before["entries"].keys() | after["entries"].keys()):
+        old, new = before["entries"].get(name), after["entries"].get(name)
+        if old == new:
+            continue
+        change = "added" if old is None else "removed" if new is None else "changed"
+        record[change + "Count"] += 1
+        if len(record["changes"]) < 32:
+            record["changes"].append({"name": name, "change": change, "before": entry(old), "after": entry(new)})
+    record["changeCount"] = sum(record[name] for name in ("addedCount", "removedCount", "changedCount"))
+    record["truncated"] = record["changeCount"] > len(record["changes"])
+    require(len(json.dumps(record, allow_nan=False).encode()) <= 128 * 1024, "Bounded trust diagnostic exceeded")
+    return record
+
+
+def record_trust_restore_failure(before, after, certificate_absent):
+    record = {"kind": "production016-tls-restore-failure", "pid": os.getpid()}
+    try:
+        record = trust_restore_difference(before, after, certificate_absent)
+        save(BASE / f"tls-restore-failure-{os.getpid()}.json", record, 0o644)
+    except Exception as error:
+        record["evidencePublicationErrorType"] = type(error).__name__
+    try:
+        print(json.dumps(record, separators=(",", ":"), allow_nan=False), file=sys.stderr, flush=True)
+    except Exception:
+        pass
+
+
 def tls_arm(env):
     raw = read(BASE / "tls/armed.json", 256 * 1024, uid=0, mode=0o600)
     value = parse(raw)
@@ -1861,7 +1925,12 @@ def tls_cleanup_locked(env):
         # An interrupted rebuild after the exact owned unlink is recoverable;
         # an unknown/unrecorded certificate still has no cleanup authority.
         run_tool(["/usr/sbin/update-ca-certificates"], timeout=60)
-    require(not os.path.lexists(TLS_CERT) and trust_snapshot() == arm["before"], "Original CI trust snapshot not restored")
+    certificate_absent = not os.path.lexists(TLS_CERT)
+    after = trust_snapshot()
+    restored = certificate_absent and after == arm["before"]
+    if not restored:
+        record_trust_restore_failure(arm["before"], after, certificate_absent)
+    require(restored, "Original CI trust snapshot not restored")
     return {"temporaryCertificateRemoved": True, "originalTrustRestored": True}
 
 
@@ -2223,8 +2292,8 @@ def export_evidence(env):
     destination.mkdir(mode=0o700); os.chown(destination, owner, owner)
     names = ("broker.json", "request.json", "review.json", "result/report.json", "result/original-ui.json", "result/successor-ui.json", "session.stdout", "session.stderr",
              "result/initial-bitmap/root-window.png", "result/successor-bitmap/root-window.png")
-    diagnostics = sorted(BASE.glob("public-tool-failure-*.json"))
-    require(len(diagnostics) <= 8 and all(re.fullmatch(r"public-tool-failure-(baseline-dpkg-install|update-ca-certificates)-[1-9][0-9]*\.json", file.name)
+    diagnostics = sorted((*BASE.glob("public-tool-failure-*.json"), *BASE.glob("tls-restore-failure-*.json")))
+    require(len(diagnostics) <= 8 and all(re.fullmatch(r"(?:public-tool-failure-(baseline-dpkg-install|update-ca-certificates)|tls-restore-failure)-[1-9][0-9]*\.json", file.name)
                                         and file.lstat().st_uid == 0 for file in diagnostics), "Unknown public tool evidence refused")
     names += tuple(file.name for file in diagnostics)
     for name in names:
