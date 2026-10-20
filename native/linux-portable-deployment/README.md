@@ -118,9 +118,47 @@ Pending transactions block another activation until explicitly reviewed.
 ## Offline Native Selector And User Registration
 
 This is a typed native-caller boundary, not a finished installer or Flatpak UX.
-The only executable operation is `creator-hub-portable-selector activate`.
-All other argument sets refuse; no package path, command string, settings root,
-install approval or sandbox RPC can be passed to activation.
+Normal activation remains `creator-hub-portable-selector activate`. The separate
+closed `recover-pending` operation below can review and acknowledge only an
+interrupted deployment journal. No package path, command string, settings root,
+install approval or sandbox RPC can be passed to either operation.
+
+### Pending Deployment Recovery Without Opening Hub
+
+If a portable update stops after its deployment journal was written, activation
+correctly refuses even if an old or new selection remains readable. Use the
+**native terminal outside Flatpak**, as the same user who installed native support:
+
+```sh
+"${XDG_DATA_HOME:-$HOME/.local/share}/creator-hub-portable/activation-v1/creator-hub-portable-selector" recover-pending
+```
+
+This first command makes no persistent changes. It verifies both signed
+generations, the observed selection, owned service/selector registration and the
+running selector image. It prints which version/generation is retained, whether
+the previous selection remains or the new selection already committed, and an
+**exact acknowledgement command containing a review ID**. Run that printed
+command only if you approve acknowledging that state. Decline by doing nothing.
+
+Acknowledgement rechecks the same state and identities under the existing
+transaction lock, retains transaction history and removes only the exact reviewed
+pending marker. It never selects a generation, downloads, launches Hub, rolls
+back, replays an update or claims that the app/update worked. Activation is a
+separate later `activate` command.
+
+A busy lock, stale review ID, changed signature/image/registration, unknown
+selection or separate registration journal refuses without repair. Review again
+after resolving an ordinary busy condition. Do not delete journals manually. An
+acknowledgement I/O/flush failure is reported as **outcome unknown**: re-run the
+read-only command to inspect; do not repeat the update. If no pending record
+remains, the acknowledgement command is not replayed and normal activation still
+independently verifies the selected generation.
+
+This command requires a selector built with this recovery entrypoint and present
+in the signed installed inventory. It does not retrofit frozen older helper bytes.
+Initial-install and registration recovery remain separate; they are not adopted
+or overridden by this command. No desktop session, settings or AI-client files are
+copied or changed, and no candidate/native acceptance is implied by unit tests.
 
 The stable tool must come from the separately inventoried, mode-0755 signed
 entry `usr/libexec/creator-hub-portable-selector` in a `VerifiedPackage`. A copied
