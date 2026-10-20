@@ -827,6 +827,27 @@ class WarmConsumedTerminalTests(unittest.TestCase):
 
 
 class WarmLineageWiringTests(unittest.TestCase):
+    def test_refused_proxy_capture_reuses_bound_operands_and_checks_both_existing_guards(self):
+        session = object.__new__(M.Session)
+        attempt = SimpleNamespace(binding=SimpleNamespace(launch={'pid': 10}, verify=Mock()))
+        capture = SimpleNamespace(read=Mock(), budget=Mock())
+        module, protected, target_guard = SimpleNamespace(proxy_association_diagnostic=Mock()), Mock(), Mock()
+        client, tree = {'pid': 14}, {10: {}}
+        def diagnostic(*args, **kwargs):
+            self.assertEqual(args, (attempt.binding.launch, client, tree, capture.read))
+            self.assertIs(kwargs['system_image'], protected)
+            self.assertIs(kwargs['pidfds'], M.ObserverPidfds)
+            self.assertIs(kwargs['image_open'], M.K.HeldImage)
+            self.assertIs(kwargs['budget'], capture.budget)
+            kwargs['guard']()
+            return {'readOnly': True, 'qualified': False, 'inputPermitted': False, 'authorityGranted': False,
+                    'releaseReady': False, 'complete': True, 'associationObserved': True}
+        module.proxy_association_diagnostic.side_effect = diagnostic
+        with patch.object(M, 'PortalImage', return_value=protected) as opened:
+            value = session.capture_refused_proxy_association(module, attempt, client, tree, capture, target_guard)
+        opened.assert_called_once_with('proxy'); attempt.binding.verify.assert_called_once(); target_guard.assert_called_once()
+        self.assertFalse(value['inputPermitted']); self.assertFalse(value['qualified'])
+
     def test_actual_captured_observer_import_seals_live_tree_and_never_rereads_parent_after_input(self):
         with LauncherKeyboardTests().fixture('Open Creator Hub', 'warm') as (session, state, _):
             fixture = LauncherKeyboardTests()
@@ -906,6 +927,31 @@ class WarmLineageWiringTests(unittest.TestCase):
                 self.assertEqual(refused['record']['observation']['callbackMessages'], 0)
                 self.assertEqual(system.close.call_count, 2)
                 system.snapshot = lambda: (copy.deepcopy(rows[12]['image']), rows[12]['kernelImageSha256'])
+                # Only the already-refused zero-candidate path may run the read-only extra capture.
+                proxy = tree.pop(12)
+                connections_before = len(connections)
+                for broken in (False, True):
+                    evidence = dict(readOnly=True, qualified=False, inputPermitted=False, authorityGranted=False,
+                                    releaseReady=False, complete=True, associationObserved=True)
+                    with patch.object(M.Session, 'capture_refused_proxy_association',
+                                      side_effect=RuntimeError('PRIVATE DIAGNOSTIC') if broken else None,
+                                      return_value=evidence) as diagnostic:
+                        refused = M.Session.start_warm_activation_diagnostic(session, rows[14], attempt)
+                    diagnostic.assert_called_once()
+                    self.assertEqual(refused['record']['unavailable'], 'ValueError')
+                    self.assertEqual(refused['record']['setupFailureStage'], 'pre-input-lineage-create')
+                    self.assertEqual(refused['record']['preInputBaseline']['failureStage'], 'candidate-count')
+                    self.assertIsNone(refused['capture'].baseline)
+                    M.Session.finish_warm_activation_diagnostic(session, refused)
+                    self.assertFalse(refused['record']['observation']['armed'])
+                    self.assertFalse(refused['record']['observation']['inputStarted'])
+                    self.assertEqual(len(connections), connections_before)
+                    self.assertNotIn('PRIVATE DIAGNOSTIC', M.json_bytes(refused['record']).decode())
+                    if broken:
+                        self.assertEqual(refused['record']['externalProxyDiagnostic']['unavailable'], 'RuntimeError')
+                    else:
+                        self.assertEqual(refused['record']['externalProxyDiagnostic'], evidence)
+                tree[12] = proxy
                 def arm_refusal(*_): raise ValueError('PRIVATE ARM ERROR')
                 gio.DBusConnection.new_for_address_sync = arm_refusal
                 refused = M.Session.start_warm_activation_diagnostic(session, rows[14], attempt)
@@ -915,7 +961,7 @@ class WarmLineageWiringTests(unittest.TestCase):
                 M.Session.finish_warm_activation_diagnostic(session, refused)
                 self.assertNotIn('PRIVATE ARM ERROR', M.json_bytes(refused['record']).decode())
             self.assertCountEqual(closed, opened)
-            self.assertTrue(all(item.close.call_count == 1 for item in held)); self.assertEqual(system.close.call_count, 3)
+            self.assertTrue(all(item.close.call_count == 1 for item in held)); self.assertEqual(system.close.call_count, 5)
 
 
 class LauncherReadinessDiagnosticTests(unittest.TestCase):

@@ -2,8 +2,11 @@
 import ast
 import copy
 import importlib.util
+import os
 from pathlib import Path
+import stat
 import sys
+import tempfile
 import threading
 import unittest
 from unittest.mock import Mock, patch
@@ -384,6 +387,251 @@ class PreInputLineageTests(unittest.TestCase):
         self.assertEqual(value['treeCount'], 100); self.assertTrue(value['treeTruncated'])
         self.assertGreater(len(value['tree']), 0); self.assertLessEqual(len(value['tree']), 16)
         self.assertFalse(value['inputPermitted'])
+
+
+class ProxyAssociationTests(unittest.TestCase):
+    def fixture(self):
+        state = PreInputLineageTests().fixture()
+        state.tree.pop(11); state.tree.pop(12)
+        state.rows[12]['parentPid'] = 99
+        state.rows[12]['startTime'] = '11'
+        state.info = dict(size=200, sha256='b' * 64, identity=[1, 2, 3],
+                          fields=dict(app='com.creatorworks.hub', instanceId='123', appCommit='c' * 64, runtimeCommit='d' * 64))
+        state.pipes = {10: ([], 'outer'), 13: ([dict(fd=7, inode=900, access='read')], 'app'),
+                       12: ([dict(fd=8, inode=900, access='write')], 'proxy')}
+        state.proc = SimpleNamespace(candidates=Mock(return_value=([12], 8)),
+            info=Mock(side_effect=lambda pid: copy.deepcopy(state.info)),
+            pipes=Mock(side_effect=lambda pid: copy.deepcopy(state.pipes[pid])))
+        def read(pid, full=False):
+            state.reads.append((pid, full))
+            return copy.deepcopy(state.rows[pid])
+        def image(pid):
+            stamp = copy.deepcopy(state.rows[pid]['image']), state.rows[pid]['kernelImageSha256']
+            held = SimpleNamespace(snapshot=Mock(return_value=stamp), close=Mock())
+            state.images.append(held)
+            return held
+        state.reader, state.image_open = read, image
+        state.pidfds = SimpleNamespace(open=Mock(side_effect=lambda pid: pid), ready=Mock(return_value=False),
+                                       close=Mock(side_effect=state.closed.append))
+        state.run = lambda **options: M.proxy_association_diagnostic(state.rows[10], state.rows[14], state.tree,
+            state.reader, image_open=state.image_open, system_image=state.system, pidfds=state.pidfds,
+            guard=state.guard, budget=options.pop('budget', lambda: None), proc=state.proc, **options)
+        return state
+
+    def test_external_proxy_shared_pipe_and_instance_are_diagnostic_not_lineage_admission(self):
+        state = self.fixture(); value = state.run()
+        self.assertTrue(value['complete']); self.assertTrue(value['associationObserved'])
+        self.assertEqual(value['candidateCount'], 1)
+        self.assertEqual(set(value['launcher']['flatpakInfo']), {'sha256', 'fields'})
+        self.assertNotIn('identity', value['candidates'][0]['flatpakInfo'])
+        self.assertEqual(value['candidates'][0]['sharedPipes'], [dict(appPid=13, appFd=7, proxyFd=8,
+            inode=900, appAccess='read', proxyAccess='write')])
+        for key in ('qualified', 'inputPermitted', 'authorityGranted', 'releaseReady'): self.assertFalse(value[key])
+        self.assertCountEqual(state.closed, [14, 13, 10, 12])
+        self.assertTrue(all(item.close.call_count == 1 for item in state.images))
+        state.system.close.assert_called_once()
+        diagnostic = {}
+        with self.assertRaises(ValueError): state.build(diagnostic=diagnostic)
+        self.assertEqual(diagnostic['failureStage'], 'candidate-count')
+
+    def test_hash_instance_or_pipe_mismatch_never_observes_association(self):
+        for change in ('hash', 'instance', 'inode', 'direction'):
+            state = self.fixture()
+            if change in ('hash', 'instance'):
+                def info(pid):
+                    value = copy.deepcopy(state.info)
+                    if pid == 12:
+                        if change == 'hash': value['sha256'] = 'e' * 64
+                        else: value['fields']['instanceId'] = '456'
+                    return value
+                state.proc.info.side_effect = info
+            elif change == 'inode': state.pipes[12][0][0]['inode'] = 901
+            else: state.pipes[12][0][0]['access'] = 'read'
+            with self.subTest(change=change):
+                value = state.run()
+                self.assertTrue(value['complete']); self.assertFalse(value['associationObserved'])
+
+    def test_foreign_uid_image_path_or_nonprotected_proxy_refuses_before_private_info(self):
+        for change in ('uid', 'image', 'path', 'writable'):
+            state = self.fixture()
+            if change == 'uid': state.rows[12]['uids'] = [2000] * 4
+            if change == 'image': state.rows[12]['kernelImageSha256'] = 'e' * 64
+            if change == 'path': state.rows[12]['executable'] = '/private/FOREIGN'
+            if change == 'writable': state.rows[12]['image']['st_mode'] = str(0o100777)
+            with self.subTest(change=change):
+                value = state.run()
+                self.assertFalse(value['complete']); self.assertFalse(value['associationObserved'])
+                self.assertEqual(value['failureStage'], 'candidate-image')
+                state.proc.info.assert_not_called()
+                self.assertNotIn('FOREIGN', M.json.dumps(value))
+
+    def test_candidate_count_inventory_and_output_are_finite(self):
+        for candidates, scanned in (([], 1), ([12] * 2, 8), ([12, 15, 16, 17, 18], 8), ([12], 4097), ([12], True)):
+            state = self.fixture(); state.proc.candidates.return_value = candidates, scanned
+            with self.subTest(candidates=candidates, scanned=scanned):
+                value = state.run()
+                self.assertFalse(value['complete']); self.assertEqual(value['failureStage'], 'candidate-inventory')
+                state.proc.info.assert_not_called()
+        state = self.fixture(); state.pipes[12][0][0]['fd'] = '9' * 13000
+        value = state.run()
+        self.assertEqual(value['unavailable'], 'OutputLimit')
+        self.assertLessEqual(len(M.json.dumps(value)), 12288)
+
+    def test_mapping_info_process_image_and_pidfd_races_refuse(self):
+        for change in ('mapping', 'info', 'process', 'image', 'pidfd', 'guard'):
+            state = self.fixture(); calls = {}
+            if change in ('mapping', 'info'):
+                original = state.proc.pipes.side_effect if change == 'mapping' else state.proc.info.side_effect
+                def read(pid):
+                    calls[pid] = calls.get(pid, 0) + 1
+                    value = original(pid)
+                    if calls[pid] > 1:
+                        if change == 'mapping': return value[0], 'replaced'
+                        value['identity'] = [999]
+                    return value
+                (state.proc.pipes if change == 'mapping' else state.proc.info).side_effect = read
+            if change == 'process':
+                original = state.reader
+                def read(pid, full):
+                    value = original(pid, full)
+                    if len(state.reads) > 8: value['startTime'] = '999'
+                    return value
+                state.reader = read
+            if change == 'image':
+                original = state.image_open
+                def image(pid):
+                    held = original(pid)
+                    held.snapshot.side_effect = [held.snapshot.return_value, ({}, 'e' * 64)]
+                    return held
+                state.image_open = image
+            if change == 'pidfd': state.pidfds.ready.side_effect = lambda fd: len(state.reads) > 8
+            if change == 'guard': state.guard.side_effect = [None, RuntimeError('PRIVATE GUARD')]
+            with self.subTest(change=change):
+                value = state.run()
+                self.assertFalse(value['complete']); self.assertFalse(value['associationObserved'])
+                self.assertNotIn('PRIVATE GUARD', M.json.dumps(value))
+
+    def test_ambiguous_matching_proxies_and_cleanup_failure_are_unavailable(self):
+        state = self.fixture(); state.rows[15] = copy.deepcopy(state.rows[12]); state.rows[15].update(pid=15, startTime='12')
+        state.proc.candidates.return_value = [12, 15], 8
+        state.pipes[15] = copy.deepcopy(state.pipes[12])
+        value = state.run()
+        self.assertEqual(value['failureStage'], 'association-ambiguity')
+        self.assertFalse(value['complete']); self.assertFalse(value['associationObserved'])
+        state = self.fixture(); state.pidfds.close.side_effect = OSError('PRIVATE CLOSE')
+        value = state.run()
+        self.assertTrue(value['cleanupUnavailable']); self.assertFalse(value['associationObserved'])
+        self.assertEqual(state.pidfds.close.call_count, 4); state.system.close.assert_called_once()
+        self.assertNotIn('PRIVATE CLOSE', M.json.dumps(value))
+
+    def test_process_change_during_final_fd_snapshot_is_not_marked_complete(self):
+        state = self.fixture(); reads = {}
+        original = state.proc.pipes.side_effect
+        def pipes(pid):
+            reads[pid] = reads.get(pid, 0) + 1
+            if pid == 12 and reads[pid] == 2:
+                state.rows[12]['startTime'] = '999'
+            return original(pid)
+        state.proc.pipes.side_effect = pipes
+        value = state.run()
+        self.assertFalse(value['complete']); self.assertFalse(value['associationObserved'])
+        self.assertEqual(value['failureStage'], 'association-recheck')
+
+    def test_budget_cannot_extend_or_replace_the_original_refusal(self):
+        state = self.fixture(); value = state.run(budget=Mock(side_effect=ValueError('PRIVATE DEADLINE')))
+        self.assertEqual(value['failureStage'], 'owned-launch'); state.proc.candidates.assert_not_called()
+        self.assertNotIn('PRIVATE DEADLINE', M.json.dumps(value)); state.system.close.assert_called_once()
+
+
+class ProxyAssociationProcTests(unittest.TestCase):
+    def flags(self):
+        stack = ExitStack()
+        for name in ('O_NOFOLLOW', 'O_NONBLOCK', 'O_CLOEXEC', 'O_DIRECTORY', 'O_ACCMODE'):
+            stack.enter_context(patch.object(M.os, name, getattr(M.os, name, 3 if name == 'O_ACCMODE' else 0), create=True))
+        return stack
+
+    @staticmethod
+    def info_raw():
+        return ('[Application]\nname=com.creatorworks.hub\n[Instance]\ninstance-id=123\napp-commit=' + 'c' * 64
+                + '\nruntime-commit=' + 'd' * 64 + '\n[Environment]\nPRIVATE=DO NOT OUTPUT\n').encode()
+
+    def test_private_info_outputs_only_hash_fixed_fields_and_numeric_identity(self):
+        proc = M.ProxyAssociationProc(); raw = self.info_raw()
+        with self.flags(), patch.object(M.os, 'open', return_value=9), patch.object(M.os, 'close'), \
+                patch.object(proc, 'read_at', return_value=(raw, (1, 2, 3))):
+            value = proc.info(14)
+        self.assertEqual(value['sha256'], M.hashlib.sha256(raw).hexdigest())
+        self.assertEqual(value['fields']['instanceId'], '123')
+        self.assertNotIn('PRIVATE', M.json.dumps(value)); self.assertNotIn('DO NOT OUTPUT', M.json.dumps(value))
+        for bad in (raw.replace(b'123', b'SECRET/path'), raw.replace(b'com.creatorworks.hub', b'foreign.app'),
+                    raw.replace(b'app-commit=', b'app-commit=SECRET'), raw + b'[Application]\nname=other\n'):
+            with self.flags(), patch.object(M.os, 'open', return_value=9), patch.object(M.os, 'close'), \
+                    patch.object(proc, 'read_at', return_value=(bad, (1, 2, 3))), self.assertRaises(Exception):
+                proc.info(14)
+
+    def test_regular_info_size_type_and_mutation_guards_before_open(self):
+        with tempfile.TemporaryDirectory() as directory, self.flags():
+            path = Path(directory) / 'synthetic-info'; path.write_bytes(b'123')
+            self.assertEqual(M.ProxyAssociationProc.read_at(None, str(path), 3, sized=True)[0], b'123')
+            with patch.object(M.os, 'open', wraps=M.os.open) as opened, self.assertRaises(ValueError):
+                M.ProxyAssociationProc.read_at(None, str(path), 2, sized=True)
+            opened.assert_not_called()
+            with self.assertRaises(ValueError): M.ProxyAssociationProc.read_at(None, str(path.parent), 65536, sized=True)
+            changed = SimpleNamespace(**{key: getattr(path.stat(), key) for key in ('st_dev', 'st_ino', 'st_mode', 'st_uid',
+                'st_gid', 'st_nlink', 'st_size', 'st_mtime_ns', 'st_ctime_ns')}); changed.st_ino += 1
+            with patch.object(M.os, 'fstat', return_value=changed), self.assertRaises(ValueError):
+                M.ProxyAssociationProc.read_at(None, str(path), 3, sized=True)
+            with self.assertRaises(ValueError): M.ProxyAssociationProc.read_at(None, str(path), 2)
+            path.write_bytes(b'')
+            with self.assertRaises(ValueError): M.ProxyAssociationProc.read_at(None, str(path), 3, sized=True)
+
+    def test_pid_scan_filters_foreign_uid_and_bounds_candidates_and_total(self):
+        proc = M.ProxyAssociationProc()
+        def entry(pid, uid=1001):
+            info = SimpleNamespace(st_mode=stat.S_IFDIR | 0o555, st_dev=1, st_ino=pid, st_uid=uid, st_gid=uid,
+                                   st_nlink=1, st_size=0, st_mtime_ns=1, st_ctime_ns=1)
+            return SimpleNamespace(name=str(pid), stat=lambda **_: info)
+        def context(entries):
+            from contextlib import nullcontext
+            return nullcontext(iter(entries))
+        with patch.object(M.os, 'scandir', return_value=context([entry(14, 2000), entry(15)])), \
+                patch.object(M.os, 'readlink', return_value='/usr/bin/xdg-dbus-proxy') as link:
+            self.assertEqual(proc.candidates(1001, lambda: None), ([15], 2))
+            link.assert_called_once_with('/proc/15/exe')
+        for entries in ([entry(pid) for pid in range(10, 15)], [entry(pid, 2000) for pid in range(10, 4107)]):
+            with patch.object(M.os, 'scandir', return_value=context(entries)), \
+                    patch.object(M.os, 'readlink', return_value='/usr/bin/xdg-dbus-proxy'), self.assertRaises(ValueError):
+                proc.candidates(1001, lambda: None)
+        with patch.object(M.os, 'scandir', return_value=context([entry(15)])), \
+                patch.object(M.os, 'readlink', side_effect=FileNotFoundError()), self.assertRaises(FileNotFoundError):
+            proc.candidates(1001, lambda: None)
+
+    def test_pipe_capture_has_no_other_targets_and_rejects_bad_fdinfo_and_mapping(self):
+        proc = M.ProxyAssociationProc()
+        identity = SimpleNamespace(st_mode=stat.S_IFLNK | 0o777, st_dev=1, st_ino=2, st_uid=1001, st_gid=1001,
+                                   st_nlink=1, st_size=12, st_mtime_ns=1, st_ctime_ns=1)
+        from contextlib import nullcontext
+        for change in (None, 'flags', 'inode', 'mapping', 'count'):
+            entries = [SimpleNamespace(name=str(i)) for i in (range(129) if change == 'count' else (1, 2))]
+            raw = b'pos:\t0\nflags:\t02000001\nmnt_id:\t1\nino:\t900\n'
+            if change == 'flags': raw = raw.replace(b'02000001', b'SECRET')
+            if change == 'inode': raw = raw.replace(b'900', b'901')
+            reads = {}
+            def link(name, **_):
+                reads[name] = reads.get(name, 0) + 1
+                if name == '1': return 'pipe:[901]' if change == 'mapping' and reads[name] > 1 else 'pipe:[900]'
+                return '/PRIVATE/secret-path'
+            with self.flags(), patch.object(M.os, 'open', side_effect=[10, 11]), patch.object(M.os, 'close') as close, \
+                    patch.object(M.os, 'scandir', side_effect=lambda _: nullcontext(iter(entries))), \
+                    patch.object(M.os, 'stat', return_value=identity), patch.object(M.os, 'readlink', side_effect=link), \
+                    patch.object(proc, 'read_at', return_value=(raw, ())) as read:
+                if change:
+                    with self.assertRaises(ValueError): proc.pipes(12)
+                else:
+                    value = proc.pipes(12)
+                    self.assertEqual(value[0], [dict(fd=1, inode=900, access='write')])
+                    self.assertNotIn('PRIVATE', str(value)); read.assert_called_once_with(11, '1', 4096)
+                self.assertCountEqual([call.args[0] for call in close.call_args_list], [10, 11])
 
 
 class GioAdapterTests(unittest.TestCase):

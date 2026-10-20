@@ -6,9 +6,12 @@ Primary contracts: docs.gtk.org/gio/method.DBusConnection.add_filter.html and
 dbus.freedesktop.org/doc/dbus-specification.html#bus-messages-become-monitor.
 """
 import copy
+import configparser
+import hashlib
 import json
 import os
 import re
+import stat
 import sys
 import threading
 import time
@@ -288,6 +291,230 @@ def lineage_inputs(original, client, tree):
     while len(json.dumps(value, ensure_ascii=True).encode()) > 12288 and value['tree']:
         value['tree'].pop(); value['treeTruncated'] = True
     return bounded(value, 14336)
+
+
+class ProxyAssociationProc:
+    """Fixed /proc metadata only. Never opens an application FD, cmdline or environ."""
+    MAX_PIDS, MAX_FDS, MAX_INFO = 4096, 128, 65536
+
+    @staticmethod
+    def stamp(info):
+        return tuple(getattr(info, key) for key in ('st_dev', 'st_ino', 'st_mode', 'st_uid', 'st_gid',
+                     'st_nlink', 'st_size', 'st_mtime_ns', 'st_ctime_ns'))
+
+    @classmethod
+    def read_at(cls, parent, name, maximum, *, sized=False):
+        flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+        before = os.stat(name, dir_fd=parent, follow_symlinks=False)
+        require(stat.S_ISREG(before.st_mode) and (not sized or 0 < before.st_size <= maximum))
+        fd = os.open(name, flags, dir_fd=parent)
+        try:
+            require(cls.stamp(os.fstat(fd)) == cls.stamp(before))
+            body = bytearray()
+            while len(body) <= maximum:
+                chunk = os.read(fd, min(8192, maximum + 1 - len(body)))
+                if not chunk:
+                    break
+                body.extend(chunk)
+            require(len(body) <= maximum and (not sized or len(body) == before.st_size)
+                    and cls.stamp(os.fstat(fd)) == cls.stamp(before)
+                    and cls.stamp(os.stat(name, dir_fd=parent, follow_symlinks=False)) == cls.stamp(before))
+            return bytes(body), cls.stamp(before)
+        finally:
+            os.close(fd)
+
+    def candidates(self, uid, budget):
+        count, found = 0, []
+        with os.scandir('/proc') as entries:
+            for entry in entries:
+                if not re.fullmatch(r'[1-9][0-9]{0,9}', entry.name):
+                    continue
+                count += 1
+                require(count <= self.MAX_PIDS and int(entry.name) < 2**31)
+                budget()
+                before = entry.stat(follow_symlinks=False)
+                require(stat.S_ISDIR(before.st_mode))
+                if before.st_uid != uid:
+                    continue
+                target = os.readlink('/proc/' + entry.name + '/exe')
+                require(len(target) <= 4096 and self.stamp(entry.stat(follow_symlinks=False)) == self.stamp(before))
+                if target == '/usr/bin/xdg-dbus-proxy':
+                    found.append(int(entry.name))
+                    require(len(found) <= 4)
+        return sorted(found), count
+
+    def info(self, pid):
+        # /proc/PID/root is an intentional kernel magic link; the final leaf is not followed.
+        root = os.open(f'/proc/{pid}/root', os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        try:
+            raw, stamp = self.read_at(root, '.flatpak-info', self.MAX_INFO, sized=True)
+        finally:
+            os.close(root)
+        parser = configparser.ConfigParser(interpolation=None, strict=True)
+        parser.read_string(raw.decode('utf-8'))
+        require(not parser.defaults() and parser.get('Application', 'name') == 'com.creatorworks.hub')
+        fields = {'app': 'com.creatorworks.hub', 'instanceId': parser.get('Instance', 'instance-id')}
+        require(re.fullmatch(r'[0-9]{1,20}', fields['instanceId']))
+        for key, output in (('app-commit', 'appCommit'), ('runtime-commit', 'runtimeCommit')):
+            value = parser.get('Instance', key)
+            require(re.fullmatch(r'[a-f0-9]{64}', value))
+            fields[output] = value
+        return dict(size=len(raw), sha256=hashlib.sha256(raw).hexdigest(), fields=fields, identity=list(stamp))
+
+    def pipes(self, pid):
+        directory = os.open(f'/proc/{pid}/fd', os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        info = None
+        try:
+            info = os.open(f'/proc/{pid}/fdinfo', os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+            def names():
+                rows = []
+                with os.scandir(directory) as entries:
+                    for entry in entries:
+                        require(len(rows) < self.MAX_FDS and re.fullmatch(r'[0-9]{1,10}', entry.name))
+                        rows.append(entry.name)
+                return sorted(rows, key=int)
+            before, mappings, pipes = names(), [], []
+            for name in before:
+                stamp = self.stamp(os.stat(name, dir_fd=directory, follow_symlinks=False))
+                require(stat.S_ISLNK(stamp[2]))
+                target = os.readlink(name, dir_fd=directory)
+                require(len(target) <= 4096)
+                match = re.fullmatch(r'pipe:\[([0-9]{1,20})\]', target)
+                if match:
+                    raw, _ = self.read_at(info, name, 4096)
+                    flags = re.findall(rb'^flags:\s*([0-7]{1,12})\s*$', raw, re.M)
+                    inode = re.findall(rb'^ino:\s*([0-9]{1,20})\s*$', raw, re.M)
+                    require(len(flags) == len(inode) == 1 and int(inode[0]) == int(match[1]))
+                    access = int(flags[0], 8) & os.O_ACCMODE
+                    require(access in (os.O_RDONLY, os.O_WRONLY, os.O_RDWR) and len(pipes) < 16)
+                    pipes.append(dict(fd=int(name), inode=int(match[1]),
+                                      access={os.O_RDONLY: 'read', os.O_WRONLY: 'write', os.O_RDWR: 'read-write'}[access]))
+                require(self.stamp(os.stat(name, dir_fd=directory, follow_symlinks=False)) == stamp
+                        and os.readlink(name, dir_fd=directory) == target)
+                mappings.append((name, stamp, hashlib.sha256(target.encode()).hexdigest()))
+            require(names() == before)
+            return pipes, hashlib.sha256(json.dumps(mappings).encode()).hexdigest()
+        finally:
+            try:
+                if info is not None:
+                    os.close(info)
+            finally:
+                os.close(directory)
+
+
+def proxy_association_diagnostic(original, client, tree, read, *, image_open, system_image, pidfds,
+                                 guard, budget, proc=None):
+    """Corroborating evidence for a refused launch; never an alternative lineage admission."""
+    value = dict(readOnly=True, qualified=False, inputPermitted=False, authorityGranted=False, releaseReady=False,
+                 complete=False, associationObserved=False, candidates=[])
+    proc = ProxyAssociationProc() if proc is None else proc
+    held, fds, rows, stage = {}, {}, {}, 'owned-launch'
+    try:
+        guard(); budget()
+        OwnedLineage.validate(original); OwnedLineage.validate(client)
+        require(type(tree) is dict and 0 < len(tree) <= 64 and original['executable'] == '/usr/bin/bwrap'
+                and client['executable'] == '/app/bin/creator-hub-flatpak-activate' and original['uids'] == client['uids'])
+
+        def retain(pid, expected=None):
+            budget()
+            require(type(pid) is int and 1 < pid < 2**31 and pid not in rows and len(rows) < 16)
+            fds[pid] = pidfds.open(pid)
+            held[pid] = image_open(pid)
+            row = read(pid, True)
+            OwnedLineage.validate(row)
+            require(row['pid'] == pid and row['uids'] == original['uids']
+                    and (expected is None or {k: v for k, v in row.items() if k != 'kernelImageSha256'} == expected)
+                    and held[pid].snapshot() == (row['image'], row['kernelImageSha256'])
+                    and not pidfds.ready(fds[pid]) and read(pid, True) == row)
+            rows[pid] = copy.deepcopy(row)
+
+        chain, pid = [], client['pid']
+        for _ in range(MAX_ANCESTORS):
+            require(pid in tree and pid not in chain)
+            retain(pid, tree[pid]); chain.append(pid)
+            if pid == original['pid']:
+                break
+            require(rows[pid]['executable'] == ('/app/bin/creator-hub-flatpak-activate' if pid == client['pid'] else '/usr/bin/bwrap'))
+            parent = rows[pid]['parentPid']
+            require(parent in tree and int(tree[parent]['startTime']) <= int(rows[pid]['startTime']))
+            pid = parent
+        require(chain[-1] == original['pid'] and rows[original['pid']] == original and rows[client['pid']] == client)
+        stage = 'candidate-inventory'
+        candidates, scanned = proc.candidates(original['uids'][0], budget)
+        require(type(candidates) is list and 0 < len(candidates) <= 4 and len(set(candidates)) == len(candidates)
+                and type(scanned) is int and len(candidates) <= scanned <= ProxyAssociationProc.MAX_PIDS)
+        value.update(scannedPids=scanned, candidateCount=len(candidates))
+        protected = system_image.snapshot()
+        for pid in candidates:
+            stage = 'candidate-image'
+            retain(pid)
+            row = rows[pid]
+            require(row['executable'] == '/usr/bin/xdg-dbus-proxy'
+                    and (row['image'], row['kernelImageSha256']) == protected
+                    and int(row['image']['st_uid']) == int(row['image']['st_gid']) == 0
+                    and stat.S_ISREG(int(row['image']['st_mode'])) and not int(row['image']['st_mode']) & 0o7022)
+        def recheck():
+            guard(); budget()
+            require(system_image.snapshot() == protected)
+            for pid, row in rows.items():
+                budget()
+                require(not pidfds.ready(fds[pid]) and read(pid, True) == row
+                        and held[pid].snapshot() == (row['image'], row['kernelImageSha256'])
+                        and read(pid, True) == row and not pidfds.ready(fds[pid]))
+            guard(); budget()
+        stage = 'instance-and-pipe-snapshot'
+        recheck()
+        launcher_info = proc.info(client['pid'])
+        bwraps = [pid for pid in chain if rows[pid]['executable'] == '/usr/bin/bwrap']
+        first_pipes = {pid: proc.pipes(pid) for pid in (*bwraps, *candidates)}
+        infos = {pid: proc.info(pid) for pid in candidates}
+        def public_info(info):
+            return dict(sha256=info['sha256'], fields={key: info['fields'][key]
+                        for key in ('app', 'instanceId', 'appCommit', 'runtimeCommit')})
+        value['launcher'] = dict(process=copy.deepcopy(client), flatpakInfo=public_info(launcher_info))
+        value['appBwraps'] = [dict(process=rows[pid], pipes=first_pipes[pid][0]) for pid in bwraps]
+        associations = []
+        for pid in candidates:
+            info = infos[pid]
+            matches = [dict(appPid=app, appFd=left['fd'], proxyFd=right['fd'], inode=left['inode'],
+                            appAccess=left['access'], proxyAccess=right['access'])
+                       for app in bwraps for left in first_pipes[app][0] for right in first_pipes[pid][0]
+                       if left['inode'] == right['inode'] and left['access'] == 'read' and right['access'] == 'write']
+            require(len(matches) <= 16)
+            same_info = info['sha256'] == launcher_info['sha256'] and info['fields'] == launcher_info['fields']
+            value['candidates'].append(dict(process=rows[pid], flatpakInfo=public_info(info), pipes=first_pipes[pid][0],
+                                            infoMatchesLauncher=same_info, sharedPipes=matches))
+            if same_info and matches:
+                require(len({entry['inode'] for entry in matches}) == 1)
+                associations.append(pid)
+        stage = 'association-recheck'
+        recheck()
+        require(proc.info(client['pid']) == launcher_info)
+        require(all(proc.pipes(pid) == snapshot for pid, snapshot in first_pipes.items())
+                and all(proc.info(pid) == info for pid, info in infos.items()))
+        recheck()
+        stage = 'association-ambiguity'
+        require(len(associations) <= 1)
+        guard(); budget()
+        value.update(complete=True, associationObserved=len(associations) == 1)
+    except Exception as error:
+        value.update(complete=False, associationObserved=False, failureStage=stage,
+                     unavailable=type(error).__name__ if type(error) in (ValueError, KeyError, TypeError, RuntimeError,
+                         PermissionError, FileNotFoundError, ProcessLookupError, OSError) else 'OtherError')
+    finally:
+        cleanup = False
+        for item, close in [(item, lambda x: x.close()) for item in held.values()] + [(fd, pidfds.close) for fd in fds.values()] + [(system_image, lambda x: x.close())]:
+            try:
+                close(item)
+            except Exception:
+                cleanup = True
+        if cleanup:
+            value.update(complete=False, associationObserved=False, cleanupUnavailable=True)
+    try:
+        return bounded(value, 12288)
+    except Exception:
+        return dict(readOnly=True, qualified=False, inputPermitted=False, authorityGranted=False, releaseReady=False,
+                    complete=False, associationObserved=False, unavailable='OutputLimit')
 
 
 class OwnedLineage:

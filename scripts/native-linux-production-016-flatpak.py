@@ -1446,6 +1446,11 @@ class Session:
         except Exception:
             pass  # Preserve the original refusal even when diagnostics are unavailable.
 
+    def capture_refused_proxy_association(self, module, attempt, client, tree, capture, target_guard):
+        return module.proxy_association_diagnostic(attempt.binding.launch, client, tree, capture.read,
+            image_open=K.HeldImage, system_image=PortalImage('proxy'), pidfds=ObserverPidfds,
+            guard=lambda: (attempt.binding.verify(), target_guard()), budget=capture.budget)
+
     def start_warm_activation_diagnostic(self, client, attempt=None):
         state = {'capture': None, 'record': {'schemaVersion': 1, 'phase': 'warm', 'readOnly': True,
                  'qualified': False, 'inputPermitted': False, 'authorityGranted': False, 'releaseReady': False}}
@@ -1515,6 +1520,16 @@ class Session:
                     pass
             if baseline_diagnostic:
                 state['record']['preInputBaseline'] = baseline_diagnostic
+            if stage == 'pre-input-lineage-create' and baseline_diagnostic.get('failureStage') == 'candidate-count':
+                try:
+                    state['record']['externalProxyDiagnostic'] = self.capture_refused_proxy_association(
+                        module, attempt, client, tree, capture, target_guard)
+                except Exception as diagnostic_error:
+                    state['record']['externalProxyDiagnostic'] = dict(readOnly=True, qualified=False,
+                        inputPermitted=False, authorityGranted=False, releaseReady=False, complete=False,
+                        associationObserved=False, unavailable=type(diagnostic_error).__name__ if type(diagnostic_error) in (
+                            ValueError, KeyError, TypeError, RuntimeError, PermissionError, FileNotFoundError,
+                            ProcessLookupError, OSError) else 'OtherError')
         return state
 
     def finish_warm_activation_diagnostic(self, state, *, settle=False):
