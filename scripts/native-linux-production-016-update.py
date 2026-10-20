@@ -6,6 +6,7 @@ pure validation use only the Python 3.10 standard library.
 """
 import base64
 import ctypes
+import errno
 import hashlib
 import importlib.util
 import io
@@ -2089,6 +2090,58 @@ def owned_process_umask(process, native, helper):
     return {"pid": process["pid"], "startTime": process["startTime"], "umask": values[0].decode("ascii")}
 
 
+def owned_journal_directory_acl(home):
+    require(home == BASE / "result/home" and home.resolve(strict=True) == home, "Exact synthetic journal home required")
+    paths = (home, home / "config", home / "config/creator-works-mcp")
+    handles, observed = [], []
+    try:
+        for index, path in enumerate(paths):
+            before = path.lstat() if index == 0 else os.stat(path.name, dir_fd=handles[-1], follow_symlinks=False)
+            require(stat.S_ISDIR(before.st_mode) and before.st_uid == before.st_gid == UID, "Owned journal ancestry required")
+            fd = os.open(path if index == 0 else path.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                         **({} if index == 0 else {"dir_fd": handles[-1]}))
+            handles.append(fd); observed.append(before)
+            require(stamp(os.fstat(fd)) == stamp(before), "Journal ancestry changed during open")
+        try:
+            raw = os.getxattr(handles[-1], "system.posix_acl_default")
+        except OSError as error:
+            if error.errno != errno.ENODATA:
+                raise
+            acl = {"present": False}
+        else:
+            require(type(raw) is bytes and 0 < len(raw) <= 65536, "Bounded default ACL required")
+            acl = {"present": True, **pin(raw)}
+        for index, path in enumerate(paths):
+            named = path.lstat() if index == 0 else os.stat(path.name, dir_fd=handles[index - 1], follow_symlinks=False)
+            require(stamp(named) == stamp(observed[index]) and stamp(os.fstat(handles[index])) == stamp(observed[index]),
+                    "Journal ancestry changed during ACL observation")
+        info = observed[-1]
+        return {"directory": "config/creator-works-mcp", "uid": info.st_uid, "gid": info.st_gid,
+                "mode": stat.S_IMODE(info.st_mode), "defaultAcl": acl}
+    finally:
+        for fd in reversed(handles):
+            os.close(fd)
+
+
+def capture_initial_creation_context(phase, home, process, report, native, helper):
+    entry = {"phase": phase, "readOnly": True, "complete": False, "intendedChildUmask": "0022"}
+    try:
+        require(phase in ("before-first-input", "after-refusal"), "Fixed creation diagnostic phase required")
+        records = report.setdefault("creationContextDiagnostics", [])
+        require(len(records) < 2 and not any(row["phase"] == phase for row in records), "One creation diagnostic per phase")
+        records.append(entry)
+        entry["process"] = owned_process_umask(process, native, helper)
+        entry["journalDirectory"] = owned_journal_directory_acl(home)
+        require(kernel_record(process["pid"], native, helper) == process, "Owned Root changed during creation diagnostic")
+        entry["complete"] = True
+    except Exception as error:
+        # Diagnostics never authorize input or replace the original refusal.
+        entry["unavailable"] = {"type": type(error).__name__[:80]}
+        if isinstance(error, OSError) and type(error.errno) is int and 0 < error.errno < 4096:
+            entry["unavailable"]["errno"] = error.errno
+    return entry
+
+
 def capture_portable_ancestry(phase, process, native, helper):
     require(phase in ("before-launch", "after-refusal"), "Finite portable diagnostic phase required")
     result = {"schemaVersion": 1, "phase": phase, "readOnly": True, "qualified": False, **FALSE}
@@ -2302,12 +2355,14 @@ def native_session(env):
         else:
             report["installed16"] = verify_installed(review, "16")
             initial = subprocess.Popen(["/usr/bin/creator-hub"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                       env=automation_env if scenario == HTML_SCENARIO else app_env)
+                                       env=automation_env if scenario == HTML_SCENARIO else app_env, umask=0o022)
             expected, executable, parent_pid = profile["baseline"]["hub"], "/usr/bin/creator-hub", os.getpid()
             old = phase_identity(kernel_record(initial.pid, native, helper), expected, executable, parent_pid, UID)
         report["initialRoot"] = old; save(BASE / "result/root.json", old)
         old_bus = verify_bus(old, bus, polkit, GLib, portable=portable)
         surface = Surface(old, x11, helper, native, Atspi, manifest=manifest, generation_dir=generation_dir, inventory=inventory)
+        if not portable:
+            capture_initial_creation_context("before-first-input", home, old, report, native, helper)
         if scenario == HTML_SCENARIO:
             html = HtmlPages(surface, initial, pages, original_request["htmlDriver"]["pin"], automation_port, app_env,
                              report.setdefault("htmlWebDriver", {}))
@@ -2417,6 +2472,8 @@ def native_session(env):
         failure = error
         report["refusal"] = {"type": type(error).__name__, "message": str(error)[:1000]}
         retain_refusal_diagnostic(report, error)
+        if not portable and report.get("initialRoot") is not None:
+            capture_initial_creation_context("after-refusal", home, report["initialRoot"], report, native, helper)
     finally:
         if secret is not None:
             secret[:] = b"\0" * len(secret)

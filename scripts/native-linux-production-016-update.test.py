@@ -2511,6 +2511,219 @@ class HomeMenuLabels(unittest.TestCase):
                 namespace["identity"]()
 
 
+class InitialRootCreationContext(unittest.TestCase):
+    @staticmethod
+    def launch_node():
+        tree = ast.parse(Path(M.__file__).read_text())
+        session = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "native_session")
+        matches = [n for n in ast.walk(session) if isinstance(n, ast.Assign) and isinstance(n.value, ast.Call)
+                   and ast.unparse(n.value.func) == "subprocess.Popen" and n.value.args
+                   and ast.unparse(n.value.args[0]) == "['/usr/bin/creator-hub']"]
+        if len(matches) != 1:
+            raise AssertionError("Exactly the existing initial Root launch is required")
+        return tree, session, matches[0]
+
+    @classmethod
+    def launcher(cls, popen, scenario):
+        _, _, node = cls.launch_node()
+        body = ast.Module(body=[copy.deepcopy(node)], type_ignores=[])
+        namespace = {"subprocess": SimpleNamespace(Popen=popen, DEVNULL=subprocess.DEVNULL), "scenario": scenario,
+                     "HTML_SCENARIO": M.HTML_SCENARIO, "app_env": {"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"},
+                     "automation_env": {"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C", "TAURI_WEBVIEW_AUTOMATION": "true"}}
+        exec(compile(ast.fix_missing_locations(body), "initial-owned-root-launch", "exec"), namespace)
+        return namespace["initial"], namespace
+
+    def test_only_existing_initial_root_launch_sets_child_mask_without_parent_mutation(self):
+        child = object()
+        for scenario in (M.HTML_SCENARIO, "deb-auth-cancel", "deb-approve"):
+            launch = Mock(return_value=child)
+            with patch.object(M.os, "umask", side_effect=AssertionError("No parent umask changes"), create=True):
+                result, namespace = self.launcher(launch, scenario)
+            self.assertIs(result, child)
+            launch.assert_called_once()
+            self.assertEqual(launch.call_args.args, (["/usr/bin/creator-hub"],))
+            self.assertEqual(launch.call_args.kwargs, {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL,
+                "stderr": subprocess.DEVNULL, "env": namespace["automation_env"] if scenario == M.HTML_SCENARIO else namespace["app_env"],
+                "umask": 0o022})
+        tree, _, original = self.launch_node()
+        modified = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and any(k.arg == "umask" for k in n.keywords)]
+        self.assertEqual(modified, [original.value])
+        self.assertFalse(any(isinstance(n, ast.Call) and ast.unparse(n.func) == "os.umask" for n in ast.walk(tree)))
+
+    @unittest.skipUnless(sys.platform == "linux", "Requires Linux file modes in an owned pure fixture child; no app or system unit")
+    def test_linux_real_fresh_file_0644_under_adversarial_parent_mask_without_changing_parent(self):
+        # Only this owned worker changes its mask; it executes the actual launch
+        # expression with the Root command replaced by a fresh-file Python child.
+        worker = r'''
+import ast, os, pathlib, subprocess, sys
+source, directory = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+tree = ast.parse(source.read_text())
+session = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "native_session")
+nodes = [n for n in ast.walk(session) if isinstance(n, ast.Assign) and isinstance(n.value, ast.Call)
+         and ast.unparse(n.value.func) == "subprocess.Popen" and n.value.args
+         and ast.unparse(n.value.args[0]) == "['/usr/bin/creator-hub']"]
+assert len(nodes) == 1
+original = os.umask(0)
+try:
+    control = directory / "adversarial-control"
+    fd = os.open(control, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666); os.close(fd)
+    assert control.stat().st_mode & 0o777 == 0o666, "Fixture must prove unmasked creation, without a restrictive inherited ACL"
+    launches = []
+    real_popen = subprocess.Popen
+    def launch(command, **kwargs):
+        assert command == ["/usr/bin/creator-hub"]
+        assert kwargs["umask"] == 0o022
+        launches.append(command)
+        return real_popen([sys.executable, "-I", "-S", "-B", "-c",
+            "import os,sys; f=os.open(sys.argv[1],os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o666); os.close(f)",
+            str(directory / "new-journal")], **kwargs)
+    class Substitute:
+        Popen = staticmethod(launch)
+        DEVNULL = subprocess.DEVNULL
+    namespace = {"subprocess": Substitute, "scenario": "deb-native-cancel", "HTML_SCENARIO": "deb-native-cancel",
+                 "app_env": {"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"},
+                 "automation_env": {"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"}}
+    exec(compile(ast.fix_missing_locations(ast.Module(body=nodes, type_ignores=[])), "existing-initial-root", "exec"), namespace)
+    assert namespace["initial"].wait(timeout=10) == 0
+    assert launches == [["/usr/bin/creator-hub"]]
+    assert (directory / "new-journal").stat().st_mode & 0o777 == 0o644
+    assert os.umask(0) == 0, "Launching child must not alter the worker parent's adversarial mask"
+    print("Owned fresh-file creation 0666 control -> 0644 child; parent mask unchanged; one launch; no app executed")
+finally:
+    os.umask(original)
+'''
+        with tempfile.TemporaryDirectory(prefix="creator-update-mask-") as folder:
+            result = subprocess.run([sys.executable, "-I", "-S", "-B", "-c", worker, M.__file__, folder],
+                                    stdin=subprocess.DEVNULL, capture_output=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr.decode("utf8", errors="replace"))
+        self.assertIn(b"parent mask unchanged; one launch; no app executed", result.stdout)
+
+    def test_exact_actual_0666_mode_still_refuses_before_any_journal_content_read(self):
+        diagnostic = []
+        fixture = JournalMetadataDiagnostics()
+        with fixture.fixture(mode=0o666) as (home, reader), self.assertRaisesRegex(RuntimeError, "Read journal ownership/mode differs"):
+            M.journal(home, diagnostics=diagnostic)
+        reader.assert_not_called()
+        self.assertEqual(diagnostic[0]["mode"], 0o666)
+        self.assertIsNone(diagnostic[0]["recordCount"])
+
+    @contextmanager
+    def acl_fixture(self, *, raw=b"SYNTHETIC_PRIVATE_ACL_BYTES", error=None, fault=None):
+        home = M.BASE / "result/home"
+        paths = (home, home / "config", home / "config/creator-works-mcp")
+        named = {p: SimpleNamespace(st_dev=1, st_ino=100 + index, st_uid=M.UID, st_gid=M.UID,
+            st_mode=stat.S_IFDIR | 0o700, st_nlink=2, st_size=4096, st_mtime_ns=1, st_ctime_ns=1)
+            for index, p in enumerate(paths)}
+        held, opened, closed = {}, [], []
+        if fault == "foreign": named[paths[1]].st_uid = 0
+        if fault == "symlink": named[paths[1]].st_mode = stat.S_IFLNK | 0o777
+        def open_dir(name, flags, **kwargs):
+            path = Path(name) if not kwargs else paths[opened.index(kwargs["dir_fd"])] / name
+            self.assertIn(path, paths)
+            self.assertEqual(flags, os.O_RDONLY | M.os.O_DIRECTORY | M.os.O_NOFOLLOW | M.os.O_CLOEXEC)
+            fd = 1000 + len(opened); opened.append(fd); held[fd] = copy.copy(named[path])
+            if fault == "opened-drift" and path == paths[1]: held[fd].st_ino += 1
+            return fd
+        def stat_dir(name, *, dir_fd, follow_symlinks):
+            self.assertFalse(follow_symlinks)
+            return named[paths[opened.index(dir_fd)] / name]
+        def xattr(fd, name):
+            self.assertEqual(fd, opened[-1]); self.assertEqual(len(opened), 3)
+            self.assertEqual(name, "system.posix_acl_default")
+            if fault == "named-drift": named[paths[-1]] = SimpleNamespace(**{**vars(named[paths[-1]]), "st_ino": 999})
+            if error is not None: raise error
+            return raw
+        with ExitStack() as stack:
+            for name in ("O_DIRECTORY", "O_NOFOLLOW", "O_CLOEXEC"):
+                if not hasattr(M.os, name): stack.enter_context(patch.object(M.os, name, 0, create=True))
+            if not hasattr(M.errno, "ENODATA"): stack.enter_context(patch.object(M.errno, "ENODATA", 61, create=True))
+            stack.enter_context(patch.object(Path, "resolve", side_effect=lambda self, **_: self, autospec=True))
+            stack.enter_context(patch.object(Path, "lstat", side_effect=lambda self: named[self], autospec=True))
+            stack.enter_context(patch.object(M.os, "open", side_effect=open_dir))
+            stack.enter_context(patch.object(M.os, "stat", side_effect=stat_dir))
+            stack.enter_context(patch.object(M.os, "fstat", side_effect=lambda fd: held[fd]))
+            stack.enter_context(patch.object(M.os, "close", side_effect=closed.append))
+            reader = stack.enter_context(patch.object(M.os, "getxattr", side_effect=xattr, create=True))
+            for name in ("chmod", "fchmod", "chown", "umask", "mkdir", "makedirs"):
+                stack.enter_context(patch.object(M.os, name, side_effect=AssertionError("Diagnostic must not mutate"), create=True))
+            try:
+                yield home, reader
+            finally:
+                self.assertEqual(closed, list(reversed(opened)))
+
+    def test_default_acl_observation_is_fixed_owned_fd_hash_only_without_mutation(self):
+        secret = b"SYNTHETIC_PRIVATE_ACL_BYTES"
+        with self.acl_fixture(raw=secret) as (home, reader):
+            value = M.owned_journal_directory_acl(home)
+        reader.assert_called_once()
+        self.assertEqual(value, {"directory": "config/creator-works-mcp", "uid": M.UID, "gid": M.UID,
+            "mode": 0o700, "defaultAcl": {"present": True, **M.pin(secret)}})
+        self.assertNotIn(secret.decode(), json.dumps(value))
+
+    def test_missing_acl_is_absent_but_unsupported_and_other_errors_are_not_absence(self):
+        with self.acl_fixture(error=OSError(getattr(M.errno, "ENODATA", 61), "private")) as (home, _):
+            self.assertEqual(M.owned_journal_directory_acl(home)["defaultAcl"], {"present": False})
+        for code in (1, 13, 95):
+            with self.acl_fixture(error=OSError(code, "private")) as (home, _), self.assertRaises(OSError):
+                M.owned_journal_directory_acl(home)
+
+    def test_foreign_symlink_fd_named_drift_and_unbounded_acl_refuse(self):
+        for fault in ("foreign", "symlink", "opened-drift", "named-drift"):
+            with self.subTest(fault=fault), self.acl_fixture(fault=fault) as (home, reader), self.assertRaises(RuntimeError):
+                M.owned_journal_directory_acl(home)
+            if fault != "named-drift": reader.assert_not_called()
+        for raw in (b"", b"x" * 65537, "not-bytes"):
+            with self.acl_fixture(raw=raw) as (home, _), self.assertRaises(RuntimeError):
+                M.owned_journal_directory_acl(home)
+        with self.acl_fixture() as (home, reader), self.assertRaises(RuntimeError):
+            M.owned_journal_directory_acl(home / "other")
+        reader.assert_not_called()
+
+    def test_creation_diagnostics_before_input_and_after_refusal_are_bounded_and_readonly(self):
+        process = {"pid": 42, "startTime": "7"}; report = {}
+        with patch.object(M, "owned_process_umask", return_value={**process, "umask": "0022"}) as mask, \
+                patch.object(M, "owned_journal_directory_acl", return_value={"defaultAcl": {"present": False}}) as acl, \
+                patch.object(M, "kernel_record", return_value=process), patch.object(M, "save", side_effect=AssertionError("No extra evidence files")):
+            for phase in ("before-first-input", "after-refusal"):
+                value = M.capture_initial_creation_context(phase, M.BASE / "result/home", process, report, None, None)
+                self.assertTrue(value["readOnly"]); self.assertTrue(value["complete"])
+            M.capture_initial_creation_context("after-refusal", M.BASE / "result/home", process, report, None, None)
+        self.assertEqual(mask.call_count, 2); self.assertEqual(acl.call_count, 2)
+        self.assertEqual(len(report["creationContextDiagnostics"]), 2)
+        self.assertLess(len(json.dumps(report)), 4096)
+
+    def test_diagnostic_permission_error_and_owned_root_loss_cannot_hide_or_replace_first_failure(self):
+        secret = "SYNTHETIC_PRIVATE_CREATION_MARKER"; process = {"pid": 42, "startTime": "7"}
+        for fault in ("process", "acl", "final-owner"):
+            report = {"refusal": {"type": "RuntimeError", "message": "Original journal refusal"}}
+            before = copy.deepcopy(report["refusal"])
+            with patch.object(M, "owned_process_umask", side_effect=RuntimeError(secret) if fault == "process" else None,
+                              return_value={**process, "umask": "0000"}), \
+                    patch.object(M, "owned_journal_directory_acl", side_effect=PermissionError(13, secret) if fault == "acl" else None,
+                                 return_value={"defaultAcl": {"present": False}}) as acl, \
+                    patch.object(M, "kernel_record", return_value={**process, "startTime": "8"} if fault == "final-owner" else process):
+                value = M.capture_initial_creation_context("after-refusal", M.BASE / "result/home", process, report, None, None)
+            self.assertFalse(value["complete"]); self.assertIn("unavailable", value)
+            if fault == "process": acl.assert_not_called()
+            if fault == "acl": self.assertEqual(value["unavailable"], {"type": "PermissionError", "errno": 13})
+            self.assertNotIn(secret, json.dumps(report)); self.assertEqual(report["refusal"], before)
+
+    def test_source_binds_diagnostic_before_inputs_and_after_primary_refusal_without_new_actions(self):
+        tree, session, _ = self.launch_node()
+        calls = [n for n in ast.walk(session) if isinstance(n, ast.Call) and ast.unparse(n.func) == "capture_initial_creation_context"]
+        self.assertEqual(len(calls), 2)
+        before, after = sorted(calls, key=lambda n: n.lineno)
+        self.assertEqual(before.args[0].value, "before-first-input"); self.assertEqual(after.args[0].value, "after-refusal")
+        startup = next(n for n in ast.walk(session) if isinstance(n, ast.Call) and ast.unparse(n.func) == "html.startup")
+        ax_startup = next(n for n in ast.walk(session) if isinstance(n, ast.Call) and ast.unparse(n.func) == "startup_ui")
+        primary = next(n for n in ast.walk(session) if isinstance(n, ast.Call) and ast.unparse(n.func) == "retain_refusal_diagnostic")
+        self.assertLess(before.lineno, min(startup.lineno, ax_startup.lineno)); self.assertGreater(after.lineno, primary.lineno)
+        for name in ("owned_journal_directory_acl", "capture_initial_creation_context"):
+            function = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == name)
+            methods = {ast.unparse(n.func) for n in ast.walk(function) if isinstance(n, ast.Call)}
+            self.assertFalse(methods & {"subprocess.Popen", "subprocess.run", "save", "os.umask", "os.chmod", "os.fchmod", "os.setxattr", "os.removexattr"})
+
+
 class JournalMetadataDiagnostics(unittest.TestCase):
     @staticmethod
     def records(session="a" * 64):
