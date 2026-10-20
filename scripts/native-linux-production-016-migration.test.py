@@ -1861,6 +1861,63 @@ class ControllerTests(unittest.TestCase):
                  if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "save"]
         self.assertEqual([(ast.unparse(node.args[0]), ast.unparse(node.args[1])) for node in saved], [("root / 'report.json'", "report")])
 
+    def test_cancel_journal_requires_original_semantics_bytes_and_pin_in_both_phases(self):
+        for baseline in ({"revision": 1, "records": []}, {"revision": 1, "records": records("a", ["save_config"], [2])}):
+            raw, report = json.dumps(baseline).encode(), {}
+            with patch.object(M, "read_file", return_value=raw) as read, patch.object(M, "journal_delta", side_effect=AssertionError("Cancel cannot use the append oracle")):
+                for phase in ("first", "reopened"):
+                    self.assertEqual(M.observed_cancel_journal(baseline, raw, Path("/synthetic/home"), report, phase), baseline)
+                    captured = report["operationJournals"][phase]
+                    self.assertEqual(captured["file"], {"size": len(raw), "sha256": M.digest(raw)})
+                    self.assertTrue(captured["prefixEqual"]); self.assertEqual(captured["appendCount"], 0)
+                    self.assertEqual(captured["current"]["records"], captured["previous"]["records"])
+            self.assertEqual(read.call_count, 2)
+            self.assertTrue(all(call.args == (Path("/synthetic/home") / M.JOURNAL, 65536) and call.kwargs == {"uid": M.UID} for call in read.call_args_list))
+
+    def test_cancel_journal_rejects_any_append_changed_old_records_and_reformatted_bytes_after_capture(self):
+        empty = {"revision": 1, "records": []}
+        old = {"revision": 1, "records": records("a", ["save_config"], [2])}
+        cases = [(empty, {"revision": 1, "records": [{**row, "outcome": outcome} for row in records("b", ["save_config"], [3])]})
+                 for outcome in (*sorted(M.JOURNAL_OUTCOMES), "unsupported-outcome")]
+        cases.append((empty, {"revision": 1, "records": records("b", ["load_config", "discover_unity_projects"], [3, 4])}))
+        for key, value in (("id", 3), ("session", "b" * 64), ("command", "load_config"), ("outcome", "accepted")):
+            changed = copy.deepcopy(old); changed["records"][0][key] = value; cases.append((old, changed))
+        for phase in ("first", "reopened"):
+            for baseline, changed in cases:
+                with self.subTest(phase=phase, changed=changed), patch.object(M, "read_file", return_value=json.dumps(changed).encode()):
+                    report = {}
+                    with self.assertRaisesRegex(RuntimeError, "Guide cancellation changed operation journal records"):
+                        M.observed_cancel_journal(baseline, json.dumps(baseline).encode(), Path("/synthetic/home"), report, phase)
+                    self.assertIn(phase, report["operationJournals"])
+            for raw in (json.dumps(empty, separators=(",", ":")).encode(), json.dumps(empty).encode() + b"\n"):
+                with self.subTest(phase=phase, raw=raw), patch.object(M, "read_file", return_value=raw):
+                    report = {}
+                    with self.assertRaisesRegex(RuntimeError, "Guide cancellation changed original operation journal bytes or file pin"):
+                        M.observed_cancel_journal(empty, json.dumps(empty).encode(), Path("/synthetic/home"), report, phase)
+                    captured = report["operationJournals"][phase]
+                    self.assertEqual(captured["appendCount"], 0); self.assertTrue(captured["prefixEqual"])
+                    self.assertEqual(captured["file"], {"size": len(raw), "sha256": M.digest(raw)})
+
+    def test_only_initial_guide_cancel_uses_exact_original_journal_checks_on_both_roots(self):
+        tree = ast.parse((HERE / "native-linux-production-016-migration.py").read_text(encoding="utf-8"))
+        run = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "run_session")
+        branches = [node for node in ast.walk(run) if isinstance(node, ast.If)
+                    and any(isinstance(call, ast.Call) and isinstance(call.func, ast.Name) and call.func.id == "observed_cancel_journal"
+                            for statement in node.body for call in ast.walk(statement))]
+        self.assertEqual(len(branches), 2)
+        for branch, phase, previous in zip(branches, ("first", "reopened"), ("baseline", "current")):
+            self.assertEqual(ast.unparse(branch.test), "scenario == SCENARIOS[0]")
+            calls = [node for statement in branch.body for node in ast.walk(statement) if isinstance(node, ast.Call)]
+            cancel = [node for node in calls if isinstance(node.func, ast.Name) and node.func.id == "observed_cancel_journal"]
+            self.assertEqual(len(cancel), 1)
+            self.assertEqual([ast.unparse(arg) for arg in cancel[0].args[:4]], ["baseline", "before[JOURNAL]", "home", "report"])
+            self.assertEqual(cancel[0].args[4].value, phase)
+            other = [node for statement in branch.orelse for node in ast.walk(statement)
+                     if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "observed_journal_delta"]
+            self.assertEqual(len(other), 1)
+            self.assertEqual(ast.unparse(other[0].args[0]), previous)
+            self.assertEqual(other[0].args[3].value, phase)
+
     def test_guide_cancel_allows_only_two_completed_reads_per_new_root_and_preserves_prefix(self):
         empty = {"revision": 1, "records": []}
         first = {"revision": 1, "records": records("a", ["load_config", "discover_unity_projects"], [3, 4])}

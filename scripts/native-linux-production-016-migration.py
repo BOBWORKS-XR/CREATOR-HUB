@@ -250,7 +250,7 @@ def journal_delta(previous, current, *, transferred=False):
     return current
 
 
-def observed_journal_delta(previous, home, report, phase, *, transferred=False):
+def observe_journal(previous, home, report, phase):
     require(phase in ("first", "reopened"), "Finite journal observation phase required")
     raw = read_file(home / JOURNAL, 65536, uid=UID)
     capture = {"diagnosticOnly": True, "validationAuthority": False,
@@ -289,7 +289,21 @@ def observed_journal_delta(previous, home, report, phase, *, transferred=False):
     capture.update(previous=summary(previous), current=summary(current),
                    prefixEqual=new[:len(old)] == old if lists else None,
                    appendCount=len(new) - len(old) if lists else None)
+    return current, raw
+
+
+def observed_journal_delta(previous, home, report, phase, *, transferred=False):
+    current, _raw = observe_journal(previous, home, report, phase)
     return journal_delta(previous, current, transferred=transferred)
+
+
+def observed_cancel_journal(baseline, original_raw, home, report, phase):
+    current, raw = observe_journal(baseline, home, report, phase)
+    require(current == baseline, "Guide cancellation changed operation journal records")
+    expected = {"size": len(original_raw), "sha256": digest(original_raw)}
+    require(raw == original_raw and report["operationJournals"][phase]["file"] == expected,
+            "Guide cancellation changed original operation journal bytes or file pin")
+    return current
 
 
 def retention_state(scenario):
@@ -2356,7 +2370,10 @@ def run_session(env):
                          lambda: session.review_connections(home, before, binding))
         report["authorization"] = authorizer.records
         finish_ui(session, scenario)
-        current = observed_journal_delta(baseline, home, report, "first", transferred=scenario != SCENARIOS[0])
+        if scenario == SCENARIOS[0]:
+            current = observed_cancel_journal(baseline, before[JOURNAL], home, report, "first")
+        else:
+            current = observed_journal_delta(baseline, home, report, "first", transferred=scenario != SCENARIOS[0])
         preserved(home, before, transferred=scenario != SCENARIOS[0], binding=binding); batch_outcome(home, scenario)
         installed(binding, retention_state(scenario))
         report["oldRuntimeAfterMigration"] = old_sdk.check()
@@ -2369,7 +2386,10 @@ def run_session(env):
         require(read_file(home / TERMS) == terms and session.owned["pid"] != report["first"]["root"]["pid"], "Normal reopen or terms retention failed")
         pages.wait(lambda: session.d.read("#usage-terms-dialog", "attribute/open") is None)
         finish_ui(session, scenario, reopened=True)
-        observed_journal_delta(current, home, report, "reopened")
+        if scenario == SCENARIOS[0]:
+            observed_cancel_journal(baseline, before[JOURNAL], home, report, "reopened")
+        else:
+            observed_journal_delta(current, home, report, "reopened")
         for name, raw in expected_after.items():
             require(read_file(home / name) == raw, "Reopen repeated migration or changed settings: " + name)
         preserved(home, before, transferred=scenario != SCENARIOS[0], binding=binding); batch_outcome(home, scenario)
