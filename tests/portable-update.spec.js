@@ -3,10 +3,10 @@
 // run_install tests; this browser fixture does not claim native installation.
 const { test, expect } = require('@playwright/test');
 
-async function load(page, { recovery = false, preview = false, previewSupported, platform = 'Linux x86_64', updateError = null } = {}) {
+async function load(page, { recovery = false, preview = false, previewSupported, platform = 'Linux x86_64', updateError = null, recoveryError = null } = {}) {
   const state = { calls: [], errors: [], update: { currentVersion: '0.1.16', availableVersion: '0.1.17',
     downloaded: false, installBlocked: null, warning: null }, recovery: { retained: false, message: null },
-    preferences: { preview, autoDownload: false, restoreHostedViews: true }, updateError };
+    preferences: { preview, autoDownload: false, restoreHostedViews: true }, updateError, recoveryError };
   if (previewSupported !== undefined) state.update.previewSupported = previewSupported;
   page.on('pageerror', error => state.errors.push(error.message));
   await page.exposeFunction('portableUpdateNativeFixture', async (command, args) => {
@@ -30,7 +30,10 @@ async function load(page, { recovery = false, preview = false, previewSupported,
         if (state.recovery.retained) throw Error('Another Hub operation is already running.');
         if (state.updateError) throw Error(state.updateError);
         return state.update;
-      case 'hub_update_recovery_status': return state.recovery;
+      case 'hub_update_recovery_status':
+        if (state.recoveryError) throw Error(state.recoveryError);
+        if (state.holdRecovery) return new Promise(resolve => { state.finishRecovery = resolve; });
+        return state.recovery;
       case 'review_retained_hub_update': return new Promise((resolve, reject) => {
         state.finishReview = resolve;
         state.refuseReview = message => reject(Error(message));
@@ -62,6 +65,13 @@ async function load(page, { recovery = false, preview = false, previewSupported,
   }, { recovery, preview, platform });
   await page.goto('http://127.0.0.1:4188');
   await expect(page.locator('#check-updates')).toBeEnabled();
+  if (recoveryError) {
+    await expect(page.locator('#action-error')).toContainText('Retained update state could not be read');
+    await expect(page.locator('#hub-update-button')).toBeDisabled();
+    expect(state.calls.some(c => ['hub_preferences_status', 'convergence_status', 'app_inventory',
+      'hub_update_status', 'install_hub_update', 'download_hub_update'].includes(c.command))).toBe(false);
+    return state;
+  }
   if (updateError) {
     await expect(page.locator('#hub-update-warning')).toContainText(updateError);
     await expect(page.locator('#hub-update-button')).toBeDisabled();
@@ -75,6 +85,53 @@ async function load(page, { recovery = false, preview = false, previewSupported,
   await expect(page.locator('#hub-update-review')).toBeHidden();
   return state;
 }
+
+test('startup recovery read failure can resume through Check for updates after the state is readable', async ({ page }) => {
+  const state = await load(page, { recovery: true, recoveryError: 'Recovery state temporarily unavailable' });
+  state.recoveryError = null;
+  await page.locator('#check-updates').click();
+  await expect(page.locator('#hub-update-button')).toBeEnabled();
+  await expect(page.locator('#action-error')).toBeHidden();
+  expect(state.calls.filter(c => c.command === 'hub_preferences_status')).toHaveLength(1);
+  expect(state.calls.filter(c => c.command === 'convergence_status')).toHaveLength(1);
+  expect(state.calls.some(c => ['install_hub_update', 'download_hub_update', 'set_hub_preference'].includes(c.command))).toBe(false);
+  expect(state.errors).toEqual([]);
+});
+
+test('startup recovery retry keeps startup blocked on another read failure or a retained update', async ({ page }) => {
+  const state = await load(page, { recovery: true, recoveryError: 'Recovery state temporarily unavailable' });
+  await page.locator('#check-updates').click();
+  await expect(page.locator('#check-updates')).toBeEnabled();
+  await expect(page.locator('#action-error')).toContainText('Retained update state could not be read');
+  expect(state.calls.filter(c => c.command === 'hub_update_recovery_status')).toHaveLength(2);
+  state.recoveryError = null;
+  state.recovery = { retained: true, message: 'Review the retained update before closing Hub.' };
+  await page.locator('#check-updates').click();
+  await expect(page.locator('#hub-update-review')).toBeVisible();
+  await expect(page.locator('#hub-update-button')).toBeDisabled();
+  expect(state.calls.some(c => ['hub_preferences_status', 'convergence_status', 'app_inventory',
+    'hub_update_status', 'install_hub_update', 'download_hub_update'].includes(c.command))).toBe(false);
+  expect(state.errors).toEqual([]);
+});
+
+test('pending startup recovery retry admits one read and resumes startup once', async ({ page }) => {
+  const state = await load(page, { recovery: true, recoveryError: 'Recovery state temporarily unavailable' });
+  state.recoveryError = null;
+  state.holdRecovery = true;
+  await page.locator('#check-updates').click();
+  await expect.poll(() => typeof state.finishRecovery).toBe('function');
+  await expect(page.locator('#check-updates')).toBeDisabled();
+  await page.locator('#check-updates').dispatchEvent('click');
+  expect(state.calls.filter(c => c.command === 'hub_update_recovery_status')).toHaveLength(2);
+  expect(state.calls.some(c => c.command === 'hub_preferences_status')).toBe(false);
+  state.holdRecovery = false;
+  state.finishRecovery(state.recovery);
+  await expect(page.locator('#check-updates')).toBeEnabled();
+  expect(state.calls.filter(c => c.command === 'hub_preferences_status')).toHaveLength(1);
+  expect(state.calls.filter(c => c.command === 'convergence_status')).toHaveLength(1);
+  expect(state.calls.some(c => ['install_hub_update', 'download_hub_update'].includes(c.command))).toBe(false);
+  expect(state.errors).toEqual([]);
+});
 
 async function progress(page, message, cancellable) {
   await page.evaluate(({ message, cancellable }) => window.events['app-progress']({ payload: {

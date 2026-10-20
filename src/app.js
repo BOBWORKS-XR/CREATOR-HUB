@@ -27,6 +27,8 @@
   let hubUpdate = null;
   let previewSupported = true;
   let retainedUpdate = null;
+  let startupRecoveryRetry = false;
+  let startupRunning = false;
   let busy = false;
   let launchRevision = -1;
   const preferenceControls = [['preview-channel', 'preview', 'preview'],
@@ -287,7 +289,7 @@
   function renderState() {
     renderToolView();
     const featureBusy = directFeatures && window.CreatorFeaturePages?.busy() === true;
-    byId('check-updates').disabled = busy || featureBusy;
+    byId('check-updates').disabled = busy || featureBusy || startupRunning;
     byId('retry-inventory').disabled = busy;
     byId('inventory-error').classList.toggle('hidden', !inventoryError);
     byId('inventory-error-message').textContent = inventoryError ? `App discovery failed: ${inventoryError}${inventory ? ' Last-known versions are shown; retry before using app controls.' : ''}` : '';
@@ -691,7 +693,7 @@
   byId('open-button').addEventListener('click', () => action('open_app'));
   byId('adopt-button').addEventListener('click', () => action('use_existing_app'));
   for (const id of ['disconnect-mcp-row', 'disconnect-mcp-detail']) byId(id).addEventListener('click', () => action('disconnect_mcp', 'mcp'));
-  byId('check-updates').addEventListener('click', () => refresh(true));
+  byId('check-updates').addEventListener('click', () => startupRecoveryRetry ? beginStartup() : refresh(true));
   byId('retry-inventory').addEventListener('click', () => refresh(false));
   byId('recheck-app').addEventListener('click', async () => {
     if (busy) return;
@@ -758,23 +760,35 @@
     directReady = true;
     renderState();
   }
-  window.CreatorUsageTerms.requireAcceptance().then(async () => {
-    if (updateRecovery) {
-      try {
-        acceptRecovery(await invoke('hub_update_recovery_status'));
-        // A renderer reload must not hide recovery behind Manager-backed
-        // migration or restoration. Reopening through the helper resumes startup.
-        if (retainedUpdate.retained) { renderState(); return; }
-      } catch (reason) {
-        error.textContent = `Retained update state could not be read: ${String(reason)}. Use Check for updates to review it again.`;
-        error.classList.remove('hidden');
-        renderState(); return;
+  async function beginStartup() {
+    if (startupRunning) return;
+    startupRunning = true; renderState(); error.classList.add('hidden');
+    try {
+      if (updateRecovery) {
+        try {
+          acceptRecovery(await invoke('hub_update_recovery_status'));
+          startupRecoveryRetry = false;
+          // A renderer reload must not hide recovery behind Manager-backed
+          // migration or restoration. Reopening through the helper resumes startup.
+          if (retainedUpdate.retained) return;
+        } catch (reason) {
+          startupRecoveryRetry = true;
+          error.textContent = `Retained update state could not be read: ${String(reason)}. Use Check for updates to review it again.`;
+          error.classList.remove('hidden');
+          return;
+        }
       }
+      await loadPreferences();
+      await window.CreatorConvergence?.run();
+      await start();
+    } catch (reason) {
+      error.textContent = `Startup paused: ${String(reason)}. Existing apps and settings were kept.`;
+      error.classList.remove('hidden');
+    } finally {
+      startupRunning = false; renderState();
     }
-    await loadPreferences();
-    await window.CreatorConvergence?.run();
-    await start();
-  }).catch(reason => {
+  }
+  window.CreatorUsageTerms.requireAcceptance().then(beginStartup).catch(reason => {
     error.textContent = `Startup paused: ${String(reason)}. Existing apps and settings were kept.`;
     error.classList.remove('hidden');
   });
