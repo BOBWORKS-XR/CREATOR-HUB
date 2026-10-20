@@ -1,0 +1,145 @@
+name: Production 016 fresh and public012 manual incoming qualification
+
+on:
+  push:
+    branches: [validation/native-linux-production-016]
+  workflow_dispatch:
+    inputs:
+      scenario:
+        description: One scenario on one fresh hosted runner
+        required: true
+        type: choice
+        options: [fresh16, public012-to16]
+      execute_incoming:
+        description: Allow only this runner's exact manual Hub installation and native page inputs
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  incoming:
+    if: >-
+      github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.repository_id == '1364807512' &&
+      github.ref == 'refs/heads/validation/native-linux-production-016' && github.event_name == 'workflow_dispatch' &&
+      github.workflow_ref == 'BOBWORKS-XR/CREATOR-HUB/.github/workflows/native-linux-production-016-incoming.yml@refs/heads/validation/native-linux-production-016' &&
+      inputs.execute_incoming == true
+    runs-on: ubuntu-22.04
+    timeout-minutes: 25
+    env:
+      CREATOR_NATIVE_LINUX_PRODUCTION_016: '1'
+      CREATOR_INCOMING_016_EXECUTE: ${{ inputs.execute_incoming }}
+      CREATOR_INCOMING_016_SCENARIO: ${{ inputs.scenario }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24.17.0
+      - uses: actions/setup-python@v6
+        id: preflight_python
+        with:
+          python-version: '3.11.17'
+          update-environment: false
+      - run: npm ci --ignore-scripts
+      - name: Pure controller, workflow YAML and Bash checks before privilege or downloads
+        env:
+          PREFLIGHT_PYTHON: ${{ steps.preflight_python.outputs.python-path }}
+        run: |
+          "$PREFLIGHT_PYTHON" -B scripts/native-linux-production-016-incoming.test.py
+          node --test scripts/native-linux-production-016-input.test.cjs
+      - name: Fresh immutable assembly, inspection and public012 API evidence
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const fs = require('node:fs'), path = require('node:path'), assert = require('node:assert/strict');
+            const {execFileSync} = require('node:child_process');
+            const script = path.join(process.env.GITHUB_WORKSPACE, 'scripts/native-linux-production-016-incoming.py');
+            const profile = execFileSync('/usr/bin/python3', ['-B', script, 'profile'], {encoding:'utf8', maxBuffer:16384});
+            const production = require(path.join(process.env.GITHUB_WORKSPACE, 'scripts/native-linux-production-016-input.cjs'));
+            const neutral = require(path.join(process.env.GITHUB_WORKSPACE, 'scripts/native-linux-016-input.cjs'));
+            await production.run({github, context, profile});
+            const repo = {owner:'BOBWORKS-XR', repo:'CREATOR-HUB'};
+            const inspectionRun = (await github.rest.actions.getWorkflowRun({...repo, run_id:39348205069})).data;
+            const inspectionJob = (await github.rest.actions.getJobForWorkflowRun({...repo, job_id:118385851104})).data;
+            const inspectionArtifact = (await github.rest.actions.getArtifact({...repo, artifact_id:12232440390})).data;
+            const release = (await github.rest.repos.getReleaseByTag({...repo, tag:'v0.1.12'})).data;
+            const asset = (await github.rest.repos.getReleaseAsset({...repo, asset_id:608099582})).data;
+            const tag = (await github.rest.git.getRef({...repo, ref:'tags/v0.1.12'})).data;
+            const tagObject = (await github.rest.git.getTag({...repo, tag_sha:'4c11a9ebaf5076fe0b051455b35b7d2dce48c119'})).data;
+            const baseline = await neutral.publicDeb(github, {repo:'CREATOR-HUB', tag:'v0.1.12', name:'Creator.Hub_0.1.12_amd64.deb',
+              size:5911218, sha256:'a1d20fb23544356d90ab2314b6d430b274220e97d9129815eea731ac39c7ffd2'}, fetch);
+            assert.equal(baseline.receipt.assetId,608099582); assert.equal(baseline.receipt.releaseId,402585934);
+            const temp = fs.realpathSync(process.env.RUNNER_TEMP); assert.equal(temp,process.env.RUNNER_TEMP);
+            for (const [name,body] of [['incoming-016-api.json',Buffer.from(JSON.stringify({inspectionRun,inspectionJob,inspectionArtifact,release,asset,tag,tagObject}))],
+              ['incoming-016-baseline.deb',baseline.bytes]]) fs.writeFileSync(path.join(temp,name),body,{flag:'wx',mode:0o600});
+      - name: Existing unchanged production offline inspection, not native acceptance
+        run: python3 -B scripts/native-linux-production-016-stage.py
+      - name: Install only disposable native test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-0 libayatana-appindicator3-1 libgtk-3-0 libxdo3 libxres1 librsvg2-2 \
+            python3-gi python3-toml gir1.2-gtk-3.0 gir1.2-atspi-2.0 gir1.2-gdkpixbuf-2.0 at-spi2-core webkit2gtk-driver \
+            dbus-x11 xvfb xauth openbox fonts-dejavu-core
+      - uses: dtolnay/rust-toolchain@1.99.0
+      - name: Build only the pinned native WebDriver tool, never Root or private modules
+        run: cargo install tauri-driver --version 2.1.0 --locked --root "$RUNNER_TEMP/native-linux-production-016-driver"
+      - name: Seal request, install once per fixed phase, then observe owned GUI and normal reopen
+        run: python3 -B scripts/native-linux-production-016-incoming.py run
+      - name: Retain bounded root installer receipts without package inputs
+        if: always()
+        run: |
+          sudo -n /usr/bin/env -i PATH=/usr/bin:/bin RUNNER_TEMP="$RUNNER_TEMP" RUNNER_UID="$(id -u)" /usr/bin/python3 -B - <<'PY'
+          import os, stat
+          from pathlib import Path
+          base = Path('/opt/creator-incoming-016-fixture')
+          output = Path(os.environ['RUNNER_TEMP']) / 'native-linux-production-016-incoming-installer'
+          assert output.parent.resolve() == output.parent and not os.path.lexists(output)
+          output.mkdir(mode=0o700); uid = int(os.environ['RUNNER_UID']); os.chown(output,uid,uid)
+          for name in ['request.json','ancestry.json','baseline-files.json','install-first-started.json','install-first-complete.json','install16-started.json','install16-complete.json']:
+              file = base / name
+              if not os.path.lexists(file): continue
+              before = file.lstat()
+              assert file.resolve() == file and stat.S_ISREG(before.st_mode) and before.st_nlink == 1 and before.st_uid == before.st_gid == 0 and before.st_size <= 262144
+              def stamp(info): return tuple(getattr(info,k) for k in ['st_dev','st_ino','st_size','st_mode','st_nlink','st_uid','st_gid','st_mtime_ns','st_ctime_ns'])
+              with os.fdopen(os.open(file,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK),'rb') as stream:
+                  assert stamp(os.fstat(stream.fileno())) == stamp(before)
+                  body = stream.read(262145)
+                  assert len(body) == before.st_size and stamp(os.fstat(stream.fileno())) == stamp(before)
+              assert stamp(file.lstat()) == stamp(before)
+              target = output / name
+              with target.open('xb') as stream: stream.write(body)
+              os.chmod(target,0o600); os.chown(target,uid,uid)
+          PY
+      - name: Retain original synthetic evidence; no update, retirement, Flatpak or release claim
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-linux-production-016-incoming-${{ inputs.scenario }}-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/incoming-016-api.json
+            ${{ runner.temp }}/incoming-016-request.json
+            ${{ runner.temp }}/native-linux-production-016-input/profile.json
+            ${{ runner.temp }}/native-linux-production-016-input/api-binding.json
+            ${{ runner.temp }}/native-linux-production-016-stage/binding.json
+            ${{ runner.temp }}/native-linux-production-016-incoming-installer/
+            ${{ runner.temp }}/native-linux-production-016-incoming/before.json
+            ${{ runner.temp }}/native-linux-production-016-incoming/report.json
+            ${{ runner.temp }}/native-linux-production-016-incoming/old012/session.json
+            ${{ runner.temp }}/native-linux-production-016-incoming/old012/driver.*
+            ${{ runner.temp }}/native-linux-production-016-incoming/old012/physical/
+            ${{ runner.temp }}/native-linux-production-016-incoming/old012/failure-physical/
+            ${{ runner.temp }}/native-linux-production-016-incoming/first16/session.json
+            ${{ runner.temp }}/native-linux-production-016-incoming/first16/driver.*
+            ${{ runner.temp }}/native-linux-production-016-incoming/first16/physical/
+            ${{ runner.temp }}/native-linux-production-016-incoming/first16/failure-physical/
+            ${{ runner.temp }}/native-linux-production-016-incoming/reopened16/session.json
+            ${{ runner.temp }}/native-linux-production-016-incoming/reopened16/driver.*
+            ${{ runner.temp }}/native-linux-production-016-incoming/reopened16/physical/
+            ${{ runner.temp }}/native-linux-production-016-incoming/reopened16/failure-physical/
