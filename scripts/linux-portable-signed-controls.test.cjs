@@ -103,6 +103,24 @@ test('private token has no checkout/execution and the worker has only read permi
   assert.match(evidence.with.path, /result\/04-stale.json/); assert.match(evidence.with.path, /stage-receipt.json/);
 });
 
+test('runner context is step-local, never job env; Cargo target belongs to its execution step', () => {
+  const jobEnvScope = value => {
+    for (const [name, job] of Object.entries(value.jobs)) {
+      for (const expression of JSON.stringify(job.env || {}).match(/\$\{\{[\s\S]*?\}\}/g) || []) {
+        assert.doesNotMatch(expression, /\brunner\s*(?:\.|\[)/, `${name}: runner context is unavailable in job env`);
+      }
+    }
+  };
+  jobEnvScope(workflow);
+  const worker = workflow.jobs['signed-controls'];
+  const cargo = worker.steps.find(step => step.run?.includes('cargo test --release'));
+  assert.equal(worker.env.CARGO_TARGET_DIR, undefined);
+  assert.equal(cargo.env.CARGO_TARGET_DIR, '${{ runner.temp }}/portable-signed-controls-target');
+  const old = structuredClone(workflow);
+  old.jobs['signed-controls'].env.CARGO_TARGET_DIR = '${{ runner.temp }}/portable-signed-controls-target';
+  assert.throws(() => jobEnvScope(old), /runner context is unavailable in job env/);
+});
+
 test('all Bash, embedded JS and staging Python parse without execution', () => {
   const bash = process.platform === 'win32' ? 'C:/Program Files/Git/bin/bash.exe' : '/usr/bin/bash';
   for (const job of Object.values(workflow.jobs)) for (const step of job.steps) {

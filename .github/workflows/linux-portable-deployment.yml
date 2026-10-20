@@ -134,7 +134,6 @@ jobs:
       actions: read
     env:
       SIGNED_CONTROLS_EXECUTE: ${{ inputs.run_signed_controls }}
-      CARGO_TARGET_DIR: ${{ runner.temp }}/portable-signed-controls-target
     steps:
       - uses: actions/checkout@v6
         with:
@@ -160,6 +159,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.99.0
       - name: Run only the fixed signed filesystem control integration test
         env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/portable-signed-controls-target
           CREATOR_SIGNED_CONTROLS_INPUT_ROOT: ${{ runner.temp }}/portable-signed-controls-staged/input
           CREATOR_SIGNED_CONTROLS_OUTPUT: ${{ runner.temp }}/portable-signed-controls-staged/result
         run: |
