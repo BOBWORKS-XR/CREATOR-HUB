@@ -364,11 +364,45 @@ def stage_zip(file, expected, output):
             write(target, raw)
 
 
+def public_tool_failure(argv, out, err, failure_type, returncode=None, *, input=None, env=None):
+    # Only these public, independently inspected commands may expose output.
+    package = BASE / "inputs/members/assembly16/native-packages/Creator Hub_0.1.16_amd64.deb"
+    if input is not None or env is not None:
+        return
+    if argv == ["/usr/bin/dpkg", "--install", str(package)]:
+        tool = "baseline-dpkg-install"
+    elif argv == ["/usr/sbin/update-ca-certificates"]:
+        tool = "update-ca-certificates"
+    else:
+        return
+    record = {"kind": "production016-public-tool-failure", "tool": tool, "pid": os.getpid(),
+              "failureType": failure_type, "returncode": returncode}
+    try:
+        for label, stream in (("stdout", out), ("stderr", err)):
+            size = stream.seek(0, os.SEEK_END); stream.seek(0)
+            record[label] = {"bytes": size, "truncated": size > 8192, "text": stream.read(8192).decode("utf-8", errors="replace")}
+        save(BASE / f"public-tool-failure-{tool}-{os.getpid()}.json", record, 0o644)
+    except Exception as error:
+        record["evidencePublicationErrorType"] = type(error).__name__
+    try:
+        print(json.dumps(record, separators=(",", ":"), allow_nan=False), file=sys.stderr, flush=True)
+    except Exception:
+        pass  # A failed diagnostic sink must not replace the original failure.
+
+
 def run_tool(argv, *, input=None, allowed=(0,), timeout=90, env=None, limit=2 * 1024**2):
     with __import__("tempfile").TemporaryFile() as out, __import__("tempfile").TemporaryFile() as err:
-        result = subprocess.run(argv, input=input, stdin=subprocess.DEVNULL if input is None else None, stdout=out, stderr=err,
-                                env=env or {"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"}, cwd="/", timeout=timeout, check=False)
-        require(out.tell() <= limit and err.tell() <= 65536, "Bounded tool diagnostics exceeded")
+        try:
+            result = subprocess.run(argv, input=input, stdin=subprocess.DEVNULL if input is None else None, stdout=out, stderr=err,
+                                    env=env or {"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"}, cwd="/", timeout=timeout, check=False)
+        except Exception as error:
+            public_tool_failure(argv, out, err, type(error).__name__, input=input, env=env)
+            raise
+        bounded = out.tell() <= limit and err.tell() <= 65536
+        if not bounded or result.returncode not in allowed:
+            public_tool_failure(argv, out, err, "NonzeroExit" if bounded else "DiagnosticLimitExceeded",
+                                result.returncode, input=input, env=env)
+        require(bounded, "Bounded tool diagnostics exceeded")
         out.seek(0); raw = out.read(limit + 1)
         require(result.returncode in allowed, "Fixed tool failed: " + Path(argv[0]).name)
         return raw
@@ -2152,11 +2186,13 @@ def broker(env):
                 try:
                     child.finish(close_message=close_message)
                 except Exception as error:
-                    failure = failure or error; record[label] = {"refused": True}
+                    failure = failure or error
+                    record[label] = {"refused": True, "type": type(error).__name__, "message": str(error)[:1000]}
         try:
             record["tlsCleanup"] = tls_cleanup(env)
         except Exception as error:
             failure = failure or error; record["tlsCleanupRefused"] = True
+            record["tlsCleanupError"] = {"type": type(error).__name__, "message": str(error)[:1000]}
         try:
             if relock:
                 polkit.fixture_credential("lock")
@@ -2187,6 +2223,10 @@ def export_evidence(env):
     destination.mkdir(mode=0o700); os.chown(destination, owner, owner)
     names = ("broker.json", "request.json", "review.json", "result/report.json", "result/original-ui.json", "result/successor-ui.json", "session.stdout", "session.stderr",
              "result/initial-bitmap/root-window.png", "result/successor-bitmap/root-window.png")
+    diagnostics = sorted(BASE.glob("public-tool-failure-*.json"))
+    require(len(diagnostics) <= 8 and all(re.fullmatch(r"public-tool-failure-(baseline-dpkg-install|update-ca-certificates)-[1-9][0-9]*\.json", file.name)
+                                        and file.lstat().st_uid == 0 for file in diagnostics), "Unknown public tool evidence refused")
+    names += tuple(file.name for file in diagnostics)
     for name in names:
         file = BASE / name
         if not os.path.lexists(file):

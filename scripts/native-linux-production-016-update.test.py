@@ -192,6 +192,92 @@ def offline_verifier_inputs(folder):
 
 
 class Pure(unittest.TestCase):
+    def public_tool_failure(self, argv, *, output=b"installer output\n", error=b"dependency failure\n", code=1, **kwargs):
+        def child(actual, **options):
+            self.assertEqual(actual, argv)
+            options["stdout"].write(output); options["stderr"].write(error)
+            return SimpleNamespace(returncode=code)
+        with patch.object(M.subprocess, "run", side_effect=child), patch("builtins.print") as printed:
+            with self.assertRaises(RuntimeError) as failure:
+                M.run_tool(argv, **kwargs)
+        return failure.exception, [json.loads(call.args[0]) for call in printed.call_args_list]
+
+    def test_exact_baseline_install_failure_captures_public_output_without_argv_or_context(self):
+        with tempfile.TemporaryDirectory() as temp, patch.object(M, "BASE", Path(temp).resolve()):
+            command = ["/usr/bin/dpkg", "--install", str(M.BASE / "inputs/members/assembly16/native-packages/Creator Hub_0.1.16_amd64.deb")]
+            failure, logs = self.public_tool_failure(command)
+            self.assertEqual(str(failure), "Fixed tool failed: dpkg")
+            self.assertEqual(len(logs), 1)
+            evidence = logs[0]
+            self.assertEqual(evidence["tool"], "baseline-dpkg-install")
+            self.assertEqual(evidence["returncode"], 1)
+            self.assertEqual(evidence["failureType"], "NonzeroExit")
+            self.assertEqual(evidence["stderr"], {"bytes": 19, "truncated": False, "text": "dependency failure\n"})
+            self.assertEqual(evidence["stdout"]["text"], "installer output\n")
+            self.assertNotIn("argv", evidence); self.assertNotIn("env", evidence); self.assertNotIn("stdin", evidence)
+            files = list(M.BASE.glob("public-tool-failure-*.json")); self.assertEqual(len(files), 1)
+            self.assertEqual(json.loads(files[0].read_text()), evidence)
+
+    def test_public_ca_failure_is_bounded_and_overflow_keeps_original_refusal(self):
+        with tempfile.TemporaryDirectory() as temp, patch.object(M, "BASE", Path(temp).resolve()):
+            failure, logs = self.public_tool_failure(["/usr/sbin/update-ca-certificates"], output=b"o" * 10000, error=b"e" * 65537)
+            self.assertEqual(str(failure), "Bounded tool diagnostics exceeded")
+            self.assertEqual(logs[0]["failureType"], "DiagnosticLimitExceeded")
+            for stream, size in (("stdout", 10000), ("stderr", 65537)):
+                self.assertEqual(logs[0][stream]["bytes"], size)
+                self.assertTrue(logs[0][stream]["truncated"])
+                self.assertEqual(len(logs[0][stream]["text"]), 8192)
+            self.assertEqual(logs[0]["tool"], "update-ca-certificates")
+
+    def test_other_tools_input_environment_and_foreign_install_paths_never_capture_output(self):
+        with tempfile.TemporaryDirectory() as temp, patch.object(M, "BASE", Path(temp).resolve()):
+            for command, kwargs in ((["/usr/bin/passwd", "--stdin", M.USER], {"input": b"private"}),
+                                    (["/usr/bin/dpkg", "--install", "/foreign.deb"], {}),
+                                    (["/usr/sbin/update-ca-certificates", "--fresh"], {}),
+                                    (["/usr/sbin/update-ca-certificates"], {"input": b"private"}),
+                                    (["/usr/sbin/update-ca-certificates"], {"env": {"PRIVATE": "secret"}})):
+                with self.subTest(command=command, options=tuple(kwargs)):
+                    _, logs = self.public_tool_failure(command, output=b"secret stdout", error=b"secret stderr", **kwargs)
+                    self.assertFalse(logs)
+            self.assertFalse(list(M.BASE.iterdir()))
+
+    def test_public_tool_timeout_and_existing_evidence_preserve_original_error(self):
+        with tempfile.TemporaryDirectory() as temp, patch.object(M, "BASE", Path(temp).resolve()):
+            command = ["/usr/sbin/update-ca-certificates"]
+            original = subprocess.TimeoutExpired(command, 90)
+            def child(actual, **options):
+                options["stderr"].write(b"bounded timeout detail")
+                raise original
+            with patch.object(M.subprocess, "run", side_effect=child), patch("builtins.print") as printed:
+                with self.assertRaises(subprocess.TimeoutExpired) as caught:
+                    M.run_tool(command)
+            self.assertIs(caught.exception, original)
+            evidence = json.loads(printed.call_args_list[0].args[0])
+            self.assertEqual(evidence["failureType"], "TimeoutExpired")
+            self.assertIsNone(evidence["returncode"])
+            self.assertEqual(evidence["stderr"]["text"], "bounded timeout detail")
+            file = next(M.BASE.glob("public-tool-failure-*.json")); before = file.read_bytes()
+            failure, _ = self.public_tool_failure(command)
+            self.assertEqual(str(failure), "Fixed tool failed: update-ca-certificates")
+            self.assertEqual(file.read_bytes(), before)
+
+    def test_public_tool_success_emits_no_diagnostic_and_export_is_finite(self):
+        with tempfile.TemporaryDirectory() as temp, patch.object(M, "BASE", Path(temp).resolve()):
+            def child(argv, **options):
+                options["stdout"].write(b"success")
+                return SimpleNamespace(returncode=0)
+            with patch.object(M.subprocess, "run", side_effect=child), patch("builtins.print") as printed:
+                self.assertEqual(M.run_tool(["/usr/sbin/update-ca-certificates"]), b"success")
+            printed.assert_not_called(); self.assertFalse(list(M.BASE.iterdir()))
+        tree = ast.parse((HERE / "native-linux-production-016-update.py").read_text())
+        exporter = ast.unparse(next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "export_evidence"))
+        self.assertIn("public-tool-failure-", exporter)
+        self.assertIn("baseline-dpkg-install|update-ca-certificates", exporter)
+        self.assertIn("len(diagnostics) <= 8", exporter)
+        broker = ast.unparse(next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "broker"))
+        self.assertIn("record['tlsCleanupError']", broker)
+        self.assertIn("'type': type(error).__name__", broker)
+
     def parent_fixture(self, *, mode=0o777, fault=None, context=None, log_error=None, guard_only=False):
         root = dict(st_dev=10, st_ino=1, st_uid=0, st_gid=0, st_mode=stat.S_IFDIR | 0o755)
         opt = {**root, "st_ino": 2, "st_mode": stat.S_IFDIR | mode}
