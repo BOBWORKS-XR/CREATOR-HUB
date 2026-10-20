@@ -5,9 +5,18 @@ use gtk::prelude::*;
 fn activate() -> Result<(), &'static str> {
     let bus = gio::bus_get_sync(gio::BusType::Session, gio::Cancellable::NONE)
         .map_err(|_| "Cannot connect to the desktop session bus.")?;
-    bus.call_sync(Some(contract::NAME), contract::PATH, contract::INTERFACE, contract::METHOD,
-        Some(&().to_variant()), Some(VariantTy::UNIT), gio::DBusCallFlags::NONE, 15_000, gio::Cancellable::NONE)
-        .map_err(|_| "Native Hub support is unavailable or did not confirm activation. Choose Get Native Hub for the dedicated Creator Hub Native Support setup AppImage, not the ordinary Hub AppImage. Close Hub normally and open the setup download to review native support setup. Then close setup and reopen this Flatpak. This launcher did not install software or change host settings.")?;
+    bus.call_sync(
+        Some(contract::NAME),
+        contract::PATH,
+        contract::INTERFACE,
+        contract::METHOD,
+        Some(&().to_variant()),
+        Some(VariantTy::UNIT),
+        gio::DBusCallFlags::NONE,
+        15_000,
+        gio::Cancellable::NONE,
+    )
+    .map_err(|_| contract::ACTIVATION_UNAVAILABLE)?;
     Ok(())
 }
 

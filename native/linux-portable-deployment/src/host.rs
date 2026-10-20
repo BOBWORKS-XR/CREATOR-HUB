@@ -412,7 +412,7 @@ fn no_recovery(store: &Store) -> Result<()> {
     if optional_record(&store.root.join("pending.json"))?.is_some() {
         return Err(Error {
             kind: ErrorKind::RecoveryRequired,
-            message: "Review portable deployment recovery before installation or activation",
+            message: super::PENDING_RECOVERY_MESSAGE,
         });
     }
     Ok(())

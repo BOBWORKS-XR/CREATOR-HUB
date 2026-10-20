@@ -64,6 +64,23 @@ Native preflight also checks these captured boundaries:
   privilege. Capture failed parent type/UID/mode before diagnosing; do not clear
   system records or relax permissions checks to make a runner pass.
 
+## Interrupted Portable Updates
+
+- A retained deployment journal can block native activation before Hub opens.
+  The registered selector must expose a read-only `recover-pending` review and
+  a separate acknowledgement bound to the exact signed, owned state. Never
+  clear a journal, replay an update, change selection or launch Hub implicitly.
+- Reject changed reviews, foreign registration, initial-install recovery and
+  missing or modified signed images. Preserve uncertainty after an interrupted
+  acknowledgement. Display shell commands using fixed quoted environment paths,
+  never by interpolating an installation path into shell syntax.
+- Flatpak activation errors must not imply that support is simply missing.
+  Existing installations need the non-writing recovery route; first installs
+  need the dedicated native-support download. Do not expose raw D-Bus errors.
+- Source tests and cross-compilation do not prove native recovery or GTK layout.
+  Execute the Unix recovery tests and check the packaged failure screen before
+  claiming those acceptance gates passed.
+
 ## Still Open
 
 - Linux native cancellation and synthetic approval passed in run 39294045915

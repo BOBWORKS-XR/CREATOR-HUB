@@ -16,8 +16,9 @@ pub use store::host::{
     HOST_PROFILE,
 };
 pub use store::registration::{
-    RegistrationChoice, RegistrationOutcome, RegistrationRecovery, RegistrationRecoveryChoice,
-    RegistrationReview, SELECTOR_ENTRYPOINT,
+    PendingDeploymentReview, PendingRecoveryChoice, PendingRecoveryOutcome, RegistrationChoice,
+    RegistrationOutcome, RegistrationRecovery, RegistrationRecoveryChoice, RegistrationReview,
+    SELECTOR_ENTRYPOINT,
 };
 #[cfg(feature = "experimental-restart")]
 pub use store::restart::{RestartChoice, RestartReview, RestartStageOutcome, StagedRestart};

@@ -14,6 +14,7 @@ pub const SERVICE: &str = include_str!("../com.creatorworks.hub.Host.service");
 const KEY: &str = include_str!("../../../src-tauri/src/catalog-key.pub");
 pub const DESCRIPTOR: &str = "creator-hub-linux-x86_64-deb.json";
 pub const DISCLOSURE: &str = "Creator Hub opens a native window outside the Flatpak sandbox and uses your existing host settings for MCP and Project Setup. If native support is missing, choose Get Native Hub for the dedicated Creator Hub Native Support setup download (Linux x86_64 AppImage), not the ordinary Hub AppImage. Close any existing Hub windows normally, then open the setup download and review native support setup. Installation requires signature verification and your approval. After setup, close that window normally and reopen this Flatpak. A matching native DEB installation is another option on supported distributions. This launcher does not install host software.";
+pub const ACTIVATION_UNAVAILABLE: &str = "Native Hub did not confirm activation. This does not tell us whether support is missing or an existing installation needs recovery.\n\nIf native support is already installed, do not delete its records or reinstall over an interrupted update. In a terminal outside Flatpak, run this read-only review:\n\"${XDG_DATA_HOME:-$HOME/.local/share}/creator-hub-portable/activation-v1/creator-hub-portable-selector\" recover-pending\nIt changes nothing and, for a verified pending update, prints a separate acknowledgement command. If the helper is missing or review refuses, keep the records and report the displayed error to support.\n\nFor a first installation, choose Get Native Hub for the dedicated Creator Hub Native Support setup AppImage, not the ordinary Hub AppImage. Close existing Hub windows normally, open the setup download and review native support setup. Then close setup and reopen this Flatpak. This launcher did not install software or change host settings.";
 
 pub fn installer_page() -> String {
     format!("https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/download/v{VERSION}/Creator.Hub.Native.Support_{VERSION}_amd64.AppImage")
@@ -251,6 +252,26 @@ mod tests {
         assert!(!DISCLOSURE.contains("--install-native-support"));
         assert!(!DISCLOSURE.contains("DEB installation is required"));
         assert!(!DISCLOSURE.contains(VERSION));
+    }
+    #[test]
+    fn activation_failure_exposes_read_only_recovery_without_claiming_support_is_missing() {
+        let source = include_str!("linux.rs");
+        assert!(source.contains(".map_err(|_| contract::ACTIVATION_UNAVAILABLE)?"));
+        for phrase in [
+            "does not tell us whether support is missing",
+            "do not delete its records or reinstall over an interrupted update",
+            "terminal outside Flatpak",
+            "\"${XDG_DATA_HOME:-$HOME/.local/share}/creator-hub-portable/activation-v1/creator-hub-portable-selector\" recover-pending",
+            "changes nothing",
+            "separate acknowledgement command",
+            "keep the records",
+            "For a first installation",
+            "did not install software or change host settings",
+        ] {
+            assert!(ACTIVATION_UNAVAILABLE.contains(phrase), "{phrase}");
+        }
+        assert!(!ACTIVATION_UNAVAILABLE.contains("--acknowledge"));
+        assert!(!ACTIVATION_UNAVAILABLE.contains("sudo"));
     }
     #[test]
     fn exact_deb_descriptor_only_no_test_only_or_path_escape() {

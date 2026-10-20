@@ -113,6 +113,271 @@ pub enum RegistrationRecoveryChoice {
     RestoreBefore,
 }
 
+/// An exact pending deployment and owned registration, not permission to select or launch.
+pub struct PendingDeploymentReview {
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    root: PathBuf,
+    recovery: Recovery,
+    id: String,
+}
+
+impl PendingDeploymentReview {
+    pub fn review_id(&self) -> &str {
+        &self.id
+    }
+    pub fn state(&self) -> RecoveryState {
+        self.recovery.state
+    }
+    pub fn retained_selection(&self) -> &Selection {
+        self.recovery.current.as_ref().unwrap().selection()
+    }
+    pub fn target_generation(&self) -> &str {
+        &self.recovery.target_generation
+    }
+    pub fn acknowledgement_command(&self) -> String {
+        format!(
+            "{} --acknowledge {}",
+            super::PENDING_RECOVERY_COMMAND,
+            self.id
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PendingRecoveryChoice {
+    KeepPending,
+    AcknowledgeReviewed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PendingRecoveryOutcome {
+    Kept,
+    Acknowledged,
+}
+
+impl Store {
+    /// The registered selector can inspect deployment recovery even while activation is blocked.
+    #[cfg(target_os = "linux")]
+    pub fn review_pending_deployment(
+        &self,
+        session: &HostSession,
+    ) -> Result<PendingDeploymentReview> {
+        disk::admit()?;
+        let executable =
+            std::env::current_exe().map_err(|_| refused("Cannot locate running selector"))?;
+        let actual = fs::File::open("/proc/self/exe")
+            .map_err(|_| refused("Cannot hold running selector"))?;
+        self.review_pending_with(session, &executable, &actual, &production_verify)
+    }
+
+    /// Decline is read-only, including after drift. Approval acknowledges only the reviewed commit state.
+    pub fn recover_pending_deployment(
+        &self,
+        session: &HostSession,
+        reviewed: &PendingDeploymentReview,
+        choice: PendingRecoveryChoice,
+    ) -> Result<PendingRecoveryOutcome> {
+        if choice == PendingRecoveryChoice::KeepPending {
+            return Ok(PendingRecoveryOutcome::Kept);
+        }
+        disk::admit()?;
+        #[cfg(target_os = "linux")]
+        {
+            let executable =
+                std::env::current_exe().map_err(|_| refused("Cannot locate running selector"))?;
+            let actual = fs::File::open("/proc/self/exe")
+                .map_err(|_| refused("Cannot hold running selector"))?;
+            self.recover_pending_with(
+                session,
+                reviewed,
+                &executable,
+                &actual,
+                &|_| Ok(()),
+                &production_verify,
+            )
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (session, reviewed);
+            Err(refused("Pending recovery is native Linux only"))
+        }
+    }
+
+    #[cfg(any(target_os = "linux", all(test, unix)))]
+    fn review_pending_with(
+        &self,
+        session: &HostSession,
+        executable: &Path,
+        actual: &fs::File,
+        verifier: &Verifier,
+    ) -> Result<PendingDeploymentReview> {
+        self.checked()?;
+        let _lock = disk::lock(&self.root.join("transaction.lock"))?;
+        self.review_pending_unlocked(session, executable, actual, verifier)
+    }
+
+    #[cfg(any(target_os = "linux", all(test, unix)))]
+    fn review_pending_unlocked(
+        &self,
+        session: &HostSession,
+        executable: &Path,
+        actual: &fs::File,
+        verifier: &Verifier,
+    ) -> Result<PendingDeploymentReview> {
+        no_global_registration()?;
+        let service = self.registration_paths(session)?;
+        require(
+            self.registration_journal()?.is_none(),
+            "Registration recovery is separate; no deployment acknowledgement allowed",
+        )?;
+        require(
+            optional_record(&self.root.join("pending.json"))?.is_some(),
+            "No pending deployment record remains. Nothing was acknowledged; use the same helper with activate when ready",
+        )?;
+        let before = self.pending_identities(&service)?;
+        let recovery = self
+            .recovery_unlocked(verifier)?
+            .ok_or_else(|| refused("No pending deployment needs acknowledgement"))?;
+        require(
+            recovery.previous.is_some() && recovery.current.is_some(),
+            "Initial installation recovery is separate; no deployment acknowledgement allowed",
+        )?;
+        let images = self.registration_images(&service)?;
+        require(
+            self.owned_registration(&service, &images, verifier)?
+                .is_some(),
+            "No owned signed selector registration",
+        )?;
+        let tool = self.root.join(DIRECTORY).join(TOOL);
+        require(
+            executable == tool,
+            "Recovery must run the exact registered stable selector",
+        )?;
+        let (named, bytes) = disk::hold_regular(&tool, TOOL_LIMIT, true)?;
+        require(
+            Some(&bytes) == images.tool.as_ref() && super::host::same_file(&named, actual)?,
+            "Running recovery selector differs from the signed registered image",
+        )?;
+        let after = self.pending_identities(&service)?;
+        require(
+            before == after,
+            "Deployment or registration identity changed during recovery review",
+        )?;
+        let state = match recovery.state {
+            RecoveryState::PreparedOldSelectionRetained => 0u8,
+            RecoveryState::SelectionCommitted => 1,
+        };
+        let id = digest(&encode(&(
+            "pending-deployment-review-v1",
+            &self.root,
+            state,
+            &recovery.pending,
+            recovery.current.as_ref().map(|s| &s.bytes),
+            recovery.previous.as_ref().map(|s| &s.bytes),
+            &images.tool,
+            &images.service,
+            &images.owner,
+            after,
+        ))?);
+        Ok(PendingDeploymentReview {
+            root: self.root.clone(),
+            recovery,
+            id,
+        })
+    }
+
+    #[cfg(any(target_os = "linux", all(test, unix)))]
+    fn recover_pending_with(
+        &self,
+        session: &HostSession,
+        reviewed: &PendingDeploymentReview,
+        executable: &Path,
+        actual: &fs::File,
+        checkpoint: &dyn Fn(&str) -> Result<()>,
+        verifier: &Verifier,
+    ) -> Result<PendingRecoveryOutcome> {
+        self.checked()?;
+        let _lock = disk::lock(&self.root.join("transaction.lock"))?;
+        require(
+            reviewed.root == self.root,
+            "Recovery review belongs to another store",
+        )?;
+        checkpoint("pending-recovery-locked")?;
+        checkpoint("pending-recovery-before-recheck")?;
+        let fresh = self.review_pending_unlocked(session, executable, actual, verifier)?;
+        require(
+            fresh.id == reviewed.id,
+            "Pending deployment changed since review; review again without retrying an update",
+        )?;
+        // Use the existing acknowledgement transaction under this same lock. This never activates.
+        let acknowledge = || -> Result<()> {
+            self.acknowledge_unlocked(&reviewed.recovery, verifier)?;
+            checkpoint("pending-recovery-acknowledged")
+        };
+        acknowledge().map_err(|_| Error {
+            kind: ErrorKind::OutcomeUnknown,
+            message: "Pending acknowledgement completion is unknown. Re-run recover-pending to inspect; do not replay the update or delete records manually",
+        })?;
+        Ok(PendingRecoveryOutcome::Acknowledged)
+    }
+
+    #[cfg(any(target_os = "linux", all(test, unix)))]
+    fn pending_identities(&self, service: &Path) -> Result<Vec<Vec<u8>>> {
+        let paths = [
+            self.root
+                .parent()
+                .ok_or_else(|| refused("Store parent missing"))?
+                .to_owned(),
+            self.root.clone(),
+            self.root.join("store.id"),
+            self.root.join("transaction.lock"),
+            self.root.join("generations"),
+            self.root.join("history"),
+            self.root.join("current.json"),
+            self.root.join("pending.json"),
+            self.root.join(DIRECTORY),
+            self.root.join(DIRECTORY).join(TOOL),
+            self.root.join(DIRECTORY).join(OWNER),
+            service.to_owned(),
+        ];
+        paths
+            .iter()
+            .map(|path| {
+                disk::unlinked(path)?;
+                let info = fs::symlink_metadata(path)
+                    .map_err(|_| refused("Recovery identity unavailable"))?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::MetadataExt;
+                    encode(&(
+                        info.dev(),
+                        info.ino(),
+                        info.uid(),
+                        info.gid(),
+                        info.mode(),
+                        info.nlink(),
+                        info.len(),
+                        info.mtime(),
+                        info.mtime_nsec(),
+                        info.ctime(),
+                        info.ctime_nsec(),
+                    ))
+                }
+                #[cfg(not(unix))]
+                {
+                    encode(&(
+                        info.len(),
+                        info.modified()
+                            .ok()
+                            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                            .map(|d| d.as_nanos()),
+                    ))
+                }
+            })
+            .collect()
+    }
+}
+
 // Only the origin-bound bootstrap caller uses this private inspection while
 // holding transaction.lock. No journal fields or ownership constructors escape.
 pub(super) enum BootstrapRegistration {
@@ -501,7 +766,7 @@ impl Store {
     pub(super) fn no_registration_recovery(&self) -> Result<()> {
         require(
             optional_record(&self.root.join("pending.json"))?.is_none(),
-            "Review Hub deployment recovery first",
+            super::PENDING_RECOVERY_MESSAGE,
         )?;
         if self.registration_journal()?.is_some() {
             return Err(Error {
