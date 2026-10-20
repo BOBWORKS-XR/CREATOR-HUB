@@ -64,9 +64,9 @@ jobs:
             const neutral = require(path.join(process.env.GITHUB_WORKSPACE, 'scripts/native-linux-016-input.cjs'));
             await production.run({github, context, profile});
             const repo = {owner:'BOBWORKS-XR', repo:'CREATOR-HUB'};
-            const inspectionRun = (await github.rest.actions.getWorkflowRun({...repo, run_id:39364292874})).data;
-            const inspectionJob = (await github.rest.actions.getJobForWorkflowRun({...repo, job_id:118437413085})).data;
-            const inspectionArtifact = (await github.rest.actions.getArtifact({...repo, artifact_id:12238786956})).data;
+            const inspectionRun = (await github.rest.actions.getWorkflowRun({...repo, run_id:39435273515})).data;
+            const inspectionJob = (await github.rest.actions.getJobForWorkflowRun({...repo, job_id:118670553277})).data;
+            const inspectionArtifact = (await github.rest.actions.getArtifact({...repo, artifact_id:12270560239})).data;
             const release = (await github.rest.repos.getReleaseByTag({...repo, tag:'v0.1.12'})).data;
             const asset = (await github.rest.repos.getReleaseAsset({...repo, asset_id:608099582})).data;
             const tag = (await github.rest.git.getRef({...repo, ref:'tags/v0.1.12'})).data;
