@@ -67,6 +67,59 @@ TLS_REMOVE = ('import hashlib,os,stat,sys; p=sys.argv[1]; s=os.lstat(p); '
     'b=os.read(f,65537); assert 0<len(b)<=65536 and hashlib.sha256(b).hexdigest()==sys.argv[2]; '
     'identity=lambda x:(x.st_dev,x.st_ino,x.st_mode,x.st_uid,x.st_gid,x.st_nlink,x.st_size,x.st_mtime_ns,x.st_ctime_ns); '
     'assert identity(os.lstat(p))==identity(s) and identity(os.fstat(f))==identity(h); os.unlink(p); os.close(f)')
+TLS_TRUST = Path('/etc/ssl/certs')
+TLS_ALIAS_TARGETS = {'99383ae7.0': 'creator-production-bootstrap016.pem',
+                     'creator-production-bootstrap016.pem': '/usr/local/share/ca-certificates/creator-production-bootstrap016.crt'}
+TLS_ALIAS_REMOVE = r'''
+import hashlib,json,os,re,stat,sys
+assert os.getuid()==os.geteuid()==0 and len(sys.argv)==2 and len(sys.argv[1])<=4096
+p=json.loads(sys.argv[1])
+targets={'99383ae7.0':'creator-production-bootstrap016.pem','creator-production-bootstrap016.pem':'/usr/local/share/ca-certificates/creator-production-bootstrap016.crt'}
+assert type(p) is dict and set(p)=={'directory','links','bundle'} and type(p['links']) is dict and set(p['links'])==set(targets)
+assert type(p['directory']) is list and len(p['directory'])==5
+assert all(type(v) is list and len(v)==9 for v in p['links'].values())
+assert all(type(n) is int and 0<=n<2**64 for v in [p['directory'],*p['links'].values()] for n in v)
+b=p['bundle']
+assert type(b) is dict and set(b)=={'size','sha256'} and type(b['size']) is int and 0<b['size']<=2097152 and type(b['sha256']) is str and re.fullmatch('[a-f0-9]{64}',b['sha256'])
+identity=lambda s:[getattr(s,k) for k in ('st_dev','st_ino','st_size','st_mode','st_uid','st_gid','st_mtime_ns','st_ctime_ns','st_nlink')]
+directory_key=lambda s:[s.st_dev,s.st_ino,s.st_mode,s.st_uid,s.st_gid]
+directory=os.open('/etc/ssl/certs',os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC)
+held={}
+bundle=None
+def protected():
+    for path in ('/','/etc','/etc/ssl','/etc/ssl/certs','/usr','/usr/local','/usr/local/share','/usr/local/share/ca-certificates'):
+        s=os.lstat(path)
+        assert stat.S_ISDIR(s.st_mode) and s.st_uid==s.st_gid==0 and not s.st_mode&0o022
+    assert directory_key(os.fstat(directory))==directory_key(os.lstat('/etc/ssl/certs'))==p['directory']
+    assert not os.path.lexists('/usr/local/share/ca-certificates/creator-production-bootstrap016.crt')
+def check_link(name):
+    protected()
+    for s in (os.fstat(held[name]),os.stat(name,dir_fd=directory,follow_symlinks=False)):
+        assert stat.S_ISLNK(s.st_mode) and s.st_uid==s.st_gid==0 and s.st_nlink==1 and identity(s)==p['links'][name]
+    assert os.readlink('',dir_fd=held[name])==os.readlink(name,dir_fd=directory)==targets[name]
+try:
+    protected()
+    for name in targets:
+        held[name]=os.open(name,os.O_PATH|os.O_NOFOLLOW|os.O_CLOEXEC,dir_fd=directory)
+        check_link(name)
+    bundle=os.open('ca-certificates.crt',os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC,dir_fd=directory)
+    original=os.fstat(bundle)
+    assert stat.S_ISREG(original.st_mode) and original.st_uid==original.st_gid==0 and original.st_nlink==1 and stat.S_IMODE(original.st_mode)==0o644 and original.st_size==b['size']
+    raw=os.read(bundle,b['size']+1)
+    assert len(raw)==b['size'] and hashlib.sha256(raw).hexdigest()==b['sha256']
+    for name in targets: check_link(name)
+    for name in targets:
+        check_link(name)
+        assert identity(os.fstat(bundle))==identity(os.stat('ca-certificates.crt',dir_fd=directory,follow_symlinks=False))==identity(original)
+        os.unlink(name,dir_fd=directory)
+    os.fsync(directory)
+    protected()
+    assert not set(targets).intersection(os.listdir(directory))
+finally:
+    if bundle is not None: os.close(bundle)
+    for fd in held.values(): os.close(fd)
+    os.close(directory)
+'''
 GATES = dict.fromkeys(("candidateExecuted", "flatpakInstalled", "disclosureCancelAccepted", "missingHostAccepted",
                       "portalCaptureAccepted", "setupCancelAccepted", "bootstrapAccepted", "typedResumeAccepted",
                       "coldActivationAccepted", "warmActivationAccepted", "settingsPreserved", "signedUpdateAccepted",
@@ -581,10 +634,67 @@ def tls_lock(root, seconds=0):
         os.close(fd)
 
 
+def capture_tls_aliases(before, after):
+    added = {'system/' + name: {'link': target} for name, target in TLS_ALIAS_TARGETS.items()}
+    require(not set(added).intersection(before) and after == {**before, **added}, 'Only the original trust snapshot plus the exact owned alias pair is eligible')
+    bundle = before.get('system/ca-certificates.crt')
+    require(type(bundle) is dict and type(bundle.get('size')) is int and 0 < bundle['size'] <= 2 * 1024 * 1024
+            and type(bundle.get('sha256')) is str and re.fullmatch(r'[a-f0-9]{64}', bundle['sha256'])
+            and bundle.get('uid') == bundle.get('gid') == 0 and bundle.get('mode') == 0o644, 'Original bounded root-owned trust bundle required')
+    protected_trust_parent(TLS_TRUST)
+    original = TLS_TRUST.lstat()
+    directory_key = lambda info: [info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid]
+    links = {}
+    for name, target in TLS_ALIAS_TARGETS.items():
+        file = TLS_TRUST / name; info = file.lstat()
+        require(stat.S_ISLNK(info.st_mode) and info.st_uid == info.st_gid == 0 and info.st_nlink == 1
+                and os.readlink(file) == target, 'Only exact root-owned nonlinked alias symlinks may be removed')
+        value = list(P.stamp(info)) + [info.st_nlink]
+        current = file.lstat()
+        require(list(P.stamp(current)) + [current.st_nlink] == value, 'Alias changed during capture')
+        links[name] = value
+    require(directory_key(TLS_TRUST.lstat()) == directory_key(original) and not os.path.lexists(TLS_DESTINATION)
+            and P.record(TLS_TRUST / 'ca-certificates.crt', 2 * 1024 * 1024) == bundle, 'Trust directory, certificate or original bundle changed')
+    return {'directory': directory_key(original), 'links': links, 'bundle': {key: bundle[key] for key in ('size', 'sha256')}}
+
+
+def consume_tls_alias_attempt(root, armed_bytes, proof):
+    parent = root / 'lab-tls'; marker = parent / 'alias-cleanup-attempted.json'
+    raw = json_bytes({'schemaVersion': 1, 'profile': '016-bootstrap', 'armedSha256': hashlib.sha256(armed_bytes).hexdigest(), 'proof': proof})
+    require(len(raw) <= 4096 and parent.resolve(strict=True) == parent, 'Bounded canonical one-attempt marker required')
+    before = parent.lstat()
+    require(stat.S_ISDIR(before.st_mode) and before.st_uid == os.getuid() and stat.S_IMODE(before.st_mode) == 0o700,
+            'Private owned cleanup marker directory required')
+    key = lambda info: (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid)
+    directory = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    fd = None
+    try:
+        require(key(os.fstat(directory)) == key(before), 'Cleanup marker directory changed')
+        fd = os.open(marker.name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=directory)
+        os.fchmod(fd, 0o600)
+        require(os.write(fd, raw) == len(raw), 'Cleanup attempt marker write is uncertain; no helper authorized')
+        os.fsync(fd)
+        current = os.fstat(fd)
+        require(stat.S_ISREG(current.st_mode) and current.st_uid == os.getuid() and current.st_nlink == 1
+                and stat.S_IMODE(current.st_mode) == 0o600 and key(os.stat(marker.name, dir_fd=directory, follow_symlinks=False)) == key(current)
+                and key(parent.lstat()) == key(os.fstat(directory)) == key(before), 'Cleanup attempt marker identity changed')
+        os.fsync(directory)
+    finally:
+        if fd is not None:
+            os.close(fd)
+        os.close(directory)
+
+
 def cleanup_owned_tls(root, arm, armed_bytes):
     require(regular(root / 'lab-tls/armed.json', 512 * 1024, 0o600) == armed_bytes, 'Cleanup authority changed')
     bound(root / 'lab-tls/public.crt', arm['certificate'], 65536)
     protected_trust_parent(TLS_DESTINATION.parent)
+    result = {'schemaVersion': 1, 'profile': '016-bootstrap', 'cleanupVerified': True,
+              'publicDiscovery': False, 'releaseReady': False, 'scope': 'disposable-github-ci-only'}
+    if os.path.lexists(root / 'lab-tls/alias-cleanup-attempted.json'):
+        require(not os.path.lexists(TLS_DESTINATION) and trust_view() == arm['before'],
+                'Alias cleanup attempt consumed; no retry or adoption, disposable teardown required')
+        return result
     if os.path.lexists(TLS_DESTINATION):
         row = TLS_DESTINATION.lstat()
         require(stat.S_ISREG(row.st_mode) and row.st_uid == row.st_gid == 0 and row.st_nlink == 1
@@ -595,8 +705,20 @@ def cleanup_owned_tls(root, arm, armed_bytes):
                  str(TLS_DESTINATION), arm['certificate']['sha256']], env=lab_environment(root))
         command(['/usr/bin/sudo', '-n', '/usr/sbin/update-ca-certificates'], env=lab_environment(root))
     absent, after = not os.path.lexists(TLS_DESTINATION), trust_view()
+    added = {'system/' + name: {'link': target} for name, target in TLS_ALIAS_TARGETS.items()}
+    if absent and not set(added).intersection(arm['before']) and after == {**arm['before'], **added}:
+        try:
+            proof = capture_tls_aliases(arm['before'], after)
+        except Exception:
+            # An uncertain capture must not adopt a replacement on the next call.
+            consume_tls_alias_attempt(root, armed_bytes, {'captureFailed': True})
+            raise
+        consume_tls_alias_attempt(root, armed_bytes, proof)
+        command(['/usr/bin/sudo', '-n', '/usr/bin/python3', '-B', '-c', TLS_ALIAS_REMOVE,
+                 json.dumps(proof, separators=(',', ':'), allow_nan=False)], env=lab_environment(root))
+        absent, after = not os.path.lexists(TLS_DESTINATION), trust_view()
     if not absent or after != arm['before']:
-        # Diagnostics never remove aliases or replace the original cleanup refusal.
+        # A failed one-attempt cleanup never weakens the full before-image requirement.
         try:
             difference = trust_difference(arm['before'], after, absent)
             for number in (1, 2):
@@ -608,8 +730,6 @@ def cleanup_owned_tls(root, arm, armed_bytes):
         except Exception:
             pass
     require(absent and after == arm['before'], 'CI trust before-image was not restored')
-    result = {'schemaVersion': 1, 'profile': '016-bootstrap', 'cleanupVerified': True,
-              'publicDiscovery': False, 'releaseReady': False, 'scope': 'disposable-github-ci-only'}
     receipt = root / 'tls-cleanup.json'
     if receipt.exists():
         require(parse(regular(receipt, 4096, 0o600)) == result, 'Existing cleanup evidence differs')

@@ -17,6 +17,7 @@ import unittest
 from unittest.mock import Mock, patch
 import zipfile
 import warnings
+from contextlib import contextmanager
 from types import SimpleNamespace
 
 sys.dont_write_bytecode = True
@@ -1199,6 +1200,276 @@ class DiagnosticTests(unittest.TestCase):
         invocation.return_dbus_error.assert_called_once_with('org.freedesktop.DBus.Error.AccessDenied', 'Portal sender is not the bound signed launcher')
         self.assertTrue(session.report['portalAttribution']['stable']); self.assertFalse(session.report['portalAttribution']['inputPermitted'])
         self.assertFalse(session.report['portalAttribution']['qualified']); self.assertFalse(session.report['portalAttribution']['peerPairingProven'])
+
+
+class AliasCleanupTests(unittest.TestCase):
+    HASH = '99383ae7.0'
+    PEM = 'creator-production-bootstrap016.pem'
+    CERT = '/usr/local/share/ca-certificates/creator-production-bootstrap016.crt'
+
+    @staticmethod
+    def info(ino, mode, size=0, uid=0, nlink=1):
+        return SimpleNamespace(st_dev=1, st_ino=ino, st_mode=mode, st_uid=uid, st_gid=uid,
+                               st_nlink=nlink, st_size=size, st_mtime_ns=1, st_ctime_ns=2)
+
+    def proof(self):
+        links = {self.HASH: self.PEM, self.PEM: self.CERT}
+        return {'directory': [1, 10, stat.S_IFDIR | 0o755, 0, 0], 'bundle': pin(b'original bundle'),
+                'links': {name: list(M.P.stamp(self.info(20 + index, stat.S_IFLNK | 0o777, len(target)))) + [1]
+                          for index, (name, target) in enumerate(links.items())}}
+
+    @contextmanager
+    def controller(self, failure=None):
+        root = Path('/private/fixture')
+        before = {'system/ca-certificates.crt': {**pin(b'original bundle'), 'mode': 0o644, 'uid': 0, 'gid': 0},
+                  'system/original.pem': {'link': 'untouched'}}
+        after = {**before, 'system/' + self.HASH: {'link': self.PEM}, 'system/' + self.PEM: {'link': self.CERT}}
+        state = {'marker': False, 'certificate': False, 'trust': copy.deepcopy(after), 'commands': [], 'events': [], 'saved': {}}
+        consume = M.consume_tls_alias_attempt
+        def mark(*args):
+            def opened(path, flags, mode=0o777, **kwargs):
+                if Path(path).name == 'alias-cleanup-attempted.json':
+                    self.assertTrue(flags & M.os.O_EXCL); self.assertTrue(flags & M.os.O_CREAT)
+                    self.assertFalse(state['marker']); state['marker'] = True
+                    if failure == 'open-race': raise FileExistsError('another attempt owns this marker')
+                    state['events'].append('marker-open'); return 500
+                self.assertEqual(Path(path), root / 'lab-tls')
+                state['events'].append('parent-open'); return 501
+            def sync(fd):
+                state['events'].append('file-fsync' if fd == 500 else 'parent-fsync')
+                if failure == ('file-fsync' if fd == 500 else 'parent-fsync'):
+                    raise OSError('injected fsync failure')
+            parent = self.info(50, stat.S_IFDIR | 0o700, uid=1001)
+            marker = self.info(51, stat.S_IFREG | 0o600, uid=1001)
+            def write(fd, raw):
+                if failure == 'write-error': raise OSError('uncertain write')
+                return len(raw) - (failure == 'short-write')
+            with patch.object(M.os, 'getuid', return_value=1001, create=True), \
+                    patch.object(M.os, 'O_NOFOLLOW', 0, create=True), patch.object(M.os, 'O_CLOEXEC', 0, create=True), \
+                    patch.object(M.os, 'O_DIRECTORY', 0, create=True), patch.object(M.os, 'open', side_effect=opened), \
+                    patch.object(M.os, 'write', side_effect=write), \
+                    patch.object(M.os, 'fchmod', create=True), patch.object(M.os, 'fsync', side_effect=sync), \
+                    patch.object(M.os, 'fstat', side_effect=lambda fd: marker if fd == 500 else parent), \
+                    patch.object(M.os, 'stat', return_value=self.info(52, stat.S_IFREG | 0o600, uid=1001) if failure == 'marker-replaced' else marker), \
+                    patch.object(M.os, 'close'), patch.object(Path, 'lstat', return_value=parent), \
+                    patch.object(Path, 'resolve', side_effect=lambda *a, **k: root / 'lab-tls'):
+                return consume(*args)
+        def command(argv, **kwargs):
+            self.assertEqual(argv[:6], ['/usr/bin/sudo', '-n', '/usr/bin/python3', '-B', '-c', M.TLS_ALIAS_REMOVE])
+            self.assertEqual(len(argv), 7)
+            self.assertEqual(json.loads(argv[6]), self.proof())
+            self.assertTrue(state['marker'])
+            self.assertIn('file-fsync', state['events']); self.assertIn('parent-fsync', state['events'])
+            state['events'].append('helper'); state['commands'].append(argv)
+            if failure == 'partial':
+                del state['trust']['system/' + self.HASH]
+                raise RuntimeError('helper outcome unknown')
+            if failure == 'final-mismatch':
+                state['trust'] = {**before, 'system/foreign.pem': {'link': 'foreign'}}
+            else:
+                state['trust'] = copy.deepcopy(before)
+            return b''
+        def exists(path):
+            return state['marker'] if Path(path).name == 'alias-cleanup-attempted.json' else state['certificate']
+        arm = {'before': before, 'certificate': pin(b'public')}
+        with patch.object(M, 'regular', return_value=b'arm'), patch.object(M, 'bound'), \
+                patch.object(M, 'protected_trust_parent'), patch.object(M, 'capture_tls_aliases', return_value=self.proof(),
+                    side_effect=RuntimeError('capture outcome unknown') if failure == 'capture-error' else None) as capture, \
+                patch.object(M, 'consume_tls_alias_attempt', side_effect=mark), patch.object(M, 'command', side_effect=command), \
+                patch.object(M.os.path, 'lexists', side_effect=exists), patch.object(M, 'trust_view', side_effect=lambda: copy.deepcopy(state['trust'])), \
+                patch.object(M, 'save', side_effect=lambda p, v: state['saved'].update({Path(p).name: v})):
+            yield root, arm, state, capture
+
+    def test_exact_pair_fsyncs_exclusive_marker_before_helper_and_repeated_calls_are_read_only(self):
+        with self.controller() as (root, arm, state, capture):
+            result = M.cleanup_owned_tls(root, arm, b'arm')
+            self.assertTrue(result['cleanupVerified'])
+            self.assertEqual(state['events'], ['parent-open', 'marker-open', 'file-fsync', 'parent-fsync', 'helper'])
+            M.cleanup_owned_tls(root, arm, b'arm')
+            self.assertEqual(len(state['commands']), 1); self.assertEqual(capture.call_count, 1)
+
+    def test_partial_helper_failure_consumes_attempt_and_never_adopts_remaining_alias(self):
+        with self.controller('partial') as (root, arm, state, capture):
+            with self.assertRaisesRegex(RuntimeError, 'outcome unknown'):
+                M.cleanup_owned_tls(root, arm, b'arm')
+            for _ in range(2):
+                with self.assertRaisesRegex(RuntimeError, 'consumed'):
+                    M.cleanup_owned_tls(root, arm, b'arm')
+            self.assertIn('system/' + self.PEM, state['trust'])
+            self.assertEqual(len(state['commands']), 1); self.assertEqual(capture.call_count, 1)
+            self.assertNotIn('tls-cleanup.json', state['saved'])
+
+    def test_uncertain_capture_also_consumes_attempt_without_allowing_later_recapture(self):
+        with self.controller('capture-error') as (root, arm, state, capture):
+            with self.assertRaisesRegex(RuntimeError, 'capture outcome unknown'):
+                M.cleanup_owned_tls(root, arm, b'arm')
+            self.assertTrue(state['marker']); self.assertFalse(state['commands'])
+            with self.assertRaisesRegex(RuntimeError, 'consumed'):
+                M.cleanup_owned_tls(root, arm, b'arm')
+            self.assertEqual(capture.call_count, 1)
+
+    def test_marker_write_or_fsync_failure_prevents_helper_and_consumes_existing_marker(self):
+        for failure in ('open-race', 'write-error', 'short-write', 'file-fsync', 'parent-fsync', 'marker-replaced'):
+            with self.subTest(failure=failure), self.controller(failure) as (root, arm, state, capture):
+                with self.assertRaises((RuntimeError, OSError)):
+                    M.cleanup_owned_tls(root, arm, b'arm')
+                self.assertTrue(state['marker']); self.assertFalse(state['commands'])
+                with self.assertRaisesRegex(RuntimeError, 'consumed'):
+                    M.cleanup_owned_tls(root, arm, b'arm')
+                self.assertEqual(capture.call_count, 1)
+
+    def test_consumed_marker_never_mutates_even_if_certificate_reappears_or_restoration_is_complete(self):
+        with self.controller() as (root, arm, state, capture):
+            state['marker'] = True; state['certificate'] = True
+            with self.assertRaisesRegex(RuntimeError, 'consumed'):
+                M.cleanup_owned_tls(root, arm, b'arm')
+            self.assertFalse(state['commands']); self.assertFalse(state['events']); capture.assert_not_called()
+            state['certificate'] = False; state['trust'] = copy.deepcopy(arm['before'])
+            self.assertTrue(M.cleanup_owned_tls(root, arm, b'arm')['cleanupVerified'])
+            self.assertFalse(state['saved']); self.assertFalse(state['events']); self.assertFalse(state['commands'])
+
+    def test_final_beforeimage_mismatch_fails_and_cannot_run_helper_again(self):
+        with self.controller('final-mismatch') as (root, arm, state, capture):
+            with self.assertRaisesRegex(RuntimeError, 'before-image'):
+                M.cleanup_owned_tls(root, arm, b'arm')
+            with self.assertRaisesRegex(RuntimeError, 'consumed'):
+                M.cleanup_owned_tls(root, arm, b'arm')
+            self.assertEqual(len(state['commands']), 1)
+            self.assertIn('system/foreign.pem', state['trust'])
+            self.assertNotIn('tls-cleanup.json', state['saved'])
+
+    def test_capture_refuses_original_foreign_partial_and_changed_bundle_before_any_attempt(self):
+        before = {'system/ca-certificates.crt': {**pin(b'original bundle'), 'mode': 0o644, 'uid': 0, 'gid': 0}}
+        after = {**before, 'system/' + self.HASH: {'link': self.PEM}, 'system/' + self.PEM: {'link': self.CERT}}
+        for failure in ('original', 'unknown', 'partial', 'target', 'bundle'):
+            original, current = copy.deepcopy(before), copy.deepcopy(after)
+            if failure == 'original': original['system/' + self.PEM] = current['system/' + self.PEM]
+            if failure == 'unknown': current['system/foreign.pem'] = {'link': 'foreign'}
+            if failure == 'partial': del current['system/' + self.HASH]
+            if failure == 'target': current['system/' + self.PEM] = {'link': 'foreign'}
+            if failure == 'bundle': current['system/ca-certificates.crt'].update(pin(b'different'))
+            with self.subTest(failure=failure), patch.object(M, 'protected_trust_parent') as parent:
+                with self.assertRaises(RuntimeError): M.capture_tls_aliases(original, current)
+                parent.assert_not_called()
+
+    def test_actual_capture_binds_both_link_identities_and_refuses_metadata_or_bundle_races(self):
+        before = {'system/ca-certificates.crt': {**pin(b'original bundle'), 'mode': 0o644, 'uid': 0, 'gid': 0}}
+        targets = {self.HASH: self.PEM, self.PEM: self.CERT}
+        after = {**before, **{'system/' + name: {'link': target} for name, target in targets.items()}}
+        for mutation in ('none', 'uid', 'hardlink', 'replacement', 'directory', 'certificate', 'bundle'):
+            reads = {}
+            def info(file):
+                reads[file.name] = reads.get(file.name, 0) + 1
+                if file.name == 'certs': return self.info(11 if mutation == 'directory' and reads[file.name] > 1 else 10, stat.S_IFDIR | 0o755)
+                index = list(targets).index(file.name)
+                return self.info(99 if mutation == 'replacement' and reads[file.name] > 1 else 20 + index,
+                                 stat.S_IFLNK | 0o777, len(targets[file.name]), uid=1002 if mutation == 'uid' else 0,
+                                 nlink=2 if mutation == 'hardlink' else 1)
+            with self.subTest(mutation=mutation), patch.object(M, 'protected_trust_parent'), \
+                    patch.object(Path, 'lstat', info), patch.object(M.os, 'readlink', side_effect=lambda p: targets[p.name]), \
+                    patch.object(M.os.path, 'lexists', return_value=mutation == 'certificate'), \
+                    patch.object(M.P, 'record', return_value={**before['system/ca-certificates.crt'], **(pin(b'changed') if mutation == 'bundle' else {})}), \
+                    patch.object(M.os, 'unlink') as unlink, patch.object(M, 'command') as command:
+                if mutation == 'none': self.assertEqual(M.capture_tls_aliases(before, after), self.proof())
+                else:
+                    with self.assertRaises(RuntimeError): M.capture_tls_aliases(before, after)
+                unlink.assert_not_called(); command.assert_not_called()
+
+    def helper_fixture(self, mutation=None):
+        # Executes the actual fixed helper against a fake kernel/filesystem, never native trust.
+        import builtins
+        target = {self.HASH: self.PEM, self.PEM: self.CERT}
+        nodes = {name: SimpleNamespace(info=self.info(20 + i, stat.S_IFLNK | 0o777, len(value)), target=value)
+                 for i, (name, value) in enumerate(target.items())}
+        directory = self.info(10, stat.S_IFDIR | 0o755)
+        directory_path = [copy.deepcopy(directory)]
+        bundle = self.info(30, stat.S_IFREG | 0o644, len(b'original bundle'))
+        proof = self.proof(); held, unlinked, closed, events = {}, [], [], []
+        offsets, sequence = {}, [100]
+        if mutation == 'uid': nodes[self.PEM].info.st_uid = 1002
+        if mutation == 'hardlink': nodes[self.PEM].info.st_nlink = 2
+        if mutation == 'target': nodes[self.PEM].target = 'foreign'
+        if mutation == 'regular': nodes[self.PEM].info.st_mode = stat.S_IFREG | 0o644
+        if mutation == 'extra-proof': proof['path'] = '/private/DO-NOT-ACCESS'
+        if mutation == 'directory-uid': directory_path[0].st_uid = 1002
+        if mutation == 'directory-mode': directory_path[0].st_mode |= 0o002
+        if mutation == 'bundle-mode': bundle.st_mode |= 0o022
+        def key(path): return str(path).replace('\\', '/')
+        def opened(path, flags, mode=0o777, *, dir_fd=None):
+            name = key(path); sequence[0] += 1; fd = sequence[0]
+            if name == '/etc/ssl/certs': value = SimpleNamespace(info=directory, target=None, kind='directory')
+            elif name == 'ca-certificates.crt': value = SimpleNamespace(info=bundle, target=None, kind='bundle')
+            else:
+                self.assertIn(name, target); self.assertTrue(flags & fake.O_PATH); self.assertTrue(flags & fake.O_NOFOLLOW)
+                value = SimpleNamespace(info=copy.deepcopy(nodes[name].info), target=nodes[name].target, kind=name)
+            held[fd] = value; offsets[fd] = 0
+            if mutation == 'held-replacement' and name == self.PEM: nodes[name].info.st_ino += 1
+            if mutation == 'directory-replaced' and name == self.PEM: directory_path[0].st_ino += 1
+            return fd
+        def stat_at(path, *, dir_fd=None, follow_symlinks=True):
+            name = key(path)
+            if name in target: return copy.deepcopy(nodes[name].info)
+            if name == 'ca-certificates.crt': return copy.deepcopy(bundle)
+            if name == '/etc/ssl/certs': return copy.deepcopy(directory_path[0])
+            return copy.deepcopy(directory)
+        def unlink(name, *, dir_fd):
+            self.assertIn(name, target); unlinked.append(name); del nodes[name]
+            if len(unlinked) == 1 and mutation == 'between-unlinks': nodes[self.PEM].info.st_ino += 1
+            if len(unlinked) == 1 and mutation == 'interrupted': raise OSError('interrupted after first unlink')
+            if len(unlinked) == 2 and mutation == 'reappeared':
+                nodes[self.HASH] = SimpleNamespace(info=self.info(999, stat.S_IFLNK | 0o777, 7), target='foreign')
+        def read(fd, limit):
+            raw = b'different bundle' if mutation == 'bundle' else b'original bundle'
+            position = offsets[fd]; offsets[fd] += limit
+            return raw[position:position + limit]
+        def close(fd): closed.append(fd); held.pop(fd)
+        fake = SimpleNamespace(getuid=lambda: 1001 if mutation == 'not-root' else 0, geteuid=lambda: 0, open=opened, stat=stat_at,
+            lstat=stat_at, fstat=lambda fd: copy.deepcopy(held[fd].info), read=read, unlink=unlink, close=close,
+            fsync=lambda fd: events.append('directory-fsync'), listdir=lambda fd: list(nodes) + ['ca-certificates.crt'],
+            readlink=lambda name, dir_fd=None: held[dir_fd].target if name == '' else nodes[name].target,
+            path=SimpleNamespace(lexists=lambda path: mutation == 'certificate' if key(path) == self.CERT else key(path).rsplit('/', 1)[-1] in nodes,
+                                 realpath=lambda path: key(path)),
+            O_RDONLY=0, O_DIRECTORY=0x10000, O_NOFOLLOW=0x20000, O_CLOEXEC=0x40000, O_PATH=0x80000)
+        imports = builtins.__import__
+        def imported(name, *args, **kwargs):
+            if name == 'os': return fake
+            if name == 'sys': return SimpleNamespace(argv=['fixed-helper', json.dumps(proof)])
+            return imports(name, *args, **kwargs)
+        error = None
+        try:
+            exec(compile(M.TLS_ALIAS_REMOVE, '<fixed-alias-helper>', 'exec'),
+                 {'__builtins__': {**vars(builtins), '__import__': imported}})
+        except (RuntimeError, AssertionError, OSError, KeyError) as failure:
+            error = failure
+        return SimpleNamespace(error=error, nodes=nodes, unlinked=unlinked, held=held, closed=closed, events=events)
+
+    def test_fixed_privileged_helper_parses_and_unlinks_only_held_exact_pair_in_order(self):
+        ast.parse(M.TLS_ALIAS_REMOVE)
+        result = self.helper_fixture()
+        self.assertIsNone(result.error)
+        self.assertEqual(result.unlinked, [self.HASH, self.PEM]); self.assertFalse(result.held)
+        self.assertIn('directory-fsync', result.events)
+        self.assertNotIn('--fresh', M.TLS_ALIAS_REMOVE)
+        self.assertNotIn('update-ca-certificates', M.TLS_ALIAS_REMOVE)
+
+    def test_fixed_helper_refuses_foreign_replaced_or_changed_inputs_without_unlink(self):
+        for mutation in ('uid', 'hardlink', 'target', 'regular', 'held-replacement', 'certificate', 'bundle',
+                         'directory-uid', 'directory-mode', 'directory-replaced', 'bundle-mode', 'extra-proof', 'not-root'):
+            with self.subTest(mutation=mutation):
+                result = self.helper_fixture(mutation)
+                self.assertIsNotNone(result.error); self.assertFalse(result.unlinked); self.assertFalse(result.held)
+
+    def test_fixed_helper_interruption_or_race_between_unlinks_never_removes_replacement(self):
+        for mutation in ('between-unlinks', 'interrupted'):
+            with self.subTest(mutation=mutation):
+                result = self.helper_fixture(mutation)
+                self.assertIsNotNone(result.error); self.assertEqual(result.unlinked, [self.HASH])
+                self.assertIn(self.PEM, result.nodes); self.assertFalse(result.held)
+
+    def test_fixed_helper_refuses_reappearance_without_retrying_or_removing_foreign_link(self):
+        result = self.helper_fixture('reappeared')
+        self.assertIsNotNone(result.error); self.assertEqual(result.unlinked, [self.HASH, self.PEM])
+        self.assertEqual(result.nodes[self.HASH].target, 'foreign'); self.assertFalse(result.held)
 
 
 if __name__ == '__main__':
