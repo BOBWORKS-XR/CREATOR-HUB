@@ -623,7 +623,7 @@ class SourceContracts(unittest.TestCase):
         tree = ast.parse((HERE / "native-linux-unity-cli-registry-probe.py").read_text(encoding="utf-8"))
         calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)]
         attrs = [node.func.attr for node in calls if isinstance(node.func, ast.Attribute)]
-        self.assertEqual(attrs.count("Popen"), 1)
+        self.assertEqual(attrs.count("Popen"), 2)
         for name in ("run", "call", "check_call", "check_output", "chmod", "umask", "execve", "execv"):
             self.assertNotIn(name, attrs)
         self.assertNotIn("os.system", [ast.unparse(node.func) for node in calls])
@@ -763,7 +763,7 @@ class Registration(unittest.TestCase):
 
     def test_fixed_add_has_only_thirteen_known_absolute_paths_and_exact_flags(self):
         with self.fixture() as root, patch.object(M, "project_inventory") as inventory, \
-                patch.object(M.os, "getuid", return_value=1000, create=True), patch.object(M, "_run_command") as command:
+                patch.object(M.os, "getuid", return_value=1000, create=True), patch.object(M, "_run_registration_command") as command:
             paths = tuple(str(path) for path in M.registration_paths(root))
             add = ("register", ("projects", "add", *paths, *M.COMMANDS[-1][1][2:]))
             M.run_registration_fixed(Mock(), add, root)
@@ -774,7 +774,7 @@ class Registration(unittest.TestCase):
             self.assertEqual(command.call_args.args[1][1], (*M.COMMANDS[-1][1], "--all"))
 
     def test_foreign_missing_duplicate_extra_path_flag_and_command_refused_before_launch(self):
-        with self.fixture() as root, patch.object(M, "_run_command") as command:
+        with self.fixture() as root, patch.object(M, "_run_command") as command, patch.object(M, "_run_registration_command") as registry:
             paths = tuple(str(path) for path in M.registration_paths(root))
             flags = M.COMMANDS[-1][1][2:]
             bad = (("register", ("projects", "add", *paths[:-1], *flags)),
@@ -787,10 +787,11 @@ class Registration(unittest.TestCase):
                 with self.subTest(specification=specification), self.assertRaises(RuntimeError):
                     M.run_registration_fixed(Mock(), specification, root)
             command.assert_not_called()
+            registry.assert_not_called()
 
     def test_unsafe_fixture_inventory_refuses_before_any_registration_input(self):
         with self.fixture() as root, patch.object(M, "project_inventory", side_effect=RuntimeError("unsafe fixture")), \
-                patch.object(M.os, "getuid", return_value=1000, create=True), patch.object(M, "_run_command") as command:
+                patch.object(M.os, "getuid", return_value=1000, create=True), patch.object(M, "_run_registration_command") as command:
             add = ("register", ("projects", "add", *(str(path) for path in M.registration_paths(root)), *M.COMMANDS[-1][1][2:]))
             with self.assertRaisesRegex(RuntimeError, "unsafe fixture"):
                 M.run_registration_fixed(Mock(), add, root)
@@ -823,6 +824,17 @@ class Registration(unittest.TestCase):
             with self.subTest(size=len(raw)), self.assertRaises((RuntimeError, ValueError)):
                 M.registration_json(raw)
 
+    @staticmethod
+    def inventory():
+        value = {".": {"kind": "directory", "stamp": (1, 1, 0o40700, 1000, 1000, 1, 0, 1, 1)}}
+        for index, name in enumerate(M.PROJECT_NAMES):
+            value[name] = {"kind": "directory", "stamp": (1, index + 2, 0o40700, 1000, 1000, 1, 0, 1, 1)}
+            for directory in ("Assets", "Packages", "ProjectSettings"):
+                value[name + "/" + directory] = {"kind": "directory", "stamp": (1, 100 + len(value), 0o40700, 1000, 1000, 1, 0, 1, 1)}
+            for relative, raw in M.PROJECT_FILES.items():
+                value[name + "/" + relative] = {"kind": "file", "stamp": (1, 100 + len(value), 0o100600, 1000, 1000, 1, len(raw), 1, 1), **M.pin(raw)}
+        return value
+
     def sequence(self, failure=None, default_count=10):
         with self.fixture() as root, ExitStack() as stack:
             calls = []
@@ -839,11 +851,17 @@ class Registration(unittest.TestCase):
             stack.enter_context(patch.object(M, "read_regular", side_effect=lambda path, limit, expected=None:
                 help_outputs[path] if path in help_outputs else original_reader(path, limit, expected)))
             stack.enter_context(patch.object(M, "run_fixed", return_value={"mockedReadOnly": True}))
-            inventory = stack.enter_context(patch.object(M, "project_inventory", return_value={"fixture": {"kind": "file", "hash": "unchanged"}}))
+            before_inventory = self.inventory()
+            inventory = stack.enter_context(patch.object(M, "project_inventory", return_value=before_inventory))
             if failure == "project-change":
-                inventory.side_effect = ({"fixture": "before"}, {"fixture": "after"})
+                after_inventory = json.loads(json.dumps(before_inventory))
+                # Match the captured vendor effect: only 11 project-root timestamps.
+                before_inventory = json.loads(json.dumps(before_inventory))
+                for name in M.PROJECT_NAMES[:11]:
+                    after_inventory[name]["stamp"][-2:] = [2, 2]
+                inventory.side_effect = (before_inventory, after_inventory)
             if failure == "add-and-inventory":
-                inventory.side_effect = ({"fixture": "before"}, RuntimeError("later inventory failure"))
+                inventory.side_effect = (before_inventory, RuntimeError("later inventory failure"))
             def run(tool, specification, passed_root):
                 self.assertEqual(root, passed_root)
                 calls.append(specification)
@@ -861,6 +879,7 @@ class Registration(unittest.TestCase):
                     raw = self.envelope([{"path": str(path)} for path in (paths[:default_count] if role == "list-current" else paths)])
                 return record, raw
             stack.enter_context(patch.object(M, "run_registration_fixed", side_effect=run))
+            metadata = stack.enter_context(patch.object(M, "private_home_metadata", return_value={"complete": True, "readOnly": True, "entries": []}))
             if failure is None:
                 M.registration_sequence(Mock(), root, 0 if sys.platform == "win32" else os.getuid(), report)
                 self.assertTrue(report["paginationCompared"]); self.assertTrue(report["projectContentsUnchanged"])
@@ -873,11 +892,20 @@ class Registration(unittest.TestCase):
                     M.registration_sequence(Mock(), root, 0 if sys.platform == "win32" else os.getuid(), report)
                 if failure == "add-and-inventory":
                     self.assertIn("partial result", str(raised.exception))
-                self.assertFalse(report["paginationCompared"])
+                self.assertEqual(report["paginationCompared"], failure == "project-change")
                 if failure != "project-change":
                     self.assertEqual([call[0] for call in calls], ["hub-help", "list-before", "register"], str(raised.exception))
                 if failure != "project-change":
                     self.assertFalse(report["registrationReturnedSuccess"])
+                    metadata.assert_called_once()
+                else:
+                    self.assertEqual(report["currentCount"], default_count); self.assertEqual(report["allCount"], 13)
+                    self.assertEqual(report["projectFileCount"], 39)
+                    self.assertTrue(report["projectFileContentsAndIdentitiesPreserved"])
+                    self.assertTrue(report["projectNestedDirectoryIdentitiesPreserved"])
+                    self.assertTrue(report["projectRootNonTimestampMetadataPreserved"])
+                    self.assertEqual(len(report["projectRootTimestampDrift"]), 11)
+                    metadata.assert_not_called()
             self.assertEqual(sum(call[0] == "register" for call in calls), 1)
             self.assertTrue(report["registrationAttempted"])
             self.assertTrue(all(report[name] is False for name in M.FALSE))
@@ -925,9 +953,12 @@ class Registration(unittest.TestCase):
     def test_actual_registration_launcher_uses_sealed_fd_exact_argv_and_closed_child_env(self):
         with self.fixture() as root, patch.object(M, "project_inventory"), \
                 patch.object(M.os, "getuid", return_value=1000, create=True), \
-                patch.object(M, "read_regular", side_effect=(self.envelope(), b"")), \
+                patch.object(M, "drain_registration") as drain, \
                 patch.object(M.subprocess, "Popen") as spawn:
             child = Mock(pid=42); child.wait.return_value = 0; spawn.return_value = child
+            def complete(owned, buffers, deadline):
+                self.assertIs(owned, child); buffers["stdout"].extend(self.envelope()); return 0
+            drain.side_effect = complete
             image = Mock(fd=412)
             args = ("projects", "add", *(str(path) for path in M.registration_paths(root)), *M.COMMANDS[-1][1][2:])
             record, raw = M.run_registration_fixed(image, ("register", args), root)
@@ -935,9 +966,12 @@ class Registration(unittest.TestCase):
             self.assertEqual(spawn.call_args.kwargs["pass_fds"], (412,))
             self.assertEqual(spawn.call_args.kwargs["env"], M.child_environment(root))
             self.assertFalse(spawn.call_args.kwargs["shell"])
+            self.assertEqual(spawn.call_args.kwargs["stdout"], M.subprocess.PIPE)
+            self.assertEqual(spawn.call_args.kwargs["stderr"], M.subprocess.PIPE)
+            self.assertIs(spawn.call_args.kwargs["preexec_fn"].func, M.registration_limits)
             self.assertEqual(image.check.call_count, 2)
             self.assertEqual(record["exitCode"], 0); self.assertEqual(raw, self.envelope())
-            child.wait.assert_called_once_with(timeout=M.COMMAND_SECONDS); child.kill.assert_not_called()
+            drain.assert_called_once(); child.kill.assert_not_called()
 
     def test_registration_context_failure_precedes_all_creations_and_downloads(self):
         with patch.object(M, "private_directory") as directory, patch.object(M, "download") as download, \
@@ -1003,6 +1037,268 @@ class Registration(unittest.TestCase):
             path.unlink(); path.symlink_to(project / "ProjectSettings/ProjectVersion.txt")
             with self.assertRaises(RuntimeError):
                 M.project_inventory(root, uid)
+
+
+class PipeSelector:
+    def __init__(self, empty=False):
+        self.entries, self.empty = {}, empty
+
+    def __enter__(self): return self
+    def __exit__(self, *_): return False
+    def register(self, stream, event, name):
+        self.entries[stream.fileno()] = SimpleNamespace(fd=stream.fileno(), fileobj=stream, data=name)
+    def unregister(self, stream): del self.entries[stream.fileno()]
+    def get_map(self): return self.entries
+    def select(self, _timeout): return [] if self.empty else [(key, M.selectors.EVENT_READ) for key in self.entries.values()]
+
+
+class RegistrationBudget(unittest.TestCase):
+    @contextmanager
+    def draining(self, stdout=b"", stderr=b"", empty=False):
+        streams = {61: io.BytesIO(stdout), 62: io.BytesIO(stderr)}
+        child = Mock(stdout=Mock(fileno=Mock(return_value=61)), stderr=Mock(fileno=Mock(return_value=62)))
+        child.wait.return_value = 0
+        reads = []
+        def read(fd, count):
+            reads.append((fd, count)); return streams[fd].read(count)
+        with patch.object(M.selectors, "DefaultSelector", return_value=PipeSelector(empty)), \
+                patch.object(M.os, "set_blocking", create=True) as blocking, patch.object(M.os, "read", side_effect=read), \
+                patch.object(M.time, "monotonic", return_value=0):
+            yield child, {"stdout": bytearray(), "stderr": bytearray()}, reads, blocking
+
+    def test_registry_file_cap_is_32mib_and_original_readonly_cap_remains_128kib(self):
+        self.assertEqual(M.REGISTRATION_FILE_LIMIT, 32 * 1024 * 1024)
+        resource = SimpleNamespace(RLIMIT_CORE=4, RLIMIT_FSIZE=1, setrlimit=Mock())
+        with patch.dict(sys.modules, {"resource": resource}), patch.object(M.os, "set_inheritable") as setter:
+            M.registration_limits(412)
+            self.assertEqual(resource.setrlimit.call_args_list[-1].args, (1, (33554432, 33554432)))
+            setter.assert_called_once_with(412, False)
+            resource.setrlimit.reset_mock(); M.child_limits(412)
+            self.assertEqual(resource.setrlimit.call_args_list[-1].args, (1, (131072, 131072)))
+
+    def test_concurrent_pipe_drains_keep_exact_caps_and_wait_only_after_both_eof(self):
+        with self.draining(b"o" * M.STDOUT_LIMIT, b"e" * M.STDERR_LIMIT) as (child, buffers, reads, blocking):
+            self.assertEqual(M.drain_registration(child, buffers, 45), 0)
+            self.assertEqual(buffers["stdout"], b"o" * M.STDOUT_LIMIT)
+            self.assertEqual(buffers["stderr"], b"e" * M.STDERR_LIMIT)
+            self.assertEqual([fd for fd, _ in reads[:2]], [61, 62])
+            self.assertTrue(all(count <= 65536 for _, count in reads))
+            blocking.assert_any_call(61, False); blocking.assert_any_call(62, False)
+            child.wait.assert_called_once_with(timeout=45)
+
+    def test_either_stream_overflow_retains_at_most_cap_and_never_waits_as_success(self):
+        for name, size in (("stdout", M.STDOUT_LIMIT), ("stderr", M.STDERR_LIMIT)):
+            with self.subTest(name=name), self.draining(**{name: b"x" * (size + 1)}) as (child, buffers, _reads, _blocking):
+                with self.assertRaisesRegex(RuntimeError, "exceeded output cap"):
+                    M.drain_registration(child, buffers, 45)
+                self.assertEqual(len(buffers[name]), size); child.wait.assert_not_called()
+
+    def test_invalid_or_preoverflowed_output_buffers_refused_before_reads(self):
+        for buffers in ({}, {"stdout": b"immutable", "stderr": bytearray()},
+                        {"stdout": bytearray(M.STDOUT_LIMIT + 1), "stderr": bytearray()}):
+            with self.subTest(keys=list(buffers)), patch.object(M.os, "read") as read, self.assertRaises(RuntimeError):
+                M.drain_registration(Mock(), buffers, 45)
+            read.assert_not_called()
+
+    def test_output_deadline_does_not_wait_or_spin_indefinitely(self):
+        with self.draining(empty=True) as (child, buffers, _reads, _blocking), \
+                patch.object(M.time, "monotonic", side_effect=(0, 2)):
+            with self.assertRaisesRegex(RuntimeError, "deadline"):
+                M.drain_registration(child, buffers, 1)
+            child.wait.assert_not_called()
+
+    def test_would_block_is_not_eof_and_stderr_is_still_drained(self):
+        with self.draining(b"out", b"err") as (child, buffers, _reads, _blocking):
+            original = M.os.read.side_effect
+            blocked = []
+            def read(fd, count):
+                if fd == 61 and not blocked:
+                    blocked.append(True); raise BlockingIOError
+                return original(fd, count)
+            M.os.read.side_effect = read
+            M.drain_registration(child, buffers, 45)
+            self.assertEqual(buffers, {"stdout": bytearray(b"out"), "stderr": bytearray(b"err")})
+
+    def test_runner_preserves_original_drain_error_when_owned_cleanup_also_fails(self):
+        with Registration().fixture() as root, patch.object(M.subprocess, "Popen") as spawn, \
+                patch.object(M, "drain_registration") as drain:
+            child = Mock(pid=42); child.poll.return_value = None; child.wait.side_effect = RuntimeError("cleanup failed")
+            spawn.return_value = child
+            original = RuntimeError("output overflow")
+            def failed(_child, buffers, _deadline):
+                buffers["stdout"].extend(b"partial"); raise original
+            drain.side_effect = failed
+            with self.assertRaises(RuntimeError) as raised:
+                M._run_registration_command(Mock(fd=412), ("register", ("projects", "add")), root)
+            self.assertIs(raised.exception, original)
+            self.assertFalse(original.registration_record["outputComplete"])
+            self.assertEqual(original.registration_record["cleanupRefusal"], "RuntimeError")
+            child.kill.assert_called_once(); child.wait.assert_called_once_with(timeout=5)
+            self.assertEqual((root / "evidence/register.stdout").read_bytes(), b"partial")
+            self.assertEqual(spawn.call_count, 1)
+
+    def test_signal_record_is_not_command_success_and_foreign_output_refuses_before_spawn(self):
+        with Registration().fixture() as root, patch.object(M.subprocess, "Popen") as spawn, \
+                patch.object(M, "drain_registration", return_value=-25):
+            spawn.return_value = Mock(pid=42)
+            record, raw = M._run_registration_command(Mock(fd=412), ("register", ("projects", "add")), root)
+            self.assertEqual(record["exitCode"], -25); self.assertEqual(record["terminationSignal"], 25)
+            self.assertEqual(raw, b"")
+            original = (root / "evidence/register.stdout").read_bytes()
+            with self.assertRaises(FileExistsError):
+                M._run_registration_command(Mock(fd=412), ("register", ("projects", "add")), root)
+            self.assertEqual(spawn.call_count, 1)
+            self.assertEqual((root / "evidence/register.stdout").read_bytes(), original)
+
+    def test_hub_help_uses_original_runner_but_registry_reads_use_separate_budget(self):
+        with Registration().fixture() as root, patch.object(M, "_run_command") as old, \
+                patch.object(M, "_run_registration_command") as new:
+            M.run_registration_fixed(Mock(), ("hub-help", ("hub", "--help")), root)
+            old.assert_called_once(); new.assert_not_called()
+            M.run_registration_fixed(Mock(), ("list-before", M.COMMANDS[-1][1]), root)
+            self.assertEqual(old.call_count, 1); new.assert_called_once()
+
+    @unittest.skipUnless(sys.platform == "linux", "Real Unix pipe/dir-FD primitives only; no executable launched")
+    def test_real_unix_pipe_drains_and_private_home_dirfd_metadata_without_cli(self):
+        with ExitStack() as stack:
+            pipes = [os.pipe(), os.pipe()]
+            for read_fd, write_fd in pipes:
+                stack.callback(os.close, read_fd); stack.callback(os.close, write_fd)
+            os.write(pipes[0][1], b"stdout"); os.write(pipes[1][1], b"stderr")
+            # Duplicate read ends into stream ownership; close write ends for EOF.
+            stdout = stack.enter_context(os.fdopen(os.dup(pipes[0][0]), "rb", buffering=0))
+            stderr = stack.enter_context(os.fdopen(os.dup(pipes[1][0]), "rb", buffering=0))
+            os.close(pipes[0][1]); os.close(pipes[1][1])
+            # ExitStack callbacks for write ends are now discharged explicitly.
+            stack.pop_all()
+            try:
+                child = SimpleNamespace(stdout=stdout, stderr=stderr, wait=Mock(return_value=0))
+                buffers = {"stdout": bytearray(), "stderr": bytearray()}
+                self.assertEqual(M.drain_registration(child, buffers, M.time.monotonic() + M.COMMAND_SECONDS), 0)
+                self.assertEqual(buffers, {"stdout": bytearray(b"stdout"), "stderr": bytearray(b"stderr")})
+            finally:
+                stdout.close(); stderr.close(); os.close(pipes[0][0]); os.close(pipes[1][0])
+        with Registration().fixture() as root:
+            M.private_directory(root / "home/projects", os.getuid())
+            M.new_private_file(root / "home/config/unknown.bin", b"synthetic metadata only")
+            with patch.object(M, "read_regular", side_effect=AssertionError("No file-content read")), \
+                    patch.object(M.subprocess, "Popen", side_effect=AssertionError("No executable")):
+                result = M.private_home_metadata(root, os.getuid())
+            self.assertTrue(result["complete"])
+            self.assertEqual(next(row for row in result["entries"] if row["path"] == "config/unknown.bin")["size"], 23)
+
+
+class HomeMetadataModel:
+    def __init__(self, nodes):
+        self.nodes, self.opened, self.closed = nodes, [], []
+        self.ids = {name: 100 + index for index, name in enumerate(nodes)}
+        self.names = {value: key for key, value in self.ids.items()}
+
+    def info(self, name):
+        value = self.nodes[name]
+        kind = value.get("kind", "directory")
+        mode = {"file": stat.S_IFREG | 0o600, "directory": stat.S_IFDIR | 0o700, "link": stat.S_IFLNK | 0o777,
+                "fifo": stat.S_IFIFO | 0o600}[kind]
+        return SimpleNamespace(st_dev=1, st_ino=self.ids[name], st_mode=mode, st_uid=value.get("uid", 1000),
+                               st_gid=1000, st_nlink=1, st_size=value.get("size", 0), st_mtime_ns=1, st_ctime_ns=1)
+
+    @contextmanager
+    def install(self, root):
+        original_stat, original_lstat = os.stat, Path.lstat
+        def named(name, *args, **kwargs):
+            if "dir_fd" not in kwargs:
+                return original_stat(name, *args, **kwargs)
+            prefix = self.names[kwargs["dir_fd"]]
+            return self.info((prefix + "/" if prefix else "") + name)
+        def opened(name, flags, **kwargs):
+            if "dir_fd" not in kwargs:
+                assert name == root / "home"; relative = ""
+            else:
+                prefix = self.names[kwargs["dir_fd"]]
+                relative = (prefix + "/" if prefix else "") + name
+            self.opened.append(relative)
+            return self.ids[relative]
+        @contextmanager
+        def scan(fd):
+            yield iter(SimpleNamespace(name=name) for name in self.nodes[self.names[fd]].get("children", []))
+        def lstat(path, *args, **kwargs):
+            return self.info("") if path == root / "home" else original_lstat(path, *args, **kwargs)
+        with ExitStack() as stack:
+            portable_flags(stack)
+            if not hasattr(os, "O_DIRECTORY"):
+                stack.enter_context(patch.object(os, "O_DIRECTORY", 0, create=True))
+            stack.enter_context(patch.object(M, "protected_parent"))
+            stack.enter_context(patch.object(M.os, "open", side_effect=opened))
+            stack.enter_context(patch.object(M.os, "fstat", side_effect=lambda fd: self.info(self.names[fd])))
+            stack.enter_context(patch.object(M.os, "stat", side_effect=named))
+            stack.enter_context(patch.object(Path, "lstat", new=lstat))
+            stack.enter_context(patch.object(M.os, "scandir", side_effect=scan))
+            stack.enter_context(patch.object(M.os, "close", side_effect=self.closed.append))
+            yield
+
+
+class RegistrationMetadata(unittest.TestCase):
+    def test_preservation_reports_do_not_hide_file_nested_directory_or_root_identity_changes(self):
+        before = json.loads(json.dumps(Registration.inventory()))
+        after = json.loads(json.dumps(before))
+        after["probe-project-01/Assets/Probe.txt"]["sha256"] = "f" * 64
+        value = M.project_preservation(before, after)
+        self.assertFalse(value["projectFileContentsAndIdentitiesPreserved"])
+        after = json.loads(json.dumps(before)); after["probe-project-01/Assets"]["stamp"][-2] = 2
+        self.assertFalse(M.project_preservation(before, after)["projectNestedDirectoryIdentitiesPreserved"])
+        after = json.loads(json.dumps(before)); after["probe-project-01"]["stamp"][1] = 999
+        self.assertFalse(M.project_preservation(before, after)["projectRootNonTimestampMetadataPreserved"])
+
+    def test_fixed_private_home_only_records_unknown_file_metadata_and_no_contents(self):
+        nodes = {"": {"children": ["config", "projects"]}, "config": {"children": ["registry.db", "unknown.bin"]},
+                 "projects": {}, "config/registry.db": {"kind": "file", "size": 131072},
+                 "config/unknown.bin": {"kind": "file", "size": 7}}
+        model = HomeMetadataModel(nodes)
+        with Registration().fixture() as root, model.install(root), patch.object(M, "read_regular") as read:
+            result = M.private_home_metadata(root, 1000)
+        self.assertTrue(result["complete"]); self.assertTrue(result["readOnly"]); self.assertFalse(result["inputPermitted"])
+        self.assertEqual(model.opened, ["", "config"]); self.assertEqual(len(model.closed), 2)
+        self.assertEqual(next(row for row in result["entries"] if row["path"] == "config/registry.db")["size"], 131072)
+        self.assertEqual(next(row for row in result["entries"] if row["path"] == "projects")["subtree"], "separate-exact-project-inventory")
+        read.assert_not_called()
+
+    def test_links_special_and_foreign_entries_refuse_without_opening_or_following(self):
+        for entry in ({"kind": "link"}, {"kind": "fifo"}, {"kind": "directory", "uid": 1002}):
+            model = HomeMetadataModel({"": {"children": ["unknown"]}, "unknown": entry})
+            with self.subTest(entry=entry), Registration().fixture() as root, model.install(root):
+                result = M.private_home_metadata(root, 1000)
+            self.assertFalse(result["complete"]); self.assertEqual(model.opened, [""])
+            self.assertEqual(result["refusal"], "RuntimeError")
+
+    def test_metadata_count_name_and_depth_bounds_are_enforced_without_file_reads(self):
+        cases = [{"": {"children": [str(n) for n in range(129)]},
+                  **{str(n): {"kind": "file"} for n in range(129)}}, {"": {"children": ["x" * 129]}}]
+        deep = {"": {"children": ["d"]}}
+        for depth in range(1, 9):
+            deep["/".join(["d"] * depth)] = {"children": ["d"] if depth < 8 else []}
+        cases.append(deep)
+        for nodes in cases:
+            model = HomeMetadataModel(nodes)
+            with self.subTest(count=len(nodes)), Registration().fixture() as root, model.install(root):
+                result = M.private_home_metadata(root, 1000)
+            self.assertFalse(result["complete"]); self.assertLessEqual(len(result["entries"]), 128)
+            self.assertEqual(len(model.closed), len(model.opened))
+
+    def test_metadata_failure_or_oversize_capture_never_replaces_original_failure(self):
+        for value in (RuntimeError("capture failed"), {"complete": True, "entries": ["x" * 70000]}):
+            with Registration().fixture() as root, patch.object(M, "private_home_metadata") as metadata:
+                if isinstance(value, Exception): metadata.side_effect = value
+                else: metadata.return_value = value
+                report = {}
+                original = RuntimeError("original registration refusal")
+                try:
+                    raise original
+                except RuntimeError as error:
+                    M.retain_registration_failure_metadata(root, 1000, report)
+                    self.assertIs(error, original)
+                self.assertIn("registrationFailureMetadataRefusal", report)
+                self.assertNotIn("registrationFailureHomeMetadata", report)
+                self.assertFalse((root / "evidence/register-home-metadata.json").exists())
 
 
 if __name__ == "__main__":

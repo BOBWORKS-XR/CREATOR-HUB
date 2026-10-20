@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import platform
 import re
+import selectors
 import stat
 import subprocess
 import sys
@@ -44,6 +45,7 @@ COMMANDS = (
 FALSE = dict.fromkeys(("nonemptyRegistryAccepted", "automaticDiscoveryAccepted", "unityEditorAccepted",
                        "hubUiFixtureAccepted", "releaseReady"), False)
 STDOUT_LIMIT, STDERR_LIMIT, COMMAND_SECONDS = 128 * 1024, 64 * 1024, 45
+REGISTRATION_FILE_LIMIT = 32 * 1024 * 1024  # Conservative per-file test cap, not a vendor requirement.
 
 
 def require(value, message):
@@ -418,6 +420,8 @@ def run_registration_fixed(tool, specification, root):
     require(specification in allowed, "Only the fixed private registration/pagination commands may execute")
     if specification[0] in ("register", "list-current", "list-all"):
         project_inventory(root, os.getuid())
+    if specification[0] != "hub-help":
+        return _run_registration_command(tool, specification, root)
     return _run_command(tool, specification, root)
 
 
@@ -494,6 +498,188 @@ def execute(env):
             stream.write(raw)
 
 
+def registration_limits(executable_fd):
+    import resource
+    os.set_inheritable(executable_fd, False)
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+    resource.setrlimit(resource.RLIMIT_FSIZE, (REGISTRATION_FILE_LIMIT, REGISTRATION_FILE_LIMIT))
+
+
+def drain_registration(child, buffers, deadline):
+    caps = {"stdout": STDOUT_LIMIT, "stderr": STDERR_LIMIT}
+    require(set(buffers) == set(caps) and all(type(buffers[name]) is bytearray and len(buffers[name]) <= caps[name] for name in caps),
+            "Bounded private registry output buffers required")
+    with selectors.DefaultSelector() as poller:
+        for name in caps:
+            stream = getattr(child, name)
+            os.set_blocking(stream.fileno(), False)
+            poller.register(stream, selectors.EVENT_READ, name)
+        while poller.get_map():
+            remaining = deadline - time.monotonic()
+            require(remaining > 0, "Private registry output deadline; no retry")
+            for key, _mask in poller.select(min(remaining, 0.25)):
+                name = key.data
+                left = caps[name] - len(buffers[name])
+                try:
+                    raw = os.read(key.fd, min(65536, left + 1))
+                except BlockingIOError:
+                    continue
+                if not raw:
+                    poller.unregister(key.fileobj)
+                    continue
+                buffers[name].extend(raw[:left])
+                require(len(raw) <= left, "Private registry " + name + " exceeded output cap; no retry")
+        remaining = deadline - time.monotonic()
+        require(remaining > 0, "Private registry process deadline; no retry")
+        return child.wait(timeout=remaining)
+
+
+def _run_registration_command(tool, specification, root):
+    role, args = specification
+    tool.check()
+    buffers, handles, child, failure, cleanup = {"stdout": bytearray(), "stderr": bytearray()}, [], None, None, None
+    code = None
+    try:
+        for suffix in buffers:
+            path = root / "evidence" / (role + "." + suffix)
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
+                         | getattr(os, "O_BINARY", 0), 0o600)
+            handles.append(os.fdopen(fd, "wb"))
+        executable = "/proc/self/fd/" + str(tool.fd)
+        deadline = time.monotonic() + COMMAND_SECONDS
+        child = subprocess.Popen([executable, *args], executable=executable, shell=False, pass_fds=(tool.fd,), close_fds=True,
+                                 stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                 env=child_environment(root), cwd=root / "home", preexec_fn=partial(registration_limits, tool.fd))
+        code = drain_registration(child, buffers, deadline)
+        tool.check()
+    except Exception as error:
+        failure = error
+        if child is not None:
+            try:
+                if child.poll() is None:
+                    child.kill(); child.wait(timeout=5)
+            except Exception as error:
+                cleanup = type(error).__name__
+    finally:
+        for handle, raw in zip(handles, buffers.values()):
+            try:
+                require(handle.write(raw) == len(raw), "Private registry output write incomplete")
+                handle.flush(); os.fsync(handle.fileno())
+            except Exception as error:
+                if failure is None:
+                    failure = error
+            finally:
+                try:
+                    handle.close()
+                except Exception as error:
+                    if failure is None:
+                        failure = error
+        if child is not None:
+            for stream in (child.stdout, child.stderr):
+                if stream is not None:
+                    try:
+                        stream.close()
+                    except Exception as error:
+                        if failure is None:
+                            failure = error
+    record = {"role": role, "pid": None if child is None else child.pid, "exitCode": code,
+              "fileSizeLimit": REGISTRATION_FILE_LIMIT, "fileSizeLimitScope": "per-file-test-cap-not-vendor-requirement",
+              "outputComplete": failure is None, **{name: pin(raw) for name, raw in buffers.items()}}
+    if code is not None and code < 0:
+        record["terminationSignal"] = -code
+    if cleanup is not None:
+        record["cleanupRefusal"] = cleanup
+    if failure is not None:
+        failure.registration_record = record
+        raise failure
+    return record, bytes(buffers["stdout"])
+
+
+def private_home_metadata(root, uid):
+    registration_paths(root)
+    protected_parent(root, uid)
+    home = root / "home"
+    require(home.resolve(strict=True) == home, "Canonical isolated HOME required")
+    result = {"scope": "fixed-private-cli-home-metadata-only", "readOnly": True, "complete": False,
+              "inputPermitted": False, "releaseReady": False, "entries": []}
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+
+    def walk(fd, relative, depth):
+        require(depth <= 6, "Private HOME metadata depth bound")
+        before = os.fstat(fd)
+        require(stat.S_ISDIR(before.st_mode) and before.st_uid == uid and not before.st_mode & 0o022,
+                "Owned protected metadata directory required")
+        with os.scandir(fd) as entries:
+            for entry in entries:
+                require(len(result["entries"]) < 128 and len(entry.name) <= 128 and entry.name not in (".", "..")
+                        and not any(value in entry.name for value in ("/", "\\", "\x00")), "Private HOME metadata entry bound")
+                name = (relative + "/" if relative else "") + entry.name
+                require(len(name) <= 1024, "Private HOME metadata path bound")
+                info = os.stat(entry.name, dir_fd=fd, follow_symlinks=False)
+                row = {"path": name, "stamp": identity(info), "size": info.st_size}
+                result["entries"].append(row)
+                require(info.st_uid == uid, "Foreign private HOME entry refused")
+                if stat.S_ISREG(info.st_mode):
+                    row["kind"] = "file"
+                else:
+                    require(stat.S_ISDIR(info.st_mode), "Linked or special private HOME entry refused")
+                    row["kind"] = "directory"
+                    if name == "projects":
+                        row["subtree"] = "separate-exact-project-inventory"
+                    else:
+                        child = os.open(entry.name, flags, dir_fd=fd)
+                        try:
+                            require(identity(os.fstat(child)) == identity(info), "Private HOME directory changed during open")
+                            walk(child, name, depth + 1)
+                        finally:
+                            os.close(child)
+                require(identity(os.stat(entry.name, dir_fd=fd, follow_symlinks=False)) == identity(info),
+                        "Private HOME entry changed during metadata capture")
+        require(identity(os.fstat(fd)) == identity(before), "Private HOME directory changed during capture")
+
+    fd = os.open(home, flags)
+    try:
+        require(identity(os.fstat(fd)) == identity(home.lstat()), "Private HOME changed during open")
+        try:
+            walk(fd, "", 0)
+            require(identity(os.fstat(fd)) == identity(home.lstat()), "Private HOME changed after capture")
+            result["complete"] = True
+        except Exception as error:
+            result["refusal"] = type(error).__name__
+    finally:
+        os.close(fd)
+    return result
+
+
+def retain_registration_failure_metadata(root, uid, report):
+    try:
+        value = private_home_metadata(root, uid)
+        raw = (json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n").encode()
+        require(len(raw) <= 65536, "Private HOME metadata receipt bound")
+        new_private_file(root / "evidence/register-home-metadata.json", raw)
+        report["registrationFailureHomeMetadata"] = {**pin(raw), "complete": value["complete"], "readOnly": True}
+    except Exception as error:
+        report["registrationFailureMetadataRefusal"] = type(error).__name__
+
+
+def project_preservation(before, after):
+    names_match = set(before) == set(after)
+    files = [name for name, row in before.items() if row["kind"] == "file"]
+    directories = [name for name, row in before.items() if row["kind"] == "directory"]
+    roots = set(PROJECT_NAMES)
+    changes = [{"fixtureId": name, "before": dict(zip(("mtimeNs", "ctimeNs"), before[name]["stamp"][-2:])),
+                "after": dict(zip(("mtimeNs", "ctimeNs"), after[name]["stamp"][-2:]))}
+               for name in PROJECT_NAMES if name in before and name in after and before[name]["stamp"][-2:] != after[name]["stamp"][-2:]]
+    return {"projectFileCount": len(files), "projectFileContentsAndIdentitiesPreserved": names_match and len(files) == 39
+            and all(before[name] == after[name] for name in files),
+            "projectNestedDirectoryIdentitiesPreserved": names_match
+            and all(before[name] == after[name] for name in directories if name not in roots),
+            "projectRootNonTimestampMetadataPreserved": names_match
+            and roots <= set(before) and all(before[name]["kind"] == after[name]["kind"] == "directory"
+                                            and before[name]["stamp"][:-2] == after[name]["stamp"][:-2] for name in roots),
+            "projectRootTimestampDrift": changes}
+
+
 def registration_sequence(tool, root, uid, report):
     for specification in COMMANDS[:5]:
         report["commands"].append(run_fixed(tool, specification, root))
@@ -505,7 +691,13 @@ def registration_sequence(tool, root, uid, report):
             "Actual beta.9 pagination help differs; no registration attempted")
 
     def command(specification):
-        record, raw = run_registration_fixed(tool, specification, root)
+        try:
+            record, raw = run_registration_fixed(tool, specification, root)
+        except Exception as error:
+            record = getattr(error, "registration_record", None)
+            if type(record) is dict:
+                report["commands"].append(record)
+            raise
         report["commands"].append(record)
         require(record["exitCode"] == 0, "Private probe command failed; no retry: " + record["role"])
         return raw
@@ -523,11 +715,18 @@ def registration_sequence(tool, root, uid, report):
     report["projectInventoryBefore"] = pin(before_raw)
     try:
         report["registrationAttempted"] = True
-        registration_json(command(("register", ("projects", "add", *(str(path) for path in registration_paths(root)),
-                                                  *COMMANDS[-1][1][2:]))))
+        try:
+            registration_json(command(("register", ("projects", "add", *(str(path) for path in registration_paths(root)),
+                                                      *COMMANDS[-1][1][2:]))))
+        except Exception:
+            retain_registration_failure_metadata(root, uid, report)
+            raise
         report["registrationReturnedSuccess"] = True
         current = listed_projects(command(("list-current", COMMANDS[-1][1])), root, all_projects=False)
         every = listed_projects(command(("list-all", (*COMMANDS[-1][1], "--all"))), root, all_projects=True)
+        report.update(currentCount=len(current), allCount=len(every),
+                      currentFixtureIds=sorted(current), allFixtureIds=sorted(every), omittedFixtureIds=sorted(every - current),
+                      jsonDefaultOmittedFixtures=current != every, paginationCompared=True)
     finally:
         original_failure = sys.exc_info()[0] is not None
         try:
@@ -536,15 +735,13 @@ def registration_sequence(tool, root, uid, report):
             require(len(after_raw) <= 32768, "Bounded project inventory required")
             new_private_file(root / "evidence/projects-after.json", after_raw)
             report["projectInventoryAfter"] = pin(after_raw)
+            report.update(project_preservation(before, after))
             require(after == before, "Synthetic project inventory changed; no acceptance")
             report["projectContentsUnchanged"] = True
         except Exception as error:
             report["projectInventoryRefusal"] = type(error).__name__
             if not original_failure:
                 raise
-    report.update(currentCount=len(current), allCount=len(every),
-                  currentFixtureIds=sorted(current), allFixtureIds=sorted(every), omittedFixtureIds=sorted(every - current),
-                  jsonDefaultOmittedFixtures=current != every, paginationCompared=True)
 
 
 def execute_registration(env):
