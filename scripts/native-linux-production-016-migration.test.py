@@ -5,11 +5,13 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
+from types import SimpleNamespace
 
 sys.dont_write_bytecode = True
 HERE = Path(__file__).resolve().parent
@@ -52,6 +54,69 @@ def records(session, commands, ids):
 
 
 class ControllerTests(unittest.TestCase):
+    def test_helper_namespace_is_the_exact_compiled_inspection_files_and_their_finite_parents(self):
+        rust = HERE.parent / "native/linux-deb-retirement/src"
+        mcp = re.findall(r'pin!\(\s*"([^"]+)"', (rust / "pins.rs").read_text())
+        setup = re.findall(r'path: "([^"]+)"', (rust / "setup.rs").read_text())
+        system = {"/usr/bin/dpkg", "/usr/bin/dpkg-query", "/var/lib/dpkg/diversions", "/var/lib/dpkg/statoverride",
+                  "/var/lib/dpkg/info/creator-works-mcp.list", "/var/lib/dpkg/info/creator-works-mcp.md5sums",
+                  "/var/lib/dpkg/info/creator-project-setup.list", "/var/lib/dpkg/info/creator-project-setup.md5sums"}
+        self.assertEqual(set(M.HELPER_INSPECTION_FILES), {"/" + name for name in mcp + setup} | system)
+        self.assertEqual(set(M.HELPER_INSPECTION_DIRS), {"/var/lib/dpkg/info", "/var/lib/dpkg/updates",
+                         "/var/lib/creator-hub-deb-retirement", "/var/lib/creator-hub-deb-retirement-setup"})
+        expected = set()
+        for leaf in (*M.HELPER_INSPECTION_FILES, *M.HELPER_INSPECTION_DIRS):
+            path = M.PurePosixPath(leaf)
+            expected.update(map(str, (path, *path.parents)))
+        calls = []
+        def lstat(path):
+            calls.append(path)
+            if path.endswith("statoverride"):
+                raise FileNotFoundError(2, "synthetic absent metadata")
+            kind = M.stat.S_IFREG if path == "/usr/bin/dpkg" else M.stat.S_IFLNK if path == "/usr/bin/dpkg-query" else M.stat.S_IFDIR
+            return SimpleNamespace(st_uid=0, st_gid=7 if path == "/usr/share" else 0, st_nlink=3,
+                                   st_mode=kind | (0o777 if path == "/usr/share" else 0o755),
+                                   st_size=4096, st_dev=1, st_ino=2, st_mtime_ns=3, st_ctime_ns=4)
+        with patch.object(M.os, "lstat", side_effect=lstat), patch.object(M.os, "scandir", side_effect=AssertionError("No scan")), \
+             patch.object(M, "read_file", side_effect=AssertionError("No file-content reads")):
+            snapshot = M.helper_namespace()
+        self.assertEqual(calls, sorted(expected))
+        self.assertLessEqual(len(calls), 96)
+        rows = {row["path"]: row for row in snapshot["entries"]}
+        self.assertEqual(rows["/usr/share"]["mode"], 0o777)
+        self.assertEqual(rows["/usr/share"]["modeOctal"], "0777")
+        self.assertEqual(rows["/usr/share"]["gid"], 7)
+        self.assertEqual(rows["/usr/share"]["type"], "directory")
+        self.assertEqual(rows["/usr/bin/dpkg"]["type"], "file")
+        self.assertEqual(rows["/usr/bin/dpkg"]["nlink"], 3)
+        self.assertEqual(rows["/usr/bin/dpkg-query"]["type"], "symlink")
+        self.assertEqual(rows["/var/lib/dpkg/statoverride"], {"path": "/var/lib/dpkg/statoverride", "error": "FileNotFoundError", "errno": 2})
+
+    def test_helper_namespace_snapshots_surround_execution_before_reason_or_image_read(self):
+        events = []
+        snapshots = iter(({"entries": [{"path": "/usr/share", "mode": 0o755}]},
+                          {"entries": [{"path": "/usr/share", "mode": 0o777}]}))
+        def snapshot():
+            events.append("stat"); return next(snapshots)
+        def execute(*args, **kwargs):
+            events.append("helper"); return subprocess.CompletedProcess(args[0], 2, b'{"reason":"synthetic"}', b"")
+        parse = M.P.parse
+        def reason(raw):
+            events.append("reason"); return parse(raw)
+        def image():
+            events.append("image"); return {"path": M.HELPER}
+        with tempfile.TemporaryDirectory() as temporary, patch.object(M, "BASE", Path(temporary).resolve()) as root, \
+             patch.object(M, "helper_namespace", side_effect=snapshot), patch.object(M.subprocess, "run", side_effect=execute), \
+             patch.object(M.P, "parse", side_effect=reason), patch.object(M, "helper_identity", side_effect=image), \
+             patch.multiple(M.os, getuid=Mock(return_value=0), geteuid=Mock(return_value=0),
+                            getgid=Mock(return_value=0), getegid=Mock(return_value=0), create=True):
+            with self.assertRaises(RuntimeError):
+                M.tool([M.HELPER, "inspect"], helper_pin={"size": 64, "sha256": "a" * 64})
+            receipt = json.loads((root / "helper-inspection-failure.json").read_bytes())
+        self.assertEqual(events, ["stat", "helper", "stat", "reason", "image"])
+        self.assertEqual(receipt["namespaceBefore"]["entries"][0]["mode"], 0o755)
+        self.assertEqual(receipt["namespaceAfter"]["entries"][0]["mode"], 0o777)
+
     def test_helper_inspection_failure_is_saved_before_throw_even_before_user_creation(self):
         actions = ("inspect", "inspect-retained-mcp-2.7.7", "inspect-setup-0.3.7", "inspect-retained-setup-0.3.7")
         pin = {"size": 64, "sha256": "a" * 64}
@@ -67,6 +132,7 @@ class ControllerTests(unittest.TestCase):
                     destination = root / ("result/helper-inspection-failure.json" if uid else "helper-inspection-failure.json")
                     result = subprocess.CompletedProcess([M.HELPER, action], 2, stdout, stderr)
                     with patch.object(M, "BASE", root), patch.object(M, "helper_identity", return_value=actual), \
+                         patch.object(M, "helper_namespace", return_value={"entries": []}), \
                          patch.multiple(M.os, getuid=Mock(return_value=uid), geteuid=Mock(return_value=uid),
                                         getgid=Mock(return_value=uid), getegid=Mock(return_value=uid), create=True), \
                          patch.object(M.subprocess, "run", return_value=result) as run:
@@ -96,19 +162,20 @@ class ControllerTests(unittest.TestCase):
                              ([M.HELPER], {"helper_pin": pin}), ([M.HELPER, "inspect"], {}),
                              ([M.HELPER, "inspect"], {"helper_pin": pin, "allowed": (0, 2)})):
             with self.subTest(args=args, kwargs=kwargs), patch.object(M.subprocess, "run") as run, \
-                 patch.object(M, "helper_identity") as identity, self.assertRaises(RuntimeError):
+                 patch.object(M, "helper_identity") as identity, patch.object(M, "helper_namespace") as namespace, self.assertRaises(RuntimeError):
                 M.tool(args, **kwargs)
-            run.assert_not_called(); identity.assert_not_called()
+            run.assert_not_called(); identity.assert_not_called(); namespace.assert_not_called()
 
     def test_successful_helper_inspections_remain_read_only_and_oversized_output_still_refuses(self):
         pin = {"size": 64, "sha256": "a" * 64}
         for action in ("inspect", "inspect-retained-mcp-2.7.7", "inspect-setup-0.3.7", "inspect-retained-setup-0.3.7"):
             with patch.object(M.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, b"{}", b"")) as run, \
-                 patch.object(M, "save") as save:
+                 patch.object(M, "save") as save, patch.object(M, "helper_namespace", return_value={"entries": []}):
                 self.assertEqual(M.tool([M.HELPER, action], helper_pin=pin), b"{}")
                 run.assert_called_once(); save.assert_not_called()
         with tempfile.TemporaryDirectory() as temporary, patch.object(M, "BASE", Path(temporary).resolve()) as root, \
              patch.object(M, "helper_identity", return_value={"unavailable": "OSError"}), \
+             patch.object(M, "helper_namespace", return_value={"entries": []}), \
              patch.multiple(M.os, getuid=Mock(return_value=0), geteuid=Mock(return_value=0),
                             getgid=Mock(return_value=0), getegid=Mock(return_value=0), create=True), \
              patch.object(M.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, b"x" * 262145, b"")):

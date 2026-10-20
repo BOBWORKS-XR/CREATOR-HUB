@@ -12,7 +12,7 @@ import importlib.util
 import json
 import math
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import secrets
 import select
@@ -36,6 +36,31 @@ BASE = Path("/opt/creator-polkit-fixture")
 USER, UID = "creator-polkit-fixture", 21314
 HUB = "/usr/bin/creator-hub"
 HELPER = "/usr/libexec/creator-hub-deb-retirement-helper"
+# Finite union of read-only helper paths in pins.rs, setup.rs and linux/{metadata,setup}.rs.
+HELPER_INSPECTION_FILES = (
+    "/usr/bin/dpkg", "/usr/bin/dpkg-query",
+    "/var/lib/dpkg/diversions", "/var/lib/dpkg/statoverride",
+    "/var/lib/dpkg/info/creator-works-mcp.list", "/var/lib/dpkg/info/creator-works-mcp.md5sums",
+    "/var/lib/dpkg/info/creator-project-setup.list", "/var/lib/dpkg/info/creator-project-setup.md5sums",
+    "/usr/bin/creator-works-mcp-launcher",
+    "/usr/lib/Creator Works MCP/server/LICENSE", "/usr/lib/Creator Works MCP/server/THIRD_PARTY_NOTICES.md",
+    "/usr/lib/Creator Works MCP/server/creator-works-mcp.mjs",
+    "/usr/lib/Creator Works MCP/server/runtime/LICENSE", "/usr/lib/Creator Works MCP/server/runtime/VERSION",
+    "/usr/lib/Creator Works MCP/server/runtime/node", "/usr/lib/Creator Works MCP/server/runtime/node.exe",
+    "/usr/lib/Creator Works MCP/server/unity-extension/Editor/BanterMCPBridge.cs",
+    "/usr/lib/Creator Works MCP/server/unity-extension/Editor/CreatorWorksMCPLogo.png",
+    "/usr/share/applications/Creator Works MCP.desktop",
+    "/usr/share/icons/hicolor/128x128/apps/creator-works-mcp-launcher.png",
+    "/usr/share/icons/hicolor/256x256@2/apps/creator-works-mcp-launcher.png",
+    "/usr/share/icons/hicolor/32x32/apps/creator-works-mcp-launcher.png",
+    "/usr/bin/creator-project-setup", "/usr/share/applications/Creator Project Setup.desktop",
+    "/usr/share/icons/hicolor/32x32/apps/creator-project-setup.png",
+    "/usr/share/icons/hicolor/256x256@2/apps/creator-project-setup.png",
+    "/usr/share/icons/hicolor/128x128/apps/creator-project-setup.png",
+    "/usr/share/creator-project-setup/retired-by-creator-hub.txt",
+)
+HELPER_INSPECTION_DIRS = ("/var/lib/dpkg/info", "/var/lib/dpkg/updates",
+                          "/var/lib/creator-hub-deb-retirement", "/var/lib/creator-hub-deb-retirement-setup")
 POLICY = "/usr/share/polkit-1/actions/com.creatorworks.hub.deb-retirement.policy"
 TITLE = "Creator Hub - Development Preview"
 CONFIG = "config/creator-works-mcp/launcher-config.json"
@@ -245,6 +270,26 @@ def policy_question(raw):
     return question
 
 
+def helper_namespace():
+    paths = set()
+    for name in (*HELPER_INSPECTION_FILES, *HELPER_INSPECTION_DIRS):
+        leaf = PurePosixPath(name)
+        paths.update(map(str, (leaf, *leaf.parents)))
+    require(len(paths) <= 96, "Fixed helper diagnostic namespace exceeds bound")
+    entries = []
+    for path in sorted(paths):
+        try:
+            info = os.lstat(path)
+            kind = {stat.S_IFDIR: "directory", stat.S_IFREG: "file", stat.S_IFLNK: "symlink"}.get(stat.S_IFMT(info.st_mode), "other")
+            entries.append({"path": path, "type": kind, "uid": info.st_uid, "gid": info.st_gid,
+                            "mode": stat.S_IMODE(info.st_mode), "modeOctal": f"{stat.S_IMODE(info.st_mode):04o}",
+                            "nlink": info.st_nlink, "size": info.st_size, "dev": info.st_dev, "ino": info.st_ino,
+                            "mtimeNs": info.st_mtime_ns, "ctimeNs": info.st_ctime_ns})
+        except OSError as error:
+            entries.append({"path": path, "error": type(error).__name__, "errno": error.errno})
+    return {"scope": "fixed-helper-inspection-paths-only", "observedAtNs": time.time_ns(), "entries": entries}
+
+
 def helper_identity():
     observed = {"path": HELPER}
     try:
@@ -272,10 +317,12 @@ def tool(args, *, allowed=(0,), helper_pin=None):
                 and type(helper_pin["sha256"]) is str and re.fullmatch(r"[a-f0-9]{64}", helper_pin["sha256"]), "Exact helper byte pin required")
     else:
         require(helper_pin is None, "Helper diagnostics cannot capture another command")
+    namespace_before = helper_namespace() if helper else None
     result = subprocess.run(args, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LANG": "C", "LC_ALL": "C"}, check=False)
     accepted = len(result.stdout) <= 262144 and len(result.stderr) <= 262144 and result.returncode in allowed
     if helper and not accepted:
+        namespace_after = helper_namespace()
         def output(raw):
             return {"bytes": len(raw), "sha256": digest(raw), "excerpt": raw[:2048].decode("utf-8", "replace"), "truncated": len(raw) > 2048}
         reason = None
@@ -290,6 +337,7 @@ def tool(args, *, allowed=(0,), helper_pin=None):
         destination = BASE if caller["euid"] == 0 else BASE / "result"
         save(destination / "helper-inspection-failure.json", {"schemaVersion": 1, "readOnly": True, "retryPermitted": False,
              "argv": args, "exitCode": result.returncode, "caller": caller,
+             "namespaceBefore": namespace_before, "namespaceAfter": namespace_after,
              "helperExpected": {"path": HELPER, **helper_pin, "mode": 0o755, "uid": 0, "gid": 0},
              "helperActual": helper_identity(), "stdout": output(result.stdout), "stderr": output(result.stderr), "reasonExcerpt": reason})
     require(accepted, "Finite native inspection refused; no retry: " + args[0])
