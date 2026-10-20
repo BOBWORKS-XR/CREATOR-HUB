@@ -90,6 +90,23 @@ test('future portable output must come from its actual production workflow and a
   const workflow = fs.readFileSync(path.join(ROOT, expected.workflow), 'utf8');
   assert.ok(workflow.includes('name: linux-016-production-portable-unsigned-${{ github.run_id }}-${{ github.run_attempt }}'));
 });
+test('final016 host source remains independent of the immutable actual c13 launcher', () => {
+  // API-shape fixture only, not a replacement for the actual output byte gate.
+  const input = profile();
+  Object.assign(input.portable, { sourceCommit: 'ff3053539e96d3b6af5612a8308d4bda7af773e5',
+    sourceTree: 'a9c5c920e929bd125e359e50da4e742e9704a75c',
+    packagingCommit: '1a426f01a24afd6dcf569db0e5bf30b50c423222',
+    packagingTree: 'e0bc409cace402f0a2deec338d62677e190a48bc', runId: 39365532397,
+    runAttempt: 1, jobId: 118441408232, artifactId: 12239775115 });
+  const p = input.portable;
+  c.portableAPI(proof({ ...p, harnessSource: p.packagingCommit, harnessTree: p.packagingTree,
+    branch: 'validation/linux-016-portable-production', workflow: '.github/workflows/linux-016-portable-production.yml',
+    artifactName: `linux-016-production-portable-unsigned-${p.runId}-${p.runAttempt}` }), input);
+  c.flatpakAPI(flatpakProof());
+  assert.equal(c.FIXED.runId, 39348943839);
+  assert.equal(c.FIXED.sourceCommit, 'c13cb9ef3b9116ea5ffb1f6cf8250becf5fd49e7');
+  assert.notEqual(p.sourceCommit, c.FIXED.sourceCommit);
+});
 test('data admission cannot install, compile, launch or sign, including its CLI', () => {
   const source = fs.readFileSync(path.join(__dirname, 'native-linux-production-016-flatpak.cjs'), 'utf8');
   for (const forbidden of ['child_process', 'execFile', 'spawn(', 'eval(', 'flatpak-spawn', 'startLabProxy', 'minisign -S']) {

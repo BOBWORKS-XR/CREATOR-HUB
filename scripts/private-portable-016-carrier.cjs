@@ -7,7 +7,7 @@ const crypto = require('node:crypto');
 const { execFileSync } = require('node:child_process');
 const BRANCH = 'refs/heads/validation/private-portable-016-carrier';
 const WORKFLOW = '.github/workflows/private-portable-016-carrier.yml';
-const ASSET = 'signed-private-portable016-carrier-39352300183.zip';
+const ASSET = 'signed-private-portable016-carrier-39365532397.zip';
 const RELEASE = 411494394, TAG = 'v0.1.13-validation';
 const META = 2 * 1024 * 1024, SIGNED_META = 128 * 1024, FILE = 256 * 1024 * 1024, ZIP = 768 * 1024 * 1024;
 const FILES = Object.freeze(['package-receipt.json', 'Creator Hub_0.1.16_amd64.AppImage',
