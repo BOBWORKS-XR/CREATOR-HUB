@@ -669,7 +669,8 @@ def baseline_mcp_inputs(folder, profile, package_files, verifier):
     for name in ("runtime", "router"):
         signature(source / "modules/routing" / (name + ".json"),
                   source / "modules/routing" / (name + ".minisig"), verifier)
-    return source / "modules", {name: hashes[name] for name in names}
+    return (source / "modules", {name: hashes[name] for name in names},
+            {name: manifest["payloadArchive"]["files"][name]["mode"] for name in mcp.MODULE_FILES})
 
 
 def stage(folder, env):
@@ -1696,6 +1697,52 @@ class HtmlPages:
                 "Projects readiness/preferences differ")
         phase("complete")
 
+    def require_feature_ready(self, feature, heading):
+        require(feature in ("mcp", "setup"), "Fixed direct feature required")
+        prefix = "#feature-" + feature
+        record = {"feature": feature, "readOnly": True, "inputAuthority": False, "guardPassed": False,
+                  "guardReads": {}, "failureOnlyReads": {}}
+        def retain():
+            try:
+                self.evidence.setdefault("featureReadinessRefusal", record)
+            except Exception:
+                pass  # Diagnostics cannot replace the original refusal.
+        def read(label, suffix, property="text", *, failure_only=False):
+            value = self.d.read(prefix + suffix, property)
+            limit = 2048 if label == "error" else 256
+            if type(value) is str:
+                observed = {"chars": len(value), "truncated": len(value) > limit}
+                if len(value) <= limit:
+                    observed["value"] = value
+                else:
+                    observed.update(prefix=value[:limit], prefixSha256=hashlib.sha256(value[:limit].encode()).hexdigest())
+            elif value is None or type(value) in (bool, int):
+                observed = {"value": value}
+            else:
+                observed = {"unavailable": "NonliteralValue"}
+            record["failureOnlyReads" if failure_only else "guardReads"][label] = observed
+            return value
+        try:
+            ready = (read("heading", " h2") == heading
+                     and read("status", ' [data-field="status"]') == "Ready"
+                     and not read("error", ' [data-field="error"]')
+                     and read("disabled", ' [data-field="controls"]', "attribute/disabled") is None)
+        except Exception:
+            retain()
+            raise
+        if not ready:
+            retain()
+            # Fixed failure-only observations are not an atomic snapshot or a
+            # readiness retry. Every request retains the existing driver guard.
+            for label in ("status", "error"):
+                if label in record["guardReads"]:
+                    continue
+                try:
+                    read(label, ' [data-field="' + label + '"]', failure_only=True)
+                except Exception as error:
+                    record["failureOnlyReads"][label] = {"unavailable": type(error).__name__[:64]}
+            require(False, "Direct feature not Ready")
+
     def direct_pages(self, actions):
         phase_processes(self.surface)
         for feature, heading in (("mcp", "Creator Works MCP"), ("setup", "Project Setup")):
@@ -1704,9 +1751,7 @@ class HtmlPages:
             self.click(selector, actions, "view-" + feature)
             prefix = "#feature-" + feature
             wait(lambda: self.optional(prefix, "displayed") is True and self.optional(prefix, "attribute/aria-busy") == "false", 60)
-            require(self.d.read(prefix + " h2") == heading and self.d.read(prefix + ' [data-field="status"]') == "Ready"
-                    and not self.d.read(prefix + ' [data-field="error"]')
-                    and self.d.read(prefix + ' [data-field="controls"]', "attribute/disabled") is None, "Direct feature not Ready")
+            self.require_feature_ready(feature, heading)
             require(not self.d.elements("iframe,object,embed") and len(self.d.call("GET", "/window/handles")) == 1, "Separate feature document refused")
             if feature == "mcp":
                 selected = prefix + ' .feature-project[data-selected="true"] .feature-project-select'
@@ -2467,9 +2512,9 @@ def native_session(env):
             automation_env, automation_port = html_automation_environment(app_env)
         mcp = load("native-linux-update-mcp")
         verifier = (BASE / "scripts/verify-package-input", original_request["verifier"])
-        resource_source, resource_files = baseline_mcp_inputs(folder, profile, review["deb16"], verifier)
+        resource_source, resource_files, payload_modes = baseline_mcp_inputs(folder, profile, review["deb16"], verifier)
         route = mcp.prepare_existing_route(load("native-linux-production-016-migration"), home,
-                                           resource_source, resource_files, lambda body, sig: signature(body, sig, verifier))
+                                           resource_source, resource_files, payload_modes, lambda body, sig: signature(body, sig, verifier))
         evidence = BASE / "result/mcp"; evidence.mkdir(mode=0o700)
         connection = mcp.McpFixture(route, evidence,
                                    {**{k: v for k, v in app_env.items() if k not in ("HTTPS_PROXY", "NO_PROXY")},

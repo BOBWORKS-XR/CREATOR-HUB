@@ -69,7 +69,7 @@ def _fixture_session(home, migration):
             "Only the existing disposable updater session may seed MCP state")
 
 
-def prepare_existing_route(migration, home, source, resource_files, verify_signature):
+def prepare_existing_route(migration, home, source, resource_files, payload_modes, verify_signature):
     """Seed only the fresh CI fixture, never adopt/repair an installed route.
 
     Like migration's synthetic client settings, this represents pre-update
@@ -81,6 +81,9 @@ def prepare_existing_route(migration, home, source, resource_files, verify_signa
     require(type(resource_files) is dict and set(resource_files) == set(MODULE_FILES + ROUTING_FILES)
             and all(type(value) is str and re.fullmatch(r"[a-f0-9]{64}", value) for value in resource_files.values()),
             "Complete original signed resource pins required before fixture setup")
+    require(type(payload_modes) is dict and set(payload_modes) == set(MODULE_FILES)
+            and all(type(mode) is int and mode in (0o644, 0o755) for mode in payload_modes.values()),
+            "Exact verified archive modes required for the shared runtime generation")
     require(home.resolve(strict=True) == home and (home / "data").resolve(strict=True) == home / "data"
             and source.is_absolute() and source.resolve(strict=True) == source,
             "Canonical fixture home and verified resource source required")
@@ -120,10 +123,11 @@ def prepare_existing_route(migration, home, source, resource_files, verify_signa
         fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode)
         with os.fdopen(fd, "wb") as output:
             require(output.write(body) == len(body), "MCP fixture publication incomplete")
-            output.flush(); os.fsync(output.fileno())
+            output.flush()
+            os.fchmod(output.fileno(), mode)
+            os.fsync(output.fileno())
     for name in MODULE_FILES:
-        publish("runtime-generations/linux-x86_64/" + generation + "/" + name, raw[name],
-                0o500 if name in ("mcp/creator-works-mcp-launcher", "mcp/server/runtime/node") else 0o400)
+        publish("runtime-generations/linux-x86_64/" + generation + "/" + name, raw[name], payload_modes[name])
     prefix = "mcp-route-v1/linux-x86_64/"
     for name in ("runtime.json", "runtime.minisig"):
         publish(prefix + "descriptors/" + descriptor_id + "/" + name, raw["routing/" + name], 0o600)

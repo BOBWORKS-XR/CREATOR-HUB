@@ -244,6 +244,18 @@ class SeedTests(unittest.TestCase):
         self.home = self.root / "target-home"; (self.home / "data").mkdir(parents=True)
         (self.home / "unrelated.txt").write_bytes(b"preserve-exactly")
         self.pins = fixture.resources
+        # Exact modes in the independently reviewed Linux payload archive.
+        self.payload_modes = {
+            "mcp/creator-works-mcp-launcher": 0o755,
+            "mcp/server/creator-works-mcp.mjs": 0o644,
+            "mcp/server/runtime/node": 0o755,
+            "mcp/server/runtime/LICENSE": 0o644,
+            "mcp/server/runtime/VERSION": 0o644,
+            "mcp/server/unity-extension/Editor/BanterMCPBridge.cs": 0o644,
+            "mcp/server/unity-extension/Editor/CreatorWorksMCPLogo.png": 0o644,
+            "mcp/server/LICENSE": 0o644,
+            "mcp/server/THIRD_PARTY_NOTICES.md": 0o644,
+        }
         for name, raw in fixture.files.items():
             target = self.source / name; target.parent.mkdir(parents=True, exist_ok=True); target.write_bytes(raw)
         for name in ("creator-hub-mcp-router", "router.json", "router.minisig"):
@@ -256,9 +268,11 @@ class SeedTests(unittest.TestCase):
         patch.object(MIG, "read_file", lambda p, limit=262144, **kw: READ(p, limit)).start()
         patch.object(M, "_fixture_session", return_value=None).start()
         patch.object(M.os, "O_NOFOLLOW", getattr(os, "O_NOFOLLOW", 0), create=True).start()
+        if os.name == "nt":
+            patch.object(M.os, "fchmod", return_value=None, create=True).start()
 
     def seed(self, verifier=lambda *_: None):
-        return M.prepare_existing_route(MIG, self.home, self.source, self.pins, verifier)
+        return M.prepare_existing_route(MIG, self.home, self.source, self.pins, self.payload_modes, verifier)
 
     def test_seed_copies_only_signed_fixture_bytes_and_real_router_rechecks_them(self):
         route = self.seed()
@@ -283,6 +297,47 @@ class SeedTests(unittest.TestCase):
 
     def test_real_seed_admission_refuses_this_non_native_non_fixture_path(self):
         with self.assertRaises(RuntimeError): ORIGINAL_SEED_ADMISSION(self.home, MIG)
+
+    def test_generation_payload_modes_match_reviewed_archive_exactly(self):
+        original_open = os.open
+        with patch.object(M.os, "open", wraps=original_open) as opened:
+            self.seed()
+        generation_base = self.home / "data/creator-hub/runtime-generations/linux-x86_64"
+        requested = {}
+        for call in opened.call_args_list:
+            if len(call.args) == 3 and call.args[1] & os.O_CREAT:
+                target = Path(call.args[0])
+                if generation_base in target.parents:
+                    name = Path(*target.relative_to(generation_base).parts[1:]).as_posix()
+                    requested[name] = call.args[2]
+        self.assertEqual(requested, self.payload_modes)
+        if os.name == "posix":
+            files = [file for file in generation_base.rglob("*") if file.is_file()]
+            self.assertEqual(len(files), len(self.payload_modes))
+            for file in files:
+                name = Path(*file.relative_to(generation_base).parts[1:]).as_posix()
+                self.assertEqual(file.stat().st_mode & 0o7777, self.payload_modes[name])
+            self.assertTrue(all(directory.stat().st_mode & 0o7777 == 0o700
+                                for directory in generation_base.rglob("*") if directory.is_dir()))
+
+    def test_mode_inventory_refuses_missing_extra_noninteger_or_unreviewed_bits_before_writes(self):
+        for kind in ("missing", "extra", "bool", "writable", "readonly"):
+            modes = dict(self.payload_modes)
+            if kind == "missing": modes.pop("mcp/server/runtime/node")
+            elif kind == "extra": modes["unrelated"] = 0o644
+            else: modes["mcp/server/runtime/node"] = {"bool": True, "writable": 0o777, "readonly": 0o500}[kind]
+            with self.subTest(kind=kind), self.assertRaises(RuntimeError):
+                M.prepare_existing_route(MIG, self.home, self.source, self.pins, modes, lambda *_: None)
+            self.assertFalse((self.home / "data/creator-hub").exists())
+
+    def test_exact_modes_are_applied_only_to_exclusively_created_held_file_descriptors(self):
+        fchmod = os.fchmod
+        with patch.object(M.os, "fchmod", wraps=fchmod) as set_mode:
+            self.seed()
+        self.assertEqual(len(set_mode.call_args_list), len(M.MODULE_FILES) + 6)
+        self.assertEqual([call.args[1] for call in set_mode.call_args_list[:len(M.MODULE_FILES)]],
+                         [self.payload_modes[name] for name in M.MODULE_FILES])
+        self.assertTrue(all(type(call.args[0]) is int for call in set_mode.call_args_list))
 
 
 class AdapterTests(FixtureBase):

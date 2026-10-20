@@ -4946,9 +4946,11 @@ class McpUpdateProtocol(unittest.TestCase):
     def test_original_zip_resources_match_embedded_manifest_archive_and_package_inventory(self):
         with tempfile.TemporaryDirectory() as temp, patch.object(M, "signature") as signature:
             folder = Path(temp).resolve(); p, package, source, hashes = self.resources(folder)
-            directory, pins = M.baseline_mcp_inputs(folder, p, package, ("tool", "evidence"))
+            directory, pins, modes = M.baseline_mcp_inputs(folder, p, package, ("tool", "evidence"))
             self.assertEqual(directory, source / "modules")
             self.assertEqual(pins, {k: v for k, v in hashes.items() if not k.startswith("setup/")})
+            self.assertEqual(modes, {name: 0o755 if name in ("mcp/creator-works-mcp-launcher", "mcp/server/runtime/node") else 0o644
+                                     for name in M.load("native-linux-update-mcp").MODULE_FILES})
             self.assertEqual(signature.call_count, 2)
             self.assertEqual([call.args[0].name for call in signature.call_args_list], ["runtime.json", "router.json"])
             self.assertFalse((folder / "extracted").exists())
@@ -5053,6 +5055,8 @@ class McpUpdateProtocol(unittest.TestCase):
         self.assertLess(code.index("complete_mcp_protocol(connection, report)"), code.index("outcome(scenario, report)"))
         self.assertNotIn("sys.stdin.buffer.read()", code)
         self.assertIn("native-linux-update-mcp.py", M.SOURCES)
+        seed = next(n for n in ast.walk(session) if isinstance(n, ast.Call) and ast.unparse(n.func) == "mcp.prepare_existing_route")
+        self.assertEqual(ast.unparse(seed.args[4]), "payload_modes")
 
     def test_helper_preflight_locked_sdk_and_export_are_finite(self):
         workflow = (HERE.parent / ".github/workflows/native-linux-production-016-update.yml").read_text()
@@ -5064,6 +5068,104 @@ class McpUpdateProtocol(unittest.TestCase):
                      "result/mcp/reconnect/sdk.stdout", "result/mcp/reconnect/sdk.stderr", "result/mcp/reconnect/sdk-result.json"):
             self.assertIn(path, exported)
         self.assertNotIn("rglob", exported)
+
+
+class FeatureReadinessEvidence(unittest.TestCase):
+    def fixture(self, **overrides):
+        values = {"heading": "Creator Works MCP", "status": "Ready", "error": "", "disabled": None, **overrides}
+        calls = []
+        suffixes = {"#feature-mcp h2": "heading", '#feature-mcp [data-field="status"]': "status",
+                    '#feature-mcp [data-field="error"]': "error", '#feature-mcp [data-field="controls"]': "disabled"}
+        def read(selector, property="text"):
+            label = suffixes[selector]; calls.append((label, property))
+            value = values[label]
+            if isinstance(value, BaseException): raise value
+            return value() if callable(value) else value
+        page = SimpleNamespace(d=SimpleNamespace(read=read), evidence={})
+        return page, calls
+
+    def run_guard(self, page):
+        return M.HtmlPages.require_feature_ready(page, "mcp", "Creator Works MCP")
+
+    def test_ready_path_keeps_exact_four_original_reads_without_diagnostic_or_input(self):
+        page, calls = self.fixture()
+        self.run_guard(page)
+        self.assertEqual(calls, [("heading", "text"), ("status", "text"), ("error", "text"), ("disabled", "attribute/disabled")])
+        self.assertEqual(page.evidence, {})
+
+    def test_needs_attention_retains_exact_status_and_fixed_failure_only_error(self):
+        page, calls = self.fixture(status="Needs attention", error="Retained module mode changed. Nothing was opened.")
+        with self.assertRaisesRegex(RuntimeError, "^Direct feature not Ready$"): self.run_guard(page)
+        record = page.evidence["featureReadinessRefusal"]
+        self.assertEqual(record["guardReads"]["status"]["value"], "Needs attention")
+        self.assertNotIn("error", record["guardReads"])
+        self.assertEqual(record["failureOnlyReads"]["error"]["value"], "Retained module mode changed. Nothing was opened.")
+        self.assertEqual(calls, [("heading", "text"), ("status", "text"), ("error", "text")])
+        self.assertFalse(record["guardPassed"]); self.assertFalse(record["inputAuthority"])
+
+    def test_review_saved_settings_and_unknown_status_are_not_promoted_to_ready(self):
+        for status in ("Review saved settings", "Checking Unity connection", "Unknown future status"):
+            page, _ = self.fixture(status=status)
+            with self.subTest(status=status), self.assertRaisesRegex(RuntimeError, "^Direct feature not Ready$"): self.run_guard(page)
+            self.assertEqual(page.evidence["featureReadinessRefusal"]["guardReads"]["status"]["value"], status)
+
+    def test_heading_error_and_disabled_mismatches_preserve_short_circuit_order(self):
+        for override, original in (({"heading": "wrong"}, ["heading"]),
+                                   ({"error": "native read failed"}, ["heading", "status", "error"]),
+                                   ({"disabled": "true"}, ["heading", "status", "error", "disabled"])):
+            page, calls = self.fixture(**override)
+            with self.subTest(override=override), self.assertRaisesRegex(RuntimeError, "^Direct feature not Ready$"): self.run_guard(page)
+            row = page.evidence["featureReadinessRefusal"]
+            self.assertEqual(list(row["guardReads"]), original)
+            self.assertEqual([label for label, _ in calls[:len(original)]], original)
+            self.assertLessEqual(len(calls), 4)
+
+    def test_original_driver_exception_is_preserved_without_failure_only_queries(self):
+        original = RuntimeError("original transport failure")
+        page, calls = self.fixture(status=original)
+        with self.assertRaises(RuntimeError) as caught: self.run_guard(page)
+        self.assertIs(caught.exception, original)
+        self.assertEqual(calls, [("heading", "text"), ("status", "text")])
+        self.assertEqual(page.evidence["featureReadinessRefusal"]["failureOnlyReads"], {})
+
+    def test_failure_only_read_error_cannot_replace_original_refusal(self):
+        page, calls = self.fixture(status="Needs attention", error=RuntimeError("DO NOT RECORD CREDENTIAL CONTENT"))
+        with self.assertRaisesRegex(RuntimeError, "^Direct feature not Ready$"): self.run_guard(page)
+        record = page.evidence["featureReadinessRefusal"]
+        self.assertEqual(record["failureOnlyReads"]["error"], {"unavailable": "RuntimeError"})
+        self.assertNotIn("CREDENTIAL", json.dumps(record))
+        self.assertEqual(len(calls), 3)
+
+    def test_later_readiness_change_never_rechecks_or_accepts_the_failed_guard(self):
+        page, calls = self.fixture(heading="wrong", status="Ready", error="")
+        with self.assertRaisesRegex(RuntimeError, "^Direct feature not Ready$"): self.run_guard(page)
+        row = page.evidence["featureReadinessRefusal"]
+        self.assertEqual(row["failureOnlyReads"]["status"]["value"], "Ready")
+        self.assertFalse(row["guardPassed"])
+        self.assertEqual([label for label, _ in calls], ["heading", "status", "error"])
+
+    def test_large_error_is_bounded_and_first_record_is_never_overwritten(self):
+        page, _ = self.fixture(status="Needs attention", error="x" * 100000)
+        with self.assertRaises(RuntimeError): self.run_guard(page)
+        first = copy.deepcopy(page.evidence["featureReadinessRefusal"])
+        field = first["failureOnlyReads"]["error"]
+        self.assertEqual(field["chars"], 100000); self.assertEqual(len(field["prefix"]), 2048)
+        self.assertTrue(field["truncated"]); self.assertNotIn("value", field)
+        with self.assertRaises(RuntimeError): self.run_guard(page)
+        self.assertEqual(page.evidence["featureReadinessRefusal"], first)
+
+    def test_diagnostic_sink_failure_preserves_the_same_readiness_refusal(self):
+        class Broken(dict):
+            def setdefault(self, *args): raise RuntimeError("sink failed")
+        page, _ = self.fixture(status="Needs attention"); page.evidence = Broken()
+        with self.assertRaisesRegex(RuntimeError, "^Direct feature not Ready$"): self.run_guard(page)
+
+    def test_capture_has_no_input_fallback_wait_or_transport_retry(self):
+        method = next(n for n in ast.walk(ast.parse((HERE / "native-linux-production-016-update.py").read_text()))
+                      if isinstance(n, ast.FunctionDef) and n.name == "require_feature_ready")
+        calls = [ast.unparse(n.func) for n in ast.walk(method) if isinstance(n, ast.Call)]
+        self.assertFalse(set(calls) & {"self.click", "wait", "time.sleep", "self.start", "self.optional", "subprocess.Popen"})
+        self.assertEqual(calls.count("self.d.read"), 1)
 
 
 if __name__ == "__main__":
