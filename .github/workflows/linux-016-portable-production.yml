@@ -1,6 +1,8 @@
 name: Unsigned production-input Linux 016 portable packaging (not acceptance)
 
 on:
+  push:
+    branches: [validation/linux-016-portable-production]
   workflow_dispatch:
     inputs:
       assembly_pins:

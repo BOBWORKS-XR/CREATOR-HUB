@@ -380,7 +380,10 @@ test('production workflow and embedded inspection scripts parse, remain manual/r
   const parsed = yaml.parse(fs.readFileSync(path.join(ROOT, p.WORKFLOW), 'utf8'), { uniqueKeys: true });
   execFileSync(PYTHON, ['-B', '-c', 'import sys,yaml; p=yaml.safe_load(sys.stdin.read()); assert set(p["jobs"])=={"package"}'],
     { input: fs.readFileSync(path.join(ROOT, p.WORKFLOW), 'utf8') });
-  assert.deepEqual(Object.keys(parsed.on), ['workflow_dispatch']); assert.deepEqual(Object.keys(parsed.jobs), ['package']);
+  assert.deepEqual(Object.keys(parsed.on), ['push', 'workflow_dispatch']);
+  assert.deepEqual(parsed.on.push, { branches: ['validation/linux-016-portable-production'] });
+  assert.deepEqual(Object.keys(parsed.jobs), ['package']);
+  assert.ok(parsed.jobs.package.if.includes("github.event_name == 'workflow_dispatch'"));
   assert.deepEqual(parsed.permissions, { contents: 'read', actions: 'read' }); assert.equal(parsed.jobs.package['runs-on'], 'ubuntu-22.04');
   assert.ok(parsed.jobs.package.if.includes(p.BRANCH)); assert.equal(parsed.jobs.package.env, undefined); assert.equal(parsed.env, undefined);
   assert.doesNotMatch(parsed.jobs.package.if, /\brunner\./, 'runner context is unavailable in job-level if/env');
