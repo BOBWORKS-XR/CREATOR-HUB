@@ -1369,6 +1369,24 @@ class Pure(unittest.TestCase):
         source = (HERE / "native-linux-production-016-update.py").read_text()
         self.assertIn('load("native-linux-production-016-flatpak")', source)
 
+    def test_workflow_html_driver_is_pinned_and_provisioned_for_exactly_three_deb_scenarios(self):
+        steps = self.workflow["jobs"]["update"]["steps"]
+        selected = [(index, step) for index, step in enumerate(steps)
+                    if "cargo install tauri-driver" in step.get("run", "")]
+        self.assertEqual(len(selected), 1)
+        index, step = selected[0]
+        condition = "inputs.scenario == 'deb-native-cancel' || inputs.scenario == 'deb-auth-cancel' || inputs.scenario == 'deb-approve'"
+        self.assertEqual(step["if"], condition)
+        admitted = re.findall(r"inputs\.scenario == '([^']+)'", step["if"])
+        self.assertEqual(tuple(admitted), M.HTML_SCENARIOS)
+        for scenario in M.SCENARIOS:
+            self.assertEqual(scenario in admitted, scenario.startswith("deb-"))
+        self.assertEqual(step["run"], 'cargo install tauri-driver --version 2.1.0 --locked --root "$RUNNER_TEMP/native-linux-production-016-driver"')
+        profile = next(i for i, value in enumerate(steps)
+                       if value.get("name") == "Bind independent profile and fresh API identities before downloading data")
+        stage = next(i for i, value in enumerate(steps) if value.get("run", "").endswith("update.py stage"))
+        self.assertLess(profile, index); self.assertLess(index, stage)
+
     def test_real_gi_binding_step_is_post_apt_site_enabled_and_before_ui(self):
         steps = self.workflow["jobs"]["update"]["steps"]
         command = "/usr/bin/python3 -I -B scripts/native-linux-production-016-update.test.py GenuineGiBinding"
@@ -1697,11 +1715,15 @@ class Pure(unittest.TestCase):
                         "oldRetirementHelperRestored": scenario == "deb-approve"}
             if scenario.endswith("approve"):
                 evidence.update(dict.fromkeys(("oldNormalExit", "automaticRestartObserved", "installed17Verified", "fresh17UiVersion", "directPagesObserved"), True)); evidence["automaticSuccessor"] = {"pid": 2}
-            if scenario == M.HTML_SCENARIO:
-                evidence["htmlWebDriver"] = dict(probePassed=True, inputCountAtProbe=0, detached=True, toolsClosedAfterRootExit=True)
-                for missing in evidence["htmlWebDriver"]:
-                    incomplete = copy.deepcopy(evidence); incomplete["htmlWebDriver"].pop(missing)
-                    with self.assertRaises(RuntimeError): M.outcome(scenario, incomplete)
+            if scenario in M.HTML_SCENARIOS:
+                phases = ("htmlWebDriver", "successorHtmlWebDriver") if scenario == "deb-approve" else ("htmlWebDriver",)
+                for phase in phases:
+                    evidence[phase] = dict(probePassed=True, inputCountAtProbe=0, detached=True, toolsClosedAfterRootExit=True,
+                                           documentVersion="0.1.17" if phase == "successorHtmlWebDriver" else "0.1.16")
+                for phase in phases:
+                    for missing in evidence[phase]:
+                        incomplete = copy.deepcopy(evidence); incomplete[phase].pop(missing)
+                        with self.assertRaises(RuntimeError): M.outcome(scenario, incomplete)
             self.assertTrue(M.outcome(scenario, evidence))
             with self.assertRaises(RuntimeError): M.outcome(scenario, {**evidence, "normalFinalClose": False})
             with self.assertRaises(RuntimeError): M.outcome(scenario, {**evidence, "releaseReady": True})
@@ -2892,7 +2914,7 @@ class InitialRootCreationContext(unittest.TestCase):
         _, _, node = cls.launch_node()
         body = ast.Module(body=[copy.deepcopy(node)], type_ignores=[])
         namespace = {"subprocess": SimpleNamespace(Popen=popen, DEVNULL=subprocess.DEVNULL), "scenario": scenario,
-                     "HTML_SCENARIO": M.HTML_SCENARIO, "app_env": {"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"},
+                     "HTML_SCENARIOS": M.HTML_SCENARIOS, "app_env": {"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"},
                      "automation_env": {"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C", "TAURI_WEBVIEW_AUTOMATION": "true"}}
         exec(compile(ast.fix_missing_locations(body), "initial-owned-root-launch", "exec"), namespace)
         return namespace["initial"], namespace
@@ -2907,7 +2929,7 @@ class InitialRootCreationContext(unittest.TestCase):
             launch.assert_called_once()
             self.assertEqual(launch.call_args.args, (["/usr/bin/creator-hub"],))
             self.assertEqual(launch.call_args.kwargs, {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL,
-                "stderr": subprocess.DEVNULL, "env": namespace["automation_env"] if scenario == M.HTML_SCENARIO else namespace["app_env"],
+                "stderr": subprocess.DEVNULL, "env": namespace["automation_env"] if scenario in M.HTML_SCENARIOS else namespace["app_env"],
                 "umask": 0o022})
         tree, _, original = self.launch_node()
         modified = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and any(k.arg == "umask" for k in n.keywords)]
@@ -2944,7 +2966,7 @@ try:
     class Substitute:
         Popen = staticmethod(launch)
         DEVNULL = subprocess.DEVNULL
-    namespace = {"subprocess": Substitute, "scenario": "deb-native-cancel", "HTML_SCENARIO": "deb-native-cancel",
+    namespace = {"subprocess": Substitute, "scenario": "deb-native-cancel", "HTML_SCENARIOS": ("deb-native-cancel", "deb-auth-cancel", "deb-approve"),
                  "app_env": {"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"},
                  "automation_env": {"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"}}
     exec(compile(ast.fix_missing_locations(ast.Module(body=nodes, type_ignores=[])), "existing-initial-root", "exec"), namespace)
@@ -3256,7 +3278,9 @@ class StartupPartialEvidence(unittest.TestCase):
 class HtmlAttachmentTests(unittest.TestCase):
     def fixture(self):
         pages_module = M.load("native-linux-integrated-pages")
-        surface = SimpleNamespace(pid=12, window=20, record={"pid": 12}, recheck=Mock(), native=SimpleNamespace(), helper=object(), x11=object())
+        surface = SimpleNamespace(pid=12, window=20, record={"pid": 12, "startTime": "100", "parentPid": os.getpid(),
+            "uids": [M.UID] * 4, "executable": "/usr/bin/creator-hub", "kernelImageSha256": "a" * 64, "image": {"st_size": "4"}},
+            recheck=Mock(), native=SimpleNamespace(), helper=object(), x11=object())
         original = Mock(pid=12); original.poll.return_value = None
         child = Mock(pid=51); child.poll.return_value = None
         logs = Mock(); logs.metadata.return_value = {"stdout": {"truncated": False}, "stderr": {"truncated": False}}
@@ -3611,9 +3635,10 @@ class HtmlAttachmentTests(unittest.TestCase):
     def test_workflow_and_scope_keep_other_lanes_and_native_gtk_untouched(self):
         source = (HERE / "native-linux-production-016-update.py").read_text()
         workflow = (HERE.parent / ".github/workflows/native-linux-production-016-update.yml").read_text()
-        self.assertIn("if scenario == HTML_SCENARIO:", source)
+        self.assertIn("if scenario in HTML_SCENARIOS:", source)
         self.assertIn("HTML_SCENARIO = \"deb-native-cancel\"", source)
-        self.assertIn("if: inputs.scenario == 'deb-native-cancel'", workflow)
+        self.assertEqual(M.HTML_SCENARIOS, ("deb-native-cancel", "deb-auth-cancel", "deb-approve"))
+        self.assertIn("if: inputs.scenario == 'deb-native-cancel' || inputs.scenario == 'deb-auth-cancel' || inputs.scenario == 'deb-approve'", workflow)
         self.assertIn('cargo install tauri-driver --version 2.1.0 --locked --root "$RUNNER_TEMP/native-linux-production-016-driver"', workflow)
         self.assertLess(workflow.index("Bind independent profile"), workflow.index("cargo install tauri-driver"))
         self.assertLess(workflow.index("cargo install tauri-driver"), workflow.index("update.py stage"))
@@ -3630,6 +3655,213 @@ class HtmlAttachmentTests(unittest.TestCase):
         self.assertIn("range(1, 9)", source)
 
 
+class HtmlDebLifecycleTests(unittest.TestCase):
+    def successor_fixture(self):
+        owner = HtmlAttachmentTests()
+        old = owner.fixture()
+        with owner.native_stubs(old), patch.object(old.html, "retain_logs"):
+            old.html.start(); old.html.detach()
+            old.original.poll.return_value = 0
+            old.html.finish_tools()
+        state = owner.fixture()
+        transport = state.html.d.http
+        state.original = old.original
+        record = {"pid": 77, "startTime": "101", "parentPid": os.getpid(), "uids": [M.UID] * 4,
+                  "executable": "/usr/bin/creator-hub", "kernelImageSha256": M.FIXED["17"]["hub"]["sha256"],
+                  "image": {"st_size": str(M.FIXED["17"]["hub"]["size"])}}
+        state.surface.pid, state.surface.record = 77, record
+        state.child.pid = 61
+        state.records = {61: {**state.records[51], "pid": 61},
+                         62: {**state.records[52], "pid": 62, "parentPid": 61}, 77: copy.deepcopy(record)}
+        state.pages.subtree.return_value = {62: state.records[62]}
+        state.html = M.HtmlPages(state.surface, state.original, state.pages, old.html.driver_pin, old.html.port,
+                                 old.html.env, {}, previous=old.html)
+        state.html.d.http = transport
+        state.changed[".footer-version:text"] = "0.1.17"
+        state.old, state.owner = old, owner
+        return state
+
+    def test_three_deb_requests_bind_driver_while_portable_requests_do_not(self):
+        tree = ast.parse(Path(M.__file__).read_text())
+        request = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "request")
+        block = next(n for n in request.body if isinstance(n, ast.If) and ast.unparse(n.test) == "scenario in HTML_SCENARIOS")
+        code = compile(ast.Module(body=[block], type_ignores=[]), "actual-driver-request-binding", "exec")
+        for scenario in M.SCENARIOS:
+            reader = Mock(return_value=b"\x7fELFfixed driver")
+            namespace = {**vars(M), "scenario": scenario, "env": {"RUNNER_TEMP": "/fixed"}, "result": {}, "read": reader}
+            exec(code, namespace)
+            if scenario in M.HTML_SCENARIOS:
+                self.assertEqual(namespace["result"]["htmlDriver"], {"version": "2.1.0", "pin": M.pin(reader.return_value)})
+                self.assertEqual(reader.call_args.args, (Path("/fixed/native-linux-production-016-driver/bin/tauri-driver"), 64 * 1024**2))
+                self.assertEqual(reader.call_args.kwargs, {"mode": 0o755})
+            else:
+                reader.assert_not_called(); self.assertEqual(namespace["result"], {})
+
+    def test_fresh_successor_attachment_uses_same_inherited_port_and_separate_fixed_version(self):
+        state = self.successor_fixture()
+        old_count = len(state.old.requests)
+        with state.owner.native_stubs(state): state.html.start()
+        self.assertEqual(state.html.evidence["documentVersion"], "0.1.17")
+        self.assertEqual(state.html.evidence["inputCountAtProbe"], 0)
+        self.assertEqual(state.html.evidence["inputAttempts"], [])
+        self.assertEqual(state.html.port, state.old.html.port)
+        self.assertIsNot(state.html.d, state.old.html.d)
+        self.assertEqual(sum((method, route) == ("POST", "/session") for method, route, _ in state.requests), 1)
+        self.assertEqual(len(state.old.requests), old_count)
+        self.assertFalse(any(route.endswith("/click") for _, route, _ in state.requests))
+        with self.assertRaises(RuntimeError): state.old.html.d.call("GET", "/title")
+        self.assertEqual(len(state.old.requests), old_count)
+        state.pages.listener.assert_any_call(77, 41000)
+
+    def test_missing_endpoint_or_wrong_successor_document_never_launches_replacement_or_inputs(self):
+        for defect in ("endpoint", "old-version", "unknown-version", "origin", "title"):
+            state = self.successor_fixture()
+            if defect == "endpoint": state.pages.listener.return_value = False
+            if defect == "old-version": state.changed[".footer-version:text"] = "0.1.16"
+            if defect == "unknown-version": state.changed[".footer-version:text"] = "0.1.17-modified"
+            if defect == "origin": state.changed["/url"] = "https://foreign.example/"
+            if defect == "title": state.changed["/title"] = "Foreign app"
+            with self.subTest(defect=defect), state.owner.native_stubs(state), self.assertRaises((RuntimeError, AssertionError)):
+                state.html.start()
+            self.assertFalse(state.html.probed)
+            self.assertEqual(state.html.evidence["inputAttempts"], [])
+            self.assertFalse(any(route.endswith("/click") for _, route, _ in state.requests))
+            state.original.terminate.assert_not_called(); state.original.kill.assert_not_called()
+
+    def test_handoff_requires_old_zero_exit_detach_teardown_and_frozen_phase(self):
+        for defect in ("alive", "abnormal-exit", "attached", "tools-open", "old-record", "surface-pid", "surface-record"):
+            state = self.successor_fixture()
+            if defect == "alive": state.original.poll.return_value = None
+            if defect == "abnormal-exit": state.original.poll.return_value = 1
+            if defect == "attached": state.old.html.detached = False
+            if defect == "tools-open": state.old.html.evidence["toolsClosedAfterRootExit"] = False
+            if defect == "old-record": state.old.surface.record["startTime"] = "99"
+            if defect == "surface-pid": state.surface.pid = 78
+            if defect == "surface-record": state.surface.record["startTime"] = "102"
+            with self.subTest(defect=defect), state.owner.native_stubs(state):
+                with self.assertRaises(RuntimeError): state.html.start()
+                M.subprocess.Popen.assert_not_called()
+            self.assertEqual(state.requests, [])
+
+    def test_successor_actual_kernel_pid_start_parent_uid_path_size_and_hash_must_match(self):
+        for field, value in (("pid", 78), ("startTime", "102"), ("parentPid", 99), ("uids", [0] * 4),
+                             ("executable", "/foreign/creator-hub"), ("kernelImageSha256", "0" * 64), ("image", {"st_size": "1"})):
+            state = self.successor_fixture(); state.records[77][field] = value
+            with self.subTest(field=field), state.owner.native_stubs(state), self.assertRaises(RuntimeError): state.html.start()
+            self.assertEqual(state.requests, [])
+        state = self.successor_fixture()
+        state.surface.record["parentPid"] = 99
+        state.records[77] = copy.deepcopy(state.surface.record)
+        state.html.phase_record = json.dumps(state.surface.record, sort_keys=True)
+        with state.owner.native_stubs(state), self.assertRaises(RuntimeError): state.html.start()
+
+    def test_successor_detach_refuses_identity_loss_and_never_replays_delete(self):
+        state = self.successor_fixture()
+        with state.owner.native_stubs(state):
+            state.html.start()
+            state.delete_effect = lambda: state.records[77].update(startTime="102")
+            with self.assertRaises(RuntimeError): state.html.detach()
+            self.assertFalse(state.html.detached)
+            with self.assertRaises(RuntimeError): state.html.detach()
+            with self.assertRaises(RuntimeError): state.html.finish_tools()
+        self.assertEqual(sum(method == "DELETE" for method, _, _ in state.requests), 1)
+        state.child.terminate.assert_not_called(); state.original.terminate.assert_not_called()
+
+    def test_successor_teardown_consumes_exact_actual_waitpid_zero_exit_once(self):
+        state = self.successor_fixture()
+        with state.owner.native_stubs(state), patch.object(state.html, "retain_logs"), \
+                patch.object(M.os, "WNOHANG", 1, create=True), \
+                patch.object(M.os, "waitpid", return_value=(77, 0), create=True) as waited:
+            state.html.start(); state.html.detach(); state.html.finish_tools()
+            waited.assert_called_once_with(77, 1)
+            with self.assertRaises(RuntimeError): state.html.finish_tools()
+            waited.assert_called_once()
+        self.assertEqual(state.html.evidence["adoptedExit"], {"pid": 77, "startTime": "101", "exitCode": 0})
+        self.assertTrue(state.html.evidence["toolsClosedAfterRootExit"])
+        state.child.terminate.assert_called_once()
+        state.original.terminate.assert_not_called(); state.original.kill.assert_not_called()
+
+    def test_unknown_or_nonzero_adopted_exit_never_signals_tools_or_retries_waitpid(self):
+        for result in ((77, 256), (78, 0), (0, 0), ChildProcessError("Not an owned child")):
+            state = self.successor_fixture()
+            with self.subTest(result=result), state.owner.native_stubs(state), \
+                    patch.object(M.os, "WNOHANG", 1, create=True), \
+                    patch.object(M.os, "waitstatus_to_exitcode", side_effect=lambda status: status >> 8, create=True), \
+                    patch.object(M.os, "waitpid", side_effect=result if isinstance(result, BaseException) else None,
+                                 return_value=result, create=True) as waited:
+                state.html.start(); state.html.detach()
+                with self.assertRaises((RuntimeError, ChildProcessError, AssertionError)): state.html.finish_tools()
+                before = waited.call_count
+                with self.assertRaises(RuntimeError): state.html.finish_tools()
+                self.assertEqual(waited.call_count, before)
+            state.child.terminate.assert_not_called()
+            self.assertFalse(state.html.evidence["toolsClosedAfterRootExit"] if "toolsClosedAfterRootExit" in state.html.evidence else False)
+            self.assertNotIn("adoptedExit", state.html.evidence)
+
+    def test_successor_restoration_never_navigates_to_fake_the_restored_page(self):
+        for offered in (False, True):
+            state = self.successor_fixture(); html = state.html; open_guide = [offered]
+            def optional(selector, endpoint="text"):
+                if selector == "#usage-terms-dialog": return None
+                if selector == "#convergence-dialog":
+                    return "false" if endpoint == "attribute/aria-busy" else "" if open_guide[0] else None
+                if selector == "#feature-setup": return True if endpoint == "displayed" else "false"
+                raise AssertionError("Unexpected restoration lookup")
+            text = {"#convergence-later": "Not now", "#feature-setup h2": "Project Setup",
+                    '#feature-setup [data-field="status"]': "Ready", '#feature-setup [data-field="error"]': "",
+                    '#feature-setup [data-field="controls"]': None}
+            with self.subTest(offered=offered), state.owner.native_stubs(state):
+                html.start()
+                html.optional = Mock(side_effect=optional); html.d.read = Mock(side_effect=lambda selector, *args: text[selector])
+                html.d.elements = Mock(return_value=[])
+                def dismiss(selector, actions, label):
+                    self.assertEqual((selector, label), ("#convergence-later", "convergence-later"))
+                    actions.append(label); open_guide[0] = False
+                html.click = Mock(side_effect=dismiss)
+                report = {}; html.restored(report)
+                self.assertEqual(report["restoredLastTool"], "setup")
+                self.assertEqual(report["successorStartupUi"], ["convergence-later"] if offered else [])
+                self.assertEqual(html.click.call_count, 1 if offered else 0)
+
+    def test_successor_unexpected_terms_or_recovery_action_refuses_without_input(self):
+        for terms in (False, True):
+            state = self.successor_fixture(); html = state.html
+            with self.subTest(terms=terms), state.owner.native_stubs(state):
+                html.start()
+                html.optional = Mock(side_effect=lambda selector, endpoint="text":
+                    ("" if terms else None) if selector == "#usage-terms-dialog" else "false" if endpoint == "attribute/aria-busy" else "")
+                html.d.read = Mock(return_value="Review recovery"); html.click = Mock()
+                with self.assertRaises(RuntimeError): html.restored({})
+                html.click.assert_not_called()
+
+    def test_separate_successor_log_paths_have_the_same_bounds_and_fixed_export(self):
+        state = self.successor_fixture(); state.surface.native.MAX_LOG = 262144; state.html.logs = state.logs
+        state.logs.metadata.return_value = {name: {"retainedBytes": 3, "eof": True, "truncated": False} for name in ("stdout", "stderr")}
+        with patch.object(M, "read", return_value=b"log") as reader: state.html.retain_logs()
+        self.assertEqual([call.args[0] for call in reader.call_args_list],
+                         [M.BASE / "result" / ("successor-html-driver." + name) for name in ("stdout", "stderr")])
+        self.assertTrue(all(call.args[1] == 262144 and call.kwargs == {"uid": M.UID} for call in reader.call_args_list))
+        source = Path(M.__file__).read_text()
+        self.assertIn('"result/successor-html-driver.stdout", "result/successor-html-driver.stderr"', source)
+
+    def test_actual_session_orders_detach_before_native_approval_and_fresh_attach_after_old_exit(self):
+        tree = ast.parse(Path(M.__file__).read_text())
+        session = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "native_session")
+        code = ast.unparse(session)
+        self.assertLess(code.index("html.detach()"), code.index("modal.dialog_action("))
+        self.assertLess(code.index("observe_successor("), code.index("html.finish_tools()"))
+        self.assertLess(code.index("html.finish_tools()"), code.index("replacement_html = HtmlPages("))
+        self.assertLess(code.index("replacement_html.start()"), code.index("replacement_html.restored("))
+        self.assertLess(code.index("replacement_html.detach()"), code.index("replacement.close()"))
+        self.assertLess(code.index("replacement.close()"), code.index("replacement_html.finish_tools()"))
+        launch = [n for n in ast.walk(session) if isinstance(n, ast.Call) and ast.unparse(n.func) == "subprocess.Popen"
+                  and n.args and ast.unparse(n.args[0]) == "['/usr/bin/creator-hub']"]
+        self.assertEqual(len(launch), 1)
+        self.assertIn("automation_env if scenario in HTML_SCENARIOS else app_env", ast.unparse(launch[0]))
+        self.assertEqual(code.count("html_automation_environment(app_env)"), 1)
+        self.assertIn("previous=html", code)
+
+
 class EnvelopeDiagnosticTests(unittest.TestCase):
     def fixture(self, *, ready_after=1, web_count=1):
         frame, filler, web, extra = [Mock() for _ in range(4)]
@@ -3640,7 +3872,10 @@ class EnvelopeDiagnosticTests(unittest.TestCase):
             node.get_process_id.return_value = pids[id(node)]
             node.get_role.return_value = role; node.get_toolkit_name.return_value = "gtk"
             node.get_parent.return_value = parent
-        surface = SimpleNamespace(pid=12, window=20, x11=object(), renderer=None, recheck=Mock(),
+        record = {"pid": 12, "startTime": "100", "parentPid": os.getpid(),
+                  "uids": [M.UID] * 4, "executable": "/usr/bin/creator-hub",
+                  "kernelImageSha256": "a" * 64, "image": {"st_size": "4"}}
+        surface = SimpleNamespace(pid=12, record=record, window=20, x11=object(), renderer=None, recheck=Mock(),
             references=SimpleNamespace(window=None, identity=lambda node, owner: refs[id(node)]), helper=SimpleNamespace())
         state = SimpleNamespace(surface=surface, frame=frame, filler=filler, web=web, extra=extra,
                                 frame_reads=0, ready=False, child_counts=[], now=0.0, sleeps=[])

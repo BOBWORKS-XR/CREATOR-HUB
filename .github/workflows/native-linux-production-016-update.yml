@@ -195,8 +195,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.99.0
       - name: Verify genuine GI error binding and typed read-only conversion before UI
         run: /usr/bin/python3 -I -B scripts/native-linux-production-016-update.test.py GenuineGiBinding
-      - name: Build pinned HTML attachment tooling only for the first DEB cancellation lane
-        if: inputs.scenario == 'deb-native-cancel'
+      - name: Build pinned HTML attachment tooling only for the three DEB lanes
+        if: inputs.scenario == 'deb-native-cancel' || inputs.scenario == 'deb-auth-cancel' || inputs.scenario == 'deb-approve'
         run: cargo install tauri-driver --version 2.1.0 --locked --root "$RUNNER_TEMP/native-linux-production-016-driver"
       - name: Build only the shared locked offline verifier, with source, production key, compiler and fresh executable evidence
         run: /usr/bin/python3 -I -S -B scripts/native-linux-production-016-update.py verifier
