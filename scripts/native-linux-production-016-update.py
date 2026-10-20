@@ -1122,7 +1122,9 @@ def direct_pages(surface, actions):
         surface.click("suite-trigger", [])
         rows, nodes = surface.snapshot()
         candidates = [(row, node) for row, node in zip(rows, nodes) if row["role"] == int(surface.atspi.Role.PUSH_BUTTON)
-                      and row["showing"] and row["name"] == label]
+                      and row["tag"] == "button" and row["toolkit"] == "WebKitGTK"
+                      and row["showing"] and row["enabled"] and row["sensitive"] and not row["busy"] and not row["defunct"]
+                      and row["name"] == label]
         require(len(candidates) == 1, "One exact first-party navigation button required")
         row, node = candidates[0]; ref = row["reference"]
         current, current_nodes = surface.snapshot()
@@ -1130,7 +1132,7 @@ def direct_pages(surface, actions):
         require(len(matches) == 1, "Navigation changed before input")
         interface, observation = surface.html_action_interface(matches[0], row, "navigation-" + feature); surface.recheck(full=True)
         count, name = surface.html_action_operands(interface, observation)
-        require(interface and count == 1 and name == "click", "Navigation action differs")
+        require(interface and count == 1 and name == "press", "Navigation action differs")
         actions.append("view-" + feature); require(interface.do_action(0), "Navigation uncertain; no retry")
         rows = wait(lambda: feature_ready(surface, feature), 60)
         if feature == "mcp":
@@ -1320,11 +1322,43 @@ def authorize(surface, agent, agent_record, parent, endpoint, system, glib, atsp
         bus.close_sync(None)
 
 
-def journal(home, previous=None):
+def journal_token_metadata(target, field, value, public=()):
+    if type(value) is str:
+        if value in public:
+            target[field] = value
+        elif len(value) <= 4096:
+            target[field + "Sha256"] = hashlib.sha256(value.encode("utf8", errors="surrogatepass")).hexdigest()
+        else:
+            target[field + "Characters"] = len(value)
+    else:
+        target[field + "Kind"] = "non-string"
+
+
+def journal(home, previous=None, *, diagnostics=None):
     file = home / "config/creator-works-mcp/hosted-operation-outcomes.json"
     info = file.lstat()
+    observation = {"uid": info.st_uid, "gid": info.st_gid, "mode": stat.S_IMODE(info.st_mode),
+                   "recordCount": None, "prefixCount": 0 if previous is None else len(previous["records"]),
+                   "appendCount": None, "records": []}
+    if diagnostics is not None and len(diagnostics) < 4:
+        diagnostics.append(observation)
     require(info.st_uid == info.st_gid == UID and stat.S_IMODE(info.st_mode) == 0o644, "Read journal ownership/mode differs")
     value = parse(read(file, 65536, uid=UID, mode=0o644))
+    # Retain only bounded metadata already read; admission below remains unchanged.
+    records = value.get("records") if type(value) is dict else None
+    if type(records) is list:
+        observation["recordCount"] = len(records)
+        observation["appendCount"] = len(records) - observation["prefixCount"]
+        observation["omittedRecords"] = max(0, len(records) - 16)
+        for row in records[:16]:
+            if type(row) is not dict:
+                observation["records"].append({"kind": "non-object"})
+                continue
+            metadata = {"id": row.get("id") if type(row.get("id")) is int and abs(row["id"]) <= 9007199254740991 else None}
+            journal_token_metadata(metadata, "command", row.get("command"), ("load_config", "discover_unity_projects"))
+            journal_token_metadata(metadata, "outcome", row.get("outcome"), ("returned-ok",))
+            journal_token_metadata(metadata, "session", row.get("session"))
+            observation["records"].append(metadata)
     keys(value, ("revision", "records"))
     require(value["revision"] == 1 and type(value["records"]) is list and len(value["records"]) <= 16, "Bounded exact read journal schema")
     prefix = [] if previous is None else previous["records"]
@@ -1345,15 +1379,17 @@ def navigate_home(surface):
     surface.click("suite-trigger", [])
     rows, nodes = surface.snapshot()
     choices = [(r, n) for r, n in zip(rows, nodes) if r["showing"] and r["role"] == int(surface.atspi.Role.PUSH_BUTTON)
-               and re.fullmatch(r"Creator Hub\s+Apps and projects", r["name"])]
+               and r["tag"] == "button" and r["toolkit"] == "WebKitGTK"
+               and r["enabled"] and r["sensitive"] and not r["busy"] and not r["defunct"]
+               and r["name"] == "H Creator Hub Projects"]
     require(len(choices) == 1, "One exact Home navigation control required")
-    row, _ = choices[0]
+    row, _ = choices[0]; ref = row["reference"]
     current, current_nodes = surface.snapshot()
-    matches = [node for value, node in zip(current, current_nodes) if value == row]
+    matches = [node for value, node in zip(current, current_nodes) if value == row and value["reference"] == ref]
     require(len(matches) == 1, "Home navigation changed")
     action, observation = surface.html_action_interface(matches[0], row, "navigation-home"); surface.recheck(full=True)
     count, name = surface.html_action_operands(action, observation)
-    require(action and count == 1 and name == "click", "Home action differs")
+    require(action and count == 1 and name == "press", "Home action differs")
     require(action.do_action(0), "Home action uncertain; no retry")
     wait(lambda: surface.source("projects-home-title", optional=True))
 
@@ -1658,7 +1694,7 @@ def native_session(env):
     require(libc.prctl(36, 1, 0, 0, 0) == 0 and signal.getsignal(signal.SIGCHLD) != signal.SIG_IGN, "Observable owned restart children require subreaper")
     value = ctypes.c_int(); require(libc.prctl(37, ctypes.byref(value), 0, 0, 0) == 0 and value.value == 1, "Subreaper setup not confirmed")
     report = {"schemaVersion": 1, "profile": PROFILE, "scenario": scenario, "harnessSource": env["GITHUB_SHA"],
-              "fromSource": profile["baseline"]["source"], "toSource": FIXED["17"]["source"], "nativeActions": [], "systemActions": [],
+              "fromSource": profile["baseline"]["source"], "toSource": FIXED["17"]["source"], "nativeActions": [], "systemActions": [], "journalDiagnostics": [],
               "automaticSuccessor": None, "scenarioPassed": False, "disposableTeardownRequired": True,
               "privateTargetQualification": private_target_qualification(), "oldRetirementHelperRestored": False, **FALSE}
     portable = scenario.startswith("portable-")
@@ -1712,7 +1748,7 @@ def native_session(env):
         report["startupUi"] = startup_ui(surface, home, first=not portable)
         direct_pages(surface, [])
         report["initialBitmap"] = phase_bitmap(surface, "initial-bitmap")
-        first_journal = journal(home)
+        first_journal = journal(home, diagnostics=report["journalDiagnostics"])
         navigate_home(surface)
         wait(lambda: field_text(surface, "hub-update-status") in ("Version 0.1.17 is available.", "Version 0.1.17 is ready to install."), 90)
         require(surface.source("hub-update-button")[0]["enabled"], "Actual Update Hub action is not enabled")
@@ -1753,7 +1789,7 @@ def native_session(env):
             report["fresh17UiVersion"] = True
             report["directPagesObserved"] = direct_pages(replacement, [])
             report["successorBitmap"] = phase_bitmap(replacement, "successor-bitmap")
-            report["readJournal17"] = journal(home, first_journal)
+            report["readJournal17"] = journal(home, first_journal, diagnostics=report["journalDiagnostics"])
             if portable:
                 portable_state(home, review, "17", previous=review["portable"]["16"]["generation"])
                 require(fingerprint(home / HOST_SERVICE) == old_service and set(p.name for p in (home / STORE / "generations").iterdir()) == generations | {new_generation}, "Registration/old generations were replaced or extra generations appeared")

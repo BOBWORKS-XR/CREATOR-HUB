@@ -2145,7 +2145,8 @@ class DirectMenuLabels(unittest.TestCase):
 
     @staticmethod
     def row(name, **changes):
-        return {"name": name, "role": 43, "showing": True, "tag": "button", "toolkit": "WebKitGTK", **changes}
+        return {"name": name, "role": 43, "showing": True, "enabled": True, "sensitive": True,
+                "busy": False, "defunct": False, "tag": "button", "toolkit": "WebKitGTK", **changes}
 
     def test_actual_4d9_accessibility_names_select_only_the_intended_source_row(self):
         rows = [self.row(name) for name in self.LABELS.values()]
@@ -2196,6 +2197,13 @@ class DirectMenuLabels(unittest.TestCase):
                          [self.row(label), self.row(label)]):
                 with self.subTest(feature=feature, rows=rows), self.assertRaisesRegex(RuntimeError, "One exact first-party"):
                     self.selection(feature, rows)
+
+    def test_non_webkit_non_button_or_unready_exact_feature_rows_are_refused(self):
+        for feature, label in self.LABELS.items():
+            for change in ({"toolkit": "gtk"}, {"toolkit": "unknown"}, {"tag": "input"}, {"tag": "summary"},
+                           {"enabled": False}, {"sensitive": False}, {"busy": True}, {"defunct": True}):
+                with self.subTest(feature=feature, change=change), self.assertRaisesRegex(RuntimeError, "One exact first-party"):
+                    self.selection(feature, [self.row(label, **change)])
 
     def test_source_selector_wire_identity_and_owned_root_rechecks_stay_before_input(self):
         tree = ast.parse(Path(M.__file__).read_text())
@@ -2316,9 +2324,10 @@ class HtmlActionDiagnostics(unittest.TestCase):
         exec(compile(ast.fix_missing_locations(ast.Module(body=[function_ast], type_ignores=[])), "actual-action-guard", "exec"), namespace)
         return namespace["actual_guard"], surface, events
 
-    def test_both_navigation_guards_still_refuse_press_before_input_and_after_root_recheck(self):
+    def test_captured_webkit_press_passes_both_navigation_guards_but_click_and_unknown_refuse(self):
         for function in ("direct_pages", "navigate_home"):
-            for name, passed in (("click", True), ("press", False), ("unknown", False)):
+            # Native855 captured one MCP action named press; Home uses the same source-bound HTML button contract.
+            for name, passed in (("press", True), ("click", False), ("unknown", False)):
                 interface, calls = self.interface(name=name)
                 guard, surface, events = self.guard_only(function, interface)
                 if passed: guard()
@@ -2374,6 +2383,190 @@ class HtmlActionDiagnostics(unittest.TestCase):
         retained = eval(compile(ast.Expression(copy.deepcopy(save_call.args[1])), "actual-ui-export", "eval"), {"current": surface})
         self.assertEqual(retained, {"root": surface.record, "snapshot": surface.last, "htmlButtonActions": surface.html_actions})
         self.assertNotIn("snapshot()", ast.unparse(save_call)); self.assertNotIn("walk()", ast.unparse(save_call))
+
+
+class HomeMenuLabels(unittest.TestCase):
+    LABEL = "H Creator Hub Projects"
+
+    def select(self, rows):
+        tree = ast.parse(Path(M.__file__).read_text())
+        original = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "navigate_home")
+        body = copy.deepcopy(original.body[:4]) + [ast.Return(value=ast.Name(id="choices", ctx=ast.Load()))]
+        function = ast.FunctionDef(name="select", args=ast.arguments(posonlyargs=[], args=[ast.arg(arg="surface")],
+            kwonlyargs=[], kw_defaults=[], defaults=[]), body=body, decorator_list=[])
+        clicks, nodes = [], [object() for _ in rows]
+        surface = SimpleNamespace(click=lambda control, actions: clicks.append((control, actions)),
+            snapshot=lambda: (rows, nodes), atspi=SimpleNamespace(Role=SimpleNamespace(PUSH_BUTTON=43)))
+        namespace = dict(vars(M))
+        exec(compile(ast.fix_missing_locations(ast.Module(body=[function], type_ignores=[])), "actual-home-selection", "exec"), namespace)
+        result = namespace["select"](surface)
+        self.assertEqual(clicks, [("suite-trigger", [])])
+        return result
+
+    def test_actual_captured_home_label_matches_only_exact_ready_webkit_html_button(self):
+        row = DirectMenuLabels.row(self.LABEL)
+        self.assertEqual(self.select([row])[0][0], row)
+
+    def test_old_caption_unknown_badges_suffixes_and_ambiguous_home_are_refused(self):
+        for name in ("Creator Hub Projects", "H Creator Hub Apps and projects", "Creator Hub Apps and projects",
+                     "X Creator Hub Projects", self.LABEL + " extra", self.LABEL.lower()):
+            with self.subTest(name=name), self.assertRaisesRegex(RuntimeError, "One exact Home"):
+                self.select([DirectMenuLabels.row(name)])
+        with self.assertRaisesRegex(RuntimeError, "One exact Home"):
+            self.select([DirectMenuLabels.row(self.LABEL)] * 2)
+
+    def test_foreign_or_unready_home_is_refused(self):
+        for change in ({"toolkit": "gtk"}, {"toolkit": "unknown"}, {"tag": "input"}, {"tag": "summary"},
+                       {"showing": False}, {"enabled": False}, {"sensitive": False}, {"busy": True}, {"defunct": True}):
+            with self.subTest(change=change), self.assertRaisesRegex(RuntimeError, "One exact Home"):
+                self.select([DirectMenuLabels.row(self.LABEL, **change)])
+
+    def test_source_home_badge_and_integrated_caption_rewrite_match_actual_capture(self):
+        class Menu(HTMLParser):
+            def __init__(self): super().__init__(); self.active = False; self.parts = []; self.labels = []
+            def handle_starttag(self, tag, attrs):
+                attrs = dict(attrs)
+                if tag == "button" and "suite-item" in attrs.get("class", "").split() and attrs.get("data-view") == "hub":
+                    if "aria-label" in attrs: raise AssertionError("Home accessibility override requires source review")
+                    self.active = True; self.parts = []
+            def handle_data(self, text):
+                if self.active and text.strip(): self.parts.append(text.strip())
+            def handle_endtag(self, tag):
+                if tag == "button" and self.active: self.labels.append(" ".join(self.parts)); self.active = False
+        menu = Menu(); menu.feed((HERE.parent / "src/index.html").read_text(encoding="utf8"))
+        self.assertEqual(menu.labels, ["H Creator Hub Apps and projects"])
+        source = (HERE.parent / "src/app.js").read_text(encoding="utf8")
+        self.assertIn("if (directFeatures) {", source)
+        self.assertIn("menu.querySelector('[data-view=\"hub\"] small').textContent = 'Projects';", source)
+        self.assertEqual(menu.labels[0].replace("Apps and projects", "Projects"), self.LABEL)
+
+    def test_home_refusal_rechecks_exact_row_and_wire_reference_before_action(self):
+        source = ast.unparse(next(n for n in ast.parse(Path(M.__file__).read_text()).body
+                                  if isinstance(n, ast.FunctionDef) and n.name == "navigate_home"))
+        self.assertIn("value == row and value['reference'] == ref", source)
+        self.assertLess(source.index("Home navigation changed"), source.index("html_action_interface"))
+        self.assertLess(source.index("surface.recheck(full=True)"), source.index("action.do_action(0)"))
+
+    def test_changed_menu_reference_refuses_before_interface_or_input(self):
+        tree = ast.parse(Path(M.__file__).read_text())
+        for function_name in ("direct_pages", "navigate_home"):
+            original = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == function_name)
+            statements = next(n for n in original.body if isinstance(n, ast.For)).body if function_name == "direct_pages" else original.body
+            if function_name == "direct_pages":
+                start = next(i for i, n in enumerate(statements) if isinstance(n, ast.Assign)
+                             and isinstance(n.targets[0], ast.Tuple) and [v.id for v in n.targets[0].elts] == ["row", "node"])
+            else:
+                start = 4
+            end = next(i for i, n in enumerate(statements) if "Navigation changed before input" in ast.unparse(n) or "Home navigation changed" in ast.unparse(n))
+            function = ast.FunctionDef(name="identity", args=ast.arguments(posonlyargs=[], args=[], kwonlyargs=[], kw_defaults=[], defaults=[]),
+                body=copy.deepcopy(statements[start:end + 1]), decorator_list=[])
+            row = DirectMenuLabels.row(self.LABEL, reference=[":1.4", "/original"])
+            changed = {**row, "reference": [":1.4", "/different"]}
+            surface = SimpleNamespace(snapshot=lambda: ([changed], [object()]))
+            namespace = dict(vars(M), candidates=[(row, object())], choices=[(row, object())], surface=surface)
+            exec(compile(ast.fix_missing_locations(ast.Module(body=[function], type_ignores=[])), "actual-wire-refusal", "exec"), namespace)
+            with self.subTest(function=function_name), self.assertRaisesRegex(RuntimeError, "(?:Navigation changed before input|Home navigation changed)"):
+                namespace["identity"]()
+
+
+class JournalMetadataDiagnostics(unittest.TestCase):
+    @staticmethod
+    def records(session="a" * 64):
+        return [{"session": session, "id": index, "command": command, "outcome": "returned-ok"}
+                for index, command in ((3, "load_config"), (4, "discover_unity_projects"))]
+
+    @contextmanager
+    def fixture(self, records=None, *, uid=None, gid=None, mode=0o644):
+        rows = self.records() if records is None else records
+        raw = json.dumps({"revision": 1, "records": rows}).encode()
+        info = SimpleNamespace(st_uid=M.UID if uid is None else uid, st_gid=M.UID if gid is None else gid, st_mode=stat.S_IFREG | mode)
+        with patch.object(Path, "lstat", return_value=info), patch.object(M, "read", return_value=raw) as reader:
+            yield Path("synthetic-journal-home"), reader
+
+    def test_ownership_failure_retains_only_already_read_stat_without_reading_contents(self):
+        for change in ({"uid": 0}, {"gid": 0}, {"mode": 0o600}):
+            evidence = []
+            with self.fixture(**change) as (home, reader), self.assertRaisesRegex(RuntimeError, "Read journal ownership/mode differs"):
+                M.journal(home, diagnostics=evidence)
+            reader.assert_not_called()
+            self.assertEqual(len(evidence), 1)
+            self.assertEqual(evidence[0]["uid"], change.get("uid", M.UID))
+            self.assertEqual(evidence[0]["gid"], change.get("gid", M.UID))
+            self.assertEqual(evidence[0]["mode"], change.get("mode", 0o644))
+            self.assertIsNone(evidence[0]["recordCount"]); self.assertEqual(evidence[0]["records"], [])
+
+    def test_original_two_reads_ids_and_nonce_contract_still_passes_with_hash_only_sessions(self):
+        evidence = []
+        previous = {"revision": 1, "records": self.records()}
+        records = previous["records"] + self.records("b" * 64)
+        with self.fixture(records) as (home, reader):
+            value = M.journal(home, previous, diagnostics=evidence)
+        self.assertEqual(value["records"], records)
+        self.assertEqual((evidence[0]["recordCount"], evidence[0]["prefixCount"], evidence[0]["appendCount"]), (4, 2, 2))
+        self.assertEqual([r["id"] for r in evidence[0]["records"]], [3, 4, 3, 4])
+        self.assertEqual(evidence[0]["records"][0]["command"], "load_config")
+        self.assertEqual(evidence[0]["records"][0]["outcome"], "returned-ok")
+        self.assertEqual(evidence[0]["records"][0]["sessionSha256"], hashlib.sha256(("a" * 64).encode()).hexdigest())
+        self.assertNotIn("a" * 64, json.dumps(evidence)); self.assertNotIn("b" * 64, json.dumps(evidence))
+        reader.assert_called_once()
+
+    def test_zero_one_or_three_appends_still_refuse_after_diagnostic_retention(self):
+        for rows in ([], self.records()[:1], self.records() + self.records()[:1]):
+            evidence = []
+            with self.fixture(rows) as (home, _), self.assertRaisesRegex(RuntimeError, "Exactly one native page read pair"):
+                M.journal(home, diagnostics=evidence)
+            self.assertEqual(evidence[0]["appendCount"], len(rows))
+            self.assertEqual(len(evidence[0]["records"]), len(rows))
+
+    def test_unknown_commands_outcomes_and_extra_fields_do_not_dump_values(self):
+        rows = self.records(); secret = "SYNTHETIC_PRIVATE_JOURNAL_VALUE"
+        rows[0].update(command=secret, outcome=secret, session=secret, args={"secret": secret}, results=secret, unknown=secret)
+        evidence = []
+        with self.fixture(rows) as (home, _), self.assertRaises(RuntimeError):
+            M.journal(home, diagnostics=evidence)
+        raw = json.dumps(evidence)
+        self.assertNotIn(secret, raw)
+        for field in ("args", "results", "unknown"): self.assertNotIn('"' + field + '"', raw)
+        expected = hashlib.sha256(secret.encode()).hexdigest()
+        self.assertEqual(evidence[0]["records"][0]["commandSha256"], expected)
+        self.assertEqual(evidence[0]["records"][0]["outcomeSha256"], expected)
+        self.assertEqual(evidence[0]["records"][0]["sessionSha256"], expected)
+
+    def test_count_schema_and_large_values_remain_bounded_without_acceptance_change(self):
+        rows = self.records() * 8 + [{"command": "x" * 4097, "outcome": {"private": True}, "session": "x" * 4097, "id": 10 ** 100}]
+        evidence = []
+        with self.fixture(rows) as (home, _), self.assertRaisesRegex(RuntimeError, "Bounded exact read journal schema"):
+            M.journal(home, diagnostics=evidence)
+        self.assertEqual(evidence[0]["recordCount"], 17)
+        self.assertEqual(len(evidence[0]["records"]), 16)
+        self.assertEqual(evidence[0]["omittedRecords"], 1)
+        self.assertLess(len(json.dumps(evidence)), 8192)
+        malformed = self.records(); malformed[0].update(command="x" * 4097, session="x" * 4097, id=10 ** 100)
+        evidence = []
+        with self.fixture(malformed) as (home, _), self.assertRaises(RuntimeError):
+            M.journal(home, diagnostics=evidence)
+        self.assertIsNone(evidence[0]["records"][0]["id"])
+        self.assertNotIn("x" * 128, json.dumps(evidence))
+
+    def test_all_original_prefix_id_command_outcome_and_nonce_refusals_remain(self):
+        for change in ({"id": 0}, {"id": 4}, {"id": "3"}, {"command": "unexpected"}, {"outcome": "returned-error"}, {"session": "invalid"}):
+            rows = self.records(); rows[0].update(change)
+            with self.subTest(change=change), self.fixture(rows) as (home, _), self.assertRaises(RuntimeError):
+                M.journal(home, diagnostics=[])
+        previous = {"revision": 1, "records": self.records()}
+        with self.fixture(self.records("b" * 64) + self.records("c" * 64)) as (home, _), self.assertRaisesRegex(RuntimeError, "Prior read outcomes changed"):
+            M.journal(home, previous, diagnostics=[])
+        with self.fixture(self.records() * 2) as (home, _), self.assertRaisesRegex(RuntimeError, "Fresh single-session read nonce"):
+            M.journal(home, previous, diagnostics=[])
+
+    def test_both_native_journal_calls_attach_diagnostics_to_existing_failure_report(self):
+        tree = ast.parse(Path(M.__file__).read_text())
+        session = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "native_session")
+        calls = [n for n in ast.walk(session) if isinstance(n, ast.Call) and ast.unparse(n.func) == "journal"]
+        self.assertEqual(len(calls), 2)
+        for call in calls:
+            self.assertEqual([(k.arg, ast.unparse(k.value)) for k in call.keywords], [("diagnostics", "report['journalDiagnostics']")])
+        self.assertIn("'journalDiagnostics': []", ast.unparse(session))
 
 
 if __name__ == "__main__":
