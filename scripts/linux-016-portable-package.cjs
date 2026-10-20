@@ -19,6 +19,21 @@ const LIMITS = Object.freeze({ manifest: 2 * 1024 * 1024, archive: 256 * 1024 * 
   file: 256 * 1024 * 1024, total: 512 * 1024 * 1024, entries: 8192, zip: 768 * 1024 * 1024 });
 const INPUTS = ['creator-hub', 'modules.tar.gz', 'builtin-manifest.json', 'signed-unix-assembly.json', 'unix-package-integrity.json'];
 const RECEIPTS = [...INPUTS.filter(n => n.endsWith('.json')), 'linux-byte-receipts.json', 'direct-features-candidate.json'];
+const HOST_EXCLUSIONS = Object.freeze({
+  source: Object.freeze({
+    url: 'https://raw.githubusercontent.com/AppImageCommunity/pkg2appimage/199fc9f768b35ad6166109299e5cf3832adeb5d5/excludelist',
+    size: 11454, sha256: '154aab55b8185116806488fe6ce14701de875d2e00dc11716613bf3c2e126265',
+  }),
+  generator: 'https://raw.githubusercontent.com/linuxdeploy/linuxdeploy/659c9db374666be3f29432316a859221eac28e53/src/core/generate-excludelist.sh',
+  toolRelease: 'https://github.com/tauri-apps/binary-releases/releases/tag/linuxdeploy',
+  tool: Object.freeze({ size: 13264064, sha256: '20eebde3c18ae2e44279bd624fc72482503aece216d5d77f10932235342f71c1' }),
+  sonames: Object.freeze(['libEGL.so.1', 'libGL.so.1', 'libX11-xcb.so.1', 'libX11.so.6', 'libcom_err.so.2',
+    'libdrm.so.2', 'libexpat.so.1', 'libfontconfig.so.1', 'libfreetype.so.6', 'libfribidi.so.0', 'libgbm.so.1',
+    'libgcc_s.so.1', 'libgmp.so.10', 'libgpg-error.so.0', 'libharfbuzz.so.0', 'libstdc++.so.6', 'libxcb.so.1', 'libz.so.1']),
+  scope: 'Pinned historical source explains these exclusions; the generator fetched a mutable list, so the compiled list is not attested. Tool hash is after Tauri clears bytes 8..10. No target ABI or runtime acceptance.',
+});
+const HOST_BASELINE = Object.freeze(['ld-linux-x86-64.so.2', 'libc.so.6', 'libdl.so.2', 'libm.so.6',
+  'libpthread.so.0', 'librt.so.1', 'libresolv.so.2', 'libutil.so.1', ...HOST_EXCLUSIONS.sonames]);
 function mainAllowed() {
   const finite = require('./flatpak-package.cjs');
   return [...INPUTS, 'builtin-manifest.pre-wrapper.json', 'builtin-manifest.preparation.json',
@@ -766,7 +781,7 @@ function flatten(root, destination) {
   for (const [n, e] of Object.entries(before.entries)) assert.deepEqual(after.entries[n], { ...e, mode: transportMode(n, e) });
   return { original: before, flattened: after };
 }
-function dynamicDependencies(text) {
+function dynamicTableEvidence(text) {
   assert.ok(typeof text === 'string' && Buffer.byteLength(text) <= 256 * 1024, 'Bounded dynamic table output required');
   const headers = [...text.matchAll(/^Dynamic section at offset 0x[0-9a-fA-F]+ contains ([1-9][0-9]*) entr(?:y|ies):\r?$/gm)];
   assert.ok(headers.length === 1 && text.slice(0, headers[0].index).trim() === '', 'Positive unambiguous dynamic section required');
@@ -774,13 +789,23 @@ function dynamicDependencies(text) {
   const lines = text.slice(headers[0].index + headers[0][0].length).split(/\r?\n/).map(line => line.trim()).filter(Boolean);
   assert.match(lines.shift() || '', /^Tag\s+Type\s+Name\/Value$/, 'Dynamic table columns missing');
   assert.equal(lines.length, count, 'Truncated or malformed dynamic table');
-  const needed = [];
+  const needed = [], versionTags = new Set(); let versionNeedCount = 0;
+  const versionTypes = new Map([[0x6ffffff0n, 'VERSYM'], [0x6ffffffcn, 'VERDEF'], [0x6ffffffdn, 'VERDEFNUM'],
+    [0x6ffffffen, 'VERNEED'], [0x6fffffffn, 'VERNEEDNUM']]);
   for (const [index, line] of lines.entries()) {
     const row = /^0x([0-9a-fA-F]{1,16})\s+\(([^()\r\n]+)\)\s+(.+)$/.exec(line);
     assert.ok(row, 'Malformed dynamic table row');
     const tag = BigInt(`0x${row[1]}`), type = row[2].trim();
     assert.equal(tag === 0n, type === 'NULL', 'Inconsistent dynamic NULL tag');
     assert.equal(tag === 1n, type === 'NEEDED', 'Inconsistent dynamic NEEDED tag');
+    if (versionTypes.has(tag)) {
+      assert.equal(type, versionTypes.get(tag), 'Inconsistent dynamic version tag');
+      assert.ok(!versionTags.has(type), 'Duplicate dynamic version tag'); versionTags.add(type);
+      if (type === 'VERNEEDNUM') {
+        assert.match(row[3], /^[1-9][0-9]*$/, 'Invalid VERNEEDNUM'); versionNeedCount = Number(row[3]);
+        assert.ok(Number.isSafeInteger(versionNeedCount) && versionNeedCount <= 128, 'VERNEEDNUM exceeds bound');
+      }
+    } else assert.ok(![...versionTypes.values()].includes(type), 'Inconsistent dynamic version tag');
     if (tag === 0n) assert.equal(index, count - 1, 'Dynamic NULL must terminate the table');
     if (tag === 1n) {
       const library = /^Shared library:\s*\[([^\]\r\n]+)\]$/.exec(row[3]);
@@ -790,7 +815,14 @@ function dynamicDependencies(text) {
   }
   // DT_NEEDED is optional, not evidence that the dynamic table itself is absent.
   // https://gabi.xinuos.com/elf/08-dynamic.html#dynamic-section
-  assert.ok(needed.length <= 128, 'Dynamic dependency count exceeds bound'); return needed;
+  assert.ok(needed.length <= 128, 'Dynamic dependency count exceeds bound');
+  assert.equal(versionTags.has('VERNEED'), versionTags.has('VERNEEDNUM'), 'Incomplete dynamic version-needs metadata');
+  return { needed, versionNeedCount, versionInfoPresent: versionTags.size > 0 };
+}
+function dynamicDependencies(text) { return dynamicTableEvidence(text).needed; }
+function hostBaselineEvidence(tools) {
+  assert.deepEqual(tools['linuxdeploy-x86_64.AppImage'], HOST_EXCLUSIONS.tool, 'Unreviewed linuxdeploy exclusion provenance');
+  return HOST_EXCLUSIONS;
 }
 function dependencies(root, files, run, { includeHub = false } = {}) {
   const finite = require('./flatpak-package.cjs');
@@ -800,8 +832,7 @@ function dependencies(root, files, run, { includeHub = false } = {}) {
     injectedBundle: /\/webkit2gtk-4\.1\/injected-bundle\/libwebkit2gtkinjectedbundle\.so$/ };
   const result = { primary: {}, closure: {}, hostBaseline: [], unresolved: [] }, providers = new Map(), checked = new Map();
   // Explicit ABI prerequisites, not bundled-library or distribution compatibility claims.
-  const baseline = new Set(['ld-linux-x86-64.so.2', 'libc.so.6', 'libdl.so.2', 'libm.so.6',
-    'libpthread.so.0', 'librt.so.1', 'libresolv.so.2', 'libutil.so.1']);
+  const baseline = new Set(HOST_BASELINE);
   for (const [name, entry] of Object.entries(files)) if (entry.kind === 'file' && /\.so(?:\.\d+)*$/.test(name)) {
     const base = path.posix.basename(name); if (!providers.has(base)) providers.set(base, []); providers.get(base).push(name);
   }
@@ -810,8 +841,8 @@ function dependencies(root, files, run, { includeHub = false } = {}) {
     if (checked.has(name)) return; checked.set(name, true);
     const bytes = read(path.join(root, name)); finite.validateElf(bytes); assert.deepEqual(record(bytes), { size: entry.size, sha256: entry.sha256 });
     const dynamic = String(run('/usr/bin/readelf', ['--dynamic', path.join(root, name)], { maxBuffer: 256 * 1024 }));
-    const needed = dynamicDependencies(dynamic);
-    const item = { ...entry, dynamicSha256: hash(Buffer.from(dynamic)), needed, resolution: {} }; result.closure[name] = item;
+    const dynamicInfo = dynamicTableEvidence(dynamic), { needed } = dynamicInfo;
+    const item = { ...entry, dynamicSha256: hash(Buffer.from(dynamic)), ...dynamicInfo, resolution: {} }; result.closure[name] = item;
     for (const library of needed) {
       assert.ok(relative(library) && !library.includes('/'), 'Path-bearing ELF dependency refused');
       const matches = providers.get(library) || [];
@@ -841,6 +872,7 @@ function dependencies(root, files, run, { includeHub = false } = {}) {
     result.primary.gioTls = [GIO_TLS]; inspect(GIO_TLS);
   }
   result.hostBaseline = [...new Set(result.hostBaseline)].sort();
+  result.hostBaselineSource = HOST_EXCLUSIONS;
   result.scope = 'static ELF dependency closure only; loader search, ABI versions, dlopen/plugins and native execution unaccepted';
   if (result.unresolved.length) {
     const error = Error(`Missing packaged subprocess dependency: ${result.unresolved[0].from} -> ${result.unresolved[0].library}`);
@@ -848,22 +880,78 @@ function dependencies(root, files, run, { includeHub = false } = {}) {
   }
   return result;
 }
-function primaryAbiRequirements(root, dependencyEvidence, run) {
-  const result = { scope: 'primary Hub, WebKit and declared GIO TLS symbol-version requirements only; host ABI availability, transitive versions and native execution unaccepted', files: {} };
-  const names = [...new Set(Object.values(dependencyEvidence.primary).flat())].sort();
-  assert.ok(names.length > 0 && names.length <= 42, 'Bounded primary ABI inventory required');
-  for (const name of names) {
-    const text = String(run('/usr/bin/readelf', ['--version-info', path.join(root, name)], { maxBuffer: 4 * 1024 * 1024 }));
-    assert.ok(Buffer.byteLength(text) <= 4 * 1024 * 1024, 'Primary ABI report exceeds bound');
-    let needs = false; const required = new Set();
-    for (const line of text.split(/\r?\n/)) {
-      if (/^Version (?:needs|symbols|definition) section /.test(line)) needs = line.startsWith('Version needs section ');
-      if (needs) for (const match of line.matchAll(/\bName:\s+([A-Za-z0-9_.]+)\s+Flags:/g)) required.add(match[1]);
-    }
-    assert.ok(required.size <= 256, 'Primary ABI requirement count exceeds bound');
-    result.files[name] = { executableSha256: dependencyEvidence.closure[name].sha256,
-      versionInfoSha256: hash(Buffer.from(text)), requiredSymbolVersions: [...required].sort() };
+function versionRequirements(text, dynamicInfo) {
+  assert.ok(typeof text === 'string' && Buffer.byteLength(text) <= 4 * 1024 * 1024, 'Bounded version report required');
+  // LLVM emits empty stdout for an unversioned ELF; GNU emits the fixed sentence.
+  // Neither can erase version metadata positively observed in its dynamic table.
+  if (!text.trim() || text.trim() === 'No version information found in this file.') {
+    assert.equal(dynamicInfo.versionInfoPresent, false, 'Missing declared version information');
+    assert.equal(dynamicInfo.versionNeedCount, 0); return {};
   }
+  const headers = [...text.matchAll(/^Version (symbols|definition|needs) section '[^'\r\n]+' contains ([1-9][0-9]*) entr(?:y|ies):\r?$/gm)];
+  assert.ok(headers.length > 0 && headers.length <= 3 && !text.slice(0, headers[0].index).trim(), 'Malformed version section header');
+  assert.equal(dynamicInfo.versionInfoPresent, true, 'Version sections lack declared dynamic metadata');
+  assert.equal(new Set(headers.map(h => h[1])).size, headers.length, 'Duplicate version section');
+  const result = new Map(), indexes = new Set(); let needSections = 0, total = 0;
+  for (const [i, header] of headers.entries()) {
+    const body = text.slice(header.index + header[0].length, headers[i + 1]?.index ?? text.length);
+    assert.ok(body.trim(), 'Truncated version section');
+    if (header[1] !== 'needs') continue;
+    needSections++; const count = Number(header[2]);
+    assert.equal(count, dynamicInfo.versionNeedCount, 'Version-needs count differs from dynamic table');
+    const lines = body.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+    assert.match(lines.shift() || '', /^Addr:\s+(?:0x)?[0-9a-fA-F]+\s+Offset:\s+(?:0x)?[0-9a-fA-F]+\s+Link:\s+\d+\s+\([^)]+\)$/, 'Version-needs location missing');
+    let current, remaining = 0;
+    for (const line of lines) {
+      const file = /^(?:0x)?[0-9a-fA-F]+:\s+Version:\s+1\s+File:\s+(\S+)\s+Cnt:\s+([1-9][0-9]*)$/.exec(line);
+      if (file) {
+        assert.equal(remaining, 0, 'Truncated provider version requirements');
+        assert.ok(relative(file[1]) && !file[1].includes('/') && dynamicInfo.needed.includes(file[1]), 'Version provider is not an exact DT_NEEDED dependency');
+        assert.ok(!result.has(file[1]), 'Duplicate version provider');
+        remaining = Number(file[2]); assert.ok(Number.isSafeInteger(remaining) && remaining <= 256, 'Provider version count exceeds bound');
+        current = { required: [], weak: [] }; result.set(file[1], current); continue;
+      }
+      const name = /^(?:0x)?[0-9a-fA-F]+:\s+Name:\s+([A-Za-z0-9_.]+)\s+Flags:\s+(none|WEAK)\s+Version:\s+([0-9]+)$/.exec(line);
+      assert.ok(name && current && remaining > 0, 'Malformed or orphan version requirement');
+      const index = Number(name[3]); assert.ok(index >= 2 && index <= 32767 && !indexes.has(index), 'Duplicate/invalid version index'); indexes.add(index);
+      assert.ok(!current.required.includes(name[1]) && !current.weak.includes(name[1]), 'Duplicate provider version tag');
+      current[name[2] === 'WEAK' ? 'weak' : 'required'].push(name[1]); remaining--; total++;
+      assert.ok(total <= 256, 'ELF version requirement count exceeds bound');
+    }
+    assert.equal(remaining, 0, 'Truncated provider version requirements');
+    assert.equal(result.size, count, 'Truncated provider version inventory');
+  }
+  assert.equal(needSections, dynamicInfo.versionNeedCount ? 1 : 0, 'Declared version-needs section missing');
+  return Object.fromEntries([...result].map(([name, value]) => [name, { required: value.required.sort(), weak: value.weak.sort() }]));
+}
+function closureAbiRequirements(root, dependencyEvidence, run) {
+  const result = { scope: 'whole inspected static dependency closure GNU symbol-version requirements by provider; host ABI availability, undefined symbols, loader search, dlopen/plugins and native execution unaccepted',
+    targetAbiVerified: false, undefinedSymbolsVerified: false, nativeExecutionVerified: false, releaseReady: false, files: {}, providers: {} };
+  const names = Object.keys(dependencyEvidence.closure).sort(), providers = new Map(); let outputBytes = 0;
+  assert.ok(names.length > 0 && names.length <= LIMITS.entries, 'Bounded closure ABI inventory required');
+  for (const name of names) {
+    const entry = dependencyEvidence.closure[name], file = path.join(root, name), pin = { size: entry.size, sha256: entry.sha256 };
+    exact(file, pin);
+    const text = String(run('/usr/bin/readelf', ['--version-info', file], { maxBuffer: 4 * 1024 * 1024 }));
+    exact(file, pin); outputBytes += Buffer.byteLength(text);
+    assert.ok(outputBytes <= 16 * 1024 * 1024, 'Closure version reports exceed total bound');
+    const requirements = versionRequirements(text, entry);
+    result.files[name] = { executableSha256: entry.sha256, versionInfoSha256: hash(Buffer.from(text)), requirementsByProvider: requirements,
+      unversionedDependencies: entry.needed.filter(n => !Object.hasOwn(requirements, n)) };
+    for (const library of entry.needed) {
+      const resolution = entry.resolution[library];
+      assert.ok(resolution && ['required-host-ABI-not-bundled', 'bundled-static-provider'].includes(resolution.kind), 'Unclassified version provider');
+      if (!providers.has(library)) providers.set(library, { ...resolution, required: new Set(), weak: new Set(), consumers: new Set() });
+      const provider = providers.get(library); assert.equal(provider.kind, resolution.kind);
+      provider.consumers.add(name);
+      for (const tag of requirements[library]?.required || []) provider.required.add(tag);
+      for (const tag of requirements[library]?.weak || []) provider.weak.add(tag);
+    }
+  }
+  result.providers = Object.fromEntries([...providers].sort(([a], [b]) => a.localeCompare(b)).map(([name, item]) => [name, {
+    kind: item.kind, ...(item.paths ? { paths: item.paths } : {}), requiredSymbolVersions: [...item.required].sort(),
+    weakSymbolVersions: [...item.weak].sort(), consumers: [...item.consumers].sort() }]));
+  assert.ok(Buffer.byteLength(JSON.stringify(result)) <= LIMITS.manifest, 'Closure ABI evidence exceeds bound');
   return result;
 }
 // Raw USTAR, not tarfile's PAX/GNU conveniences. Every parent directory is explicit.
@@ -1032,6 +1120,7 @@ async function produce(root, inputRoot, output, decoder, env = process.env) {
     receipt.appImage = retainAppImage(path.join(bundles, imageName), image);
     exact(binary, p.files['creator-hub']);
     receipt.upstreamPackagingTools = toolInventory(path.join(child.XDG_CACHE_HOME, 'tauri'));
+    receipt.hostBaselineSource = hostBaselineEvidence(receipt.upstreamPackagingTools);
     receipt.appRunWrapper = appRunToolBinding(receipt.upstreamPackagingTools);
     receipt.upstreamToolSource = 'https://github.com/tauri-apps/tauri/blob/tauri-cli-v2.11.4/crates/tauri-bundler/src/bundle/linux/appimage/linuxdeploy.rs';
     receipt.upstreamToolNote = 'Effective post-bundle cache hashes; Tauri 2.11.4 uses mutable upstream URLs and clears linuxdeploy bytes 8..10. Optional AppImage plugin absence means builtin fallback. No hermetic claim.';
@@ -1070,7 +1159,7 @@ async function produce(root, inputRoot, output, decoder, env = process.env) {
     write(path.join(output, 'appdir-original-inventory.json'), transformation.original);
     write(path.join(output, 'appdir-flattened-inventory.json'), finalInventory);
     receipt.dependencies = dependencies(transport, finalInventory.entries, run, { includeHub: true });
-    receipt.primaryAbi = primaryAbiRequirements(transport, receipt.dependencies, run);
+    receipt.closureAbi = closureAbiRequirements(transport, receipt.dependencies, run);
     receipt.portableHostProfile = { path: HOST_PROFILE, ...record(profile), executable: record(bytes),
       rawExecutable: baseline.portableHostBuild.rawHub, compiledFeatures: FEATURES,
       scope: 'canonical-appdir-transport-only', appImageContainsProfile: false };
@@ -1118,7 +1207,7 @@ function fetchInputs(output, env = process.env) {
 }
 module.exports = { VERSION, TARGET, FEATURES, HOST_PROFILE, LIMITS, WORKFLOW, BRANCH, INPUTS, RECEIPTS, get MAIN_ALLOWED() { return mainAllowed(); }, RECEIPT_ALLOWED,
   record, flags, validatePins, admission, preflight, verifyProducer, verifyPrivateProof, collect, ZIP_STAGE, stageZip, validateReceipts,
-  relative, prohibited, validateGtkMetadata, validateGioRuntime, retainAppImage, internalTarget, inventory, retainOriginalAppDir, flatten, dynamicDependencies, dependencies, primaryAbiRequirements, tarHeader, packTar, manifest, validateInventory, overlay, bundleArgs, toolInventory, produce, fetchInputs,
+  relative, prohibited, validateGtkMetadata, validateGioRuntime, retainAppImage, internalTarget, inventory, retainOriginalAppDir, flatten, dynamicDependencies, dynamicTableEvidence, HOST_BASELINE, HOST_EXCLUSIONS, hostBaselineEvidence, dependencies, versionRequirements, closureAbiRequirements, tarHeader, packTar, manifest, validateInventory, overlay, bundleArgs, toolInventory, produce, fetchInputs,
   hostProfile, verifyHostProfileInventory, attachHostProfile, SCHEMA_DIRECTORY, COMPILED_SCHEMA, METADATA_PINS, METADATA_PROBES, DATA_LIMIT,
   metadataRole, gvdbVariants, GVDB_VARIANTS, validateCompiledSchema, validateMetadataFormat, validateMetadata, metadataRead, metadataEvidence, transportMode,
   APPRUN_WRAPPED, APPRUN_TOOL, APPRUN_PIN, APPRUN_SOURCES, validateAppRunWrapped, appRunToolBinding };

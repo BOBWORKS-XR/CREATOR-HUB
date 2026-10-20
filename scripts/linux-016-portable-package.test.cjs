@@ -35,11 +35,29 @@ function put(root, name, bytes, mode = 0o644) {
 function elf() {
   const bytes = Buffer.alloc(64); bytes.set([127, 69, 76, 70, 2, 1, 1]); bytes.writeUInt16LE(3, 16); bytes.writeUInt16LE(62, 18); return bytes;
 }
-function dynamicTable(needed = []) {
-  return `Dynamic section at offset 0x1000 contains ${needed.length + 1} ${needed.length ? 'entries' : 'entry'}:\n`
+function dynamicTable(needed = [], versionNeedCount = 0) {
+  const count = needed.length + 1 + (versionNeedCount ? 2 : 0);
+  return `Dynamic section at offset 0x1000 contains ${count} ${count === 1 ? 'entry' : 'entries'}:\n`
     + '  Tag                Type        Name/Value\n'
     + needed.map(name => `  0x0000000000000001 (NEEDED) Shared library: [${name}]\n`).join('')
+    + (versionNeedCount ? '  0x000000006ffffffe (VERNEED) 0x2000\n'
+      + `  0x000000006fffffff (VERNEEDNUM) ${versionNeedCount}\n` : '')
     + '  0x0000000000000000 (NULL) 0x0\n';
+}
+function versionTable(requirements) {
+  const entries = Object.entries(requirements); let index = 2;
+  if (!entries.length) return 'No version information found in this file.\n';
+  return `Version needs section '.gnu.version_r' contains ${entries.length} ${entries.length === 1 ? 'entry' : 'entries'}:\n`
+    + ' Addr: 0x2000 Offset: 0x2000 Link: 4 (.dynstr)\n'
+    + entries.map(([name, versions]) => `  000000: Version: 1 File: ${name} Cnt: ${versions.length}\n`
+      + versions.map(tag => `  0x0010: Name: ${tag} Flags: none Version: ${index++}\n`).join('')).join('');
+}
+function dependencyFiles(t, extra = []) {
+  const root = temp(t), names = ['usr/bin/creator-hub', 'usr/lib/libwebkit2gtk-4.1.so.0', 'usr/lib/libjavascriptcoregtk-4.1.so.0',
+    'usr/lib/x86_64-linux-gnu/webkit2gtk-4.1/WebKitWebProcess', 'usr/lib/x86_64-linux-gnu/webkit2gtk-4.1/WebKitNetworkProcess',
+    'usr/lib/x86_64-linux-gnu/webkit2gtk-4.1/injected-bundle/libwebkit2gtkinjectedbundle.so', ...extra];
+  const entries = Object.fromEntries(names.map(n => { put(root, n, elf()); return [n, { kind: 'file', ...p.record(elf()), mode: 0o755 }]; }));
+  return { root, entries };
 }
 function identity() {
   const pins = { schemaVersion: 1, sourceCommit: 'd'.repeat(40), sourceTree: 'e'.repeat(40), runId: 9001, runAttempt: 2,
@@ -1088,25 +1106,25 @@ test('actual packaged WebKit/JSC processes and injected library must be x64 ELF,
   assert.throws(() => p.dependencies(root, entries, () => assert.fail('Changed bytes reached readelf')));
   fs.writeFileSync(path.join(root, names[0]), 'not ELF'); assert.throws(() => p.dependencies(root, entries, run), /ELF/);
 });
-test('new portable analysis includes Root dependencies and primary ABI needs, not available version definitions', t => {
+test('new portable analysis includes Root and whole-closure ABI needs, not available version definitions', t => {
   const root = temp(t), names = ['usr/bin/creator-hub', 'usr/lib/libwebkit2gtk-4.1.so.0', 'usr/lib/libjavascriptcoregtk-4.1.so.0',
     'usr/lib/x86_64-linux-gnu/webkit2gtk-4.1/WebKitWebProcess', 'usr/lib/x86_64-linux-gnu/webkit2gtk-4.1/WebKitNetworkProcess',
     'usr/lib/x86_64-linux-gnu/webkit2gtk-4.1/injected-bundle/libwebkit2gtkinjectedbundle.so'];
   const entries = Object.fromEntries(names.map(n => { put(root, n, elf()); return [n, { kind: 'file', ...p.record(elf()), mode: 0o755 }]; }));
-  const dynamic = (command, args) => { assert.equal(command, '/usr/bin/readelf'); assert.equal(args[0], '--dynamic'); return dynamicTable(['libc.so.6']); };
+  const dynamic = (command, args) => { assert.equal(command, '/usr/bin/readelf'); assert.equal(args[0], '--dynamic'); return dynamicTable(['libc.so.6'], 1); };
   const dependencies = p.dependencies(root, entries, dynamic, { includeHub: true });
   assert.deepEqual(dependencies.primary.hub, ['usr/bin/creator-hub']);
   assert.throws(() => p.dependencies(root, entries, (command, args) => args[1].endsWith('creator-hub')
     ? dynamicTable(['libmissing-hub.so.1']) : dynamic(command, args), { includeHub: true }), /creator-hub -> libmissing-hub/);
   const versionText = "Version definition section '.gnu.version_d' contains 1 entry:\n  Name: GLIBCXX_3.4.99 Flags: none Version: 1\n"
-    + "Version needs section '.gnu.version_r' contains 1 entry:\n  File: libc.so.6 Cnt: 1\n  Name: GLIBC_2.34 Flags: none Version: 2\n";
-  const abi = p.primaryAbiRequirements(root, dependencies, (command, args, options) => {
+    + versionTable({ 'libc.so.6': ['GLIBC_2.34'] });
+  const abi = p.closureAbiRequirements(root, dependencies, (command, args, options) => {
     assert.equal(command, '/usr/bin/readelf'); assert.equal(args[0], '--version-info');
     assert.equal(options.maxBuffer, 4 * 1024 * 1024); return versionText;
   });
   assert.equal(Object.keys(abi.files).length, 6);
   for (const file of Object.values(abi.files)) {
-    assert.deepEqual(file.requiredSymbolVersions, ['GLIBC_2.34']);
+    assert.deepEqual(file.requirementsByProvider, { 'libc.so.6': { required: ['GLIBC_2.34'], weak: [] } });
     assert.equal(file.executableSha256, p.record(elf()).sha256);
   }
   assert.match(abi.scope, /host ABI availability.*unaccepted/);
@@ -1117,9 +1135,109 @@ test('new portable analysis includes Root dependencies and primary ABI needs, no
   assert.ok(withGio.closure[tls]);
   assert.throws(() => p.dependencies(root, entries, (command, args) => args[1].endsWith('libgiognutls.so')
     ? dynamicTable(['libmissing-tls.so.1']) : dynamic(command, args), { includeHub: true }), /libgiognutls.so -> libmissing-tls/);
-  const gioAbi = p.primaryAbiRequirements(root, withGio, () => versionText);
+  const gioAbi = p.closureAbiRequirements(root, withGio, () => versionText);
   assert.equal(Object.keys(gioAbi.files).length, 7);
-  assert.deepEqual(gioAbi.files[tls].requiredSymbolVersions, ['GLIBC_2.34']);
+  assert.deepEqual(gioAbi.files[tls].requirementsByProvider['libc.so.6'].required, ['GLIBC_2.34']);
+  assert.deepEqual(gioAbi.providers['libc.so.6'].requiredSymbolVersions, ['GLIBC_2.34']);
+  for (const field of ['targetAbiVerified', 'undefinedSymbolsVerified', 'nativeExecutionVerified', 'releaseReady']) assert.equal(gioAbi[field], false);
+});
+test('host exclusions carry byte-pinned offline upstream source and the exact recorded packaging tool, not target acceptance', () => {
+  const source = zlib.inflateRawSync(Buffer.from('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', 'base64'), { maxOutputLength: 11454 });
+  assert.deepEqual(p.record(source), { size: p.HOST_EXCLUSIONS.source.size, sha256: p.HOST_EXCLUSIONS.source.sha256 });
+  assert.equal(p.HOST_EXCLUSIONS.source.sha256, '154aab55b8185116806488fe6ce14701de875d2e00dc11716613bf3c2e126265');
+  assert.match(p.HOST_EXCLUSIONS.source.url, /199fc9f768b35ad6166109299e5cf3832adeb5d5\/excludelist$/);
+  const names = new Set(source.toString('utf8').split(/\r?\n/).map(line => line.replace(/#.*/, '').trim()).filter(Boolean));
+  for (const name of p.HOST_EXCLUSIONS.sonames) assert.ok(names.has(name), `Missing exact upstream exclusion: ${name}`);
+  const tools = { 'linuxdeploy-x86_64.AppImage': { ...p.HOST_EXCLUSIONS.tool } };
+  assert.equal(p.hostBaselineEvidence(tools), p.HOST_EXCLUSIONS);
+  assert.match(p.HOST_EXCLUSIONS.scope, /compiled list is not attested/); assert.match(p.HOST_EXCLUSIONS.scope, /No target ABI or runtime acceptance/);
+  for (const value of [p.HOST_BASELINE, p.HOST_EXCLUSIONS, p.HOST_EXCLUSIONS.source, p.HOST_EXCLUSIONS.tool, p.HOST_EXCLUSIONS.sonames]) assert.ok(Object.isFrozen(value));
+  assert.throws(() => p.hostBaselineEvidence({}), /Unreviewed/);
+  tools['linuxdeploy-x86_64.AppImage'].sha256 = '0'.repeat(64); assert.throws(() => p.hostBaselineEvidence(tools), /Unreviewed/);
+});
+test('the exact additional host SONAMEs classify prerequisites only and unknown or conflicting providers still refuse', t => {
+  const { root, entries } = dependencyFiles(t), needed = [...p.HOST_EXCLUSIONS.sonames];
+  const evidence = p.dependencies(root, entries, () => dynamicTable(needed), { includeHub: true });
+  assert.deepEqual(evidence.hostBaseline, [...needed].sort());
+  for (const item of Object.values(evidence.closure)) for (const name of needed) {
+    assert.deepEqual(item.resolution[name], { kind: 'required-host-ABI-not-bundled' });
+  }
+  assert.equal(p.HOST_EXCLUSIONS.sonames.length, 18); assert.equal(new Set(p.HOST_BASELINE).size, 26);
+  assert.equal(evidence.hostBaselineSource, p.HOST_EXCLUSIONS); assert.match(evidence.scope, /native execution unaccepted/);
+  for (const name of ['libstdc++.so.7', 'libgcc_other.so.1', '/usr/lib/libz.so.1', '../libz.so.1', 'libz.so.1/other']) {
+    assert.throws(() => p.dependencies(root, entries, () => dynamicTable([name])));
+  }
+  const a = 'usr/lib/libz.so.1', b = 'usr/lib/other/libz.so.1';
+  put(root, a, elf()); entries[a] = { kind: 'file', ...p.record(elf()), mode: 0o644 };
+  const changed = Buffer.from(elf()); changed[30] = 1; put(root, b, changed); entries[b] = { kind: 'file', ...p.record(changed), mode: 0o644 };
+  assert.throws(() => p.dependencies(root, entries, () => dynamicTable(['libz.so.1'])), /Ambiguous bundled dependency/);
+  fs.writeFileSync(path.join(root, b), elf()); entries[b] = { ...entries[a] };
+  const aliases = p.dependencies(root, entries, (cmd, args) => [a, b].some(n => args[1].endsWith(n.split('/').join(path.sep))) ? dynamicTable() : dynamicTable(['libz.so.1']));
+  assert.deepEqual(aliases.closure['usr/lib/libwebkit2gtk-4.1.so.0'].resolution['libz.so.1'].paths, [a, b]);
+  assert.equal(aliases.hostBaseline.includes('libz.so.1'), false, 'Bundled exact-byte aliases are not mislabeled host providers');
+});
+test('whole-closure versions preserve lower transitive tags by exact provider and do not invent unversioned ABI acceptance', t => {
+  const extra = 'usr/lib/libfixture-transitive.so.1', empty = 'usr/lib/libicudata.so.70';
+  const { root, entries } = dependencyFiles(t, [extra, empty]);
+  const evidence = p.dependencies(root, entries, (cmd, args) => args[1].endsWith('libfixture-transitive.so.1')
+    ? dynamicTable(['libgcc_s.so.1', 'libgpg-error.so.0', 'libz.so.1', 'libharfbuzz.so.0', 'libicudata.so.70'], 3)
+    : args[1].endsWith('libicudata.so.70') ? dynamicTable() : dynamicTable(['libfixture-transitive.so.1', 'libgcc_s.so.1'], 1), { includeHub: true });
+  const transitive = versionTable({ 'libgcc_s.so.1': ['GCC_3.3.1'], 'libgpg-error.so.0': ['GPG_ERROR_1.0'], 'libz.so.1': ['ZLIB_1.2.9'] });
+  const abi = p.closureAbiRequirements(root, evidence, (cmd, args) => args[1].endsWith('libfixture-transitive.so.1')
+    ? transitive : args[1].endsWith('libicudata.so.70') ? '' : versionTable({ 'libgcc_s.so.1': ['GCC_7.0.0'] }));
+  assert.equal(Object.keys(abi.files).length, 8);
+  assert.deepEqual(abi.providers['libgcc_s.so.1'].requiredSymbolVersions, ['GCC_3.3.1', 'GCC_7.0.0']);
+  assert.deepEqual(abi.providers['libgpg-error.so.0'].requiredSymbolVersions, ['GPG_ERROR_1.0']);
+  assert.deepEqual(abi.providers['libz.so.1'].requiredSymbolVersions, ['ZLIB_1.2.9']);
+  assert.deepEqual(abi.files[extra].unversionedDependencies, ['libharfbuzz.so.0', 'libicudata.so.70']);
+  assert.deepEqual(abi.files[empty].requirementsByProvider, {});
+  assert.deepEqual(abi.providers['libharfbuzz.so.0'].requiredSymbolVersions, []);
+  assert.equal(abi.targetAbiVerified, false); assert.equal(abi.undefinedSymbolsVerified, false);
+});
+test('version requirement parsing binds exact provider/count/index and refuses malformed or truncated evidence', () => {
+  const info = p.dynamicTableEvidence(dynamicTable(['libgcc_s.so.1'], 1)), valid = versionTable({ 'libgcc_s.so.1': ['GCC_3.0', 'GCC_7.0.0'] });
+  assert.deepEqual(p.versionRequirements(valid, info), { 'libgcc_s.so.1': { required: ['GCC_3.0', 'GCC_7.0.0'], weak: [] } });
+  assert.deepEqual(p.versionRequirements(valid.replace('Name: GCC_3.0 Flags: none', 'Name: GCC_3.0 Flags: WEAK'), info),
+    { 'libgcc_s.so.1': { required: ['GCC_7.0.0'], weak: ['GCC_3.0'] } });
+  for (const text of ['', 'No version information found in this file.\n', valid + valid,
+    valid.replace('contains 1 entry:', 'contains 2 entries:'), valid.replace('Cnt: 2', 'Cnt: 3'),
+    valid.replace('File: libgcc_s.so.1', 'File: libunknown.so.1'), valid.replace('File: libgcc_s.so.1', 'File: ../libgcc_s.so.1'),
+    valid.replace('Addr:', 'Missing:'), valid.replace('Name: GCC_7.0.0', 'INVALID: GCC_7.0.0'),
+    valid.replace('Version: 3', 'Version: 2'), valid.replace('GCC_7.0.0', 'GCC_3.0'),
+    valid.replace('Flags: none', 'Flags: UNKNOWN'), valid.replace('Version: 3', 'Version: 32768'),
+    valid.replace(/.*Name: GCC_7.0.0.*\n/, ''), 'x\n' + valid]) assert.throws(() => p.versionRequirements(text, info));
+  assert.throws(() => p.versionRequirements('x'.repeat(4 * 1024 * 1024 + 1), info), /Bounded/);
+  const two = p.dynamicTableEvidence(dynamicTable(['libgcc_s.so.1', 'libz.so.1'], 2));
+  assert.throws(() => p.versionRequirements(versionTable({ 'libgcc_s.so.1': ['GCC_3.0'], 'libz.so.1': ['ZLIB_1.2.0'] })
+    .replace('File: libz.so.1', 'File: libgcc_s.so.1'), two), /Duplicate version provider/);
+  assert.throws(() => p.versionRequirements(versionTable({ 'libgcc_s.so.1': Array.from({ length: 257 }, (_, i) => `GCC_FIXTURE_${i}`) }), info), /count exceeds bound/);
+  const noVersion = p.dynamicTableEvidence(dynamicTable());
+  assert.deepEqual(p.versionRequirements('', noVersion), {});
+  assert.deepEqual(p.versionRequirements('No version information found in this file.\n', noVersion), {});
+  assert.throws(() => p.versionRequirements('readelf failed', noVersion));
+  assert.throws(() => p.versionRequirements("Version definition section '.gnu.version_d' contains 1 entry:\n Name: AVAILABLE_ONLY\n", noVersion), /lack declared/);
+  for (const text of [dynamicTable([], 1).replace(' (VERNEED)', ' (BROKEN)'),
+    dynamicTable([], 1).replace('VERNEEDNUM) 1', 'VERNEEDNUM) 0'),
+    dynamicTable([], 1).replace(' (VERNEED)', ' (VERNEEDNUM)')]) assert.throws(() => p.dynamicTableEvidence(text));
+});
+test('whole-closure ABI refuses failed inspectors and changes to the hash-bound ELF', t => {
+  const { root, entries } = dependencyFiles(t);
+  const evidence = p.dependencies(root, entries, () => dynamicTable(['libc.so.6'], 1), { includeHub: true });
+  const failed = Object.assign(Error('inspector failed'), { status: 1, stdout: versionTable({ 'libc.so.6': ['GLIBC_2.34'] }) }); let calls = 0;
+  assert.throws(() => p.closureAbiRequirements(root, evidence, () => { calls++; throw failed; }), error => error === failed); assert.equal(calls, 1);
+  assert.throws(() => p.closureAbiRequirements(root, evidence, () => ''), /Missing declared/);
+  assert.throws(() => p.closureAbiRequirements(root, evidence, (cmd, args) => {
+    fs.writeFileSync(args[1], 'changed during inspection'); return versionTable({ 'libc.so.6': ['GLIBC_2.34'] });
+  }));
+});
+test('packaging wires pinned source provenance and whole-closure analysis before unsigned TAR creation', () => {
+  const source = fs.readFileSync(path.join(__dirname, 'linux-016-portable-package.cjs'), 'utf8');
+  const provenance = source.indexOf('receipt.hostBaselineSource = hostBaselineEvidence(receipt.upstreamPackagingTools)');
+  const dependencies = source.indexOf('receipt.dependencies = dependencies(transport, finalInventory.entries, run, { includeHub: true })');
+  const abi = source.indexOf('receipt.closureAbi = closureAbiRequirements(transport, receipt.dependencies, run)');
+  const tar = source.indexOf('const tarBinding = await packTar(transport, tar, finalInventory)');
+  assert.ok(provenance > 0 && dependencies > provenance && abi > dependencies && tar > abi);
+  assert.equal(source.includes('receipt.primaryAbi ='), false);
 });
 test('bundler command is bundle-only, no-sign, same features and opaque module resource', () => {
   const args = p.bundleArgs(ROOT, '/owned/overlay.json'); assert.equal(args[1], 'bundle'); assert.ok(args.includes('--no-sign'));
