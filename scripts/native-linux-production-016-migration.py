@@ -956,6 +956,7 @@ class Session:
                     and self.native.native_process(self.owned["pid"], self.helper) == self.owned and self.pages.listener(self.child.pid, 4444), "Owned process/socket changed")
             self.backend_guard()
             self.evidence["lastNativeProcesses"] = answer["processes"]
+            self.evidence["lastTerminalProcesses"] = answer["terminalProcesses"]
             self.evidence["lastInventoryRequest"] = answer["request"]
         except PermissionError as error:
             try:
@@ -1107,26 +1108,108 @@ def no_legacy_backend(identity, command):
             and b"--creator-hub-host" not in command.split(b"\0"), "A separate MCP/Setup GUI or legacy host backend started")
 
 
+def inventory_process_snapshot(directory, path, pid, helper):
+    info = os.fstat(directory)
+    require(stat.S_ISDIR(info.st_mode) and info.st_uid == UID
+            and metadata_stamp(info) == metadata_stamp(path.lstat()), "Inventory proc directory changed")
+    def read(leaf, limit):
+        before = os.stat(leaf, dir_fd=directory, follow_symlinks=False)
+        require(stat.S_ISREG(before.st_mode) and before.st_nlink == 1 and 0 <= before.st_size <= limit, "Nonordinary inventory proc metadata")
+        with os.fdopen(os.open(leaf, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK, dir_fd=directory), "rb") as stream:
+            require(metadata_stamp(os.fstat(stream.fileno())) == metadata_stamp(before), "Inventory proc FD changed")
+            raw = stream.read(limit + 1)
+            require(len(raw) <= limit and metadata_stamp(os.fstat(stream.fileno())) == metadata_stamp(before), "Inventory proc metadata changed/oversized")
+        require(metadata_stamp(os.stat(leaf, dir_fd=directory, follow_symlinks=False)) == metadata_stamp(before), "Inventory proc pathname changed")
+        return raw
+    raw = read("stat", 4096).decode("utf-8")
+    start = helper.parse_start(raw, pid, require_live=False)
+    fields = raw[raw.rfind(")") + 2:].split()
+    require(fields[0] in tuple("RSDTtZXKWPI") and fields[1].isdigit() and int(fields[1]) <= 2147483647,
+            "Unknown inventory proc state/parent")
+    status, ids = read("status", 16384), {}
+    for name in ("Uid", "Gid"):
+        matches = re.findall(rb"^" + name.encode() + rb":\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s*$", status, re.M)
+        require(len(matches) == 1, "Inventory credential tuple unavailable")
+        ids[name] = [int(value) for value in matches[0]]
+    require(metadata_stamp(os.fstat(directory)) == metadata_stamp(info) == metadata_stamp(path.lstat()), "Inventory proc directory changed during observation")
+    return {"pid": pid, "startTime": start, "parentPid": int(fields[1]), "state": fields[0],
+            "procDirectory": metadata_row(path.as_posix(), info), **ids}
+
+
+def inventory_terminal_record(pid, origin, before, after):
+    for row in (origin, before, after):
+        keys(row, ("pid", "startTime", "parentPid", "state", "procDirectory", "Uid", "Gid"))
+        directory = row["procDirectory"]
+        keys(directory, ("path", "type", "uid", "gid", "mode", "nlink", "dev", "ino", "size", "mtimeNs", "ctimeNs"))
+        require(type(row["pid"]) is int and row["pid"] == pid and type(row["startTime"]) is str
+                and re.fullmatch(r"[0-9]{1,20}", row["startTime"]) and type(row["parentPid"]) is int
+                and 0 <= row["parentPid"] <= 2147483647 and row["state"] in tuple("RSDTtZXKWPI")
+                and row["Uid"] == row["Gid"] == [UID] * 4
+                and all(type(value) is int for name in ("Uid", "Gid") for value in row[name])
+                and directory["path"] == f"/proc/{pid}" and directory["type"] == "directory"
+                and directory["uid"] == directory["gid"] == UID
+                and all(type(value) is int for name, value in directory.items() if name not in ("path", "type")), "Invalid terminal identity evidence")
+    require(type(pid) is int and 1 <= pid <= 2147483647 and before == after and before["state"] in ("Z", "X")
+            and {k: v for k, v in origin.items() if k != "state"} == {k: v for k, v in before.items() if k != "state"},
+            "Terminal state/identity was not stable")
+    return {"pid": pid, "classification": "terminal", "origin": origin, "before": before, "after": after}
+
+
 def native_process_inventory(native, helper):
     candidates = [file for file in Path("/proc").iterdir() if file.name.isdecimal()]
     require(len(candidates) <= 8192, "Native PID inventory exceeds bound")
-    found = []
+    found, terminal = [], []
     for file in candidates:
+        directory = None
         try:
             if file.stat().st_uid != UID:
                 continue
-            identity = native.native_process(int(file.name), helper, False)
-            if identity["uids"] != [UID] * 4:
-                continue  # Setuid authorization is bound separately by the root observer.
-            command = proc_bytes(file / "cmdline", 8192)
-            no_legacy_backend(identity, command)
-            require(native.native_process(identity["pid"], helper, False) == identity, "Native process changed during inventory")
+            require(re.fullmatch(r"[1-9][0-9]{0,9}", file.name) and int(file.name) <= 2147483647, "Invalid inventory PID")
+            pid = int(file.name)
+            directory = os.open(file, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+            origin = inventory_process_snapshot(directory, file, pid, helper)
+            def classify(first):
+                last = inventory_process_snapshot(directory, file, pid, helper)
+                proof = inventory_terminal_record(pid, origin, first, last)
+                require(len(found) + len(terminal) < 64, "Synthetic native process inventory exceeds bound")
+                terminal.append(proof)
+            if origin["state"] in ("Z", "X"):
+                classify(origin)
+                continue
+            try:
+                identity = native.native_process(pid, helper, False)
+                require(identity["pid"] == pid and identity["startTime"] == origin["startTime"]
+                        and identity["parentPid"] == origin["parentPid"] and identity["uids"] == origin["Uid"], "Native process differs from bound inventory origin")
+                if identity["uids"] != [UID] * 4:
+                    after = inventory_process_snapshot(directory, file, pid, helper)
+                    require(after["state"] not in ("Z", "X")
+                            and {k: v for k, v in origin.items() if k != "state"} == {k: v for k, v in after.items() if k != "state"}
+                            and native.native_process(pid, helper, False) == identity, "Mixed-UID inventory process changed")
+                    continue  # Setuid authorization stays separately bound; this is not a terminal/legacy-free claim.
+                command = proc_bytes(file / "cmdline", 8192)
+                no_legacy_backend(identity, command)
+                require(native.native_process(pid, helper, False) == identity, "Native process changed during inventory")
+            except RuntimeError as error:
+                # Only this liveness refusal permits fresh terminal proof against the held origin.
+                if type(error) is not RuntimeError or str(error) != "Owned process is not live":
+                    raise
+                classify(inventory_process_snapshot(directory, file, pid, helper))
+                continue
+            after = inventory_process_snapshot(directory, file, pid, helper)
+            if after["state"] in ("Z", "X"):
+                classify(after)
+                continue
+            require({k: v for k, v in origin.items() if k != "state"} == {k: v for k, v in after.items() if k != "state"},
+                    "Live inventory origin changed")
         except (FileNotFoundError, ProcessLookupError):
             continue
-        require(len(found) < 64, "Synthetic native process inventory exceeds bound")
+        finally:
+            if directory is not None:
+                os.close(directory)
+        require(len(found) + len(terminal) < 64, "Synthetic native process inventory exceeds bound")
         found.append({"pid": identity["pid"], "startTime": identity["startTime"], "executable": identity["executable"],
                       "argvSha256": digest(command), "legacyBackend": False})
-    return sorted(found, key=lambda row: row["pid"])
+    return {"processes": sorted(found, key=lambda row: row["pid"]), "terminalProcesses": sorted(terminal, key=lambda row: row["pid"])}
 
 
 INVENTORY_MAX_SAMPLES = 2048
@@ -1154,10 +1237,11 @@ def inventory_request(value, harness, scenario, sequence):
 
 
 def inventory_answer(value, request):
-    keys(value, ("request", "ok", "processes"))
+    keys(value, ("request", "ok", "processes", "terminalProcesses"))
     inventory_request(value["request"], request["harnessSource"], request["scenario"], request["sequence"])
     require(value["request"] == request and value["ok"] is True and type(value["processes"]) is list
-            and len(value["processes"]) <= 64, "Fresh root inventory answer refused")
+            and type(value["terminalProcesses"]) is list and len(value["processes"]) + len(value["terminalProcesses"]) <= 64,
+            "Fresh root inventory answer refused")
     previous = 0
     for row in value["processes"]:
         keys(row, ("pid", "startTime", "executable", "argvSha256", "legacyBackend"))
@@ -1167,6 +1251,12 @@ def inventory_answer(value, request):
                 and len(row["executable"].encode("utf-8")) <= 4096 and not re.search(r"[\x00-\x1f\x7f]", row["executable"])
                 and type(row["argvSha256"]) is str and re.fullmatch(r"[a-f0-9]{64}", row["argvSha256"])
                 and row["legacyBackend"] is False, "Invalid root inventory record")
+        previous = row["pid"]
+    active, previous = {row["pid"] for row in value["processes"]}, 0
+    for row in value["terminalProcesses"]:
+        keys(row, ("pid", "classification", "origin", "before", "after"))
+        require(type(row["pid"]) is int and previous < row["pid"] <= 2147483647 and row["pid"] not in active
+                and row == inventory_terminal_record(row["pid"], row["origin"], row["before"], row["after"]), "Invalid terminal inventory record")
         previous = row["pid"]
 
 
@@ -1217,7 +1307,9 @@ def serve_inventory(state, record, harness, scenario, native, helper):
         inventory_request(value, harness, scenario, sequence)
         require(value["nonce"] not in state["nonces"], "Inventory nonce replay refused")
         state["nonces"].add(value["nonce"])
-        answer = {"request": value, "ok": True, "processes": native_process_inventory(native, helper)}
+        inventory = native_process_inventory(native, helper)
+        keys(inventory, ("processes", "terminalProcesses"))
+        answer = {"request": value, "ok": True, **inventory}
         inventory_answer(answer, value)
         require(len(json.dumps(answer, ensure_ascii=False, allow_nan=False).encode()) <= 524288, "Root inventory response exceeds bound")
         require(read_file(request, 512, uid=UID, mode=0o600) == raw, "Inventory request changed during observation")

@@ -618,8 +618,8 @@ def inventory_rpc_fixture():
         stack.enter_context(patch.object(M, "BASE", root))
         stack.enter_context(patch.multiple(M.os, getuid=lambda: actor[0], geteuid=lambda: actor[0], create=True))
         stack.enter_context(patch.object(M, "inventory_channel"))
-        fixture.inventory = stack.enter_context(patch.object(M, "native_process_inventory", return_value=[
-            {"pid": 12, "startTime": "120", "executable": "/usr/bin/creator-hub", "argvSha256": "a" * 64, "legacyBackend": False}]))
+        fixture.inventory = stack.enter_context(patch.object(M, "native_process_inventory", return_value={"processes": [
+            {"pid": 12, "startTime": "120", "executable": "/usr/bin/creator-hub", "argvSha256": "a" * 64, "legacyBackend": False}], "terminalProcesses": []}))
         real_read = M.read_file
         def read(file, limit, *, uid, mode):
             is_request = file.parent == root / "result"
@@ -661,7 +661,7 @@ class InventoryRpcTests(unittest.TestCase):
                 self.assertEqual(answer["request"]["operation"], "global-uid-inventory")
                 self.assertEqual(answer["request"]["harnessSource"], "f" * 40)
                 self.assertEqual(answer["request"]["scenario"], M.SCENARIOS[0])
-                self.assertEqual(set(answer), {"request", "ok", "processes"})
+                self.assertEqual(set(answer), {"request", "ok", "processes", "terminalProcesses"})
             self.assertLess(len(json.dumps(reopened).encode()), 524288)
 
     def test_unknown_existing_response_missing_response_and_failed_channel_never_allow_input_or_retry(self):
@@ -809,16 +809,16 @@ class InventoryRpcTests(unittest.TestCase):
     def test_root_answer_malformed_records_request_mutation_and_transport_metadata_fail_closed(self):
         for failure in ("extra-record", "pid-duplicate", "too-many", "true-legacy", "changed-request", "response-owner"):
             with self.subTest(failure=failure), inventory_rpc_fixture() as f:
-                row = copy.deepcopy(f.inventory.return_value[0])
-                if failure == "extra-record": f.inventory.return_value = [{**row, "args": "not-returnable"}]
-                if failure == "pid-duplicate": f.inventory.return_value = [row, row]
-                if failure == "too-many": f.inventory.return_value = [{**row, "pid": i + 1} for i in range(65)]
-                if failure == "true-legacy": f.inventory.return_value = [{**row, "legacyBackend": True}]
+                row = copy.deepcopy(f.inventory.return_value["processes"][0])
+                if failure == "extra-record": f.inventory.return_value["processes"] = [{**row, "args": "not-returnable"}]
+                if failure == "pid-duplicate": f.inventory.return_value["processes"] = [row, row]
+                if failure == "too-many": f.inventory.return_value["processes"] = [{**row, "pid": i + 1} for i in range(65)]
+                if failure == "true-legacy": f.inventory.return_value["processes"] = [{**row, "legacyBackend": True}]
                 if failure == "changed-request":
                     def change(*_):
                         file = f.root / "result/inventory-request-1.json"
                         value = json.loads(file.read_bytes()); value["nonce"] = "0" * 64
-                        file.write_text(json.dumps(value)); return [row]
+                        file.write_text(json.dumps(value)); return {"processes": [row], "terminalProcesses": []}
                     f.inventory.side_effect = change
                 if failure == "response-owner":
                     original = M.read_file
@@ -831,12 +831,27 @@ class InventoryRpcTests(unittest.TestCase):
 
 
 @contextmanager
-def global_inventory_fixture(rows, changed=None):
+def global_inventory_fixture(rows, changed=None, *, observations=None, native_error=None, denied=False):
     original, real_path = M.native_process_inventory, M.Path
-    calls = []
+    real_os = {name: getattr(M.os, name) for name in ("open", "stat", "fstat", "fdopen", "close")}
+    calls, fds, phases, reads = [], {}, {}, []
+    helper = M.load("native-unix-window")
+    observations = observations or {}
+    def current(pid):
+        values = observations.get(pid, [{}])
+        return {"state": "S", "startTime": str(pid), "parentPid": 1, "uid": M.UID, "gid": M.UID,
+                "inode": pid, **values[min(phases.get(pid, 0), len(values) - 1)]}
+    def info(pid, leaf=None):
+        value = current(pid)
+        return SimpleNamespace(st_dev=23, st_ino=value["inode"] if leaf is None else pid + 10000,
+                               st_mode=(M.stat.S_IFDIR | 0o555) if leaf is None else (M.stat.S_IFREG | 0o444),
+                               st_uid=value["uid"], st_gid=value["gid"], st_nlink=9 if leaf is None else 1,
+                               st_size=0, st_mtime_ns=2, st_ctime_ns=3)
     class Candidate:
         def __init__(self, pid): self.name = str(pid)
         def stat(self): return SimpleNamespace(st_uid=M.UID)
+        def lstat(self): return info(int(self.name))
+        def as_posix(self): return f"/proc/{self.name}"
         def __truediv__(self, leaf):
             assert leaf == "cmdline"
             return Path(f"/proc/{self.name}/cmdline")
@@ -846,19 +861,227 @@ def global_inventory_fixture(rows, changed=None):
         assert full is False
         if M.os.getuid() != 0: raise PermissionError(13, "synthetic", f"/proc/{pid}/exe")
         calls.append(pid)
+        if native_error is not None: raise native_error
+        if current(pid)["state"] in ("Z", "X"): raise RuntimeError("Owned process is not live")
         row = rows[pid]
-        value = {"pid": pid, "parentPid": 1, "uids": [M.UID] * 4, "startTime": str(pid), "executable": row[0]}
+        value = {"pid": pid, "parentPid": 1, "uids": current(pid).get("uids", [M.UID] * 4), "startTime": str(pid), "executable": row[0]}
         if changed and calls.count(pid) > 1: value.update(changed)
         return value
     def command(file, limit):
         assert limit == 8192 and file.name == "cmdline"
+        reads.append((int(file.parent.name), "cmdline"))
         return rows[int(file.parent.name)][1]
-    with patch.object(M, "Path", side_effect=path), patch.object(M, "proc_bytes", side_effect=command):
-        native, helper = SimpleNamespace(native_process=process), Mock()
-        yield SimpleNamespace(sample=lambda: original(native, helper), calls=calls)
+    def opened(file, flags, *args, dir_fd=None):
+        if not isinstance(file, Candidate) and dir_fd not in fds:
+            return real_os["open"](file, flags, *args, **({"dir_fd": dir_fd} if dir_fd is not None else {}))
+        assert flags & M.os.O_NOFOLLOW and flags & M.os.O_CLOEXEC and flags & M.os.O_NONBLOCK
+        if dir_fd is None:
+            assert isinstance(file, Candidate) and flags & M.os.O_DIRECTORY
+            pid, leaf = int(file.name), None
+        else:
+            pid, leaf = fds[dir_fd][0], file
+            assert leaf in ("stat", "status")
+        if denied: raise PermissionError(13, "synthetic", f"/proc/{pid}/stat")
+        fd = 10000 + max([0, *fds]); fds[fd] = (pid, leaf)
+        return fd
+    def named(file, *args, dir_fd=None, follow_symlinks=True):
+        if dir_fd not in fds:
+            return real_os["stat"](file, *args, **({"dir_fd": dir_fd} if dir_fd is not None else {}), follow_symlinks=follow_symlinks)
+        assert not follow_symlinks and file in ("stat", "status")
+        return info(fds[dir_fd][0], file)
+    def fdopen(fd, mode):
+        if fd not in fds: return real_os["fdopen"](fd, mode)
+        pid, leaf = fds[fd]; value = current(pid)
+        if leaf == "stat":
+            raw = (f"{value.get('statPid', pid)} (DO-NOT-EXPORT) " + " ".join([value["state"], str(value["parentPid"]), *["0"] * 17, value["startTime"]])).encode()
+            if value.get("malformed"): raw = b"invalid stat"
+        else:
+            raw = ("Uid:\t" + "\t".join(map(str, value.get("uids", [value["uid"]] * 4))) +
+                   "\nGid:\t" + "\t".join(map(str, value.get("gids", [value["gid"]] * 4))) + "\n").encode()
+            phases[pid] = phases.get(pid, 0) + 1
+        class Stream(io.BytesIO):
+            def fileno(self): return fd
+            def read(self, limit=-1):
+                reads.append((pid, leaf)); return super().read(limit)
+            def close(self):
+                fds.pop(fd, None); super().close()
+        return Stream(raw)
+    with ExitStack() as stack:
+        stack.enter_context(patch.object(M, "Path", side_effect=path))
+        stack.enter_context(patch.object(M, "proc_bytes", side_effect=command))
+        stack.enter_context(patch.multiple(M.os, O_DIRECTORY=0x10000, O_NOFOLLOW=0x20000, O_CLOEXEC=0x40000, O_NONBLOCK=0x80000, create=True))
+        for name, value in (("open", opened), ("stat", named), ("fstat", lambda fd: info(*fds[fd]) if fd in fds else real_os["fstat"](fd)),
+                            ("fdopen", fdopen), ("close", lambda fd: fds.pop(fd) if fd in fds else real_os["close"](fd))):
+            stack.enter_context(patch.object(M.os, name, value))
+        native = SimpleNamespace(native_process=process)
+        yield SimpleNamespace(sample=lambda: original(native, helper), calls=calls, reads=reads)
+        assert not fds, "Global inventory leaked a proc FD"
 
 
 class RootGlobalInventoryTests(unittest.TestCase):
+    def test_ordinary_uid_with_mixed_groups_or_other_proc_gid_still_gets_full_live_inspection(self):
+        for groups in ({"gids": [M.UID, 0, 0, 0]}, {"gid": 0}):
+            with self.subTest(groups=groups), global_inventory_fixture({7000: (M.OLD_NODE, b"node\0server.mjs\0")},
+                    observations={7000: [groups]}) as g, inventory_rpc_fixture() as f, \
+                    patch.object(M, "no_legacy_backend", wraps=M.no_legacy_backend) as check:
+                f.inventory.side_effect = lambda *_: g.sample()
+                answer = f.client.sample(f.wait)
+                self.assertEqual([row["pid"] for row in answer["processes"]], [7000])
+                self.assertEqual(answer["terminalProcesses"], [])
+                self.assertEqual(g.calls, [7000, 7000])
+                self.assertEqual(g.reads.count((7000, "cmdline")), 1)
+                check.assert_called_once()
+
+    def test_live_legacy_with_varied_groups_is_never_excluded_or_accepted(self):
+        for groups in ({"gids": [M.UID, 0, 0, 0]}, {"gid": 0}):
+            for image, command in (("/usr/bin/creator-project-setup", b"setup\0"),
+                                   ("/usr/bin/creator-works-mcp-launcher", b"mcp\0"),
+                                   (M.OLD_NODE, b"node\0--creator-hub-host\0")):
+                with self.subTest(groups=groups, image=image), global_inventory_fixture({7000: (image, command)},
+                        observations={7000: [groups]}) as g, inventory_rpc_fixture() as f:
+                    f.inventory.side_effect = lambda *_: g.sample()
+                    with self.assertRaisesRegex(RuntimeError, "separate MCP/Setup GUI or legacy host backend"): f.client.sample(f.wait)
+                    self.assertIn((7000, "cmdline"), g.reads)
+                    self.assertFalse((f.root / "inventory-response-1.json").exists())
+
+    def test_live_group_transitions_still_refuse_the_inventory(self):
+        for groups in ({"gids": [M.UID, 0, 0, 0]}, {"gid": 0}):
+            with self.subTest(groups=groups), global_inventory_fixture({7000: (M.OLD_NODE, b"node\0")},
+                    observations={7000: [{}, groups]}) as g, inventory_rpc_fixture() as f:
+                f.inventory.side_effect = lambda *_: g.sample()
+                with self.assertRaises(RuntimeError): f.client.sample(f.wait)
+                self.assertFalse((f.root / "inventory-response-1.json").exists())
+
+    def test_existing_stable_live_mixed_uid_case_is_kept_out_of_active_and_terminal_lists(self):
+        mixed = [M.UID, 0, 0, 0]
+        for groups in ({}, {"gids": mixed}, {"gid": 0}):
+            with self.subTest(groups=groups), global_inventory_fixture({7000: ("/usr/bin/pkexec", b"not-read\0")},
+                    observations={7000: [{"uids": mixed, **groups}]}) as g, inventory_rpc_fixture() as f:
+                f.inventory.side_effect = lambda *_: g.sample()
+                answer = f.client.sample(f.wait)
+                self.assertEqual(answer["processes"], []); self.assertEqual(answer["terminalProcesses"], [])
+                self.assertEqual(g.calls, [7000, 7000])
+                self.assertFalse(any(leaf == "cmdline" for _, leaf in g.reads))
+
+    def test_mixed_uid_restoration_does_not_allow_credential_transitions_or_changed_identity(self):
+        mixed, ordinary = [M.UID, 0, 0, 0], [M.UID] * 4
+        cases = ([{"uids": ordinary}, {"uids": mixed}], [{"uids": mixed}, {"uids": ordinary}],
+                 [{"uids": mixed}, {"uids": mixed, "startTime": "999"}],
+                 [{"uids": mixed}, {"uids": mixed, "inode": 999}],
+                 [{"uids": mixed}, {"uids": mixed, "gids": mixed}],
+                 [{"uids": mixed}, {"uids": mixed, "state": "Z"}])
+        for values in cases:
+            with self.subTest(values=values), global_inventory_fixture({7000: ("/usr/bin/pkexec", b"not-read\0")},
+                    observations={7000: values}) as g, inventory_rpc_fixture() as f:
+                f.inventory.side_effect = lambda *_: g.sample()
+                with self.assertRaises(RuntimeError): f.client.sample(f.wait)
+                self.assertFalse((f.root / "inventory-response-1.json").exists())
+
+    def test_mixed_uid_or_gid_terminal_processes_still_cannot_form_terminal_proof(self):
+        for state in ("Z", "X"):
+            for credentials in ({"uids": [M.UID, 0, 0, 0]}, {"gids": [M.UID, 0, 0, 0]}, {"uids": [M.UID, 0, 0, 0], "gid": 0}):
+                with self.subTest(state=state, credentials=credentials), global_inventory_fixture({7000: ("/unknown", b"")},
+                        observations={7000: [{"state": state, **credentials}]}) as g, inventory_rpc_fixture() as f:
+                    f.inventory.side_effect = lambda *_: g.sample()
+                    with self.assertRaises(RuntimeError): f.client.sample(f.wait)
+                    self.assertFalse((f.root / "inventory-response-1.json").exists())
+
+    def test_stable_terminal_states_are_separate_evidence_not_active_or_legacy_free(self):
+        for state in ("Z", "X"):
+            with self.subTest(state=state), global_inventory_fixture({7000: ("/unknown-terminal-image", b"")},
+                    observations={7000: [{"state": state}, {"state": state}]}) as g, inventory_rpc_fixture() as f:
+                f.inventory.side_effect = lambda *_: g.sample()
+                answer = f.client.sample(f.wait)
+                self.assertEqual(answer["processes"], [])
+                terminal = answer["terminalProcesses"][0]
+                self.assertEqual(terminal["classification"], "terminal")
+                self.assertEqual(terminal["before"], terminal["after"])
+                self.assertEqual(terminal["before"]["state"], state)
+                self.assertNotIn("legacyBackend", json.dumps(terminal)); self.assertFalse(g.calls)
+                self.assertFalse(any(leaf == "cmdline" for _, leaf in g.reads))
+
+    def test_exact_liveness_refusal_requires_two_terminal_observations_of_the_bound_origin(self):
+        observations = {7000: [{"state": "S"}, {"state": "Z"}, {"state": "Z"}]}
+        with global_inventory_fixture({7000: (M.OLD_NODE, b"node\0")}, observations=observations) as g, inventory_rpc_fixture() as f:
+            f.inventory.side_effect = lambda *_: g.sample()
+            answer = f.client.sample(f.wait)
+            self.assertEqual(answer["processes"], [])
+            terminal = answer["terminalProcesses"][0]
+            self.assertEqual(terminal["origin"]["state"], "S")
+            self.assertEqual(terminal["before"]["state"], "Z"); self.assertEqual(terminal["before"], terminal["after"])
+            self.assertEqual(g.calls, [7000])
+
+    def test_terminal_to_live_reused_malformed_changed_credentials_and_denied_are_not_exclusions(self):
+        failures = ([{"state": "Z"}, {"state": "S"}], [{"state": "S"}, {"state": "Z", "startTime": "999"}],
+                    [{"state": "Z"}, {"state": "Z", "inode": 999}], [{"state": "Z"}, {"state": "Z", "uid": 0}],
+                    [{"state": "Z"}, {"state": "Z", "gid": 0}], [{"state": "Z", "statPid": 999}],
+                    [{"state": "Z", "malformed": True}], [{"state": "?"}])
+        for values in failures:
+            with self.subTest(values=values), global_inventory_fixture({7000: (M.OLD_NODE, b"node\0")}, observations={7000: values}) as g, inventory_rpc_fixture() as f:
+                f.inventory.side_effect = lambda *_: g.sample()
+                with self.assertRaises(RuntimeError): f.client.sample(f.wait)
+                self.assertFalse((f.root / "inventory-response-1.json").exists())
+        with global_inventory_fixture({7000: (M.OLD_NODE, b"node\0")}, denied=True) as g, inventory_rpc_fixture() as f:
+            f.inventory.side_effect = lambda *_: g.sample()
+            with patch.object(M, "inventory_permission_capture", return_value={"stable": False}), self.assertRaises(PermissionError): f.client.sample(f.wait)
+
+    def test_unrelated_runtime_error_or_exact_liveness_error_while_live_still_fails(self):
+        for error, values in ((RuntimeError("Unrelated native failure"), [{"state": "S"}, {"state": "Z"}]),
+                              (RuntimeError("Owned process is not live"), [{"state": "S"}])):
+            with self.subTest(error=error), global_inventory_fixture({7000: (M.OLD_NODE, b"node\0")},
+                    observations={7000: values}, native_error=error) as g, inventory_rpc_fixture() as f:
+                f.inventory.side_effect = lambda *_: g.sample()
+                with self.assertRaises(RuntimeError): f.client.sample(f.wait)
+                self.assertFalse((f.root / "inventory-response-1.json").exists())
+
+    def test_normal_process_gone_still_uses_original_handling(self):
+        for error in (FileNotFoundError("gone"), ProcessLookupError("gone")):
+            with global_inventory_fixture({7000: (M.OLD_NODE, b"node\0")}, native_error=error) as g, inventory_rpc_fixture() as f:
+                f.inventory.side_effect = lambda *_: g.sample()
+                answer = f.client.sample(f.wait)
+                self.assertEqual(answer["processes"], []); self.assertEqual(answer["terminalProcesses"], [])
+
+    def test_terminal_wire_evidence_refuses_live_states_changed_identity_extra_claims_overlap_and_total_overflow(self):
+        with global_inventory_fixture({7000: (M.OLD_NODE, b"")}, observations={7000: [{"state": "Z"}]}) as g, inventory_rpc_fixture() as f:
+            f.inventory.side_effect = lambda *_: g.sample()
+            original = f.client.sample(f.wait)
+        for failure in ("live", "start", "inode", "uid", "extra", "overlap", "count"):
+            answer = copy.deepcopy(original); terminal = answer["terminalProcesses"][0]
+            if failure == "live":
+                terminal["before"]["state"] = terminal["after"]["state"] = "S"
+            if failure == "start": terminal["after"]["startTime"] = "reused"
+            if failure == "inode": terminal["origin"]["procDirectory"]["ino"] += 1
+            if failure == "uid": terminal["after"]["Uid"][0] = 0
+            if failure == "extra": terminal["legacyBackend"] = False
+            if failure in ("overlap", "count"):
+                answer["processes"] = [{"pid": pid, "startTime": "1", "executable": M.OLD_NODE,
+                                        "argvSha256": "a" * 64, "legacyBackend": False}
+                                       for pid in ([7000] if failure == "overlap" else range(1, 65))]
+            with self.subTest(failure=failure), self.assertRaises(RuntimeError): M.inventory_answer(answer, answer["request"])
+
+    def test_terminal_inventory_never_relaxes_owned_hub_driver_or_backend_liveness(self):
+        for target in (11, 12, 13):
+            with self.subTest(target=target), global_inventory_fixture({target: (M.OLD_NODE, b"")},
+                    observations={target: [{"state": "Z"}]}) as g, inventory_rpc_fixture() as f:
+                f.inventory.side_effect = lambda *_: g.sample()
+                rows = {pid: {"pid": pid, "startTime": str(pid), "parentPid": pid - 1} for pid in (11, 12, 13)}
+                stopped = [False]
+                s = object.__new__(M.Session); s.evidence, s.inventory, s.helper = {}, f.client, Mock()
+                s.logs = Mock(); s.logs.metadata.return_value = {"stderr": {"truncated": False}}
+                s.child = Mock(pid=11); s.child.poll.return_value = None
+                s.driver_identity, s.backend, s.owned = [copy.deepcopy(rows[pid]) for pid in (11, 12, 13)]
+                def process(pid, _):
+                    if stopped[0] and pid == target: raise RuntimeError("Owned process is not live")
+                    return copy.deepcopy(rows[pid])
+                s.native = SimpleNamespace(native_process=process)
+                s.pages = SimpleNamespace(listener=lambda *_: True, wait=f.wait)
+                f.after_service = lambda _: stopped.__setitem__(0, True)
+                action = Mock()
+                with self.assertRaisesRegex(RuntimeError, "Owned process is not live"):
+                    s.process_guard(); action()
+                action.assert_not_called()
+                self.assertEqual(f.record["lastInventory"]["terminalProcesses"][0]["pid"], target)
+
     def test_permission_protected_non_legacy_process_is_freshly_inspected_by_root_not_skipped(self):
         rows = {5075: ("/usr/lib/systemd/systemd", b"synthetic-system-process\0"), 6000: (M.OLD_NODE, b"node\0server.mjs\0")}
         with global_inventory_fixture(rows) as g, inventory_rpc_fixture() as f:
@@ -890,6 +1113,15 @@ class RootGlobalInventoryTests(unittest.TestCase):
                     self.assertFalse((f.root / "inventory-response-1.json").exists())
                 else:
                     self.assertEqual(len(f.client.sample(f.wait)["processes"]), 64)
+        for count in (64, 65):
+            rows = {pid: (M.OLD_NODE, b"node\0server.mjs\0") for pid in range(1, count + 1)}
+            with self.subTest(mixed=count), global_inventory_fixture(rows, observations={count: [{"state": "Z"}]}) as g, inventory_rpc_fixture() as f:
+                f.inventory.side_effect = lambda *_: g.sample()
+                if count == 65:
+                    with self.assertRaises(RuntimeError): f.client.sample(f.wait)
+                else:
+                    answer = f.client.sample(f.wait)
+                    self.assertEqual(len(answer["processes"]), 63); self.assertEqual(len(answer["terminalProcesses"]), 1)
 
 
 class DriverReadinessTests(unittest.TestCase):
