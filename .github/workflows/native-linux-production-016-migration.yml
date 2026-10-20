@@ -1,0 +1,154 @@
+name: Production 016 isolated native migration scenario
+
+on:
+  push:
+    branches: [validation/native-linux-production-016]
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: Exact independently pinned production inspection profile; no execution authority by itself
+        required: true
+        type: string
+      scenario:
+        description: One scenario per fresh runner; dispatch four times for complete coverage
+        required: true
+        type: choice
+        options:
+          - migration-guide-cancel
+          - migration-first-system-cancel
+          - migration-second-system-cancel
+          - migration-approve
+      execute_migration:
+        description: Explicitly allow this disposable runner's native installation and selected migration inputs
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  migration:
+    if: >-
+      github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.repository_id == '1364807512' &&
+      github.ref == 'refs/heads/validation/native-linux-production-016' && github.event_name == 'workflow_dispatch' &&
+      github.workflow_ref == 'BOBWORKS-XR/CREATOR-HUB/.github/workflows/native-linux-production-016-migration.yml@refs/heads/validation/native-linux-production-016' &&
+      inputs.execute_migration == true
+    runs-on: ubuntu-22.04
+    timeout-minutes: 25
+    env:
+      CREATOR_NATIVE_LINUX_PRODUCTION_016: '1'
+      CREATOR_MIGRATION_016_EXECUTE: ${{ inputs.execute_migration }}
+      CREATOR_MIGRATION_016_SCENARIO: ${{ inputs.scenario }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24.17.0
+      - run: npm ci --ignore-scripts
+      - name: Pure execution and inspection refusal tests before download or privilege
+        run: |
+          node --test scripts/native-linux-production-016-input.test.cjs scripts/native-linux-production-016-migration-workflow.test.cjs
+          python3 -B scripts/native-linux-production-016-stage.test.py
+          python3 -B scripts/native-linux-production-016-migration.test.py
+      - name: Use unchanged production API admission and bound downloads
+        uses: actions/github-script@v8
+        env:
+          PROFILE: ${{ inputs.profile }}
+        with:
+          script: |
+            const lane = require(require('node:path').join(process.env.GITHUB_WORKSPACE, 'scripts/native-linux-production-016-input.cjs'));
+            await lane.run({github, context, profile: process.env.PROFILE});
+      - name: Unchanged offline production inspection, still not execution acceptance
+        run: python3 -B scripts/native-linux-production-016-stage.py
+      - name: Bind separate one-scenario execution request before provisioning
+        run: python3 -B scripts/native-linux-production-016-migration.py
+      - name: Install only declared disposable native test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-0 libayatana-appindicator3-1 libgtk-3-0 libxdo3 libxres1 librsvg2-2 \
+            python3-gi python3-toml gir1.2-gtk-3.0 gir1.2-atspi-2.0 gir1.2-gdkpixbuf-2.0 at-spi2-core webkit2gtk-driver \
+            dbus-x11 xvfb xauth openbox fonts-dejavu-core libpam-systemd policykit-1-gnome=0.105-7ubuntu3 \
+            pkexec=0.105-33ubuntu0.2 polkitd=0.105-33ubuntu0.2 coreutils=8.32-4.1ubuntu1.4 passwd=1:4.8.1-2ubuntu2.2
+          sudo systemctl start systemd-logind.service polkit.service
+      - name: Install the locked SDK as a test tool only
+        run: |
+          test "$(sha256sum modules/mcp/package-lock.json | cut -d' ' -f1)" = ded7a99b78aca304253d5287cc1b884a845afde083eb32d1a2abecd14468ba60
+          npm ci --prefix modules/mcp --ignore-scripts --no-audit --no-fund
+      - uses: dtolnay/rust-toolchain@1.99.0
+      - name: Build pinned WebDriver tooling only, never rebuild product bytes
+        run: cargo install tauri-driver --version 2.1.0 --locked --root "$RUNNER_TEMP/native-linux-production-016-driver"
+      - name: Existing independently pinned stock policy leaf preflight
+        run: |
+          python3 -B - <<'PY'
+          import importlib.util, os, sys
+          from pathlib import Path
+          spec = importlib.util.spec_from_file_location('migration016', 'scripts/native-linux-production-016-migration.py')
+          m = importlib.util.module_from_spec(spec); sys.modules[spec.name] = m; spec.loader.exec_module(m)
+          m.admission(os.environ)
+          m.load('native-linux-polkit-probe').secure_stock_policy(Path(os.environ['RUNNER_TEMP']))
+          PY
+      - name: Fixed root broker, one synthetic session, no package restoration or retry
+        run: |
+          python3 -B - <<'PY'
+          import importlib.util, os, subprocess, sys
+          from pathlib import Path
+          source = Path('scripts/native-linux-production-016-migration.py').resolve()
+          spec = importlib.util.spec_from_file_location('migration016', source)
+          m = importlib.util.module_from_spec(spec); sys.modules[spec.name] = m; spec.loader.exec_module(m)
+          m.admission(os.environ)
+          values = [key + '=' + os.environ[key] for key in m.ENVIRONMENT]
+          subprocess.run(['/usr/bin/sudo', '-n', '/usr/bin/env', '-i', *values, 'PATH=/usr/bin:/bin', 'LANG=C', 'LC_ALL=C',
+                          '/usr/bin/python3', '-B', str(source), 'broker'], stdin=subprocess.DEVNULL, check=True)
+          PY
+      - name: Export only bounded synthetic receipts and logs, never credentials or package inputs
+        if: always()
+        run: |
+          sudo -n /usr/bin/env -i PATH=/usr/bin:/bin RUNNER_TEMP="$RUNNER_TEMP" RUNNER_UID="$(id -u)" /usr/bin/python3 -B - <<'PY'
+          import os, stat
+          from pathlib import Path
+          base = Path('/opt/creator-polkit-fixture')
+          out = Path(os.environ['RUNNER_TEMP']) / 'native-linux-production-016-migration-result'
+          assert out.parent.resolve() == out.parent and not os.path.lexists(out)
+          out.mkdir(mode=0o700); uid = int(os.environ['RUNNER_UID']); os.chown(out, uid, uid)
+          names = ['broker.json', 'ancestry.json', 'execution-request.json', 'source-binding.json', 'result/report.json', 'result/before.json', 'session.stdout', 'session.stderr']
+          for folder in ['first', 'reopened']:
+              names += ['result/' + folder + '/' + f for f in ['session.json', 'driver.stdout', 'driver.stderr', 'home.png']]
+          for folder in ['old-sdk', 'legacy-reconnect', 'managed-reconnect']:
+              names += ['result/' + folder + '/' + f for f in ['sdk.stdout', 'sdk.stderr', 'sdk-result.json']]
+          names += ['input-' + str(i) + '.json' for i in range(1, 49)]
+          for name in names:
+              file = base / name
+              if not os.path.lexists(file): continue
+              info = file.lstat()
+              assert file.resolve() == file and stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and info.st_uid in [0, 21314]
+              limit = 6 * 1024 * 1024 if file.suffix == '.png' else 262144 if file.suffix in ['.stdout', '.stderr'] else 1048576
+              assert info.st_size <= limit
+              def stamp(meta):
+                  return tuple(getattr(meta, k) for k in ['st_dev', 'st_ino', 'st_size', 'st_mode', 'st_nlink', 'st_uid', 'st_gid', 'st_mtime_ns', 'st_ctime_ns'])
+              with os.fdopen(os.open(file, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), 'rb') as stream:
+                  assert stamp(os.fstat(stream.fileno())) == stamp(info)
+                  data = stream.read(limit + 1)
+                  assert len(data) == info.st_size and stamp(os.fstat(stream.fileno())) == stamp(info)
+              assert stamp(file.lstat()) == stamp(info)
+              target = out / name.replace('/', '__')
+              with target.open('xb') as stream: stream.write(data)
+              os.chmod(target, 0o600); os.chown(target, uid, uid)
+          PY
+      - name: Retain scenario evidence; this is not update, Flatpak or release qualification
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-linux-production-016-migration-${{ inputs.scenario }}-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/native-linux-production-016-input/profile.json
+            ${{ runner.temp }}/native-linux-production-016-input/api-binding.json
+            ${{ runner.temp }}/native-linux-production-016-stage/binding.json
+            ${{ runner.temp }}/native-linux-production-016-migration-request.json
+            ${{ runner.temp }}/polkit-stock-policy-preflight.json
+            ${{ runner.temp }}/native-linux-production-016-migration-result/
