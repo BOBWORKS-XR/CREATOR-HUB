@@ -345,6 +345,20 @@ class MetadataTests(unittest.TestCase):
 
 
 class ControllerTests(unittest.TestCase):
+    def test_ci_directory_allowlist_is_exactly_fourteen_with_only_retained_graph_additions_outer_first(self):
+        original = ("/usr/share/applications", "/usr/share/icons", "/usr/share/icons/hicolor",
+                    "/usr/share/icons/hicolor/128x128", "/usr/share/icons/hicolor/128x128/apps",
+                    "/usr/share/icons/hicolor/32x32", "/usr/share/icons/hicolor/32x32/apps")
+        # Run 39357255499: both complete 30-record graphs captured exactly these additional unsafe parents.
+        retained_graph_parents = ("/usr/share/dict", "/usr/share/man", "/usr/share/man/man1",
+                                  "/usr/share/vim", "/usr/share/vim/vim82", "/usr/share/vim/vim82/doc", "/usr/share/aclocal")
+        self.assertEqual(M.CI_SHARED_DIRECTORIES, original + retained_graph_parents)
+        self.assertEqual(len(set(M.CI_SHARED_DIRECTORIES)), 14)
+        for index, path in enumerate(M.CI_SHARED_DIRECTORIES):
+            for parent in M.PurePosixPath(path).parents:
+                if str(parent) in M.CI_SHARED_DIRECTORIES:
+                    self.assertLess(M.CI_SHARED_DIRECTORIES.index(str(parent)), index)
+
     def test_fixed_ci_directory_hardening_is_fd_bound_outer_first_with_bounded_pre_post_proofs(self):
         with hardening_fixture() as f:
             f.directories[M.CI_SHARED_DIRECTORIES[0]].st_mode = M.stat.S_IFDIR | 0o755
@@ -388,12 +402,13 @@ class ControllerTests(unittest.TestCase):
             self.assertFalse(after["completed"])
 
     def test_ci_directory_hardening_refuses_other_roles_phases_and_extra_paths_before_permission_changes(self):
-        for failure in ("nonroot", "push", "reused", "extra-path"):
+        for failure in ("nonroot", "push", "reused", "extra-path", "unobserved-metadata-parent"):
             with self.subTest(failure=failure), hardening_fixture(uid=M.UID if failure == "nonroot" else 0) as f:
                 kwargs = {}
                 if failure == "push": f.env["GITHUB_EVENT_NAME"] = "push"
                 if failure == "reused": (f.root / "fixture-directory-hardening-before.json").write_bytes(b"original")
                 if failure == "extra-path": kwargs["paths"] = (*M.CI_SHARED_DIRECTORIES, "/home/runner")
+                if failure == "unobserved-metadata-parent": kwargs["paths"] = (*M.CI_SHARED_DIRECTORIES, "/usr/share/man/man2")
                 with self.assertRaises(RuntimeError): M.harden_fixture_directories(f.env, **kwargs)
                 self.assertEqual(f.changes, []); self.assertFalse(f.fds)
                 self.assertFalse((f.root / "fixture-directory-hardening-after.json").exists())

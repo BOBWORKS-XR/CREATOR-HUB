@@ -63,7 +63,9 @@ HELPER_INSPECTION_DIRS = ("/var/lib/dpkg/info", "/var/lib/dpkg/updates",
                           "/var/lib/creator-hub-deb-retirement", "/var/lib/creator-hub-deb-retirement-setup")
 CI_SHARED_DIRECTORIES = ("/usr/share/applications", "/usr/share/icons", "/usr/share/icons/hicolor",
                          "/usr/share/icons/hicolor/128x128", "/usr/share/icons/hicolor/128x128/apps",
-                         "/usr/share/icons/hicolor/32x32", "/usr/share/icons/hicolor/32x32/apps")
+                          "/usr/share/icons/hicolor/32x32", "/usr/share/icons/hicolor/32x32/apps",
+                          "/usr/share/dict", "/usr/share/man", "/usr/share/man/man1",
+                          "/usr/share/vim", "/usr/share/vim/vim82", "/usr/share/vim/vim82/doc", "/usr/share/aclocal")
 METADATA_DATABASES = ("/var/lib/dpkg/diversions", "/var/lib/dpkg/statoverride")
 METADATA_BYTES = 4 * 1024 * 1024
 METADATA_GRAPH_BYTES = 384 * 1024
