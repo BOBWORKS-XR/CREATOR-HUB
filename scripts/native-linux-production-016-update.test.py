@@ -4,6 +4,7 @@ from contextlib import ExitStack, contextmanager
 import copy
 import gzip
 import hashlib
+from html.parser import HTMLParser
 import importlib.util
 import io
 import json
@@ -2115,6 +2116,97 @@ class Pure(unittest.TestCase):
         self.assertIn("Hub will close these idle views: Creator Project Setup.", expected)
         self.assertNotIn("Your open Hub tool page will reopen.", M.question(False))
         self.assertIn("Your open Hub tool page will reopen.", M.question(True))
+
+
+class DirectMenuLabels(unittest.TestCase):
+    LABELS = {
+        "mcp": "M Creator Works MCP AI tools for Unity Included in Hub",
+        "setup": "P Project Setup Unity + Creator SDK projects Included in Hub",
+    }
+
+    def selection(self, feature, rows):
+        # Execute the actual navigation selection, without any native action.
+        tree = ast.parse(Path(M.__file__).read_text())
+        direct = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "direct_pages")
+        loop = next(n for n in direct.body if isinstance(n, ast.For))
+        labels = dict(ast.literal_eval(loop.iter))
+        nodes = [object() for _ in rows]
+        clicks = []
+        surface = SimpleNamespace(atspi=SimpleNamespace(Role=SimpleNamespace(PUSH_BUTTON=43)),
+            click=lambda control, actions: clicks.append((control, actions)), snapshot=lambda: (rows, nodes))
+        function = ast.FunctionDef(name="actual_selection", args=ast.arguments(posonlyargs=[],
+            args=[ast.arg(arg=n) for n in ("surface", "label")], kwonlyargs=[], kw_defaults=[], defaults=[]),
+            body=copy.deepcopy(loop.body[:4]) + [ast.Return(value=ast.Name(id="candidates", ctx=ast.Load()))], decorator_list=[])
+        namespace = dict(vars(M))
+        exec(compile(ast.fix_missing_locations(ast.Module(body=[function], type_ignores=[])), "actual-menu-selection", "exec"), namespace)
+        selected = namespace["actual_selection"](surface, labels[feature])
+        self.assertEqual(clicks, [("suite-trigger", [])])
+        return selected, nodes
+
+    @staticmethod
+    def row(name, **changes):
+        return {"name": name, "role": 43, "showing": True, "tag": "button", "toolkit": "WebKitGTK", **changes}
+
+    def test_actual_4d9_accessibility_names_select_only_the_intended_source_row(self):
+        rows = [self.row(name) for name in self.LABELS.values()]
+        for index, feature in enumerate(self.LABELS):
+            selected, nodes = self.selection(feature, rows)
+            self.assertEqual(len(selected), 1)
+            self.assertIs(selected[0][1], nodes[index])
+
+    def test_source_html_badges_titles_and_direct_feature_status_match_exact_labels(self):
+        class Menu(HTMLParser):
+            def __init__(self):
+                super().__init__(); self.active, self.parts, self.labels = None, [], {}
+            def handle_starttag(self, tag, attrs):
+                attrs = dict(attrs)
+                if tag == "button" and attrs.get("class") == "suite-item" and attrs.get("data-view") in self.LABELS:
+                    self.assert_no_label(attrs)
+                    self.active, self.parts = attrs["data-view"], []
+            @staticmethod
+            def assert_no_label(attrs):
+                if "aria-label" in attrs: raise AssertionError("Accessible label override requires a new source contract")
+            def handle_data(self, text):
+                if self.active and text.strip(): self.parts.append(text.strip())
+            def handle_endtag(self, tag):
+                if tag == "button" and self.active:
+                    if self.active in self.labels: raise AssertionError("Duplicate source menu row")
+                    self.labels[self.active] = " ".join(self.parts); self.active = None
+        Menu.LABELS = self.LABELS
+        menu = Menu(); menu.feed((HERE.parent / "src/index.html").read_text(encoding="utf8"))
+        self.assertEqual(set(menu.labels), set(self.LABELS))
+        for feature, expected in self.LABELS.items():
+            self.assertEqual(menu.labels[feature], expected.removesuffix("Included in Hub") + "Checking")
+        source = (HERE.parent / "src/app.js").read_text(encoding="utf8")
+        self.assertIn("const label = directFeatures ? state?.issue ? 'Unavailable' : 'Included in Hub'", source)
+        self.assertIn("byId(`menu-status-${id}`).textContent = directFeatures ? label", source)
+
+    def test_unknown_badges_status_suffixes_and_other_rows_are_not_alternatives(self):
+        for feature, label in self.LABELS.items():
+            wrong = [label[2:], "X" + label[1:], "M " + label, label + " extra", label.lower(),
+                     *[label.replace("Included in Hub", status) for status in ("Checking", "Ready", "Unavailable", "Installed")],
+                     self.LABELS["setup" if feature == "mcp" else "mcp"]]
+            for name in wrong:
+                with self.subTest(feature=feature, name=name), self.assertRaisesRegex(RuntimeError, "One exact first-party"):
+                    self.selection(feature, [self.row(name)])
+
+    def test_hidden_wrong_role_and_ambiguous_exact_rows_are_refused(self):
+        for feature, label in self.LABELS.items():
+            for rows in ([], [self.row(label, showing=False)], [self.row(label, role=11)],
+                         [self.row(label), self.row(label)]):
+                with self.subTest(feature=feature, rows=rows), self.assertRaisesRegex(RuntimeError, "One exact first-party"):
+                    self.selection(feature, rows)
+
+    def test_source_selector_wire_identity_and_owned_root_rechecks_stay_before_input(self):
+        tree = ast.parse(Path(M.__file__).read_text())
+        direct = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "direct_pages")
+        code = ast.unparse(direct)
+        self.assertIn("surface.source('projects-home-title', optional=True)", code)
+        self.assertIn("surface.click('suite-trigger', [])", code)
+        self.assertIn("r == row and r['reference'] == ref", code)
+        self.assertLess(code.index("surface.recheck(full=True)"), code.index("interface.do_action(0)"))
+        self.assertIn("require(len(matches) == 1, 'Navigation changed before input')", code)
+        self.assertIn("not any((r['tag'] in ('iframe', 'object', 'embed') for r in rows))", code)
 
 
 if __name__ == "__main__":

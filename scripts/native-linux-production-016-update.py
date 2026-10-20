@@ -1068,11 +1068,13 @@ def direct_pages(surface, actions):
     buttons = [r["name"] for r in rows if r["showing"] and r["role"] == int(surface.atspi.Role.PUSH_BUTTON) and r["name"].startswith("Open ")]
     require(buttons.count("Open selected-project") == buttons.count("Open other-project") == 1, "Unique selected/other Home projects not observed")
     require(not any(r["tag"] in ("iframe", "object", "embed") for r in rows), "Separate component document refused")
-    for feature, label in (("mcp", "Creator Works MCP"), ("setup", "Project Setup")):
+    # The bound integrated Root exposes its badge, description and status in the AX name.
+    for feature, label in (("mcp", "M Creator Works MCP AI tools for Unity Included in Hub"),
+                           ("setup", "P Project Setup Unity + Creator SDK projects Included in Hub")):
         surface.click("suite-trigger", [])
         rows, nodes = surface.snapshot()
         candidates = [(row, node) for row, node in zip(rows, nodes) if row["role"] == int(surface.atspi.Role.PUSH_BUTTON)
-                      and row["showing"] and re.fullmatch(re.escape(label) + r"(?:\s+(?:AI tools for Unity|Unity \+ Creator SDK projects|Ready|Checking|Installed))*", row["name"])]
+                      and row["showing"] and row["name"] == label]
         require(len(candidates) == 1, "One exact first-party navigation button required")
         row, node = candidates[0]; ref = row["reference"]
         current, current_nodes = surface.snapshot()
