@@ -48,9 +48,14 @@ not approval of untested packages or a publication receipt.
 
 - A genuine Unity Hub 3.22.2 project created through its UI is now available on
   the physical Steam Deck (Unity 6000.3.26f1). Its registry is in Unity Hub's
-  Flatpak profile, not the native configuration directory. Root's existing
-  native-profile-only lookup misses that location; Linux-only profile discovery
-  and its packaged qualification are still required.
+  Flatpak profile, not the native configuration directory. The earlier
+  candidate's native-only lookup missed that location. Source `a1d5f60` now
+  merges protected existing native/Flatpak profiles with child-only configuration
+  overrides, deduplication and no empty shadow-profile creation. Thirty-three
+  focused tests and independent review passed. Native Linux `39427603012` passed
+  strict Clippy, Root suites497/516/516 (overlapping,16 ignores each), module
+  tests and the separate live helper-permission fixtures. Packaged/live-profile
+  discovery and opening remain unqualified.
 - Pinned Unity CLI beta9 successfully returned that project from an isolated
   SQLite backup of the genuine registry. The probe restricts schema, objects,
   metadata and project rows before and after backup, uses private HOME/XDG paths,
@@ -58,6 +63,13 @@ not approval of untested packages or a publication receipt.
   Six focused tests passed locally and on Deck. Source database/WAL and the two
   checked project-file hashes were unchanged. This is snapshot compatibility,
   not write-free live-profile access or production Root discovery acceptance.
+- A separate copied-profile refresh diagnostic passed: one CLI process listed
+  the genuine copied row; a separate SQLite writer deleted only that copied row
+  and closed; a new CLI process returned zero rows without clearing caches.
+  This is a synthetic external-writer case, not another Hub UI registration or
+  proof of whole-project preservation. No source profile was opened by its
+  driver. The real running Editor's executable is also in an existing default
+  Setup search location; it was not launched by these probes.
 - Diagnostic source `1ef33b2` passed 24 observer,130 controller,78 input and59
   shared-window tests, with two existing platform-specific skips,12 Node tests
   and eight Python3.10 parses. Signature-only run `39423675957` passed and bound
@@ -68,6 +80,15 @@ not approval of untested packages or a publication receipt.
   refusal remains failed; no retry or qualification was manufactured. Temporary
   trust cleanup passed. A pre-input ownership baseline and separately verified
   terminal activation outcome remain necessary before warm activation can pass.
+- Source `436f1a5` adds that pre-input baseline and a narrow terminal-outcome
+  path for the observed release error. Delivery stays incomplete and requires
+  independent attribution, owned exit, original Root identity and preservation.
+  Focused tests and independent review passed; signature-only `39428692697`
+  passed. Native `39429232614` stopped before input because baseline construction
+  or arming returned an unlocalized ValueError. Warm acceptance remains false,
+  and only further failure-stage diagnostics are justified at this point.
+  A new Linux-only Root package build `39430509970` reuses the immutable module
+  payload with the reviewed source corrections; package qualification is pending.
 - Source-bound passive diagnostic `f3ae036` passed independent review, 130
   controller tests, 17 observer tests, 73 input-guard tests and 12 CJS tests.
   Its signature-only run `39419577175` verified the exact four Python imports
