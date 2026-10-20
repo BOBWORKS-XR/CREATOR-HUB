@@ -630,9 +630,199 @@ fn registry_args_allowed(args: &[&str], linux: bool) -> bool {
         && (!linux || args == ["projects", "list"])
 }
 
+#[cfg(target_os = "linux")]
+mod linux_registry_profile {
+    use super::*;
+    use std::{
+        ffi::CString,
+        os::{
+            fd::{AsRawFd, FromRawFd},
+            unix::{
+                ffi::OsStrExt,
+                fs::{MetadataExt, OpenOptionsExt},
+            },
+        },
+        path::Component,
+    };
+
+    type Identity = (u64, u64, u32, u32, u32);
+
+    fn identity(info: &fs::Metadata) -> Identity {
+        (info.dev(), info.ino(), info.mode(), info.uid(), info.gid())
+    }
+
+    pub(super) struct Profile {
+        config: PathBuf,
+        database: (File, (Identity, u64)),
+        directories: Vec<(File, Identity)>,
+    }
+
+    impl Profile {
+        #[cfg(any(test, all(target_arch = "x86_64", feature = "integrated-features")))]
+        pub(super) fn open(home: &Path) -> Result<Option<Self>, String> {
+            Self::at_config(&flatpak_registry_config(home)?)
+        }
+
+        #[cfg(any(test, all(target_arch = "x86_64", feature = "integrated-features")))]
+        pub(super) fn native(config: &Path) -> Result<Option<Self>, String> {
+            if !local_path(config) || config.parent().is_none() || config.as_os_str().len() > 4096 {
+                return Err("The native Unity Hub config path is invalid.".into());
+            }
+            Self::at_config(config)
+        }
+
+        #[cfg(any(test, all(target_arch = "x86_64", feature = "integrated-features")))]
+        pub(super) fn config(&self) -> &Path {
+            &self.config
+        }
+
+        fn at_config(config: &Path) -> Result<Option<Self>, String> {
+            let path = config.join("unityhub/hub.db");
+            let names = path
+                .components()
+                .filter_map(|part| match part {
+                    Component::Normal(name) => Some(name),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            let flags = libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK;
+            let mut directories = Vec::new();
+            let mut directory = File::options()
+                .read(true)
+                .custom_flags(flags | libc::O_DIRECTORY)
+                .open("/")
+                .map_err(|_| "Cannot open the Unity Hub profile ancestry.")?;
+            for (index, name) in names.iter().enumerate() {
+                let info = directory
+                    .metadata()
+                    .map_err(|_| "Cannot inspect the Unity Hub profile ancestry.")?;
+                let uid = unsafe { libc::geteuid() };
+                // Root-owned sticky ancestry permits private test homes in /tmp;
+                // writable non-sticky ancestry is not a trusted profile location.
+                if !info.is_dir()
+                    || ![0, uid].contains(&info.uid())
+                    || (info.mode() & 0o022 != 0 && !(info.uid() == 0 && info.mode() & 0o1000 != 0))
+                {
+                    return Err("The Unity Hub profile ancestry is not protected.".into());
+                }
+                let name =
+                    CString::new(name.as_bytes()).map_err(|_| "Invalid Unity Hub profile path.")?;
+                let last = index + 1 == names.len();
+                let fd = unsafe {
+                    libc::openat(
+                        directory.as_raw_fd(),
+                        name.as_ptr(),
+                        flags | if last { 0 } else { libc::O_DIRECTORY },
+                    )
+                };
+                if fd < 0 {
+                    return if std::io::Error::last_os_error().kind() == std::io::ErrorKind::NotFound
+                    {
+                        Ok(None)
+                    } else {
+                        Err("Cannot safely open the Unity Hub project registry.".into())
+                    };
+                }
+                let file = unsafe { File::from_raw_fd(fd) };
+                directories.push((directory, identity(&info)));
+                if last {
+                    let info = file
+                        .metadata()
+                        .map_err(|_| "Cannot inspect the Unity Hub project registry.")?;
+                    if !info.is_file()
+                        || info.uid() != uid
+                        || info.nlink() != 1
+                        || info.mode() & 0o7022 != 0
+                    {
+                        return Err("The Unity Hub project registry is not an owned, protected regular file.".into());
+                    }
+                    return Ok(Some(Self {
+                        config: config.to_owned(),
+                        database: (file, (identity(&info), info.nlink())),
+                        directories,
+                    }));
+                }
+                directory = file;
+            }
+            unreachable!()
+        }
+
+        pub(super) fn recheck(&self) -> Result<(), String> {
+            let current = Self::at_config(&self.config)?
+                .ok_or("The Unity Hub project registry disappeared.")?;
+            // Hub may update SQLite contents or create WAL files while listing.
+            // Track its named/held inode, owner, mode and links, not live data times.
+            let info = self
+                .database
+                .0
+                .metadata()
+                .map_err(|_| "Cannot recheck the Unity Hub project registry.")?;
+            if self.database.1 != current.database.1
+                || (identity(&info), info.nlink()) != self.database.1
+                || self.directories.len() != current.directories.len()
+            {
+                return Err("The Unity Hub profile ancestry changed.".into());
+            }
+            for ((file, expected), (_, actual)) in self.directories.iter().zip(&current.directories)
+            {
+                if expected != actual
+                    || identity(
+                        &file
+                            .metadata()
+                            .map_err(|_| "Cannot recheck the Unity Hub profile.")?,
+                    ) != *expected
+                {
+                    return Err("The Unity Hub profile identity changed.".into());
+                }
+            }
+            Ok(())
+        }
+
+        pub(super) fn configure(&self, command: &mut std::process::Command) -> Result<(), String> {
+            self.recheck()?;
+            command.env("XDG_CONFIG_HOME", &self.config);
+            Ok(())
+        }
+    }
+}
+
+#[cfg(any(
+    test,
+    all(
+        target_os = "linux",
+        target_arch = "x86_64",
+        feature = "integrated-features"
+    )
+))]
+fn flatpak_registry_config(home: &Path) -> Result<PathBuf, String> {
+    if !local_path(home) || home.parent().is_none() || home.as_os_str().len() > 4096 {
+        return Err("The home path for Flatpak Unity Hub discovery is invalid.".into());
+    }
+    Ok(home.join(".var/app/com.unity.UnityHub/config"))
+}
+
 // Inventory is cache-only. Windows retains its deny-write/delete handle; Linux
 // executes only a sealed capture while retaining and rechecking the source FDs.
+#[cfg(any(
+    test,
+    not(all(
+        target_os = "linux",
+        target_arch = "x86_64",
+        feature = "integrated-features"
+    ))
+))]
 fn cli(args: &[&str]) -> Result<Value, String> {
+    cli_in_profile(
+        args,
+        #[cfg(target_os = "linux")]
+        None,
+    )
+}
+
+fn cli_in_profile(
+    args: &[&str],
+    #[cfg(target_os = "linux")] profile: Option<&linux_registry_profile::Profile>,
+) -> Result<Value, String> {
     if !cfg!(all(windows, target_arch = "x86_64")) && !linux_registry_supported() {
         return Err("Current Unity Hub discovery is not yet supported on this platform.".into());
     }
@@ -649,13 +839,19 @@ fn cli(args: &[&str]) -> Result<Value, String> {
     let executable = image.executable();
     #[cfg(not(target_os = "linux"))]
     let executable = path;
-    let mut child = crate::platform::command(&executable)
+    let mut command = crate::platform::command(&executable);
+    command
         .args(args)
         .args(["--json", "--non-interactive", "--no-banner", "--no-pager"])
         .env("UNITY_NO_CONSENT_PROMPT", "1")
         .stdin(Stdio::null())
         .stderr(Stdio::null())
-        .stdout(Stdio::piped())
+        .stdout(Stdio::piped());
+    #[cfg(target_os = "linux")]
+    if let Some(profile) = profile {
+        profile.configure(&mut command)?;
+    }
+    let mut child = command
         .spawn()
         .map_err(|_| "Cannot read Unity's project registry.")?;
     let stdout = child
@@ -689,6 +885,10 @@ fn cli(args: &[&str]) -> Result<Value, String> {
         .map_err(|_| "Cannot read Unity registry response.")?;
     #[cfg(target_os = "linux")]
     image.recheck()?;
+    #[cfg(target_os = "linux")]
+    if let Some(profile) = profile {
+        profile.recheck()?;
+    }
     if !status?.success() || bytes.len() as u64 > MAX_JSON {
         return Err("Unity registry returned an unsuccessful or oversized response.".into());
     }
@@ -849,6 +1049,101 @@ fn discover(config: &Path, saved_file: &Path, current_hub: Result<Value, String>
     }
 }
 
+#[cfg(any(
+    test,
+    all(
+        target_os = "linux",
+        target_arch = "x86_64",
+        feature = "integrated-features"
+    )
+))]
+fn discover_linux_profiles(
+    config: &Path,
+    saved_file: &Path,
+    native: Result<Value, String>,
+    flatpak: Option<Result<Value, String>>,
+) -> Snapshot {
+    let Some(flatpak) = flatpak else {
+        return discover(config, saved_file, native);
+    };
+    let mut warnings = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    let mut paths = Vec::new();
+    for (flatpak, result) in [(false, native), (true, flatpak)] {
+        match result {
+            Ok(value) if value["data"].is_array() => {
+                for entry in entries(&value) {
+                    if let Some(path) = entry["path"].as_str() {
+                        if local_path(Path::new(path))
+                            && path.len() <= 4096
+                            && paths.len() < MAX_PROJECTS + 1
+                            && seen.insert(key(Path::new(path)))
+                        {
+                            paths.push(serde_json::json!({ "path": path }));
+                        }
+                    }
+                }
+            }
+            Ok(_) => warnings.push(
+                if flatpak {
+                    "Unity Hub (Flatpak) returned an unrecognized project list."
+                } else {
+                    "Unity Hub returned an unrecognized project list."
+                }
+                .into(),
+            ),
+            Err(error) => warnings.push(if flatpak {
+                format!("Unity Hub (Flatpak): {error}")
+            } else {
+                error
+            }),
+        }
+    }
+    let mut snapshot = discover(
+        config,
+        saved_file,
+        Ok(serde_json::json!({
+            "success": true, "data": paths,
+        })),
+    );
+    snapshot.warnings.extend(warnings);
+    snapshot
+}
+
+#[cfg(all(
+    target_os = "linux",
+    target_arch = "x86_64",
+    feature = "integrated-features"
+))]
+fn flatpak_registry(native_config: &Path) -> Option<Result<Value, String>> {
+    let home = match dirs::home_dir() {
+        Some(home) => home,
+        None => {
+            return Some(Err(
+                "Home directory unavailable for Flatpak Unity Hub discovery.".into(),
+            ))
+        }
+    };
+    match linux_registry_profile::Profile::open(&home) {
+        Ok(Some(profile)) if profile.config() == native_config => None,
+        Ok(Some(profile)) => Some(cli_in_profile(&["projects", "list"], Some(&profile))),
+        Ok(None) => None,
+        Err(error) => Some(Err(error)),
+    }
+}
+
+#[cfg(all(
+    target_os = "linux",
+    target_arch = "x86_64",
+    feature = "integrated-features"
+))]
+fn native_registry(config: &Path) -> Result<Value, String> {
+    match linux_registry_profile::Profile::native(config)? {
+        Some(profile) => cli_in_profile(&["projects", "list"], Some(&profile)),
+        None => Ok(serde_json::json!({"success": true, "data": []})),
+    }
+}
+
 #[cfg(any(test, feature = "integrated-features"))]
 fn collect_bridges(
     projects: &mut [Project],
@@ -917,12 +1212,35 @@ fn read_project_bridges(handle: &tauri::AppHandle, projects: &mut [Project]) -> 
 }
 
 fn refresh(handle: &tauri::AppHandle) -> Result<Snapshot, String> {
+    let config = dirs::config_dir().ok_or("Config directory unavailable.")?;
+    let saved_file = saved_path()?;
+    #[cfg(all(
+        target_os = "linux",
+        target_arch = "x86_64",
+        feature = "integrated-features"
+    ))]
+    let current_hub = native_registry(&config);
+    #[cfg(not(all(
+        target_os = "linux",
+        target_arch = "x86_64",
+        feature = "integrated-features"
+    )))]
+    let current_hub = cli(&["projects", "list"]);
+    #[cfg(all(
+        target_os = "linux",
+        target_arch = "x86_64",
+        feature = "integrated-features"
+    ))]
+    let snapshot =
+        discover_linux_profiles(&config, &saved_file, current_hub, flatpak_registry(&config));
+    #[cfg(not(all(
+        target_os = "linux",
+        target_arch = "x86_64",
+        feature = "integrated-features"
+    )))]
+    let snapshot = discover(&config, &saved_file, current_hub);
     #[allow(unused_mut)]
-    let mut result = discover(
-        &dirs::config_dir().ok_or("Config directory unavailable.")?,
-        &saved_path()?,
-        cli(&["projects", "list"]),
-    );
+    let mut result = snapshot;
     #[cfg(all(
         target_os = "linux",
         target_arch = "x86_64",
@@ -1249,6 +1567,184 @@ mod tests {
         }
     }
 
+    #[test]
+    fn linux_flatpak_profile_projects_are_not_lost_when_native_registry_is_empty() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("Flatpak project");
+        fixture(&project, json!({}));
+        let result = discover_linux_profiles(
+            root.path(),
+            &root.path().join("saved.json"),
+            Ok(json!({"success": true, "data": []})),
+            Some(Ok(json!({"success": true, "data": [{"path": project}]}))),
+        );
+        assert_eq!(result.projects.len(), 1);
+        assert_eq!(result.projects[0].id, key(&project));
+        assert!(result.warnings.is_empty());
+    }
+
+    #[test]
+    fn linux_profiles_union_deduplicates_and_preserves_saved_selection_and_preferences() {
+        let root = tempfile::tempdir().unwrap();
+        let native = root.path().join("Native project");
+        let flatpak = root.path().join("Flatpak project");
+        fixture(&native, json!({}));
+        fixture(&flatpak, json!({}));
+        let saved = root.path().join("saved.json");
+        fs::write(&saved, json!({"paths": [native]}).to_string()).unwrap();
+        fs::create_dir(root.path().join("creator-works-mcp")).unwrap();
+        let preferences = root.path().join("creator-works-mcp/launcher-config.json");
+        let bytes = json!({
+            "active_channel_id": "keep", "unknown_preference": true,
+            "channels": [{"id": "keep", "unity_project_path": flatpak}],
+        })
+        .to_string();
+        fs::write(&preferences, &bytes).unwrap();
+        let saved_before = fs::read(&saved).unwrap();
+        let result = discover_linux_profiles(
+            root.path(),
+            &saved,
+            Ok(json!({"data": [{"path": native}]})),
+            Some(Ok(
+                json!({"data": [{"path": native.join(".")}, {"path": flatpak}]}),
+            )),
+        );
+        assert_eq!(result.projects.len(), 2);
+        assert!(
+            result
+                .projects
+                .iter()
+                .find(|p| p.id == key(&native))
+                .unwrap()
+                .added
+        );
+        assert!(
+            result
+                .projects
+                .iter()
+                .find(|p| p.id == key(&flatpak))
+                .unwrap()
+                .selected
+        );
+        assert_eq!(result.projects.iter().filter(|p| p.selected).count(), 1);
+        assert_eq!(fs::read(&preferences).unwrap(), bytes.as_bytes());
+        assert_eq!(fs::read(saved).unwrap(), saved_before);
+        assert!(result.warnings.is_empty());
+    }
+
+    #[test]
+    fn linux_profiles_preserve_native_errors_and_flatpak_failures_independently() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("Project");
+        fixture(&project, json!({}));
+        let valid = json!({"data": [{"path": project}]});
+        for (native, warning) in [
+            (
+                Err("native registry unavailable".into()),
+                "native registry unavailable",
+            ),
+            (
+                Ok(json!({"data": {}})),
+                "Unity Hub returned an unrecognized project list.",
+            ),
+        ] {
+            let result = discover_linux_profiles(
+                root.path(),
+                &root.path().join("saved.json"),
+                native,
+                Some(Ok(valid.clone())),
+            );
+            assert_eq!(result.projects.len(), 1);
+            assert_eq!(result.warnings, [warning]);
+        }
+        for (flatpak, warning) in [
+            (
+                Err("profile refused".into()),
+                "Unity Hub (Flatpak): profile refused",
+            ),
+            (
+                Ok(json!({"data": null})),
+                "Unity Hub (Flatpak) returned an unrecognized project list.",
+            ),
+        ] {
+            let result = discover_linux_profiles(
+                root.path(),
+                &root.path().join("saved.json"),
+                Ok(valid.clone()),
+                Some(flatpak),
+            );
+            assert_eq!(result.projects.len(), 1);
+            assert_eq!(result.warnings, [warning]);
+        }
+    }
+
+    #[test]
+    fn linux_missing_flatpak_profile_leaves_native_snapshot_unchanged() {
+        let root = tempfile::tempdir().unwrap();
+        for native in [Ok(json!({"data": []})), Err("native warning".into())] {
+            let original = discover(root.path(), &root.path().join("saved.json"), native.clone());
+            let result =
+                discover_linux_profiles(root.path(), &root.path().join("saved.json"), native, None);
+            assert_eq!(
+                serde_json::to_value(result).unwrap(),
+                serde_json::to_value(original).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn linux_profile_union_retains_existing_project_bounds_and_local_path_rules() {
+        let root = tempfile::tempdir().unwrap();
+        let native: Vec<_> = (0..MAX_PROJECTS)
+            .map(|i| json!({"path": root.path().join(format!("native-{i}"))}))
+            .collect();
+        let flatpak = json!({"data": [
+            {"path": "relative/project"}, {"path": root.path().join("../escape")},
+            {"path": root.path().join("flatpak-extra")},
+        ]});
+        let result = discover_linux_profiles(
+            root.path(),
+            &root.path().join("saved.json"),
+            Ok(json!({"data": native})),
+            Some(Ok(flatpak)),
+        );
+        assert_eq!(result.projects.len(), MAX_PROJECTS);
+        assert!(result
+            .projects
+            .iter()
+            .all(|p| p.name.starts_with("native-")));
+        assert_eq!(result.warnings.len(), 1);
+        assert!(result.warnings[0].starts_with("Showing at most 200 known projects."));
+    }
+
+    #[test]
+    fn linux_flatpak_registry_location_is_fixed_and_never_accepts_arbitrary_profiles() {
+        let root = tempfile::tempdir().unwrap();
+        assert_eq!(
+            flatpak_registry_config(root.path()).unwrap(),
+            root.path().join(".var/app/com.unity.UnityHub/config")
+        );
+        for invalid in [
+            Path::new("relative"),
+            Path::new("/"),
+            &root.path().join("../escape"),
+        ] {
+            assert!(flatpak_registry_config(invalid).is_err());
+        }
+        assert!(flatpak_registry_config(&root.path().join("x".repeat(4097))).is_err());
+        let source = include_str!("projects.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        assert_eq!(source.matches(".env(\"XDG_CONFIG_HOME\"").count(), 1);
+        assert!(!source.contains("set_var("));
+        assert!(!source.contains("env(\"HOME\""));
+        assert!(source.contains("let home = match dirs::home_dir()"));
+        let compact = source.split_whitespace().collect::<String>();
+        assert!(compact.contains("current_hub,flatpak_registry(&config)"));
+        assert!(compact.contains("letcurrent_hub=native_registry(&config)"));
+    }
+
     fn registry_elf_fixture() -> Vec<u8> {
         let mut bytes = vec![0; 64];
         bytes[..7].copy_from_slice(&[127, b'E', b'L', b'F', 2, 1, 1]);
@@ -1323,6 +1819,192 @@ mod tests {
             false,
             "prepare_project_registry"
         ));
+    }
+
+    #[cfg(target_os = "linux")]
+    fn linux_profile_fixture() -> (tempfile::TempDir, PathBuf) {
+        use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+        let home = tempfile::Builder::new()
+            .permissions(fs::Permissions::from_mode(0o700))
+            .tempdir()
+            .unwrap();
+        let config = home.path().join(".var/app/com.unity.UnityHub/config");
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(config.join("unityhub"))
+            .unwrap();
+        let database = config.join("unityhub/hub.db");
+        // Identity-only sentinel, not a fabricated SQLite/discovery acceptance fixture.
+        File::options()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .open(&database)
+            .unwrap();
+        (home, database)
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_profiles_missing_database_never_creates_native_or_flatpak_shadow_profiles() {
+        let home = tempfile::tempdir().unwrap();
+        let native = home.path().join("native-config");
+        assert!(linux_registry_profile::Profile::open(home.path())
+            .unwrap()
+            .is_none());
+        assert!(linux_registry_profile::Profile::native(&native)
+            .unwrap()
+            .is_none());
+        assert_eq!(fs::read_dir(home.path()).unwrap().count(), 0);
+        let (flatpak_home, database) = linux_profile_fixture();
+        assert!(linux_registry_profile::Profile::open(flatpak_home.path())
+            .unwrap()
+            .is_some());
+        assert!(
+            linux_registry_profile::Profile::native(&flatpak_home.path().join(".config"))
+                .unwrap()
+                .is_none()
+        );
+        assert!(!flatpak_home.path().join(".config").exists());
+        assert!(database.is_file());
+    }
+
+    #[cfg(all(
+        target_os = "linux",
+        target_arch = "x86_64",
+        feature = "integrated-features"
+    ))]
+    #[test]
+    fn linux_native_registry_without_database_never_executes_or_creates_a_profile() {
+        let root = tempfile::tempdir().unwrap();
+        let config = root.path().join("absent-config");
+        assert_eq!(
+            native_registry(&config).unwrap(),
+            json!({"success": true, "data": []})
+        );
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_profile_binding_allows_live_sqlite_data_changes_but_not_identity_changes() {
+        use std::os::unix::fs::MetadataExt;
+        let (home, database) = linux_profile_fixture();
+        let profile = linux_registry_profile::Profile::open(home.path())
+            .unwrap()
+            .unwrap();
+        let before = fs::metadata(&database).unwrap();
+        fs::write(&database, b"live database bytes").unwrap();
+        fs::write(database.with_file_name("hub.db-wal"), b"live WAL").unwrap();
+        fs::create_dir(database.parent().unwrap().join("live-directory")).unwrap();
+        profile.recheck().unwrap();
+        assert_eq!(fs::metadata(&database).unwrap().mode(), before.mode());
+        let retained = database.with_file_name("original.db");
+        fs::rename(&database, &retained).unwrap();
+        fs::write(&database, b"replacement").unwrap();
+        assert!(profile.recheck().is_err());
+        assert_eq!(fs::read(retained).unwrap(), b"live database bytes");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_profiles_refuse_linked_or_special_database_and_linked_ancestry() {
+        use std::os::unix::{ffi::OsStrExt, fs::symlink};
+        for linked in [false, true] {
+            let (home, database) = linux_profile_fixture();
+            let retained = home.path().join("retained.db");
+            fs::rename(&database, &retained).unwrap();
+            if linked {
+                symlink(&retained, &database).unwrap();
+            } else {
+                fs::hard_link(&retained, &database).unwrap();
+            }
+            assert!(linux_registry_profile::Profile::open(home.path()).is_err());
+            assert_eq!(fs::metadata(retained).unwrap().len(), 0);
+        }
+        let (home, database) = linux_profile_fixture();
+        fs::remove_file(&database).unwrap();
+        let fifo = std::ffi::CString::new(database.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        assert!(linux_registry_profile::Profile::open(home.path()).is_err());
+        for relative in [
+            ".var",
+            ".var/app",
+            ".var/app/com.unity.UnityHub",
+            ".var/app/com.unity.UnityHub/config",
+            ".var/app/com.unity.UnityHub/config/unityhub",
+        ] {
+            let (home, _) = linux_profile_fixture();
+            let original = home.path().join(relative);
+            let retained = home.path().join("retained");
+            fs::rename(&original, &retained).unwrap();
+            symlink(&retained, &original).unwrap();
+            assert!(linux_registry_profile::Profile::open(home.path()).is_err());
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_profile_binding_refuses_changed_permissions_links_and_ancestry_without_repair() {
+        use std::os::unix::fs::PermissionsExt;
+        for directory in [false, true] {
+            let (home, database) = linux_profile_fixture();
+            let profile = linux_registry_profile::Profile::open(home.path())
+                .unwrap()
+                .unwrap();
+            let target = if directory {
+                database.parent().unwrap()
+            } else {
+                &database
+            };
+            fs::set_permissions(target, fs::Permissions::from_mode(0o777)).unwrap();
+            assert!(profile.recheck().is_err());
+            assert_eq!(
+                fs::metadata(target).unwrap().permissions().mode() & 0o777,
+                0o777
+            );
+        }
+        let (home, database) = linux_profile_fixture();
+        let profile = linux_registry_profile::Profile::open(home.path())
+            .unwrap()
+            .unwrap();
+        fs::hard_link(&database, home.path().join("alias.db")).unwrap();
+        assert!(profile.recheck().is_err());
+        let (home, database) = linux_profile_fixture();
+        let profile = linux_registry_profile::Profile::open(home.path())
+            .unwrap()
+            .unwrap();
+        let config = database.parent().unwrap().parent().unwrap();
+        fs::rename(config, home.path().join("retained")).unwrap();
+        fs::create_dir_all(config).unwrap();
+        assert!(profile.recheck().is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_profile_environment_override_is_child_only_and_rechecked_before_use() {
+        let (home, database) = linux_profile_fixture();
+        let profile = linux_registry_profile::Profile::open(home.path())
+            .unwrap()
+            .unwrap();
+        let before_config = std::env::var_os("XDG_CONFIG_HOME");
+        let before_home = std::env::var_os("HOME");
+        let mut command = std::process::Command::new("not-executed");
+        profile.configure(&mut command).unwrap();
+        assert_eq!(
+            command.get_envs().collect::<Vec<_>>(),
+            vec![(
+                std::ffi::OsStr::new("XDG_CONFIG_HOME"),
+                Some(profile.config().as_os_str()),
+            )]
+        );
+        assert_eq!(std::env::var_os("XDG_CONFIG_HOME"), before_config);
+        assert_eq!(std::env::var_os("HOME"), before_home);
+        fs::remove_file(&database).unwrap();
+        let mut refused = std::process::Command::new("not-executed");
+        assert!(profile.configure(&mut refused).is_err());
+        assert_eq!(refused.get_envs().count(), 0);
     }
 
     #[cfg(target_os = "linux")]
