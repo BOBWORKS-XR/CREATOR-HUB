@@ -847,6 +847,13 @@ def windows(x11):
     return value[2]
 
 
+class _IncompleteHtmlSnapshot(RuntimeError):
+    def __init__(self, reason, detail):
+        require(reason in ("missing-parent", "missing-child", "changed-child-count"), "Unknown incomplete HTML AX read")
+        super().__init__("Incomplete owned HTML AX snapshot")
+        self.reason, self.detail = reason, detail
+
+
 class Surface:
     """One live signed Root, one manifest/system-bound renderer and one XRes frame."""
     def __init__(self, record, x11, helper, native, atspi, *, manifest=None, generation_dir=None, title=TITLE, dialog=False, inventory=None):
@@ -873,6 +880,7 @@ class Surface:
         self.html_actions = []
         self.call_phase = None
         self.ax_parent_diagnostic = None
+        self.ax_snapshot_diagnostic = None
 
     def find_window(self, title):
         self.stable()
@@ -931,9 +939,34 @@ class Surface:
     def same_node(self, a, b):
         return a is not None and b is not None and self.references.identity(a, self) == self.references.identity(b, self)
 
+    def live_children(self, node, limit, context):
+        # Separate from the strict native-close helper: no partial HTML read authorizes input.
+        node.clear_cache()
+        count = node.get_child_count()
+        require(type(count) is int and 0 <= count <= limit, "Root close child count exceeds bound")
+        result = []
+        for index in range(count):
+            node.clear_cache()
+            child = node.get_child_at_index(index)
+            if child is None:
+                raise _IncompleteHtmlSnapshot("missing-child", {**context, "site": "Surface.live_children", "count": count, "index": index})
+            result.append(child)
+        node.clear_cache()
+        after = node.get_child_count()
+        require(type(after) is int and 0 <= after <= limit, "Root close child count exceeds bound")
+        if after != count:
+            raise _IncompleteHtmlSnapshot("changed-child-count", {**context, "site": "Surface.live_children", "count": count, "afterCount": after})
+        return result
+
     def walk(self):
         self.recheck(full=True)
-        frame = wait(self.native_frame)
+        deadline = getattr(self, "_snapshot_deadline", None)
+        if deadline is None:
+            frame = wait(self.native_frame)
+        else:
+            remaining = deadline - time.monotonic()
+            require(remaining > 0, "HTML AX snapshot deadline")
+            frame = wait(self.native_frame, seconds=remaining)
         require(frame.get_process_id() == self.pid, "AX frame PID differs")
         ref = self.references.identity(frame, self)
         if self.references.window is None:
@@ -956,10 +989,16 @@ class Surface:
                         "nodeReference": key, "expectedParentReference": parent, "actualParentPresent": False,
                         "depth": depth, "visitedCount": len(nodes), "pendingCount": len(pending), "role": int(role),
                         "unreadFields": ["state", "toolkit", "sourceId"]}
+                if actual is None and not self.dialog:
+                    raise _IncompleteHtmlSnapshot("missing-parent", {"site": "Surface.walk/parent-presence", "nodeReference": key,
+                        "expectedParentReference": parent, "depth": depth, "visitedCount": len(nodes), "pendingCount": len(pending), "role": int(role)})
                 require(actual is not None, "Missing AX parent")
                 self.node(actual); parents.append(tuple(self.references.identity(actual, self)))
             nodes.append(node)
-            pending.extend((child, key, depth + 1) for child in reversed(self.helper.fresh_close_children(node, min(64, 512 - len(nodes) - len(pending)))))
+            limit = min(64, 512 - len(nodes) - len(pending))
+            children = (self.helper.fresh_close_children(node, limit) if self.dialog else self.live_children(node, limit,
+                {"nodeReference": key, "depth": depth, "visitedCount": len(nodes), "pendingCount": len(pending)}))
+            pending.extend((child, key, depth + 1) for child in reversed(children))
         require(all(parent in seen for parent in parents), "AX semantic parent escaped owned frame")
         self.recheck(full=True)
         return nodes
@@ -991,7 +1030,7 @@ class Surface:
             require((rect.x, rect.y, rect.width, rect.height) == self.request.gtk_message_info_frame, "Modal AX/native frame geometry differs")
         return frame
 
-    def snapshot(self):
+    def _snapshot_once(self):
         nodes = self.walk(); rows = []
         for node in nodes:
             protected = node.get_role() == self.atspi.Role.PASSWORD_TEXT or node.get_state_set().contains(self.atspi.StateType.EDITABLE)
@@ -1012,8 +1051,44 @@ class Surface:
                     require(text.get_character_count() == count and len(row["text"].encode()) <= 16384, "UI text changed")
             rows.append(row)
         require(len(json.dumps(rows).encode()) <= 131072, "Bounded UI snapshot")
-        self.last = rows
         return rows, nodes
+
+    def snapshot(self):
+        if self.dialog:
+            result = self._snapshot_once()
+            self.last = result[0]
+            return result
+        # Admission deadline only; synchronous native reads retain their existing timeouts.
+        self._snapshot_deadline = time.monotonic() + 30
+        evidence = None
+        try:
+            for attempt in range(1, 9):
+                if evidence is not None:
+                    evidence["attempts"] = attempt
+                require(time.monotonic() < self._snapshot_deadline, "HTML AX snapshot deadline")
+                try:
+                    result = self._snapshot_once()
+                except _IncompleteHtmlSnapshot as error:
+                    if self.ax_snapshot_diagnostic is None:
+                        self.ax_snapshot_diagnostic = {"firstIncomplete": {**error.detail, "reason": error.reason,
+                            "phase": self.call_phase, "attempt": attempt}, "incompleteReads": 0}
+                    evidence = self.ax_snapshot_diagnostic
+                    evidence.update(incompleteReads=evidence["incompleteReads"] + 1, attempts=attempt, outcome="incomplete")
+                    require(time.monotonic() < self._snapshot_deadline, "HTML AX snapshot deadline")
+                    self.recheck(full=True)
+                    require(time.monotonic() < self._snapshot_deadline, "HTML AX snapshot deadline")
+                    continue
+                require(time.monotonic() < self._snapshot_deadline, "HTML AX snapshot deadline")
+                self.recheck(full=True)
+                require(time.monotonic() < self._snapshot_deadline, "HTML AX snapshot deadline")
+                if evidence is not None:
+                    evidence["outcome"] = "complete"
+                self.last = result[0]
+                return result
+            evidence["outcome"] = "attempt-limit"
+            raise RuntimeError("Incomplete owned HTML AX snapshot attempt limit")
+        finally:
+            del self._snapshot_deadline
 
     def source(self, source_id, *, optional=False):
         rows, nodes = self.snapshot()
@@ -1867,7 +1942,8 @@ def native_session(env):
                 try:
                     save(BASE / "result" / ("successor-ui.json" if current is replacement else "original-ui.json"),
                          {"root": current.record, "snapshot": current.last, "htmlButtonActions": current.html_actions,
-                          "axParentDiagnostic": getattr(current, "ax_parent_diagnostic", None)})
+                          "axParentDiagnostic": getattr(current, "ax_parent_diagnostic", None),
+                          "axSnapshotDiagnostic": getattr(current, "ax_snapshot_diagnostic", None)})
                     current.bus.close_sync(None)
                 except Exception as error:
                     failure = failure or error

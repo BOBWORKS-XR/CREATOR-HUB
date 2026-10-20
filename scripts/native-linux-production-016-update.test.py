@@ -369,6 +369,8 @@ class Pure(unittest.TestCase):
                                        get_attributes=lambda: {"id": case, "tag": "p", "toolkit": "WebKitGTK"},
                                        get_name=lambda: "", get_text_iface=text_iface)
                 surface = object.__new__(M.Surface)
+                surface.dialog = False
+                surface.recheck = lambda **kwargs: None
                 surface.atspi = SimpleNamespace(Role=roles, StateType=states)
                 surface.references = SimpleNamespace(identity=lambda n, owner: (":1.4", "/org/a11y/fixture"))
                 surface.walk = lambda: [node]
@@ -2382,7 +2384,7 @@ class HtmlActionDiagnostics(unittest.TestCase):
         surface.record, surface.last = {"pid": 42}, [self.row()]
         retained = eval(compile(ast.Expression(copy.deepcopy(save_call.args[1])), "actual-ui-export", "eval"), {"current": surface})
         self.assertEqual(retained, {"root": surface.record, "snapshot": surface.last,
-                                   "htmlButtonActions": surface.html_actions, "axParentDiagnostic": None})
+                                   "htmlButtonActions": surface.html_actions, "axParentDiagnostic": None, "axSnapshotDiagnostic": None})
         self.assertNotIn("snapshot()", ast.unparse(save_call)); self.assertNotIn("walk()", ast.unparse(save_call))
 
 
@@ -2637,35 +2639,256 @@ class StartupPartialEvidence(unittest.TestCase):
                          ["report['initialPageActionAttempts']", "report['successorPageActionAttempts']"])
 
 
+class HtmlSnapshotAcquisition(unittest.TestCase):
+    def surface(self, *, dialog=False):
+        surface = M.Surface.__new__(M.Surface)
+        surface.dialog, surface.last, surface.ax_snapshot_diagnostic = dialog, ["previous-not-current"], None
+        surface.call_phase = "initial-pages:wait-mcp"
+        surface.references = SimpleNamespace(window=(":1.4", "/frame"))
+        surface.renderer = {"pid": 43}
+        surface.checks = []
+        surface.recheck = lambda **kwargs: surface.checks.append(kwargs)
+        return surface
+
+    def node(self, *, counts=(1, 1), children=None):
+        calls, values = [], iter(counts)
+        if children is None: children = [object()]
+        def count(): calls.append("count"); return next(values)
+        def child(index): calls.append(("child", index)); return children[index]
+        return SimpleNamespace(clear_cache=lambda: calls.append("clear"), get_child_count=count,
+                               get_child_at_index=child), calls
+
+    def incomplete(self, reason="missing-child"):
+        return M._IncompleteHtmlSnapshot(reason, {"site": "Surface.live_children", "nodeReference": (":1.4", "/fixture"),
+            "depth": 1, "visitedCount": 1, "pendingCount": 0, "count": 1, "index": 0})
+
+    def children(self, surface, node):
+        return surface.live_children(node, 4, {"nodeReference": (":1.4", "/fixture"), "depth": 1,
+                                              "visitedCount": 1, "pendingCount": 0})
+
+    def test_local_live_children_preserves_exact_cache_count_index_sequence(self):
+        surface = self.surface(); child = object(); node, calls = self.node(children=[child])
+        self.assertEqual(self.children(surface, node), [child])
+        self.assertEqual(calls, ["clear", "count", "clear", ("child", 0), "clear", "count"])
+
+    def test_only_null_child_or_valid_changed_count_are_typed(self):
+        for counts, children, reason in (((1, 1), [None], "missing-child"), ((1, 0), [object()], "changed-child-count")):
+            with self.subTest(reason=reason):
+                node, _ = self.node(counts=counts, children=children)
+                with self.assertRaises(M._IncompleteHtmlSnapshot) as caught: self.children(self.surface(), node)
+                self.assertEqual(caught.exception.reason, reason)
+                self.assertNotIn("name", caught.exception.detail)
+
+    def test_invalid_first_or_final_count_remains_fatal_not_incomplete(self):
+        for counts in ((True,), (-1,), (5,), ("1",), (1, True), (1, -1), (1, 5), (1, "1")):
+            with self.subTest(counts=counts):
+                node, _ = self.node(counts=counts)
+                with self.assertRaises(RuntimeError) as caught: self.children(self.surface(), node)
+                self.assertNotIsInstance(caught.exception, M._IncompleteHtmlSnapshot)
+
+    def test_child_query_error_is_not_translated_or_retried(self):
+        original = RuntimeError("Root close child disappeared")
+        node, _ = self.node(); node.get_child_at_index = lambda index: (_ for _ in ()).throw(original)
+        with self.assertRaises(RuntimeError) as caught: self.children(self.surface(), node)
+        self.assertIs(caught.exception, original)
+
+    def test_incomplete_then_complete_discards_partial_and_rechecks_same_bindings(self):
+        surface = self.surface(); original_renderer = surface.renderer; original_window = surface.references.window
+        result = ([{"id": "ready"}], [object()]); calls = []
+        def once():
+            calls.append(surface._snapshot_deadline)
+            if len(calls) == 1: raise self.incomplete()
+            return result
+        surface._snapshot_once = once
+        with patch.object(M.time, "monotonic", return_value=10), patch.object(M.time, "sleep") as sleep:
+            self.assertIs(surface.snapshot(), result)
+        sleep.assert_not_called(); self.assertEqual(calls, [40, 40])
+        self.assertIs(surface.last, result[0]); self.assertIs(surface.renderer, original_renderer)
+        self.assertIs(surface.references.window, original_window)
+        self.assertEqual(surface.checks, [{"full": True}] * 2)
+        evidence = surface.ax_snapshot_diagnostic
+        self.assertEqual((evidence["incompleteReads"], evidence["attempts"], evidence["outcome"]), (1, 2, "complete"))
+        self.assertEqual(evidence["firstIncomplete"]["reason"], "missing-child")
+        self.assertEqual(evidence["firstIncomplete"]["phase"], surface.call_phase)
+        self.assertFalse(hasattr(surface, "_snapshot_deadline"))
+
+    def test_eight_persistent_incomplete_reads_fail_without_stale_return(self):
+        surface = self.surface(); calls = []
+        def once(): calls.append(True); raise self.incomplete("missing-parent")
+        surface._snapshot_once = once
+        with patch.object(M.time, "monotonic", return_value=10), patch.object(M.time, "sleep") as sleep, \
+                self.assertRaisesRegex(RuntimeError, "Incomplete owned HTML AX snapshot attempt limit"):
+            surface.snapshot()
+        self.assertEqual(len(calls), 8); sleep.assert_not_called()
+        self.assertEqual(surface.last, ["previous-not-current"])
+        self.assertEqual(surface.ax_snapshot_diagnostic["outcome"], "attempt-limit")
+        self.assertEqual(surface.ax_snapshot_diagnostic["incompleteReads"], 8)
+
+    def test_shared_absolute_deadline_cannot_be_reset_or_accept_late_result(self):
+        for returns_late in (False, True):
+            with self.subTest(returns_late=returns_late):
+                surface = self.surface(); clock = [0]; calls = []
+                def once():
+                    calls.append(surface._snapshot_deadline); clock[0] = 31
+                    if returns_late: return ([{"id": "late"}], [])
+                    raise self.incomplete()
+                surface._snapshot_once = once
+                with patch.object(M.time, "monotonic", side_effect=lambda: clock[0]), \
+                        self.assertRaisesRegex(RuntimeError, "HTML AX snapshot deadline"):
+                    surface.snapshot()
+                self.assertEqual(calls, [30]); self.assertEqual(surface.last, ["previous-not-current"])
+                self.assertFalse(hasattr(surface, "_snapshot_deadline"))
+
+    def test_deadline_equality_and_overrun_are_refused_after_read_and_after_guard(self):
+        for stage in ("read", "guard"):
+            for finished in (30, 31):
+                with self.subTest(stage=stage, finished=finished):
+                    surface = self.surface(); clock, reads, guards = [0], [], []
+                    def once():
+                        reads.append(True)
+                        if stage == "read": clock[0] = finished
+                        return ([{"id": "must-not-be-accepted"}], [])
+                    def check(**kwargs): guards.append(kwargs); clock[0] = finished
+                    surface._snapshot_once, surface.recheck = once, check
+                    with patch.object(M.time, "monotonic", side_effect=lambda: clock[0]), \
+                            self.assertRaisesRegex(RuntimeError, "HTML AX snapshot deadline"):
+                        surface.snapshot()
+                    self.assertEqual(reads, [True]); self.assertEqual(len(guards), 0 if stage == "read" else 1)
+                    self.assertEqual(surface.last, ["previous-not-current"])
+
+    def test_incomplete_postguard_deadline_refuses_before_second_read(self):
+        surface = self.surface(); clock, reads = [0], []
+        def once(): reads.append(True); raise self.incomplete()
+        def check(**kwargs): clock[0] = 30
+        surface._snapshot_once, surface.recheck = once, check
+        with patch.object(M.time, "monotonic", side_effect=lambda: clock[0]), \
+                self.assertRaisesRegex(RuntimeError, "HTML AX snapshot deadline"):
+            surface.snapshot()
+        self.assertEqual(reads, [True]); self.assertEqual(surface.ax_snapshot_diagnostic["incompleteReads"], 1)
+        self.assertEqual(surface.last, ["previous-not-current"])
+
+    def test_unknown_error_even_with_old_helper_message_is_never_reacquired(self):
+        for error in (RuntimeError("Root close child disappeared"), RuntimeError("Missing AX parent"),
+                      RuntimeError("Duplicate/cyclic AX graph"), ValueError("SYNTHETIC_PRIVATE")):
+            with self.subTest(error=type(error).__name__):
+                surface = self.surface(); calls = []
+                def once(): calls.append(True); raise error
+                surface._snapshot_once = once
+                with self.assertRaises(type(error)) as caught: surface.snapshot()
+                self.assertIs(caught.exception, error); self.assertEqual(calls, [True])
+                self.assertIsNone(surface.ax_snapshot_diagnostic)
+
+    def test_first_incomplete_is_saved_before_identity_guard_can_refuse(self):
+        surface = self.surface(); calls = []
+        original = RuntimeError("Bound Root changed")
+        def once(): calls.append(True); raise self.incomplete()
+        def refuse(**kwargs):
+            self.assertEqual(surface.ax_snapshot_diagnostic["firstIncomplete"]["reason"], "missing-child")
+            raise original
+        surface._snapshot_once, surface.recheck = once, refuse
+        with self.assertRaises(RuntimeError) as caught: surface.snapshot()
+        self.assertIs(caught.exception, original); self.assertEqual(calls, [True])
+        self.assertEqual(surface.last, ["previous-not-current"])
+
+    def test_first_diagnostic_survives_later_acquisitions_without_new_node_queries(self):
+        surface = self.surface(); result = ([], [])
+        for reason in ("missing-child", "changed-child-count"):
+            values = iter([self.incomplete(reason), result])
+            def once():
+                value = next(values)
+                if isinstance(value, Exception): raise value
+                return value
+            surface._snapshot_once = once; surface.snapshot()
+        self.assertEqual(surface.ax_snapshot_diagnostic["firstIncomplete"]["reason"], "missing-child")
+        self.assertEqual(surface.ax_snapshot_diagnostic["incompleteReads"], 2)
+        self.assertLess(len(json.dumps(surface.ax_snapshot_diagnostic)), 2048)
+
+    def test_native_dialog_snapshot_does_not_reacquire_or_change_deadline(self):
+        surface = self.surface(dialog=True); original = self.incomplete(); calls = []
+        def once(): calls.append(True); raise original
+        surface._snapshot_once = once
+        with self.assertRaises(M._IncompleteHtmlSnapshot) as caught: surface.snapshot()
+        self.assertIs(caught.exception, original); self.assertEqual(calls, [True])
+        self.assertEqual(surface.checks, []); self.assertFalse(hasattr(surface, "_snapshot_deadline"))
+        self.assertIsNone(surface.ax_snapshot_diagnostic)
+
+    def test_uncertain_input_is_never_repeated_after_successful_read_reacquisition(self):
+        for raises in (False, True):
+            with self.subTest(raises=raises):
+                surface = self.surface(); surface.x11, surface.window, surface.html_actions = object(), 7, []
+                inputs, reads, actions = [], [], []
+                original = RuntimeError("Uncertain action outcome")
+                def action(index):
+                    inputs.append(index)
+                    if raises: raise original
+                    return False
+                interface = SimpleNamespace(get_n_actions=lambda: 1, get_action_name=lambda index: "press", do_action=action)
+                node = SimpleNamespace(get_action_iface=lambda: interface)
+                row = {"id": "suite-trigger", "reference": [":1.4", "/button"], "toolkit": "WebKitGTK", "tag": "button",
+                       "showing": True, "enabled": True, "sensitive": True, "busy": False, "defunct": False}
+                def once():
+                    reads.append(True)
+                    if len(reads) == 1: raise self.incomplete()
+                    return ([row], [node])
+                surface._snapshot_once = once
+                with patch.object(M, "windows", return_value=[7]), self.assertRaises(RuntimeError) as caught:
+                    surface.click("suite-trigger", actions)
+                if raises: self.assertIs(caught.exception, original)
+                else: self.assertEqual(str(caught.exception), "UI action uncertain; no retry")
+                self.assertEqual(inputs, [0]); self.assertEqual(len(reads), 3); self.assertEqual(actions, ["suite-trigger"])
+                with patch.object(M, "windows", return_value=[7]), self.assertRaisesRegex(RuntimeError, "No repeated UI action"):
+                    surface.click("suite-trigger", actions)
+                self.assertEqual(inputs, [0]); self.assertEqual(len(reads), 3)
+
+    def test_retry_boundary_has_no_input_generic_exception_matching_or_sleep(self):
+        tree = ast.parse(Path(M.__file__).read_text())
+        surface = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "Surface")
+        snapshot = next(n for n in surface.body if isinstance(n, ast.FunctionDef) and n.name == "snapshot")
+        catches = [ast.unparse(n.type) for n in ast.walk(snapshot) if isinstance(n, ast.ExceptHandler)]
+        self.assertEqual(catches, ["_IncompleteHtmlSnapshot"])
+        source = ast.unparse(snapshot)
+        for forbidden in ("do_action", ".click(", "time.sleep", "str(error)", "self.renderer =", "self.references.window ="):
+            self.assertNotIn(forbidden, source)
+
+
 class PartialAxParentEvidence(unittest.TestCase):
-    def fixture(self, *, parent_present=False):
+    def fixture(self, *, parent_present=False, dialog=False):
         calls = []
         class Node:
-            def __init__(self, ref, role, parent=None): self.ref, self.role, self.parent = ref, role, parent
+            def __init__(self, ref, role, parent=None):
+                self.ref, self.role, self.parent, self.children = ref, role, parent, []
             def clear_cache(self): calls.append((self.ref, "clear"))
             def get_process_id(self): calls.append((self.ref, "pid")); return 42
             def get_role(self): calls.append((self.ref, "role")); return self.role
             def get_parent(self): calls.append((self.ref, "parent")); return self.parent
+            def get_child_count(self): calls.append((self.ref, "count")); return len(self.children)
+            def get_child_at_index(self, index): calls.append((self.ref, "child", index)); return self.children[index]
             def get_name(self): raise AssertionError("PRIVATE_EDITABLE_NAME_MUST_NOT_BE_READ")
             def get_attributes(self): raise AssertionError("PRIVATE_ATTRIBUTES_MUST_NOT_BE_READ")
             def get_state_set(self): raise AssertionError("Additional state query refused")
         frame = Node("/frame", 2)
         child = Node("/child", 43, frame if parent_present else None)
+        frame.children = [child]
         surface = M.Surface.__new__(M.Surface)
-        surface.pid, surface.dialog, surface.last = 42, False, None
+        surface.pid, surface.dialog, surface.last = 42, dialog, None
+        surface.ax_snapshot_diagnostic = None
         surface.call_phase = "startup-ui:wait-usage-terms"
         surface.atspi = SimpleNamespace(Role=SimpleNamespace(APPLICATION=1, FRAME=2, WINDOW=3))
         surface.references = SimpleNamespace(window=None, identity=lambda node, owner: (":1.4", node.ref))
         surface.recheck = lambda **kwargs: calls.append(("surface", "recheck"))
         surface.node = lambda node: calls.append((node.ref, "ownership"))
         surface.native_frame = lambda: frame
+        helper_tree = ast.parse((HERE / "native-unix-window.py").read_text())
+        strict = next(n for n in helper_tree.body if isinstance(n, ast.FunctionDef) and n.name == "fresh_close_children")
+        namespace = {"require": M.require}
+        exec(compile(ast.Module(body=[strict], type_ignores=[]), "actual-strict-native-children", "exec"), namespace)
         def children(node, limit):
-            calls.append((node.ref, "children")); return [child] if node is frame else []
+            calls.append((node.ref, "children")); return namespace["fresh_close_children"](node, limit)
         surface.helper = SimpleNamespace(fresh_close_children=children)
         return surface, calls, frame, child
 
-    def test_missing_parent_captures_only_same_read_context_before_original_refusal(self):
-        surface, calls, _, _ = self.fixture(); original_require = M.require
+    def test_native_dialog_missing_parent_keeps_same_read_context_and_original_refusal(self):
+        surface, calls, _, _ = self.fixture(dialog=True); original_require = M.require
         original = RuntimeError("Missing AX parent")
         def require(value, message):
             if not value and message == "Missing AX parent": raise original
@@ -2686,6 +2909,84 @@ class PartialAxParentEvidence(unittest.TestCase):
         self.assertEqual(calls.count(("/child", "parent")), 1)
         self.assertNotIn(("/child", "children"), calls)
 
+    def test_html_missing_parent_is_typed_without_querying_additional_metadata(self):
+        surface, calls, _, _ = self.fixture()
+        with patch.object(M, "wait", side_effect=lambda check: check()), self.assertRaises(M._IncompleteHtmlSnapshot) as error:
+            surface.walk()
+        self.assertEqual(error.exception.reason, "missing-parent")
+        self.assertEqual(error.exception.detail["nodeReference"], (":1.4", "/child"))
+        self.assertEqual(calls.count(("/child", "parent")), 1)
+        self.assertEqual(calls.count(("/child", "count")), 0)
+
+    def test_actual_walk_reacquires_whole_graph_after_null_child_or_parent(self):
+        for reason in ("missing-child", "missing-parent", "changed-child-count"):
+            with self.subTest(reason=reason):
+                surface, calls, frame, child = self.fixture(parent_present=True)
+                attempts, counts = [], []
+                def native_frame():
+                    attempts.append(getattr(surface, "_snapshot_deadline", None))
+                    frame.children = [None if reason == "missing-child" and len(attempts) == 1 else child]
+                    child.parent = None if reason == "missing-parent" and len(attempts) == 1 else frame
+                    return frame
+                def child_count():
+                    counts.append(True)
+                    return 0 if reason == "changed-child-count" and len(attempts) == 1 and len(counts) == 2 else 1
+                surface.native_frame, frame.get_child_count = native_frame, child_count
+                surface._snapshot_once = lambda: ([{"id": "ready"}], surface.walk())
+                with patch.object(M.time, "monotonic", return_value=10), \
+                        patch.object(M, "wait", side_effect=lambda check, **kwargs: check()):
+                    rows, nodes = surface.snapshot()
+                self.assertEqual(nodes, [frame, child]); self.assertEqual(rows, [{"id": "ready"}])
+                self.assertEqual(attempts, [40, 40])
+                self.assertEqual(surface.ax_snapshot_diagnostic["firstIncomplete"]["reason"], reason)
+                self.assertEqual(surface.ax_snapshot_diagnostic["outcome"], "complete")
+                self.assertEqual(surface.references.window, (":1.4", "/frame"))
+
+    def test_actual_walk_owner_cycle_nested_and_escaped_parent_refusals_are_not_retried(self):
+        for defect in ("owner", "cycle", "nested", "escaped-parent", "duplicate", "bounds", "xerror", "wire-owner"):
+            with self.subTest(defect=defect):
+                surface, calls, frame, child = self.fixture(parent_present=True)
+                attempts = []
+                def native_frame(): attempts.append(True); return frame
+                surface.native_frame = native_frame
+                original = RuntimeError("Bound owner refused")
+                old_node, old_identity = surface.node, surface.references.identity
+                if defect == "owner":
+                    def node(value):
+                        old_node(value)
+                        if value is child: raise original
+                    surface.node = node
+                elif defect == "wire-owner":
+                    def identity(value, owner):
+                        if value is child: raise original
+                        return old_identity(value, owner)
+                    surface.references.identity = identity
+                elif defect == "cycle": child.children = [frame]
+                elif defect == "nested": child.role = surface.atspi.Role.WINDOW
+                elif defect == "escaped-parent": child.parent = SimpleNamespace(ref="/escaped")
+                elif defect == "duplicate": frame.children = [child, child]
+                elif defect == "bounds": frame.get_child_count = lambda: 513
+                elif defect == "xerror":
+                    def check(**kwargs): raise original
+                    surface.recheck = check
+                surface._snapshot_once = lambda: ([{"id": "must-not-return"}], surface.walk())
+                with patch.object(M, "wait", side_effect=lambda check, **kwargs: check()), self.assertRaises(RuntimeError) as error:
+                    surface.snapshot()
+                self.assertNotIsInstance(error.exception, M._IncompleteHtmlSnapshot)
+                self.assertLessEqual(len(attempts), 1); self.assertIsNone(surface.last)
+                self.assertIsNone(surface.ax_snapshot_diagnostic)
+
+    def test_native_dialog_child_enumeration_uses_unchanged_strict_helper(self):
+        surface, _, _, _ = self.fixture(parent_present=True, dialog=True)
+        original = RuntimeError("Root close child disappeared"); calls = []
+        def strict(node, limit): calls.append(True); raise original
+        surface.helper.fresh_close_children = strict
+        surface.live_children = lambda *args: self.fail("HTML acquisition used in native dialog")
+        with patch.object(M, "wait", side_effect=lambda check: check()), self.assertRaises(RuntimeError) as error:
+            surface.walk()
+        self.assertIs(error.exception, original); self.assertEqual(calls, [True])
+        self.assertIsNone(surface.ax_snapshot_diagnostic)
+
     def test_valid_graph_retains_strict_fresh_checks_without_new_queries(self):
         surface, calls, frame, child = self.fixture(parent_present=True)
         with patch.object(M, "wait", side_effect=lambda check: check()): result = surface.walk()
@@ -2693,6 +2994,15 @@ class PartialAxParentEvidence(unittest.TestCase):
         self.assertEqual(calls.count(("surface", "recheck")), 2)
         self.assertEqual(calls.count(("/child", "parent")), 1)
         self.assertIsNone(getattr(surface, "ax_parent_diagnostic", None))
+
+    def test_nested_frame_wait_uses_remaining_absolute_admission_budget(self):
+        surface, _, frame, child = self.fixture(parent_present=True)
+        surface._snapshot_deadline = 40
+        waits = []
+        def waiting(check, *, seconds): waits.append(seconds); return check()
+        with patch.object(M.time, "monotonic", return_value=11), patch.object(M, "wait", side_effect=waiting):
+            self.assertEqual(surface.walk(), [frame, child])
+        self.assertEqual(waits, [29])
 
 
 if __name__ == "__main__":
