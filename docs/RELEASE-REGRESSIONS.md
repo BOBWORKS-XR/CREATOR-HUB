@@ -73,6 +73,28 @@ of defect-free releases. Source tests do not replace the installed checks below.
 
 Native preflight also checks these captured boundaries:
 
+- A new package version must pass its own readiness contract, not just Hub's
+  existing validator. SDK 4.0.22 uses a project-local node-generation stamp;
+  VS 1.9.12 initialization can write 38 named shared editor preferences.
+  `sdk_compatibility_audit` refuses a green Hub result with SDK NeedsFix.
+  Follow `SETUP-SDK-4022-VS-1912-QUALIFICATION.md`; preparation tests are not
+  runtime compatibility acceptance and the supported package policy is unchanged.
+- An initially unmapped Flatpak launcher may wait within the existing deadline
+  only with authenticated normal-window evidence and stable PID/XID/XRes identity.
+  Mapping never grants input authority. Eight regressions and native run
+  `39516147349` cover the corrected initial mapping path; that run passed
+  cancellation, bootstrap and cold activation but stopped before warm input.
+- Preserve the actual owner of test child processes. The portal test wrapper's
+  subreaper flag survived exec into the daemon, leaving its completed capture
+  worker unreaped. Run `39516147349` retained the exact PID/parent/start tuple.
+  Do not skip zombies, add broad waits, or weaken the UID scanner to hide a
+  harness lifecycle defect. Warm activation remains unqualified.
+- Diagnostic output must not block the program being tested. Prepare independent
+  bounded readers before launching Root, continue draining when retention fails,
+  and handle partial startup before spawn. The updater's drainer tests exercise
+  real synthetic writers above pipe capacity without a GUI pump. Those tests
+  do not prove the actual successor inspector is reachable; retain bounded
+  stderr, only the two inspector environment variables and exact-port ownership.
 - GTK message X titles are not necessarily AX names. Bind the captured role,
   exact context and native frame; never select a generic `Information` dialog.
 - Cargo may hard-link final build output. Stage a fresh verified copy before
