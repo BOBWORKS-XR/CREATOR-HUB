@@ -25,6 +25,61 @@ SPEC = importlib.util.spec_from_file_location("hub_capture_under_test", HERE / "
 C = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(C)
 
+# Exact public text retained in official-hub-launch-files-3.22.3.json, SHA-256
+# 4598fbbf04dd72ff30525697562e6851b0a6f7918d23d0d946b0661caa6142bf.
+VENDOR_DESKTOP = b"""[Desktop Entry]
+Name=Unity Hub
+StartupWMClass=Unity Hub
+Comment=The Official Unity Hub
+GenericName=Unity Hub
+Exec=unityhub %U
+Icon=unityhub
+Type=Application
+Terminal=false
+StartupNotify=true
+Categories=Development;
+MimeType=x-scheme-handler/unityhub;application/x-unityhub;
+
+"""
+VENDOR_WRAPPER = b"""#!/usr/bin/env bash
+
+# Uncomment for debugging purposes:
+# set -eux
+
+UNPRIVILEGED_USERNS_ENABLED=$(cat /proc/sys/kernel/unprivileged_userns_clone 2>/dev/null)
+# Resolve the real install dir even when invoked through symlinks. The deb/rpm
+# payload ships /usr/bin/unityhub as a RELATIVE symlink (../lib/unityhub/unityhub),
+# which the previous hand-rolled readlink loop resolved against the caller's CWD
+# instead of the symlink's directory \xe2\x80\x94 breaking `unityhub` from a terminal and the
+# .desktop launcher. (It only ever worked through the fpm-era update-alternatives
+# links, which were absolute.) `readlink -f` canonicalizes the whole chain; GNU
+# coreutils is a given \xe2\x80\x94 this script only runs on Linux.
+SCRIPT_DIR="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
+
+# Disable the Chromium sandbox only where it cannot work: kernels without
+# unprivileged user namespaces (sysctl missing or 0). Built as an array so an
+# empty result contributes NO argv entry \xe2\x80\x94 the old quoted `$( ... && echo )`
+# form always passed one argument, an empty string when userns is enabled.
+LAUNCH_ARGS=()
+if [[ $UNPRIVILEGED_USERNS_ENABLED == '' || $UNPRIVILEGED_USERNS_ENABLED == 0 ]]; then
+  LAUNCH_ARGS+=('--no-sandbox')
+fi
+
+exec "$SCRIPT_DIR/unityhub-bin" "${LAUNCH_ARGS[@]}" "$@"
+"""
+# Role metadata from native payload-inventory.json, SHA-256
+# 36d73d32c823c1a0a9a14f9205d7958ad03580f70c03a58a03844ea1ee2d1dd4.
+RETAINED_ROLES = {
+    "usr/share/applications/unityhub.desktop": {"kind": "file", "mode": 0o644, "archiveUid": 0, "archiveGid": 0,
+        "size": 275, "sha256": "f841d4a8bcce4c7c6862d27b03721a828d3565182c5fc29a0a3b7a843733982b"},
+    "usr/bin/unityhub": {"kind": "symlink", "mode": 0o777, "archiveUid": 0, "archiveGid": 0,
+        "target": "../lib/unityhub/unityhub", "resolved": "usr/lib/unityhub/unityhub"},
+    "usr/lib/unityhub/unityhub": {"kind": "file", "mode": 0o755, "archiveUid": 0, "archiveGid": 0,
+        "size": 1272, "sha256": "c11cdd62708d2d35b1365dbdd9df1de0014d935aaee81c94d86b42e01ce11129"},
+    "usr/lib/unityhub/unityhub-bin": {"kind": "file", "mode": 0o755, "archiveUid": 0, "archiveGid": 0,
+        "size": 228605256, "sha256": "4d402a71bfa797a6bcbe29e5360abfb684d18358a0e631bdc0cb4f0de879b254"},
+}
+
 
 class Response(io.BytesIO):
     def __init__(self, raw, url, status=200, length=None):
@@ -436,23 +491,176 @@ class CaptureTests(unittest.TestCase):
             with self.subTest(name=name), mock.patch.object(C, name, bound), self.assertRaises(RuntimeError):
                 C.inventory(path)
 
-    def test_normal_launch_only_no_wrapper_or_sandbox_flags(self):
-        records = {"usr/share/applications/unityhub.desktop": {"kind": "file"},
-                   "opt/unityhub/unityhub": {"kind": "file", "mode": 0o755, "size": 20, "sha256": "0" * 64}}
-        path = self.root / "opt/unityhub/unityhub"
-        path.parent.mkdir(parents=True)
+    def vendor_launch_fixture(self, *, records=None, desktop=VENDOR_DESKTOP, wrapper=VENDOR_WRAPPER,
+                              target="../lib/unityhub/unityhub", native_header=None):
+        path = self.root / C.NATIVE
+        path.parent.mkdir(parents=True, exist_ok=True)
+        (self.root / C.DESKTOP).parent.mkdir(parents=True, exist_ok=True)
+        (self.root / C.DESKTOP).write_bytes(desktop)
+        (self.root / C.WRAPPER).write_bytes(wrapper)
         head = bytearray(20)
         head[:7], head[16:20] = b"\x7fELF\x02\x01\x01", b"\x03\x00\x3e\x00"
-        path.write_bytes(head)
-        for command in ("/opt/unityhub/unityhub %U", "/opt/unityhub/unityhub --no-sandbox", "/usr/bin/env /opt/unityhub/unityhub"):
-            desktop = ("[Desktop Entry]\nName=Unity Hub\nType=Application\nExec=" + command + "\n").encode()
-            with self.subTest(command=command), mock.patch.object(C, "read", return_value=desktop), \
-                    mock.patch.object(C, "file_pin", return_value={"size": 20, "sha256": "0" * 64}):
-                if command.endswith("%U"):
-                    self.assertEqual(C.launch_image(self.root, records)["relative"], "opt/unityhub/unityhub")
+        path.write_bytes(head if native_header is None else native_header)
+        link = self.root / C.LAUNCH_LINK
+        real_lstat, real_pin = Path.lstat, C.file_pin
+        def lstat(value):
+            return types.SimpleNamespace(st_mode=stat.S_IFLNK | 0o777) if value == link else real_lstat(value)
+        def check(value, limit, wanted=None):
+            if value == path:
+                native_pin = {key: RETAINED_ROLES[C.NATIVE][key] for key in ("size", "sha256")}
+                self.assertEqual(wanted, native_pin)
+                return native_pin
+            return real_pin(value, limit, wanted)
+        # Only the large ELF and link are mocked; both small public text files are truly hashed.
+        with mock.patch.object(Path, "lstat", autospec=True, side_effect=lstat), \
+                mock.patch.object(C.os, "readlink", return_value=target), mock.patch.object(C, "file_pin", side_effect=check):
+            return C.launch_image(self.root, RETAINED_ROLES if records is None else records)
+
+    def test_exact_retained_vendor_roles_and_text_pins(self):
+        self.assertEqual(C.LAUNCH_ROLES, RETAINED_ROLES)
+        for name, raw in ((C.DESKTOP, VENDOR_DESKTOP), (C.WRAPPER, VENDOR_WRAPPER)):
+            self.assertEqual(C.pin(raw), {key: RETAINED_ROLES[name][key] for key in ("size", "sha256")})
+        value = self.vendor_launch_fixture()
+        self.assertEqual(value["relative"], C.NATIVE)
+        self.assertEqual(value["wrapper"]["relative"], C.WRAPPER)
+
+    def test_old_assumed_layout_and_changed_vendor_roles_refuse(self):
+        for name, field, value in ((C.NATIVE, "size", 20), (C.NATIVE, "sha256", "0" * 64),
+                                   (C.WRAPPER, "kind", "symlink"), (C.LAUNCH_LINK, "target", "/foreign/launcher")):
+            records = json.loads(json.dumps(RETAINED_ROLES))
+            records[name][field] = value
+            with self.subTest(name=name, field=field), self.assertRaises(RuntimeError):
+                self.vendor_launch_fixture(records=records)
+        with self.assertRaises(RuntimeError):
+            self.vendor_launch_fixture(records={"opt/unityhub/unityhub": RETAINED_ROLES[C.NATIVE]})
+
+    def test_foreign_actual_symlink_and_changed_vendor_text_refuse(self):
+        with self.assertRaises(RuntimeError):
+            self.vendor_launch_fixture(target="/foreign/launcher")
+        with self.assertRaises(RuntimeError):
+            self.vendor_launch_fixture(desktop=VENDOR_DESKTOP.replace(b"Exec=unityhub %U", b"Exec=unityhub https://example.invalid"))
+        with self.assertRaises(RuntimeError):
+            self.vendor_launch_fixture(wrapper=VENDOR_WRAPPER + b"# changed\n")
+
+    def test_native_header_is_checked_independently_of_inventory_pin(self):
+        with self.assertRaisesRegex(RuntimeError, "Native x64 Hub ELF"):
+            self.vendor_launch_fixture(native_header=b"not a native ELF file")
+
+    def test_fixed_vendor_payload_refuses_an_added_sandbox_helper(self):
+        records = json.loads(json.dumps(RETAINED_ROLES))
+        records["usr/lib/unityhub/chrome-sandbox"] = {"kind": "file"}
+        with self.assertRaisesRegex(RuntimeError, "Unexpected sandbox helper"):
+            self.vendor_launch_fixture(records=records)
+
+    def test_process_owner_uses_real_live_stat_parser_and_exact_uid_parent(self):
+        real_helper, _ = C.helpers()
+        child, proc, native = mock.Mock(), mock.Mock(), mock.Mock()
+        child.pid, child.poll.return_value = 123, None
+        def record(start="456", parent=None, state="S"):
+            return "123 (vendor wrapper) " + " ".join([state, str(os.getpid() if parent is None else parent), *(["0"] * 17), start])
+        helper = types.SimpleNamespace(Proc=lambda: proc, parse_start=real_helper.parse_start)
+        proc.stat.return_value = record()
+        native.process_uids.return_value = [1001] * 4
+        with mock.patch.object(C.os, "getuid", return_value=1001, create=True):
+            self.assertEqual(C.process_owner(child, helper, native), {"pid": 123, "startTime": "456", "parentPid": os.getpid(), "uids": [1001] * 4})
+            for kind in ("start", "parent", "uid", "terminal"):
+                proc.stat.side_effect = None
+                proc.stat.return_value = record()
+                native.process_uids.return_value = [1001] * 4
+                if kind == "start":
+                    proc.stat.side_effect = [record(), record(start="999")]
+                elif kind == "parent":
+                    proc.stat.return_value = record(parent=os.getpid() + 1)
+                elif kind == "uid":
+                    native.process_uids.return_value = [1001, 0, 1001, 1001]
+                else:
+                    proc.stat.return_value = record(state="Z")
+                with self.subTest(kind=kind), self.assertRaises(RuntimeError):
+                    C.process_owner(child, helper, native)
+
+    def test_kernel_exec_fd_hash_identity_and_finite_paths(self):
+        path = self.root / "mock-image"
+        path.write_bytes(b"held image")
+        allowed = {"/usr/bin/env": C.pin(b"held image")}
+        for kind in ("valid", "foreign", "hash", "links", "identity"):
+            fd = os.open(path, os.O_RDONLY)
+            real = os.fstat(fd)
+            fields = {key: getattr(real, key) for key in ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid",
+                                                        "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns")}
+            snapshots = [real, real]
+            if kind == "links":
+                snapshots[0] = types.SimpleNamespace(**{**fields, "st_nlink": 2})
+            if kind == "identity":
+                snapshots[1] = types.SimpleNamespace(**{**fields, "st_ino": fields["st_ino"] + 1})
+            pins = allowed if kind != "hash" else {"/usr/bin/env": {**allowed["/usr/bin/env"], "sha256": "0" * 64}}
+            with self.subTest(kind=kind), mock.patch.object(C.os, "open", return_value=fd), \
+                    mock.patch.object(C.os, "readlink", return_value="/foreign/image" if kind == "foreign" else "/usr/bin/env"), \
+                    mock.patch.object(C.os, "fstat", side_effect=snapshots):
+                if kind == "valid":
+                    self.assertEqual(C.kernel_exec_image(123, pins), "/usr/bin/env")
                 else:
                     with self.assertRaises(RuntimeError):
-                        C.launch_image(self.root, records)
+                        C.kernel_exec_image(123, pins)
+            with self.assertRaises(OSError):
+                os.fstat(fd)
+
+    def exec_fixture(self, *, images=None, argv=None, owner_drift=None, native_drift=None, kernel_error=None, expired=False):
+        child, helper, native, output, wm_output = (mock.Mock() for _ in range(5))
+        child.pid = 123
+        executable = self.root / "image" / C.NATIVE
+        image_pin = C.pin(b"native")
+        owner = {"pid": 123, "startTime": "456", "parentPid": os.getpid(), "uids": [1001] * 4}
+        native.native_process.return_value = {**owner, "executable": str(executable), "kernelImageSha256": image_pin["sha256"], **(native_drift or {})}
+        owner_calls = None if owner_drift is None else [owner, owner, {**owner, **owner_drift}]
+        self.exec_native = native
+        self.exec_child = child
+        with mock.patch.object(C, "process_owner", return_value=owner, side_effect=owner_calls), \
+                mock.patch.object(C, "kernel_exec_image", side_effect=kernel_error or (images if images is not None else ["/usr/bin/env", "/usr/bin/bash", str(executable)])), \
+                mock.patch.object(C.time, "monotonic", return_value=2 if expired else 0), \
+                mock.patch("builtins.open", mock.mock_open(read_data=os.fsencode(executable) + b"\0" if argv is None else argv)) as read:
+            value = C.await_vendor_exec(child, executable, image_pin,
+                {"/usr/bin/env": C.pin(b"env"), "/usr/bin/bash": C.pin(b"bash")}, helper, native, output, wm_output, 1)
+        read.assert_called_once_with("/proc/123/cmdline", "rb")
+        return value
+
+    def test_owned_vendor_exec_allows_only_ordered_pinned_interpreters_then_native(self):
+        process, proof = self.exec_fixture()
+        self.assertEqual(process["pid"], 123)
+        self.assertEqual(proof["observedImages"], ["/usr/bin/env", "/usr/bin/bash", str(self.root / "image" / C.NATIVE)])
+        self.assertTrue(proof["nativeArgvExact"])
+
+    def test_vendor_exec_already_native_still_requires_owner_and_argv(self):
+        process, proof = self.exec_fixture(images=[str(self.root / "image" / C.NATIVE)])
+        self.assertEqual(proof["owner"]["startTime"], process["startTime"])
+        self.assertTrue(proof["nativeArgvExact"])
+
+    def test_vendor_exec_refuses_argv_flags_urls_and_empty_arguments(self):
+        executable = os.fsencode(self.root / "image" / C.NATIVE)
+        for argv in (executable + b"\0--no-sandbox\0", executable + b"\0https://example.invalid\0", executable + b"\0\0", b""):
+            with self.subTest(argv=argv), self.assertRaisesRegex(RuntimeError, "argv differs"):
+                self.exec_fixture(argv=argv)
+
+    def test_vendor_exec_refuses_pid_start_uid_or_parent_drift_before_acceptance(self):
+        for drift in ({"pid": 124}, {"startTime": "999"}, {"parentPid": os.getpid() + 1}, {"uids": [0] * 4}):
+            with self.subTest(drift=drift), self.assertRaises(RuntimeError):
+                self.exec_fixture(owner_drift=drift)
+            self.exec_native.native_process.assert_not_called()
+
+    def test_vendor_exec_never_ignores_foreign_image_or_snapshot_error(self):
+        with self.assertRaisesRegex(RuntimeError, "Unexpected owned exec image"):
+            self.exec_fixture(kernel_error=RuntimeError("Unexpected owned exec image"))
+        self.exec_native.native_process.assert_not_called()
+        with self.assertRaisesRegex(RuntimeError, "regressed"):
+            self.exec_fixture(images=["/usr/bin/bash", "/usr/bin/env"])
+        with self.assertRaisesRegex(RuntimeError, "deadline"):
+            self.exec_fixture(expired=True)
+        self.exec_child.terminate.assert_not_called()
+        self.exec_child.kill.assert_not_called()
+
+    def test_vendor_exec_requires_final_native_kernel_pin_and_owner(self):
+        for drift in ({"kernelImageSha256": "0" * 64}, {"executable": "/foreign/native"}, {"startTime": "999"}):
+            with self.subTest(drift=drift), self.assertRaises(RuntimeError):
+                self.exec_fixture(native_drift=drift)
 
     def test_stage_metadata_refusal_precedes_installer_download_and_tools(self):
         def mkdir(path):
@@ -490,19 +698,21 @@ class CaptureTests(unittest.TestCase):
             C.session(self.env())
         launch.assert_not_called()
 
-    def observe_fixture(self, *, bitmap_error=None, changed_before_close=False):
+    def observe_fixture(self, *, bitmap_error=None, changed_before_close=False, sandboxes=None):
         """Mocks only: no ELF, display, native imports, screenshot or input is executed."""
         (self.root / "evidence").mkdir()
         C.save(self.root / "evidence/session-attempt.json", {"attemptConsumed": True})
         env = {**self.env(), **C.environment(self.root), "DISPLAY": ":99", "DBUS_SESSION_BUS_ADDRESS": "unix:mock"}
-        staged = {"image": {"relative": "opt/unityhub/unityhub", **C.pin(b"mock")}, "sources": {"fixture": C.pin(b"source")}}
+        staged = {"image": {"relative": C.NATIVE, **{key: RETAINED_ROLES[C.NATIVE][key] for key in ("size", "sha256")},
+                  "wrapper": {"relative": C.WRAPPER, **{key: RETAINED_ROLES[C.WRAPPER][key] for key in ("size", "sha256")}}},
+                  "sources": {"fixture": C.pin(b"source")}}
         helper, native, wm, child, x11 = (mock.Mock() for _ in range(5))
         wm.poll.return_value = None
         alive = [True]
         child.pid = 123
         child.poll.side_effect = lambda: None if alive[0] else 0
         process = {"pid": 123, "parentPid": os.getpid(), "uids": [1001] * 4, "startTime": "456",
-                   "executable": str(self.root / "image/opt/unityhub/unityhub"), "kernelImageSha256": staged["image"]["sha256"]}
+                   "executable": str(self.root / "image" / C.NATIVE), "kernelImageSha256": staged["image"]["sha256"]}
         bound = {"pid": 123, "mapped": True, "client": 10, "title": "Unity Hub"}
         clients = iter([[], [100], []])
         x11.property.side_effect = lambda _window, name: (33, 32, next(clients)) if name == "_NET_CLIENT_LIST_STACKING" else (33, 32, [1])
@@ -510,9 +720,12 @@ class CaptureTests(unittest.TestCase):
         helper.X11.return_value = x11
         real_helper, _real_native = C.helpers()
         helper.Request.parse = mock.Mock(wraps=real_helper.Request.parse)
+        helper.parse_start = real_helper.parse_start
+        helper.Proc.return_value.stat.return_value = "123 (vendor) " + " ".join(["S", str(os.getpid()), *(["0"] * 17), "456"])
         helper.perform.return_value = {"actionCount": 0, "nodes": []}
         native.client_ids.side_effect = AssertionError("Nonempty-only Root helper must not gate this local desktop")
         native.native_process.return_value = process
+        native.process_uids.return_value = [1001] * 4
         native.bitmap.return_value = {"mockOnly": True}
         if bitmap_error:
             native.bitmap.side_effect = bitmap_error
@@ -521,19 +734,28 @@ class CaptureTests(unittest.TestCase):
             alive[0] = False
         x11.close_window.side_effect = close
         if changed_before_close:
-            native.native_process.side_effect = [process, process, process, {**process, "startTime": "999"}]
+            native.native_process.side_effect = [process] * 4 + [{**process, "startTime": "999"}]
         gi, repository = types.ModuleType("gi"), types.ModuleType("gi.repository")
         gi.require_version = mock.Mock()
         repository.Atspi, repository.Gdk = mock.Mock(), mock.Mock()
         gi.repository = repository
         real_file_pin = C.file_pin
         def image_pin(path, limit, wanted=None):
-            return C.pin(b"mock") if path == self.root / "image/opt/unityhub/unityhub" else real_file_pin(path, limit, wanted)
+            for role in (C.NATIVE, C.WRAPPER):
+                if path == self.root / "image" / role:
+                    value = {key: RETAINED_ROLES[role][key] for key in ("size", "sha256")}
+                    self.assertEqual(wanted, value)
+                    return value
+            return real_file_pin(path, limit, wanted)
+        sandbox = {"readOnly": True, "kernelSettings": {C.USERNS_SYSCTL: "1"}, "chromeSandbox": None}
         with mock.patch.dict(sys.modules, {"gi": gi, "gi.repository": repository}), \
                 mock.patch.object(C, "review_stage", return_value=(self.root, staged)), \
                 mock.patch.object(C, "helpers", return_value=(helper, native)), \
-                mock.patch.object(C, "sandbox_observation", return_value={"readOnly": True}), \
-                mock.patch.object(C, "system_tool"), mock.patch.object(C, "file_pin", side_effect=image_pin), \
+                mock.patch.object(C, "sandbox_observation", return_value=sandbox, side_effect=sandboxes), \
+                mock.patch.object(C, "system_tool", return_value=C.pin(b"system")), \
+                mock.patch.object(C, "kernel_exec_image", return_value=str(self.root / "image" / C.NATIVE)), \
+                mock.patch("builtins.open", mock.mock_open(read_data=os.fsencode(self.root / "image" / C.NATIVE) + b"\0")), \
+                mock.patch.object(C, "file_pin", side_effect=image_pin), \
                 mock.patch.object(C.os, "getuid", return_value=1001, create=True), \
                 mock.patch.object(C, "source_gate", return_value=staged["sources"]), \
                 mock.patch.object(C, "Drain") as output, mock.patch.object(C, "wait_exit", return_value=0), \
@@ -557,7 +779,9 @@ class CaptureTests(unittest.TestCase):
         self.assertTrue(all(type(value) is str for value in helper.Request.parse.call_args.args[0]))
         helper.perform.assert_called_once()
         x11.close_window.assert_called_once_with(100, mock.ANY)
-        self.assertEqual(launch.call_args_list[1].args[0], [str(self.root / "image/opt/unityhub/unityhub")])
+        self.assertEqual(launch.call_args_list[1].args[0], [str(self.root / "image" / C.WRAPPER)])
+        self.assertEqual(helper.Request.parse.call_args.args[0][3], str(self.root / "image" / C.NATIVE))
+        self.assertTrue(report["wrapperExec"]["nativeArgvExact"])
         x11.dispose.assert_called_once()
 
     def test_mocked_bitmap_failure_stays_failed_with_one_normal_close(self):
@@ -576,6 +800,27 @@ class CaptureTests(unittest.TestCase):
         self.assertFalse(report["normalCloseAttempted"])
         self.assertFalse(report["normalCloseObserved"])
         x11.close_window.assert_not_called()
+
+    def test_disabled_or_absent_userns_blocks_all_gui_launch(self):
+        for value in (None, "0", "2"):
+            with self.subTest(value=value):
+                sandbox = {"kernelSettings": {C.USERNS_SYSCTL: value}, "chromeSandbox": None}
+                with self.assertRaisesRegex(RuntimeError, "unprivileged_userns_clone=1"):
+                    C.require_normal_sandbox(sandbox)
+        report, failure, _helper, _x11, launch = self.observe_fixture(sandboxes=[
+            {"kernelSettings": {C.USERNS_SYSCTL: "0"}, "chromeSandbox": None}])
+        self.assertIsNotNone(failure)
+        self.assertFalse(report["candidateExecuted"])
+        launch.assert_not_called()
+
+    def test_userns_rechecked_immediately_before_wrapper_and_refusal_never_launches_hub(self):
+        report, failure, _helper, _x11, launch = self.observe_fixture(sandboxes=[
+            {"kernelSettings": {C.USERNS_SYSCTL: "1"}, "chromeSandbox": None},
+            {"kernelSettings": {C.USERNS_SYSCTL: None}, "chromeSandbox": None}])
+        self.assertIsNotNone(failure)
+        self.assertFalse(report["candidateExecuted"])
+        self.assertEqual(launch.call_count, 1)
+        self.assertEqual(launch.call_args.args[0], ["/usr/bin/openbox", "--sm-disable"])
 
     def test_missing_native_prerequisite_retains_observation_without_launch(self):
         (self.root / "evidence").mkdir()
@@ -702,7 +947,8 @@ class CaptureTests(unittest.TestCase):
         tool_check = re.search(r"for tool in ([^\n]+); do", "\n".join(commands))
         self.assertIsNotNone(tool_check)
         self.assertEqual(shlex.split(tool_check.group(1)), ["/usr/bin/python3", "/usr/bin/gpg", "/usr/bin/gpgv",
-            "/usr/bin/dpkg-deb", "/usr/bin/xauth", "/usr/bin/dbus-run-session", "/usr/bin/xvfb-run", "/usr/bin/Xvfb", "/usr/bin/openbox"])
+            "/usr/bin/dpkg-deb", "/usr/bin/xauth", "/usr/bin/dbus-run-session", "/usr/bin/xvfb-run", "/usr/bin/Xvfb", "/usr/bin/openbox",
+            "/usr/bin/env", "/usr/bin/bash", "/usr/bin/cat", "/usr/bin/dirname", "/usr/bin/readlink"])
         self.assertIn('test -x "$tool"', workflow)
         for forbidden in ("no-sandbox", "cargo ", "npm ", "contents: write", "sysctl", "chmod", "chown", "unshare", "dpkg --install"):
             self.assertNotIn(forbidden, workflow)
@@ -722,7 +968,8 @@ class CaptureTests(unittest.TestCase):
             commands.append(shlex.split(command))
         prefix = ["/usr/bin/env", "-u", "CHROME_BIN", "/usr/bin/python3", "-I", "-B", script]
         self.assertEqual(commands, [[*prefix, phase] for phase in ("admit", "prerequisites", "stage", "session")])
-        self.assertEqual(workflow.count("/usr/bin/env"), 4)
+        self.assertEqual(workflow.count("/usr/bin/env -u CHROME_BIN"), 4)
+        self.assertEqual(workflow.count("/usr/bin/env"), 5)  # Four invocations plus one fixed-tool availability check.
         self.assertIn("run: /usr/bin/python3 -I -B scripts/native-linux-unity-hub-registry-capture.test.py", workflow)
         for forbidden in ("GITHUB_ENV", "env -i", "env --ignore-environment", "unset ", "export ", "printenv", "/etc/environment"):
             self.assertNotIn(forbidden, workflow)

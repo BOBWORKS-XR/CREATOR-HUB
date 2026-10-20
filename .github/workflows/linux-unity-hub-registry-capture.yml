@@ -44,7 +44,8 @@ jobs:
           sudo apt-get install -y --no-install-recommends xvfb openbox xauth dbus-x11 python3-gi \
             gir1.2-gtk-3.0 gir1.2-atspi-2.0 at-spi2-core libx11-6 libxres1
           for tool in /usr/bin/python3 /usr/bin/gpg /usr/bin/gpgv /usr/bin/dpkg-deb /usr/bin/xauth \
-            /usr/bin/dbus-run-session /usr/bin/xvfb-run /usr/bin/Xvfb /usr/bin/openbox; do
+            /usr/bin/dbus-run-session /usr/bin/xvfb-run /usr/bin/Xvfb /usr/bin/openbox \
+            /usr/bin/env /usr/bin/bash /usr/bin/cat /usr/bin/dirname /usr/bin/readlink; do
             test -x "$tool"
           done
           /usr/bin/env -u CHROME_BIN /usr/bin/python3 -I -B scripts/native-linux-unity-hub-registry-capture.py prerequisites

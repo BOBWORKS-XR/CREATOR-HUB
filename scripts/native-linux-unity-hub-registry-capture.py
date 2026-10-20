@@ -55,9 +55,24 @@ FALSE = dict.fromkeys(("hubUiRegistrationAttempted", "hubUiFixtureAccepted", "no
                       "automaticDiscoveryAccepted", "cliBeta9CompatibilityAccepted", "accountInteractionAttempted",
                       "unityEditorAccepted", "releaseReady"), False)
 MAX_LOG, MAX_TAR, MAX_FILE, MAX_ENTRIES = 1024 * 1024, 768 * 1024 * 1024, 256 * 1024 * 1024, 20000
-SYSTEM_TOOLS = ("/usr/bin/gpg", "/usr/bin/gpgv", "/usr/bin/dpkg-deb", "/usr/bin/xauth")
+SYSTEM_TOOLS = ("/usr/bin/gpg", "/usr/bin/gpgv", "/usr/bin/dpkg-deb", "/usr/bin/xauth",
+                "/usr/bin/env", "/usr/bin/bash", "/usr/bin/cat", "/usr/bin/dirname", "/usr/bin/readlink")
 GUI_TOOLS = ("/usr/bin/dbus-run-session", "/usr/bin/xvfb-run", "/usr/bin/Xvfb", "/usr/bin/openbox")
 DISPLAY_ARGS = "-screen 0 1280x1000x24"
+USERNS_SYSCTL = "/proc/sys/kernel/unprivileged_userns_clone"
+DESKTOP, LAUNCH_LINK = "usr/share/applications/unityhub.desktop", "usr/bin/unityhub"
+WRAPPER, NATIVE = "usr/lib/unityhub/unityhub", "usr/lib/unityhub/unityhub-bin"
+# Exact roles in the signed 3.22.3 DEB, independently retained from native run 39400105010.
+LAUNCH_ROLES = {
+    DESKTOP: {"kind": "file", "mode": 0o644, "archiveUid": 0, "archiveGid": 0, "size": 275,
+              "sha256": "f841d4a8bcce4c7c6862d27b03721a828d3565182c5fc29a0a3b7a843733982b"},
+    LAUNCH_LINK: {"kind": "symlink", "mode": 0o777, "archiveUid": 0, "archiveGid": 0,
+                  "target": "../lib/unityhub/unityhub", "resolved": WRAPPER},
+    WRAPPER: {"kind": "file", "mode": 0o755, "archiveUid": 0, "archiveGid": 0, "size": 1272,
+              "sha256": "c11cdd62708d2d35b1365dbdd9df1de0014d935aaee81c94d86b42e01ce11129"},
+    NATIVE: {"kind": "file", "mode": 0o755, "archiveUid": 0, "archiveGid": 0, "size": 228605256,
+             "sha256": "4d402a71bfa797a6bcbe29e5360abfb684d18358a0e631bdc0cb4f0de879b254"},
+}
 LABELS = {"Unity Hub", "Welcome to Unity Hub", "Sign in", "Sign In", "Create account", "Create Unity ID",
           "Projects", "Add", "Add project from disk", "Install Unity Editor"}
 
@@ -451,23 +466,26 @@ def verify_extracted(directory, records):
 
 
 def launch_image(directory, records):
-    desktop = "usr/share/applications/unityhub.desktop"
-    executable = "opt/unityhub/unityhub"
-    require(records.get(desktop, {}).get("kind") == records.get(executable, {}).get("kind") == "file", "Exact Hub desktop/native roles required")
+    require(all(records.get(name) == value for name, value in LAUNCH_ROLES.items()), "Exact signed Hub 3.22.3 launch roles required")
+    require(not any(PurePosixPath(name).name == "chrome-sandbox" for name in records), "Unexpected sandbox helper in fixed vendor payload")
+    link = directory / LAUNCH_LINK
+    require(stat.S_ISLNK(link.lstat().st_mode) and os.readlink(link) == LAUNCH_ROLES[LAUNCH_LINK]["target"],
+            "Exact vendor relative launcher symlink required")
     parser = configparser.ConfigParser(interpolation=None, strict=True)
-    parser.read_string(read(directory / desktop, 16384).decode("utf8"))
+    parser.read_string(read(directory / DESKTOP, 16384, {key: LAUNCH_ROLES[DESKTOP][key] for key in ("size", "sha256")}).decode("utf8"))
     entry = parser["Desktop Entry"]
     require(entry["Name"] == "Unity Hub" and entry["Type"] == "Application", "Official Hub desktop identity differs")
-    args = shlex.split(entry["Exec"])
-    require(args and args[0] == "/" + executable and args[1:] in ([], ["%U"], ["%u"], ["%F"], ["%f"]),
-            "Only normal native Hub launch is allowed; no wrapper or sandbox flags")
-    path = directory / executable
-    value = file_pin(path, MAX_FILE, {key: records[executable][key] for key in ("size", "sha256")})
+    require(shlex.split(entry["Exec"]) == ["unityhub", "%U"], "Exact vendor desktop launch required; no URLs are supplied")
+    wrapper_pin = {key: LAUNCH_ROLES[WRAPPER][key] for key in ("size", "sha256")}
+    read(directory / WRAPPER, 16384, wrapper_pin)
+    path = directory / NATIVE
+    value = file_pin(path, MAX_FILE, {key: LAUNCH_ROLES[NATIVE][key] for key in ("size", "sha256")})
     with path.open("rb") as stream:
         head = stream.read(20)
     require(len(head) == 20 and head[:7] == b"\x7fELF\x02\x01\x01" and int.from_bytes(head[16:18], "little") in (2, 3)
-            and head[18:20] == b"\x3e\x00" and records[executable]["mode"] & 0o111, "Native x64 Hub ELF required")
-    return {"relative": executable, **value}
+            and head[18:20] == b"\x3e\x00", "Native x64 Hub ELF required")
+    file_pin(path, MAX_FILE, value)
+    return {"relative": NATIVE, **value, "wrapper": {"relative": WRAPPER, **wrapper_pin}}
 
 
 def stage(env):
@@ -580,7 +598,7 @@ def wm_client_ids(x11):
 
 def sandbox_observation(root):
     values = {}
-    for name in ("/proc/sys/kernel/unprivileged_userns_clone", "/proc/sys/user/max_user_namespaces",
+    for name in (USERNS_SYSCTL, "/proc/sys/user/max_user_namespaces",
                  "/proc/sys/kernel/apparmor_restrict_unprivileged_userns"):
         try:
             with open(name, encoding="ascii") as stream:
@@ -589,7 +607,7 @@ def sandbox_observation(root):
             values[name] = value.strip()
         except FileNotFoundError:
             values[name] = None
-    path = root / "image/opt/unityhub/chrome-sandbox"
+    path = root / "image/usr/lib/unityhub/chrome-sandbox"
     helper = None
     if os.path.lexists(path):
         info = path.lstat()
@@ -598,6 +616,74 @@ def sandbox_observation(root):
                   "rootOwned4755": info.st_uid == 0 and stat.S_IMODE(info.st_mode) == 0o4755}
     return {"readOnly": True, "kernelSettings": values, "chromeSandbox": helper,
             "userNamespaceOperationProven": False, "settingsChanged": False, "sandboxDisabled": False}
+
+
+def require_normal_sandbox(value):
+    require(value["kernelSettings"].get(USERNS_SYSCTL) == "1" and value["chromeSandbox"] is None,
+            "Vendor launch requires unprivileged_userns_clone=1 and no sandbox helper; no override allowed")
+
+
+def process_owner(child, helper, native):
+    require(child.poll() is None, "Owned wrapper/native process exited before binding")
+    proc = helper.Proc()
+    first = proc.stat(child.pid)
+    start = helper.parse_start(first, child.pid)
+    parent = int(first[first.rfind(")") + 2:].split()[1])
+    uids = native.process_uids(child.pid)
+    last = proc.stat(child.pid)
+    require(helper.parse_start(last, child.pid) == start and int(last[last.rfind(")") + 2:].split()[1]) == parent
+            and native.process_uids(child.pid) == uids and parent == os.getpid() and uids == [os.getuid()] * 4,
+            "Owned wrapper/native PID/start/parent/UID binding differs")
+    return {"pid": child.pid, "startTime": start, "parentPid": parent, "uids": uids}
+
+
+def kernel_exec_image(pid, allowed):
+    # An exec may change /proc/PID/exe while sampling; hold and verify the exact opened image instead.
+    fd = os.open(f"/proc/{pid}/exe", os.O_RDONLY | os.O_CLOEXEC)
+    try:
+        before = os.fstat(fd)
+        name = os.readlink(f"/proc/self/fd/{fd}")
+        require(name in allowed and stat.S_ISREG(before.st_mode) and before.st_nlink == 1
+                and 0 < before.st_size == allowed[name]["size"] <= MAX_FILE, "Unexpected owned exec image")
+        digest, size = hashlib.sha256(), 0
+        while block := os.read(fd, min(65536, MAX_FILE + 1 - size)):
+            size += len(block)
+            require(size <= MAX_FILE, "Owned exec image exceeds bound")
+            digest.update(block)
+        require({"size": size, "sha256": digest.hexdigest()} == allowed[name]
+                and identity(os.fstat(fd)) == identity(before), "Owned exec image bytes or FD identity differ")
+        return name
+    finally:
+        os.close(fd)
+
+
+def await_vendor_exec(child, executable, image_pin, interpreters, helper, native, output, wm_output, deadline):
+    require(set(interpreters) == {"/usr/bin/env", "/usr/bin/bash"}, "Only exact vendor shebang interpreters may precede native exec")
+    owner = process_owner(child, helper, native)
+    allowed = {**interpreters, str(executable): image_pin}
+    order = {"/usr/bin/env": 0, "/usr/bin/bash": 1, str(executable): 2}
+    seen, previous = [], -1
+    while time.monotonic() < deadline:
+        output.pump()
+        output.check()
+        wm_output.pump()
+        wm_output.check()
+        require(process_owner(child, helper, native) == owner, "Owned exec transition changed PID/start/parent/UID")
+        name = kernel_exec_image(child.pid, allowed)
+        require(process_owner(child, helper, native) == owner and order[name] >= previous, "Owned exec transition changed identity or regressed")
+        if not seen or seen[-1] != name:
+            seen.append(name)
+        previous = order[name]
+        if name == str(executable):
+            process = native.native_process(child.pid, helper)
+            require(all(process[key] == value for key, value in owner.items()) and process["executable"] == name
+                    and process["kernelImageSha256"] == image_pin["sha256"], "Exact native exec process/image binding differs")
+            with open(f"/proc/{child.pid}/cmdline", "rb") as stream:
+                argv = stream.read(8193)
+            require(argv == os.fsencode(executable) + b"\0", "Native Hub argv differs; flags, sandbox bypass and URLs refused")
+            require(native.native_process(child.pid, helper) == process, "Native process changed while checking exact argv")
+            return process, {"owner": owner, "observedImages": seen, "nativeArgvExact": True}
+    raise RuntimeError("Owned vendor exec deadline; no retry or alternate image")
 
 
 def sanitize_ax(value):
@@ -639,6 +725,7 @@ def observe(env):
         from gi.repository import Atspi, Gdk
         Gdk.init([])
         report["sandbox"] = sandbox_observation(root)
+        require_normal_sandbox(report["sandbox"])
         system_tool("/usr/bin/openbox")
         wm = subprocess.Popen(["/usr/bin/openbox", "--sm-disable"], env={**environment(root), **{
             key: env[key] for key in ("DISPLAY", "XAUTHORITY", "DBUS_SESSION_BUS_ADDRESS") if key in env}},
@@ -653,19 +740,25 @@ def observe(env):
         require(x11.property(x11.x.XDefaultRootWindow(x11.display), "_NET_SUPPORTING_WM_CHECK")
                 and not wm_client_ids(x11), "Fresh owned desktop readiness required")
         executable = root / "image" / staged["image"]["relative"]
-        file_pin(executable, MAX_FILE, {key: staged["image"][key] for key in ("size", "sha256")})
+        native_pin = {key: staged["image"][key] for key in ("size", "sha256")}
+        file_pin(executable, MAX_FILE, native_pin)
+        wrapper = root / "image" / staged["image"]["wrapper"]["relative"]
+        file_pin(wrapper, 16384, {key: staged["image"]["wrapper"][key] for key in ("size", "sha256")})
+        wrapper_tools = {path: system_tool(path) for path in ("/usr/bin/env", "/usr/bin/bash", "/usr/bin/cat", "/usr/bin/dirname", "/usr/bin/readlink")}
         gui_env = {**environment(root), **{key: env[key] for key in ("DISPLAY", "XAUTHORITY", "DBUS_SESSION_BUS_ADDRESS") if key in env}}
+        report["sandboxBeforeLaunch"] = sandbox_observation(root)
+        require_normal_sandbox(report["sandboxBeforeLaunch"])
         report["phase"] = "normal-startup"
-        child = subprocess.Popen([str(executable)], cwd=executable.parent, env=gui_env, stdin=subprocess.DEVNULL,
+        child = subprocess.Popen([str(wrapper)], cwd=wrapper.parent, env=gui_env, stdin=subprocess.DEVNULL,
                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=False, close_fds=True)
         report.update(candidateExecuted=True, pid=child.pid)
         output = Drain(child, root / "evidence", "hub")
-        process = native.native_process(child.pid, helper)
-        require(process["parentPid"] == os.getpid() and process["uids"] == [os.getuid()] * 4
-                and process["executable"] == str(executable) and process["kernelImageSha256"] == staged["image"]["sha256"],
-                "Owned signed Hub process/image required")
+        deadline = time.monotonic() + 45
+        process, report["wrapperExec"] = await_vendor_exec(child, executable, native_pin,
+            {path: wrapper_tools[path] for path in ("/usr/bin/env", "/usr/bin/bash")}, helper, native, output, wm_output, deadline)
+        require(all(system_tool(path) == value for path, value in wrapper_tools.items()), "Vendor interpreter/tools changed during launch")
         report["process"] = process
-        deadline, window = time.monotonic() + 45, None
+        window = None
         while time.monotonic() < deadline:
             output.pump()
             output.check()
