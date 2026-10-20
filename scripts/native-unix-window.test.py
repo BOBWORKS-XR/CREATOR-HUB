@@ -3,6 +3,7 @@ import contextlib
 import ctypes as C
 import importlib.util
 import io
+import json
 import os
 from pathlib import Path
 import sys
@@ -337,6 +338,73 @@ class ActionTests(unittest.TestCase):
         f[4].children = [Node(children=[Node() for _ in range(128)]) for _ in range(5)]
         with self.assertRaisesRegex(RuntimeError, "bound"):
             self.run_action(f, request("snapshot"))
+
+
+class BoundWindowDiagnosticTests(unittest.TestCase):
+    def test_original_refusal_carries_only_bounded_same_read_comparison(self):
+        for change, message in (({"title": "PRIVATE_WINDOW_TITLE"}, "Exact visible X window differs"),
+                                ({"mapped": False}, "Exact visible X window differs"),
+                                ({"pid": 999}, "XRes window is not owned by target PID"),
+                                ({"client": 0}, "Missing XRes client identity")):
+            with self.subTest(change=change):
+                x11, req = FakeX11(), request("snapshot")
+                x11.info.update(change)
+                original = RuntimeError(message)
+                def check(value, text):
+                    if not value:
+                        self.assertEqual(text, message)
+                        raise original
+                with patch.object(h, "require", side_effect=check), self.assertRaises(RuntimeError) as raised:
+                    h.bound_window(req, x11)
+                self.assertIs(raised.exception, original)
+                self.assertEqual(x11.inspections, 1)
+                self.assertIs(original._bound_window_diagnostic_origin, h._BOUND_WINDOW_DIAGNOSTIC_ORIGIN)
+                record = original.bound_window_diagnostic
+                self.assertEqual(record["expected"]["xid"], req.window)
+                self.assertEqual(record["expected"]["pid"], req.pid)
+                self.assertIsNone(record["expected"]["client"])
+                self.assertEqual(record["observed"], {"xid": req.window, "pid": x11.info["pid"],
+                                 "client": x11.info["client"], "mapped": x11.info["mapped"],
+                                 "titleSha256": h.hashlib.sha256(x11.info["title"].encode()).hexdigest()})
+                self.assertEqual(record["matches"]["title"], x11.info["title"] == req.title)
+                self.assertEqual(record["matches"]["mapped"], x11.info["mapped"] is True)
+                self.assertIsNone(record["matches"]["client"])
+                self.assertEqual(record["clientPositive"], x11.info["client"] > 0)
+                self.assertNotIn(x11.info["title"], json.dumps(record))
+                self.assertLess(len(json.dumps(record)), 2048)
+
+    def test_success_returns_original_window_without_additional_reads(self):
+        x11 = FakeX11()
+        self.assertEqual(h.bound_window(request("snapshot"), x11), x11.info)
+        self.assertEqual(x11.inspections, 1)
+
+    def test_diagnostic_failure_never_replaces_original_refusal_or_requeries(self):
+        x11 = FakeX11()
+        x11.info["title"] = "wrong"
+        with patch.object(h, "window_comparison", side_effect=ValueError("PRIVATE_DIAGNOSTIC_FAILURE")), \
+                self.assertRaisesRegex(RuntimeError, "^Exact visible X window differs$") as raised:
+            h.bound_window(request("snapshot"), x11)
+        self.assertEqual(x11.inspections, 1)
+        self.assertFalse(hasattr(raised.exception, "bound_window_diagnostic"))
+        self.assertFalse(hasattr(raised.exception, "_bound_window_diagnostic_origin"))
+
+    def test_malformed_diagnostic_data_still_refuses_without_attachment(self):
+        for title in ("x" * 257, 17):
+            with self.subTest(title_type=type(title).__name__):
+                x11 = FakeX11()
+                x11.info["title"] = title
+                with self.assertRaisesRegex(RuntimeError, "^Exact visible X window differs$") as raised:
+                    h.bound_window(request("snapshot"), x11)
+                self.assertEqual(x11.inspections, 1)
+                self.assertFalse(hasattr(raised.exception, "bound_window_diagnostic"))
+
+    def test_comparison_binds_known_client_and_drops_unrelated_fields(self):
+        expected = FakeX11().info
+        observed = {**expected, "client": 999, "privateExtra": "PRIVATE_EXTRA"}
+        record = h.window_comparison(456, expected, observed)
+        self.assertFalse(record["matches"]["client"])
+        self.assertEqual(record["expected"]["client"], 789)
+        self.assertNotIn("PRIVATE_EXTRA", json.dumps(record))
 
 
 class XResTests(unittest.TestCase):

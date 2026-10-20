@@ -749,6 +749,22 @@ def frame_metrics(pixels, width, height, stride, channels):
             "pixelsDifferentFromFirst": changed, "nonblank": len(colors) >= 16 and high - low >= 32 and changed >= 100}
 
 
+def capture_bound_window(request, helper, x11, phase, expected=None):
+    try:
+        return helper.bound_window(request, x11)
+    except RuntimeError as error:
+        try:
+            origin = getattr(helper, "_BOUND_WINDOW_DIAGNOSTIC_ORIGIN", None)
+            if origin is not None and getattr(error, "_bound_window_diagnostic_origin", None) is origin:
+                record = {"phase": phase, "comparison": error.bound_window_diagnostic}
+                if expected is not None:
+                    record["captureExpected"] = helper.window_comparison(request.window, expected, expected)["expected"]
+                error.hub_frame_refusal = record
+        except Exception:
+            pass  # Optional metadata cannot replace the original refusal or authorize another read.
+        raise
+
+
 def owned_frame(request, helper, native, x11):
     import gi
     gi.require_version("Gdk", "3.0")
@@ -756,7 +772,7 @@ def owned_frame(request, helper, native, x11):
     from gi.repository import Gdk, GdkX11
     proc = helper.Proc()
     helper.identity(request, proc)
-    bound = helper.bound_window(request, x11)
+    bound = capture_bound_window(request, helper, x11, "before-drawable-copy")
     rectangle = native.visible_rectangle(request, helper, x11)
     display = Gdk.Display.get_default()
     require(display is not None, "GDK X11 display unavailable")
@@ -768,13 +784,15 @@ def owned_frame(request, helper, native, x11):
             and pixbuf.get_bits_per_sample() == 8, "Owned drawable copy failed")
     metrics = frame_metrics(pixbuf.get_pixels(), pixbuf.get_width(), pixbuf.get_height(), pixbuf.get_rowstride(), pixbuf.get_n_channels())
     helper.identity(request, proc)
-    require(helper.bound_window(request, x11) == bound and native.visible_rectangle(request, helper, x11) == rectangle,
+    require(capture_bound_window(request, helper, x11, "after-pixel-metrics", bound) == bound
+            and native.visible_rectangle(request, helper, x11) == rectangle,
             "Owned drawable changed during capture")
     ok, raw = pixbuf.save_to_bufferv("png", [], [])
     raw = bytes(raw)
     require(ok and 0 < len(raw) <= MAX_PNG and raw[:8] == b"\x89PNG\r\n\x1a\n", "Bounded PNG encoding failed")
     helper.identity(request, proc)
-    require(helper.bound_window(request, x11) == bound and native.visible_rectangle(request, helper, x11) == rectangle,
+    require(capture_bound_window(request, helper, x11, "after-png-encoding", bound) == bound
+            and native.visible_rectangle(request, helper, x11) == rectangle,
             "Owned XRes identity/geometry changed before PNG retention")
     return raw, {"diagnosticOnly": True, "windowOnly": True, "xid": request.window, "xres": bound,
                  "rectangle": rectangle, **metrics}
@@ -820,7 +838,14 @@ def observe_render(request, helper, native, atspi, x11, root, deadline, guard, o
             wm_output.pump()
             wm_output.check()
             guard()
-            raw, metadata = owned_frame(request, helper, native, x11)
+            try:
+                raw, metadata = owned_frame(request, helper, native, x11)
+            except RuntimeError as error:
+                origin = getattr(helper, "_BOUND_WINDOW_DIAGNOSTIC_ORIGIN", None)
+                if origin is not None and getattr(error, "_bound_window_diagnostic_origin", None) is origin \
+                        and hasattr(error, "hub_frame_refusal"):
+                    report["windowRefusal"] = {**error.hub_frame_refusal, "sampleAttempt": progress["sampleCount"] + 1}
+                raise
             guard()
             latest = raw, metadata
             progress["sampleCount"] += 1
@@ -924,7 +949,18 @@ def observe(env):
     finally:
         try:
             if request is not None and child.poll() is None:
-                require(native.native_process(child.pid, helper) == process and x11.inspect(request.window) == bound,
+                close_guard = {"processEqual": None, "windowReadAttempted": False, "windowEqual": None}
+                report["normalCloseGuard"] = close_guard
+                close_guard["processEqual"] = native.native_process(child.pid, helper) == process
+                if close_guard["processEqual"]:
+                    close_guard["windowReadAttempted"] = True
+                    current_window = x11.inspect(request.window)
+                    close_guard["windowEqual"] = current_window == bound
+                    try:
+                        close_guard["windowComparison"] = helper.window_comparison(request.window, bound, current_window)
+                    except Exception:
+                        pass  # Keep the same close decision if its optional summary cannot be retained.
+                require(close_guard["processEqual"] and close_guard["windowEqual"],
                         "Owned normal-close guard changed; no close attempted")
                 x11.check_close(request.window)
                 write_new(root / "evidence/normal-close-intent.json", json.dumps({"pid": child.pid,

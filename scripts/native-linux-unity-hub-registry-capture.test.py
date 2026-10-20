@@ -729,9 +729,9 @@ class CaptureTests(unittest.TestCase):
                     with self.assertRaises(RuntimeError):
                         native.pixel_metrics(pixels, 16, 16, 48, 3)
 
-    def frame_fixture(self, *, blank=False, drift=None, capture_error=False):
+    def frame_fixture(self, *, blank=False, drift=None, capture_error=False, real_window_change=None, real_window_stage=2):
         helper, native, x11, pixbuf, window, gdk, gdkx11 = (mock.Mock() for _ in range(7))
-        request = types.SimpleNamespace(window=100)
+        request = types.SimpleNamespace(window=100, pid=123, title="Unity Hub", gtk_message_info_frame=None)
         bound = {"pid": 123, "client": 10, "title": "Unity Hub", "mapped": True}
         rectangle = (0, 0, 16, 16)
         helper.bound_window.return_value = bound
@@ -744,6 +744,12 @@ class CaptureTests(unittest.TestCase):
             helper.bound_window.side_effect = [bound, bound, {**bound, "pid": 999}]
         if drift == "post-encoding-geometry":
             native.visible_rectangle.side_effect = [rectangle, rectangle, (1, 0, 16, 16)]
+        if real_window_change is not None:
+            actual, _ = C.helpers()
+            helper.bound_window = actual.bound_window
+            helper.window_comparison = actual.window_comparison
+            helper._BOUND_WINDOW_DIAGNOSTIC_ORIGIN = actual._BOUND_WINDOW_DIAGNOSTIC_ORIGIN
+            x11.inspect.side_effect = [bound] * real_window_stage + [{**bound, **real_window_change}]
         window.get_xid.return_value, window.get_scale_factor.return_value = 100, 1
         gdkx11.X11Window.foreign_new_for_display.return_value = window
         gdk.pixbuf_get_from_window.return_value = None if capture_error else pixbuf
@@ -755,7 +761,7 @@ class CaptureTests(unittest.TestCase):
         gi.require_version = mock.Mock()
         repository.Gdk, repository.GdkX11 = gdk, gdkx11
         gi.repository = repository
-        self.frame_helper, self.frame_pixbuf = helper, pixbuf
+        self.frame_helper, self.frame_pixbuf, self.frame_x11 = helper, pixbuf, x11
         with mock.patch.dict(sys.modules, {"gi": gi, "gi.repository": repository}):
             return C.owned_frame(request, helper, native, x11)
 
@@ -776,12 +782,62 @@ class CaptureTests(unittest.TestCase):
             else:
                 self.frame_pixbuf.save_to_bufferv.assert_not_called()
 
-    def render_fixture(self, samples, *, clock=None, ax=None, guard_error_at=None):
+    def test_same_read_window_refusal_marks_exact_capture_phase(self):
+        for stage, phase in enumerate(("before-drawable-copy", "after-pixel-metrics", "after-png-encoding")):
+            with self.subTest(phase=phase), self.assertRaisesRegex(RuntimeError, "^Exact visible X window differs$") as raised:
+                self.frame_fixture(real_window_change={"mapped": False}, real_window_stage=stage)
+            self.assertEqual(raised.exception.hub_frame_refusal["phase"], phase)
+            self.assertEqual(self.frame_x11.inspect.call_count, stage + 1)
+            self.assertEqual(self.frame_pixbuf.save_to_bufferv.call_count, int(stage == 2))
+
+    def test_post_png_title_and_mapping_refusals_retain_second_attempt_without_requery(self):
+        for change in ({"title": "PRIVATE_WINDOW_TRANSITION"}, {"mapped": False}):
+            with self.subTest(change=change), self.assertRaisesRegex(RuntimeError, "^Exact visible X window differs$") as raised:
+                self.frame_fixture(real_window_change=change)
+            error, helper = raised.exception, self.frame_helper
+            self.frame_pixbuf.save_to_bufferv.assert_called_once()
+            self.assertEqual(self.frame_x11.inspect.call_count, 3)
+            report, failure, frames, _guard, helper, root = self.render_fixture([False, error], helper=helper,
+                ax=[RuntimeError("Owned accessibility application is missing or ambiguous")])
+            self.assertIs(failure, error)
+            retained = report["windowRefusal"]
+            self.assertEqual(retained["phase"], "after-png-encoding")
+            self.assertEqual(retained["sampleAttempt"], 2)
+            self.assertEqual(retained["captureExpected"]["client"], 10)
+            comparison = retained["comparison"]
+            self.assertEqual(comparison["observed"]["xid"], 100)
+            self.assertEqual(comparison["observed"]["pid"], 123)
+            self.assertEqual(comparison["observed"]["client"], 10)
+            self.assertEqual(comparison["matches"]["title"], "title" not in change)
+            self.assertEqual(comparison["matches"]["mapped"], "mapped" not in change)
+            self.assertEqual(retained["captureExpected"]["titleSha256"], C.pin(b"Unity Hub")["sha256"])
+            self.assertEqual(frames.call_count, 2)
+            self.assertEqual(self.frame_x11.inspect.call_count, 3)
+            helper.perform.assert_called_once()
+            self.assertEqual(report["renderReadiness"]["sampleCount"], 1)
+            self.assertFalse(report["renderReadiness"]["last"]["nonblank"])
+            self.assertEqual(report["renderReadiness"]["first"]["image"], report["renderReadiness"]["last"]["image"])
+            self.assertNotIn("surface", report)
+            self.assertNotIn("axFinal", report)
+            self.assertTrue(all(report[name] is False for name in C.FALSE))
+            self.assertNotIn("PRIVATE_WINDOW_TRANSITION", json.dumps(report) + str(failure))
+
+    def test_foreign_exception_metadata_is_not_retained_as_owned_window_diagnostic(self):
+        error = RuntimeError("Exact visible X window differs")
+        error.hub_frame_refusal = {"phase": "PRIVATE_FORGED_DIAGNOSTIC"}
+        report, failure, frames, _guard, _helper, _root = self.render_fixture([False, error])
+        self.assertIs(failure, error)
+        self.assertEqual(frames.call_count, 2)
+        self.assertNotIn("windowRefusal", report)
+        self.assertNotIn("PRIVATE_FORGED_DIAGNOSTIC", json.dumps(report))
+
+    def render_fixture(self, samples, *, clock=None, ax=None, guard_error_at=None, helper=None):
         index = getattr(self, "render_index", 0) + 1
         self.render_index = index
         root = self.root / ("render-" + str(index))
         (root / "evidence").mkdir(parents=True)
-        helper, native, atspi, x11, output, wm_output, guard = (mock.Mock() for _ in range(7))
+        helper = helper if helper is not None else mock.Mock()
+        native, atspi, x11, output, wm_output, guard = (mock.Mock() for _ in range(6))
         helper.perform.side_effect = ax if ax is not None else [{"nodes": [], "actionCount": 0}] * 2
         if guard_error_at is not None:
             guard.side_effect = [None] * (guard_error_at - 1) + [RuntimeError("Owned identity/window changed")]
@@ -938,7 +994,8 @@ class CaptureTests(unittest.TestCase):
         launch.assert_not_called()
 
     def observe_fixture(self, *, bitmap_error=None, changed_before_close=False, sandboxes=None,
-                        prelaunch_property=(33, 32, []), close_timeout=False, close_alive=False):
+                        prelaunch_property=(33, 32, []), close_timeout=False, close_alive=False,
+                        changed_window_before_close=None, close_process_error=None):
         """Mocks only: no ELF, display, native imports, screenshot or input is executed."""
         (self.root / "evidence").mkdir()
         C.save(self.root / "evidence/session-attempt.json", {"attemptConsumed": True})
@@ -959,6 +1016,7 @@ class CaptureTests(unittest.TestCase):
         x11.inspect.return_value = bound
         helper.X11.return_value = x11
         real_helper, _real_native = C.helpers()
+        helper.window_comparison = real_helper.window_comparison
         helper.Request.parse = mock.Mock(wraps=real_helper.Request.parse)
         helper.parse_start = real_helper.parse_start
         helper.Proc.return_value.stat.return_value = "123 (vendor) " + " ".join(["S", str(os.getpid()), *(["0"] * 17), "456"])
@@ -972,8 +1030,18 @@ class CaptureTests(unittest.TestCase):
             alive[0] = close_alive
         x11.close_window.side_effect = close
         finished = [False]
-        if changed_before_close:
-            native.native_process.side_effect = lambda *_args: {**process, "startTime": "999"} if finished[0] else process
+        self.close_guard_window_reads = 0
+        def inspect(_window):
+            if finished[0]:
+                self.close_guard_window_reads += 1
+                return {**bound, **(changed_window_before_close or {})}
+            return bound
+        x11.inspect.side_effect = inspect
+        def current_process(*_args):
+            if finished[0] and close_process_error is not None:
+                raise close_process_error
+            return {**process, "startTime": "999"} if finished[0] and changed_before_close else process
+        native.native_process.side_effect = current_process
         gi, repository = types.ModuleType("gi"), types.ModuleType("gi.repository")
         gi.require_version = mock.Mock()
         repository.Atspi, repository.Gdk = mock.Mock(), mock.Mock()
@@ -1029,6 +1097,8 @@ class CaptureTests(unittest.TestCase):
         self.assertEqual(launch.call_args_list[1].args[0], [str(self.root / "image" / C.WRAPPER)])
         self.assertEqual(helper.Request.parse.call_args.args[0][3], str(self.root / "image" / C.NATIVE))
         self.assertTrue(report["wrapperExec"]["nativeArgvExact"])
+        self.assertTrue(report["normalCloseGuard"]["processEqual"])
+        self.assertTrue(report["normalCloseGuard"]["windowEqual"])
         x11.dispose.assert_called_once()
 
     def test_mocked_bitmap_failure_stays_failed_with_one_normal_close(self):
@@ -1099,6 +1169,46 @@ class CaptureTests(unittest.TestCase):
         self.assertIn("guard changed", report["teardownRefusal"])
         self.assertFalse(report["normalCloseAttempted"])
         self.assertFalse(report["normalCloseObserved"])
+        x11.close_window.assert_not_called()
+        self.assertEqual(report["normalCloseGuard"], {"processEqual": False, "windowReadAttempted": False, "windowEqual": None})
+        self.assertEqual(self.close_guard_window_reads, 0)
+
+    def test_close_window_mismatch_retains_original_comparison_without_input_or_requery(self):
+        report, failure, _helper, x11, _launch = self.observe_fixture(changed_window_before_close={"title": "PRIVATE_CLOSE_TITLE"})
+        self.assertIsNotNone(failure)
+        self.assertIn("guard changed", report["teardownRefusal"])
+        guard = report["normalCloseGuard"]
+        self.assertTrue(guard["processEqual"])
+        self.assertTrue(guard["windowReadAttempted"])
+        self.assertFalse(guard["windowEqual"])
+        self.assertFalse(guard["windowComparison"]["matches"]["title"])
+        self.assertEqual(guard["windowComparison"]["observed"]["titleSha256"], C.pin(b"PRIVATE_CLOSE_TITLE")["sha256"])
+        self.assertEqual(guard["windowComparison"]["expected"]["client"], 10)
+        self.assertNotIn("PRIVATE_CLOSE_TITLE", json.dumps(report))
+        self.assertEqual(self.close_guard_window_reads, 1)
+        self.assertFalse(report["normalCloseAttempted"])
+        self.assertFalse((self.root / "evidence/normal-close-intent.json").exists())
+        x11.close_window.assert_not_called()
+
+    def test_close_process_read_failure_leaves_both_comparisons_unknown_and_skips_window(self):
+        report, failure, _helper, x11, _launch = self.observe_fixture(close_process_error=RuntimeError("Synthetic process read refused"))
+        self.assertIsNotNone(failure)
+        self.assertEqual(report["normalCloseGuard"], {"processEqual": None, "windowReadAttempted": False, "windowEqual": None})
+        self.assertEqual(self.close_guard_window_reads, 0)
+        x11.close_window.assert_not_called()
+
+    def test_close_diagnostic_failure_preserves_original_refusal_and_single_window_read(self):
+        helpers = C.helpers
+        def diagnostic_failure():
+            actual, native = helpers()
+            actual.window_comparison = mock.Mock(side_effect=ValueError("PRIVATE_DIAGNOSTIC_FAILURE"))
+            return actual, native
+        with mock.patch.object(C, "helpers", side_effect=diagnostic_failure):
+            report, failure, _helper, x11, _launch = self.observe_fixture(changed_window_before_close={"mapped": False})
+        self.assertEqual(str(failure), "Owned normal-close guard changed; no close attempted")
+        self.assertEqual(report["normalCloseGuard"], {"processEqual": True, "windowReadAttempted": True, "windowEqual": False})
+        self.assertNotIn("PRIVATE_DIAGNOSTIC_FAILURE", json.dumps(report))
+        self.assertEqual(self.close_guard_window_reads, 1)
         x11.close_window.assert_not_called()
 
     def test_missing_prelaunch_property_is_retained_in_mocked_observation(self):

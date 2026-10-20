@@ -14,6 +14,7 @@ MAX_NODES, MAX_CHILDREN, MAX_DEPTH = 512, 128, 32
 REQUIRED_SEALS = 0x0f
 # Diagnostic producer identity only; this never authorizes a window or action.
 _VISIBILITY_DIAGNOSTIC_ORIGIN = object()
+_BOUND_WINDOW_DIAGNOSTIC_ORIGIN = object()
 ROOT_CLOSE_TITLE = "Close hosted app?"
 ROOT_CLOSE_BODY = ("Close this hosted app view? Unsaved form entries in this view will be discarded. "
                    "Project files and the standalone app are unchanged.")
@@ -509,11 +510,41 @@ def button(request, nodes, atspi):
     return node, interface
 
 
+def window_comparison(window, expected, observed):
+    """Diagnostic-only summaries of already-read values; never queries or authorizes X11."""
+    require(type(window) is int and 0 < window < 2**32, "Diagnostic XID exceeds bound")
+    def summary(info, unbound_client=False):
+        require(type(info) is dict and type(info.get("pid")) is int and 1 < info["pid"] < 2**31
+                and (unbound_client and info.get("client") is None or
+                     type(info.get("client")) is int and 0 <= info["client"] < 2**32)
+                and type(info.get("mapped")) is bool and type(info.get("title")) is str
+                and len(info["title"].encode("utf8")) <= 256, "Window diagnostic exceeds bound")
+        return {"xid": window, "pid": info["pid"], "client": info["client"], "mapped": info["mapped"],
+                "titleSha256": hashlib.sha256(info["title"].encode("utf8")).hexdigest()}
+    before, after = summary(expected, True), summary(observed)
+    return {"diagnosticOnly": True, "expected": before, "observed": after,
+            "matches": {"xid": True, "pid": before["pid"] == after["pid"],
+                        "client": None if before["client"] is None else before["client"] == after["client"],
+                        "mapped": before["mapped"] == after["mapped"],
+                        "title": before["titleSha256"] == after["titleSha256"]},
+            "clientPositive": after["client"] > 0}
+
+
 def bound_window(request, x11):
     info = x11.inspect(request.window)
-    require(info["pid"] == request.pid, "XRes window is not owned by target PID")
-    require(info["title"] == request.title and info["mapped"], "Exact visible X window differs")
-    require(info["client"] > 0, "Missing XRes client identity")
+    try:
+        require(info["pid"] == request.pid, "XRes window is not owned by target PID")
+        require(info["title"] == request.title and info["mapped"], "Exact visible X window differs")
+        require(info["client"] > 0, "Missing XRes client identity")
+    except RuntimeError as error:
+        try:
+            # The request binds no exact client ID; a later capture can retain its known client separately.
+            error.bound_window_diagnostic = window_comparison(request.window,
+                {"pid": request.pid, "client": None, "title": request.title, "mapped": True}, info)
+            error._bound_window_diagnostic_origin = _BOUND_WINDOW_DIAGNOSTIC_ORIGIN
+        except Exception:
+            pass  # Preserve the original refusal even when its optional diagnostic is unavailable.
+        raise
     if request.gtk_message_info_frame is not None:
         require(x11.frame_rectangle(request.window) == request.gtk_message_info_frame, "Native dialog frame changed")
     return info
