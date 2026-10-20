@@ -235,32 +235,136 @@ def sender_snapshot(name, original, client, read, peer, redact, *, budget, diagn
         return dict(qualified=False, inputPermitted=False, stable=False, correlatesToOriginalPopen=False, unavailable='OutputLimit')
 
 
+def lineage_row(row):
+    """Metadata from an existing read only; arbitrary paths, keys and strings are omitted."""
+    def kind(value):
+        return type(value).__name__ if type(value) in (dict, list, tuple, str, int, bool, type(None)) else 'other'
+    def number(value):
+        return type(value) is int and 0 <= value < 2**64 or type(value) is str and re.fullmatch(r'[0-9]{1,20}', value) is not None
+    value = {'type': kind(row)}
+    if type(row) is not dict:
+        return value
+    fields = ('pid', 'parentPid', 'startTime', 'uids', 'executable', 'image', 'kernelImageSha256')
+    value.update(fieldTypes={key: kind(row[key]) for key in fields if key in row},
+                 missingFields=[key for key in fields if key not in row], extraFieldCount=len(set(row) - set(fields)))
+    for key in ('pid', 'parentPid', 'startTime'):
+        if number(row.get(key)):
+            value[key] = row[key]
+    if type(row.get('uids')) in (list, tuple):
+        value['uidCount'] = len(row['uids'])
+        if len(row['uids']) <= 4 and all(type(uid) is int and 0 <= uid < 2**31 for uid in row['uids']):
+            value['uids'] = list(row['uids'])
+    if row.get('executable') in ('/usr/bin/flatpak', '/usr/bin/bwrap', '/usr/libexec/flatpak-bwrap',
+                                 '/usr/bin/xdg-dbus-proxy', '/app/bin/creator-hub-flatpak-activate'):
+        value['executable'] = row['executable']
+    if type(row.get('kernelImageSha256')) is str and re.fullmatch(r'[a-f0-9]{64}', row['kernelImageSha256']):
+        value['kernelImageSha256'] = row['kernelImageSha256']
+    image = row.get('image')
+    if type(image) is dict:
+        keys = ('st_dev', 'st_ino', 'st_size', 'st_mode', 'st_uid', 'st_gid', 'st_mtime_ns', 'st_ctime_ns')
+        value.update(image={key: image[key] for key in keys if key in image and number(image[key])},
+            imageTypes={key: kind(image[key]) for key in keys if key in image},
+            missingImageFields=[key for key in keys if key not in image], extraImageFieldCount=len(set(image) - set(keys)))
+    return value
+
+
+def lineage_inputs(original, client, tree):
+    value = dict(readOnly=True, inputPermitted=False, authorityGranted=False, releaseReady=False,
+                 expectedOriginal=lineage_row(original), expectedClient=lineage_row(client),
+                 treeType=type(tree).__name__ if type(tree) in (dict, list, tuple, str, int, bool, type(None)) else 'other', tree=[])
+    if type(tree) is dict:
+        value['treeCount'] = len(tree)
+        value['candidateCount'] = sum(row.get('executable') == '/usr/bin/xdg-dbus-proxy'
+            for row in tree.values() if type(row) is dict) if len(tree) <= 64 else None
+        for key, row in tree.items():
+            if len(value['tree']) == 16:
+                break
+            entry = {'record': lineage_row(row)}
+            if type(key) is int and 0 <= key < 2**31:
+                entry['treeKey'] = key
+            value['tree'].append(entry)
+        value['treeTruncated'] = len(value['tree']) < len(tree)
+    # Reserve space for the failing read and image operands inside the existing receipt bound.
+    while len(json.dumps(value, ensure_ascii=True).encode()) > 12288 and value['tree']:
+        value['tree'].pop(); value['treeTruncated'] = True
+    return bounded(value, 14336)
+
+
 class OwnedLineage:
     """Seal live ancestry before input; never infer a later ancestor's exit from /proc errors."""
-    def __init__(self, original, client, tree, read, redact, *, image_open, system_image, pidfds, guard, budget):
+    def __init__(self, original, client, tree, read, redact, *, image_open, system_image, pidfds, guard, budget,
+                 diagnostic=None, diagnostic_state=None):
         self.original, self.client, self.tree = copy.deepcopy(original), copy.deepcopy(client), copy.deepcopy(tree)
         self.read, self.redact, self.pidfds, self.guard, self.budget = read, redact, pidfds, guard, budget
         self.system, self.rows, self.held, self.fds, self.chains = system_image, {}, {}, {}, {}
         self.started, self.used, self.closed = False, False, False
         self.lock = threading.RLock()
+        self.diagnostic, self.diagnostic_state = diagnostic, diagnostic_state
+        self.stage, self.stage_pid, self.last_row, self.last_image = 'tree-shape', None, None, None
         try:
             require(type(tree) is dict and 0 < len(tree) <= 64
                     and all(type(pid) is int and type(row) is dict and row.get('pid') == pid for pid, row in tree.items()))
-            self.validate(original); self.validate(client)
+            self.checkpoint('expected-original-validation'); self.validate(original)
+            self.checkpoint('expected-client-validation'); self.validate(client)
+            self.checkpoint('expected-process-match')
             require(original['executable'] == '/usr/bin/bwrap' and client['executable'] == '/app/bin/creator-hub-flatpak-activate'
                     and original['uids'] == client['uids'] and original['pid'] != client['pid'])
-            self.guard(); self.budget()
+            self.checkpoint('initial-owned-launch-guard'); self.guard()
+            self.checkpoint('initial-budget'); self.budget()
             candidates = [pid for pid, row in tree.items() if row.get('executable') == '/usr/bin/xdg-dbus-proxy']
+            self.checkpoint('candidate-count')
             require(0 < len(candidates) <= 4)
             self.client_chain = self.walk(client['pid'], image_open)
+            self.checkpoint('expected-full-record-match')
             require(self.rows[client['pid']] == client and self.rows[original['pid']] == original)
             for pid in candidates:
                 self.chains[pid] = self.walk(pid, image_open)
-                require((self.rows[pid]['image'], self.rows[pid]['kernelImageSha256']) == self.system.snapshot())
+                self.checkpoint('candidate-system-image-read', pid)
+                observed = self.system.snapshot()
+                self.last_image = self.stage, observed
+                self.checkpoint('candidate-system-image-match', pid)
+                require((self.rows[pid]['image'], self.rows[pid]['kernelImageSha256']) == observed)
             self.verify_live()
-        except Exception:
+        except Exception as error:
+            self.capture_failure(error)
             self.close()
             raise
+
+    def checkpoint(self, stage, pid=None):
+        self.stage, self.stage_pid = stage, pid
+
+    def capture_failure(self, error):
+        if type(self.diagnostic) is not dict:
+            return
+        try:
+            value = lineage_inputs(self.original, self.client, self.tree)
+            value.update(failureStage=self.stage, failureType=type(error).__name__ if type(error) in (
+                ValueError, KeyError, TypeError, RuntimeError, PermissionError, FileNotFoundError, ProcessLookupError, OSError) else 'OtherError')
+            if self.stage_pid is not None:
+                value['failurePid'] = self.stage_pid
+                if self.stage_pid in self.rows:
+                    value['expectedRowAtFailure'] = lineage_row(self.rows[self.stage_pid])
+            if self.last_row is not None:
+                value['currentRowAt'], row = self.last_row
+                value['currentRow'] = lineage_row(row)
+                if type(row) is dict and type(row.get('pid')) is int and row['pid'] in self.tree:
+                    value['treeRowForCurrent'] = lineage_row(self.tree[row['pid']])
+            if self.last_image is not None:
+                value['observedImageAt'], image = self.last_image
+                if type(image) is tuple and len(image) == 2:
+                    value['observedImage'] = lineage_row(dict(image=image[0], kernelImageSha256=image[1]))
+            if self.diagnostic_state is not None:
+                try:
+                    state = self.diagnostic_state()
+                    if type(state) is dict and set(state) == {'closed', 'stopRequested', 'deadlineExceeded', 'cancelled'} \
+                            and all(type(v) is bool for v in state.values()):
+                        value['stateAtFailure'] = state
+                except Exception:
+                    value['stateCaptureUnavailable'] = True
+            self.diagnostic.update(bounded(value, 16384))
+        except Exception:
+            self.diagnostic.update(readOnly=True, inputPermitted=False, authorityGranted=False, releaseReady=False,
+                                   failureStage=self.stage, captureUnavailable=True)
 
     @staticmethod
     def validate(row):
@@ -281,48 +385,88 @@ class OwnedLineage:
     def walk(self, pid, image_open):
         chain = []
         for _ in range(MAX_ANCESTORS):
+            self.checkpoint('walk.budget', pid)
             self.budget()
+            self.checkpoint('walk.membership', pid)
             require(pid in self.tree and pid not in chain)
             if pid not in self.rows:
+                self.checkpoint('walk.retained-node-limit', pid)
                 require(len(self.rows) < 16)
+                self.checkpoint('walk.pidfd-open', pid)
                 fd = self.pidfds.open(pid)
                 self.fds[pid] = fd
+                self.checkpoint('walk.image-open', pid)
                 held = image_open(pid)
                 self.held[pid] = held
+                self.checkpoint('walk.full-read', pid)
                 row = self.read(pid, True)
+                self.last_row = self.stage, row
+                self.checkpoint('walk.row-validation', pid)
                 self.validate(row)
+                self.checkpoint('walk.row-match', pid)
                 require(row['pid'] == pid and row['uids'] == self.original['uids']
-                        and {k: v for k, v in row.items() if k != 'kernelImageSha256'} == self.tree[pid]
-                        and not self.pidfds.ready(fd)
-                        and held.snapshot() == (row['image'], row['kernelImageSha256'])
-                        and self.read(pid, True) == row and not self.pidfds.ready(fd))
+                        and {k: v for k, v in row.items() if k != 'kernelImageSha256'} == self.tree[pid])
+                self.checkpoint('walk.pidfd-live', pid); require(not self.pidfds.ready(fd))
+                self.checkpoint('walk.held-image-read', pid)
+                observed = held.snapshot()
+                self.last_image = self.stage, observed
+                self.checkpoint('walk.held-image-match', pid)
+                require(observed == (row['image'], row['kernelImageSha256']))
+                self.checkpoint('walk.full-recheck', pid)
+                current = self.read(pid, True)
+                self.last_row = self.stage, current
+                require(current == row)
+                self.checkpoint('walk.pidfd-recheck', pid); require(not self.pidfds.ready(fd))
                 self.rows[pid] = copy.deepcopy(row)
             row = self.rows[pid]
             chain.append(pid)
             if pid == self.original['pid']:
+                self.checkpoint('walk.original-match', pid)
                 require(row == self.original)
                 return chain
             parent = row['parentPid']
+            self.checkpoint('walk.parent-order', pid)
             require(parent in self.tree and int(self.tree[parent]['startTime']) <= int(row['startTime']))
             pid = parent
+        self.checkpoint('walk.ancestor-limit', pid)
         raise ValueError('Finite pre-input ancestry exceeded')
 
     def verify_live(self):
+        self.checkpoint('verify.preconditions')
         require(not self.closed and not self.started)
+        self.checkpoint('verify.owned-launch-guard')
         self.guard()
         for pid, row in self.rows.items():
+            self.checkpoint('verify.budget', pid)
             self.budget()
-            require(not self.pidfds.ready(self.fds[pid]) and self.read(pid, True) == row
-                    and self.held[pid].snapshot() == (row['image'], row['kernelImageSha256'])
-                    and self.read(pid, True) == row and not self.pidfds.ready(self.fds[pid]))
+            self.checkpoint('verify.pidfd-live', pid); require(not self.pidfds.ready(self.fds[pid]))
+            self.checkpoint('verify.full-read', pid)
+            current = self.read(pid, True); self.last_row = self.stage, current
+            require(current == row)
+            self.checkpoint('verify.held-image-read', pid)
+            observed = self.held[pid].snapshot(); self.last_image = self.stage, observed
+            self.checkpoint('verify.held-image-match', pid)
+            require(observed == (row['image'], row['kernelImageSha256']))
+            self.checkpoint('verify.full-recheck', pid)
+            current = self.read(pid, True); self.last_row = self.stage, current
+            require(current == row)
+            self.checkpoint('verify.pidfd-recheck', pid); require(not self.pidfds.ready(self.fds[pid]))
         for pid in self.chains:
-            require(self.system.snapshot() == (self.rows[pid]['image'], self.rows[pid]['kernelImageSha256']))
-        self.guard(); self.budget()
+            self.checkpoint('verify.system-image-read', pid)
+            observed = self.system.snapshot(); self.last_image = self.stage, observed
+            self.checkpoint('verify.system-image-match', pid)
+            require(observed == (self.rows[pid]['image'], self.rows[pid]['kernelImageSha256']))
+        self.checkpoint('verify.final-owned-launch-guard'); self.guard()
+        self.checkpoint('verify.final-budget'); self.budget()
 
     def begin_input(self):
         with self.lock:
-            self.verify_live()
-            self.started = True
+            try:
+                self.verify_live()
+                self.started = True
+            except Exception as error:
+                self.capture_failure(error)
+                raise
 
     def observe(self, name, peer, *, budget):
         with self.lock:

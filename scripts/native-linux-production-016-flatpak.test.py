@@ -890,8 +890,32 @@ class WarmLineageWiringTests(unittest.TestCase):
                 observed = capture.baseline.observe(':1.40', lambda name: dict(name=name, pid=12, uid=1001), budget=capture.budget)
                 self.assertTrue(observed['stable']); self.assertEqual({pid for pid, _ in reads}, {12})
                 M.Session.finish_warm_activation_diagnostic(session, pending)
+                self.assertEqual(system.close.call_count, 1)
+                # Pure source-bound refusal captures: neither case executes input or native GI.
+                rows.update({11: fixture.process(11, 10, '/usr/bin/bwrap'), 13: fixture.process(13, 10, '/usr/bin/bwrap')})
+                system.snapshot = lambda: (copy.deepcopy(rows[12]['image']), 'f' * 64)
+                refused = M.Session.start_warm_activation_diagnostic(session, rows[14], attempt)
+                self.assertEqual(refused['record']['unavailable'], 'ValueError')
+                self.assertEqual(refused['record']['setupFailureStage'], 'pre-input-lineage-create')
+                self.assertEqual(refused['record']['preInputBaseline']['failureStage'], 'candidate-system-image-match')
+                self.assertEqual(refused['record']['preInputBaseline']['failurePid'], 12)
+                self.assertFalse(refused['record']['setupStateAtFailure']['deadlineExceeded'])
+                self.assertIsNone(refused['capture'].baseline)
+                M.Session.finish_warm_activation_diagnostic(session, refused)
+                self.assertFalse(refused['record']['observation']['armed']); self.assertFalse(refused['record']['observation']['inputStarted'])
+                self.assertEqual(refused['record']['observation']['callbackMessages'], 0)
+                self.assertEqual(system.close.call_count, 2)
+                system.snapshot = lambda: (copy.deepcopy(rows[12]['image']), rows[12]['kernelImageSha256'])
+                def arm_refusal(*_): raise ValueError('PRIVATE ARM ERROR')
+                gio.DBusConnection.new_for_address_sync = arm_refusal
+                refused = M.Session.start_warm_activation_diagnostic(session, rows[14], attempt)
+                self.assertEqual(refused['record']['setupFailureStage'], 'observer-arm')
+                self.assertNotIn('failureStage', refused['record']['preInputBaseline'])
+                self.assertIsNotNone(refused['capture'].baseline)
+                M.Session.finish_warm_activation_diagnostic(session, refused)
+                self.assertNotIn('PRIVATE ARM ERROR', M.json_bytes(refused['record']).decode())
             self.assertCountEqual(closed, opened)
-            self.assertTrue(all(item.close.call_count == 1 for item in held)); system.close.assert_called_once()
+            self.assertTrue(all(item.close.call_count == 1 for item in held)); self.assertEqual(system.close.call_count, 3)
 
 
 class LauncherReadinessDiagnosticTests(unittest.TestCase):

@@ -1449,6 +1449,7 @@ class Session:
     def start_warm_activation_diagnostic(self, client, attempt=None):
         state = {'capture': None, 'record': {'schemaVersion': 1, 'phase': 'warm', 'readOnly': True,
                  'qualified': False, 'inputPermitted': False, 'authorityGranted': False, 'releaseReady': False}}
+        stage, baseline_diagnostic = 'harness-binding', {}
         try:
             # New imports need independent current-harness pins, never the frozen product inventory.
             names = ('scripts/native-linux-production-016-flatpak.py', 'scripts/native-linux-production-016-flatpak.test.py',
@@ -1467,6 +1468,7 @@ class Session:
             name = names[2]
             module.__file__ = str(HERE.parent / name)
             exec(compile(sources[name], module.__file__, 'exec'), module.__dict__)
+            stage = 'qualified-cold-root'
             cold, owner = self.report['coldRoot'], self.report['coldHost1Owner']
             require(self.report['coldActivationAccepted'] is True and owner['pid'] == cold['pid'], 'Qualified cold Root required')
             def target_guard():
@@ -1475,23 +1477,51 @@ class Session:
                 require(actual == owner, 'Diagnostic cold Host1 owner changed')
                 return actual
             require(attempt is not None, 'Live owned keyboard binding required for pre-input ancestry')
+            stage = 'owned-keyboard-binding-verify'
             attempt.binding.verify()
+            stage = 'observer-create'
             capture = module.PassiveCapture(owner, attempt.binding.launch, client,
                 lambda pid, full=False: self.native.native_process(pid, self.helper, full), proxy_process_snapshot,
                 target_guard, os.environ.get('DBUS_SESSION_BUS_ADDRESS'), os.getuid())
             state['capture'] = capture
+            stage = 'owned-subtree-read'
+            tree = P.subtree(self.flatpak_child.pid, self.helper, self.native)
+            try:
+                baseline_diagnostic.update(module.lineage_inputs(attempt.binding.launch, client, tree))
+            except Exception:
+                baseline_diagnostic.update(readOnly=True, inputPermitted=False, authorityGranted=False,
+                                           releaseReady=False, captureUnavailable=True)
+            state['baselineDiagnostic'] = baseline_diagnostic
+            stage = 'protected-proxy-image-open'
+            system = PortalImage('proxy')
+            stage = 'pre-input-lineage-create'
             capture.baseline = module.OwnedLineage(attempt.binding.launch, client,
-                P.subtree(self.flatpak_child.pid, self.helper, self.native), capture.read, proxy_process_snapshot,
-                image_open=K.HeldImage, system_image=PortalImage('proxy'), pidfds=ObserverPidfds,
-                guard=attempt.binding.verify, budget=capture.budget)
+                tree, capture.read, proxy_process_snapshot,
+                image_open=K.HeldImage, system_image=system, pidfds=ObserverPidfds,
+                guard=attempt.binding.verify, budget=capture.budget, diagnostic=baseline_diagnostic,
+                diagnostic_state=capture.diagnostic_state)
+            stage = 'observer-arm'
             capture.arm()
         except Exception as error:
             state['record']['unavailable'] = type(error).__name__
+            state['record']['setupFailureStage'] = stage
+            if state['capture'] is not None:
+                try:
+                    flags = state['capture'].diagnostic_state()
+                    if type(flags) is dict and set(flags) == {'closed', 'stopRequested', 'deadlineExceeded', 'cancelled'} \
+                            and all(type(flag) is bool for flag in flags.values()):
+                        state['record']['setupStateAtFailure'] = flags
+                except Exception:
+                    pass
+            if baseline_diagnostic:
+                state['record']['preInputBaseline'] = baseline_diagnostic
         return state
 
     def finish_warm_activation_diagnostic(self, state, *, settle=False):
         # Neither cleanup nor capture failure may replace the original input/outcome refusal.
         record = state['record']
+        if type(state.get('baselineDiagnostic')) is dict and 'failureStage' in state['baselineDiagnostic']:
+            record['preInputBaseline'] = state['baselineDiagnostic']
         if state.get('finished'):
             return record
         state['finished'] = True

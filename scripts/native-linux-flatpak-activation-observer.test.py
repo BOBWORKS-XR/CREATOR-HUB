@@ -228,11 +228,11 @@ class PreInputLineageTests(unittest.TestCase):
         system = SimpleNamespace(snapshot=lambda: (copy.deepcopy(rows[12]['image']), 'a' * 64), close=Mock())
         state.system = system
         tree = {pid: {k: copy.deepcopy(v) for k, v in row.items() if k != 'kernelImageSha256'} for pid, row in rows.items()}
-        def build():
+        def build(**options):
             return M.OwnedLineage(rows[10], rows[14], tree, read, lambda row: copy.deepcopy(row),
                 image_open=image, system_image=system, pidfds=SimpleNamespace(open=lambda pid: pid,
                     ready=lambda fd: fd in state.dead, close=lambda fd: state.closed.append(fd)),
-                guard=state.guard, budget=lambda: None)
+                guard=state.guard, budget=options.pop('budget', lambda: None), **options)
         state.build, state.tree = build, tree
         return state
 
@@ -321,6 +321,69 @@ class PreInputLineageTests(unittest.TestCase):
                 state.tree[pid] = {k: copy.deepcopy(v) for k, v in row.items() if k != 'kernelImageSha256'}
             with self.subTest(mutation=mutation), self.assertRaises(ValueError): state.build()
             self.assertTrue(all(held.close.call_count == 1 for held in state.images))
+
+    def test_preinput_failure_stage_retains_only_same_read_redacted_operands_without_extra_reads(self):
+        cases = ('candidate-count', 'expected-shape', 'tree-match', 'held-image', 'system-image', 'guard', 'budget')
+        for case in cases:
+            state = self.fixture(); diagnostic = {}
+            if case == 'candidate-count': state.tree.pop(12)
+            if case == 'expected-shape': state.rows[14]['uids'] = tuple(state.rows[14]['uids'])
+            if case == 'tree-match': state.tree[14]['startTime'] = '999'
+            if case == 'held-image': state.rows[14]['kernelImageSha256'] = 'b' * 64
+            if case == 'system-image': state.system.snapshot = lambda: (copy.deepcopy(state.rows[12]['image']), 'b' * 64)
+            if case == 'guard': state.guard.side_effect = lambda: (_ for _ in ()).throw(ValueError('PRIVATE FAILURE'))
+            options = {'budget': lambda: (_ for _ in ()).throw(ValueError('PRIVATE DEADLINE'))} if case == 'budget' else {}
+            status = dict(closed=False, stopRequested=False, deadlineExceeded=case == 'budget', cancelled=False)
+            with self.subTest(case=case), self.assertRaises(ValueError):
+                state.build(diagnostic=diagnostic, diagnostic_state=lambda: status, **options)
+            stages = {'candidate-count': 'candidate-count', 'expected-shape': 'expected-client-validation',
+                'tree-match': 'walk.row-match', 'held-image': 'walk.held-image-match',
+                'system-image': 'candidate-system-image-match', 'guard': 'initial-owned-launch-guard', 'budget': 'initial-budget'}
+            self.assertEqual(diagnostic['failureStage'], stages[case])
+            self.assertEqual(diagnostic['treeCount'], len(state.tree))
+            self.assertFalse(diagnostic['inputPermitted']); self.assertFalse(diagnostic['authorityGranted'])
+            self.assertNotIn('PRIVATE FAILURE', str(diagnostic))
+            self.assertNotIn('PRIVATE DEADLINE', str(diagnostic))
+            self.assertEqual(diagnostic['stateAtFailure'], status)
+            self.assertLessEqual(len(M.json.dumps(diagnostic).encode()), 16384)
+            if case == 'expected-shape': self.assertEqual(diagnostic['expectedClient']['fieldTypes']['uids'], 'tuple')
+            if case == 'held-image':
+                self.assertEqual(diagnostic['currentRow']['kernelImageSha256'], 'b' * 64)
+                self.assertEqual(diagnostic['observedImage']['kernelImageSha256'], 'a' * 64)
+                self.assertEqual(state.reads, [(14, True)])
+            if case == 'system-image':
+                self.assertEqual(diagnostic['failurePid'], 12)
+                self.assertEqual(diagnostic['expectedRowAtFailure']['kernelImageSha256'], 'a' * 64)
+                self.assertEqual(diagnostic['observedImage']['kernelImageSha256'], 'b' * 64)
+
+    def test_diagnostic_failure_cannot_mask_primary_error_or_change_native_read_sequence(self):
+        for broken_state in (False, True):
+            state = self.fixture(); diagnostic = {}
+            original = ValueError('PRIVATE ORIGINAL')
+            state.guard.side_effect = original
+            flags = dict(closed=False, stopRequested=False, deadlineExceeded=False, cancelled=False)
+            def status():
+                if broken_state: raise RuntimeError('PRIVATE DIAGNOSTIC')
+                return flags
+            with patch.object(M, 'lineage_inputs', side_effect=RuntimeError('PRIVATE REDACTION')) if not broken_state else ExitStack():
+                with self.assertRaises(ValueError) as raised:
+                    state.build(diagnostic=diagnostic, diagnostic_state=status)
+            self.assertIs(raised.exception, original)
+            self.assertEqual(state.reads, [])
+            self.assertEqual(diagnostic['failureStage'], 'initial-owned-launch-guard')
+            self.assertNotIn('PRIVATE', M.json.dumps(diagnostic)); self.assertFalse(diagnostic['inputPermitted'])
+
+    def test_diagnostic_rows_never_retain_arbitrary_paths_fields_or_oversized_values(self):
+        row = copy.deepcopy(self.fixture().rows[12])
+        row.update(executable='/private/SECRET-file', unexpected='PRIVATE VALUE', kernelImageSha256='INVALID SECRET')
+        row['image']['st_size'] = 'PRIVATE SIZE'
+        row['image']['unexpected'] = 'SECRET IMAGE'
+        value = M.lineage_inputs(row, row, {pid: row for pid in range(100)})
+        raw = M.json.dumps(value)
+        for private in ('SECRET', 'PRIVATE', 'unexpected'): self.assertNotIn(private, raw)
+        self.assertEqual(value['treeCount'], 100); self.assertTrue(value['treeTruncated'])
+        self.assertGreater(len(value['tree']), 0); self.assertLessEqual(len(value['tree']), 16)
+        self.assertFalse(value['inputPermitted'])
 
 
 class GioAdapterTests(unittest.TestCase):
