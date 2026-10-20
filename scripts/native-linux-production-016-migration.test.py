@@ -1249,6 +1249,151 @@ class ConnectionReviewHeadingTests(unittest.TestCase):
             M.graph_contract(graph, pid=123, title="Information", question="other question", password=password)
 
 
+class ConnectionDismissalDiagnosticsTests(unittest.TestCase):
+    @contextmanager
+    def fixture(self, mode="destroy"):
+        helper = M.load("native-unix-window")
+        polkit = M.load("native-linux-polkit-probe")
+        x11 = helper.X11.__new__(helper.X11)
+        x11.display, x11.error, x11.x_error_stage = 11, False, "unmarked"
+        x11.error_events, x11.error_events_truncated, x11.error_capture_unavailable = [], False, False
+        tree, allocations, queried = {1: (0, [2]), 2: (1, [77]), 77: (2, [])}, [], []
+        def query(display, xid, root, parent, children, count):
+            queried.append(xid)
+            if xid not in tree:
+                # X11 core QueryTree opcode 15; Window error 3. This is a pure modeled server, not native acceptance.
+                event = helper.XErrorEvent(0, display, xid, 100 + len(queried), 3, 15, 0)
+                x11._error(display, helper.C.byref(event))
+                return 0
+            actual_parent, values = tree[xid]
+            root._obj.value, parent._obj.value = 1, 99 if mode == "parent-drift" and xid == 2 else actual_parent
+            count._obj.value = len(values)
+            if values:
+                data = (helper.C.c_ulong * len(values))(*values); allocations.append(data)
+                helper.C.cast(children, helper.C.POINTER(helper.C.POINTER(helper.C.c_ulong)))[0] = data
+            if mode == "destroy" and xid == 2:
+                del tree[77]  # Enumerated dialog is normally destroyed before the next query.
+            if mode == "other-error" and xid == 2:
+                event = helper.XErrorEvent(0, 12, 999, 104, 2, 18, 7)
+                x11._error(display, helper.C.byref(event))
+            return 1
+        x11.x = SimpleNamespace(XDefaultRootWindow=Mock(return_value=1), XQueryTree=Mock(side_effect=query),
+            XFree=Mock(), XSync=Mock(), XNextRequest=Mock(side_effect=AssertionError("No new serial query")))
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            with patch.object(M.Session, "start"):
+                session = M.Session(root, binding())
+            session.helper, session.polkit, session.x11 = helper, polkit, x11
+            session.pages = SimpleNamespace(wait=M.load("native-linux-integrated-pages").wait)
+            session.owned = {"pid": 321, "parentPid": 320, "startTime": "123", "uids": [M.UID] * 4,
+                             "executable": M.HUB, "kernelImageSha256": "b" * 64}
+            session.window, session.xres = 40, {"pid": 321, "client": 80, "title": M.TITLE, "mapped": True}
+            dialog = {"pid": 321, "client": 80, "title": M.CONNECTION_REVIEW_TITLE, "mapped": True}
+            record = session.evidence["connectionReview"] = {"actionAttempts": 1, "actionReturned": True}
+            yield SimpleNamespace(session=session, root=root, record=record, dialog=dialog, queried=queried)
+
+    def invoke_actual_caller_tail(self, f):
+        tree = ast.parse(Path(M.__file__).read_text())
+        cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "Session")
+        method = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "review_connections")
+        body = next(n.body for n in method.body if isinstance(n, ast.Try))
+        index = next(i for i, n in enumerate(body) if isinstance(n, ast.Assign)
+                     and any(isinstance(t, ast.Name) and t.id == "dismissal" for t in n.targets))
+        function = ast.FunctionDef(name="actual_tail", args=ast.arguments(posonlyargs=[],
+            args=[ast.arg(arg=n) for n in ("self", "record", "window", "xres", "frame")], kwonlyargs=[], kw_defaults=[], defaults=[]),
+            body=copy.deepcopy(body[index:]), decorator_list=[])
+        namespace = dict(vars(M))
+        exec(compile(ast.fix_missing_locations(ast.Module(body=[function], type_ignores=[])), "actual-dismissal-caller", "exec"), namespace)
+        namespace["actual_tail"](f.session, f.record, 77, f.dialog, (10, 20, 30, 40))
+
+    def test_modeled_destroy_after_enumeration_retains_actual_shared_traversal_and_latched_xerror(self):
+        with self.fixture() as f:
+            real = f.session.polkit.native_window_absence
+            def observed(*args):
+                self.assertIs(f.record["nativeDismissal"], args[-1])
+                return real(*args)
+            with patch.object(f.session.polkit, "native_window_absence", side_effect=observed), \
+                    self.assertRaisesRegex(RuntimeError, "^Native dismissal query failed$"):
+                self.invoke_actual_caller_tail(f)
+            self.assertEqual(f.queried, [1, 2, 77])
+            self.assertEqual(f.record["nativeDismissal"], {"source": "complete-native-XQueryTree", "root": 1,
+                "target": 77, "complete": False, "lastQuery": 77, "nodes": 3})
+            capture = f.record["nativeDismissalFailure"]
+            event = capture["xError"]["events"][0]
+            self.assertEqual({k: event[k] for k in ("errorCode", "requestCode", "minorCode", "serial", "resourceId", "sameDisplay")},
+                             {"errorCode": 3, "requestCode": 15, "minorCode": 0, "serial": 103, "resourceId": 77, "sameDisplay": True})
+            self.assertEqual(capture["root"], f.session.owned)
+            self.assertEqual(capture["mainWindow"], {"xid": 40, "xres": f.session.xres})
+            self.assertEqual(capture["dialog"], {"xid": 77, "xres": f.dialog, "frame": [10, 20, 30, 40]})
+            self.assertEqual(capture["serialSource"], "XErrorEvent.serial; outbound query serial not independently sampled")
+            self.assertTrue(capture["cachedBindingsOnly"]); self.assertTrue(f.session.x11.error)
+            for key in ("inputPermitted", "authorityGranted", "releaseReady"): self.assertIs(capture[key], False)
+            f.session.x11.x.XNextRequest.assert_not_called()
+            value = json.loads((f.root / "session.json").read_bytes())
+            self.assertEqual(value["firstFailure"]["message"], "Native dismissal query failed")
+            self.assertEqual(value["connectionReview"], f.record)
+            self.assertNotIn("absent", f.record["nativeDismissal"])
+
+    def test_parent_drift_and_unrelated_latched_errors_remain_failures_not_destroyed_success(self):
+        for mode in ("parent-drift", "other-error"):
+            with self.subTest(mode=mode), self.fixture(mode) as f, self.assertRaises(RuntimeError):
+                try:
+                    self.invoke_actual_caller_tail(f)
+                finally:
+                    self.assertFalse(f.record["nativeDismissal"]["complete"])
+                    self.assertNotIn("absent", f.record["nativeDismissal"])
+                    diagnostic = f.record["nativeDismissalFailure"]["xError"]
+                    if mode == "parent-drift": self.assertEqual(diagnostic["events"], [])
+                    else:
+                        event = diagnostic["events"][0]
+                        self.assertEqual((event["errorCode"], event["requestCode"], event["resourceId"], event["sameDisplay"]), (2, 18, 999, False))
+
+    def test_capture_failure_does_not_mask_original_refusal_or_add_queries(self):
+        with self.fixture() as f:
+            with patch.object(f.session.x11, "error_diagnostic", side_effect=ValueError("PRIVATE CAPTURE ERROR")), \
+                    patch.object(f.session, "retain_dismissal_refusal", wraps=f.session.retain_dismissal_refusal) as retain, \
+                    self.assertRaises(RuntimeError) as raised:
+                self.invoke_actual_caller_tail(f)
+            self.assertIs(raised.exception, retain.call_args.args[0])
+            self.assertEqual(f.queried, [1, 2, 77])
+            capture = f.record["nativeDismissalFailure"]
+            self.assertEqual(capture["xError"], {"captureUnavailable": True, "type": "ValueError"})
+            self.assertNotIn("PRIVATE", json.dumps(capture))
+
+    def test_cached_capture_is_detached_and_oversized_metadata_cannot_mask_refusal(self):
+        for oversized in (False, True):
+            with self.subTest(oversized=oversized), self.fixture() as f:
+                if oversized: f.session.xres["title"] = "PRIVATE" * 2000
+                with self.assertRaisesRegex(RuntimeError, "^Native dismissal query failed$"):
+                    self.invoke_actual_caller_tail(f)
+                capture = f.record["nativeDismissalFailure"]
+                self.assertLessEqual(len(json.dumps(capture).encode()), 8192)
+                if oversized:
+                    self.assertTrue(capture["captureUnavailable"])
+                    self.assertNotIn("PRIVATE", json.dumps(capture))
+                else:
+                    f.session.owned["uids"][0] = 0
+                    f.session.x11.error_events[0]["serial"] = 999
+                    self.assertEqual(capture["root"]["uids"], [M.UID] * 4)
+                    self.assertEqual(capture["xError"]["events"][0]["serial"], 103)
+                self.assertEqual(f.session.evidence["firstFailure"]["message"], "Native dismissal query failed")
+
+    def test_successful_complete_traversal_has_no_failure_capture_and_no_extra_query(self):
+        with self.fixture("present") as f:
+            # Model the dialog already gone before enumeration, so no stale child is queried.
+            original = f.session.x11.x.XQueryTree.side_effect
+            def absent(display, xid, *args):
+                result = original(display, xid, *args)
+                if xid == 2: args[-1]._obj.value = 0
+                return result
+            f.session.x11.x.XQueryTree.side_effect = absent
+            self.invoke_actual_caller_tail(f)
+            self.assertEqual(f.queried, [1, 2])
+            self.assertTrue(f.record["nativeDismissal"]["absent"])
+            self.assertTrue(f.record["nativeDismissal"]["complete"])
+            self.assertNotIn("nativeDismissalFailure", f.record)
+
+
 class ConnectionReviewGraphCaptureTests(unittest.TestCase):
     def graph(self, extra="Warning"):
         question = "Command: /synthetic/client-node\nServer: /synthetic/server.mjs\nPRIVATE_CONFIG_ARGUMENT"

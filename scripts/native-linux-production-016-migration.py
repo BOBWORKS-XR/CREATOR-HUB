@@ -1279,12 +1279,39 @@ class Session:
                 button = next(node for node, row in zip(nodes, graph) if row["role"] == 43 and row["name"] == "Move reviewed connections")
                 return button, {"graph": graph, "xres": xres, "frame": frame, **expected}
             approve_connection_review(profile, guard, record)
-            dismissal = {}
-            self.pages.wait(lambda: self.polkit.native_window_absence(self.x11, self.helper, window, dismissal)["absent"])
-            record["nativeDismissal"] = dismissal
+            dismissal = record["nativeDismissal"] = {}
+            try:
+                self.pages.wait(lambda: self.polkit.native_window_absence(self.x11, self.helper, window, dismissal)["absent"])
+            except Exception as error:
+                self.retain_dismissal_refusal(error, record, window, xres, frame)
+                raise
         finally:
             bus.close_sync(None)
         self.dialogs.clear()
+
+    def retain_dismissal_refusal(self, error, record, target, xres, frame):
+        self.retain_failure(error)
+        flags = {"diagnosticOnly": True, "inputPermitted": False, "authorityGranted": False, "releaseReady": False}
+        try:
+            # Cached bindings and the existing error latch only: never query, clear, or retry X11.
+            value = {**flags, "scope": "connection-review-dismissal", "cachedBindingsOnly": True,
+                "serialSource": "XErrorEvent.serial; outbound query serial not independently sampled",
+                "root": {key: self.owned[key] for key in
+                         ("pid", "parentPid", "startTime", "uids", "executable", "kernelImageSha256")},
+                "mainWindow": {"xid": self.window, "xres": self.xres},
+                "dialog": {"xid": target, "xres": xres, "frame": list(frame)}}
+            try:
+                latched = self.x11.error_diagnostic()
+                require(len(json.dumps(latched, allow_nan=False).encode()) <= 4096, "Latched X error capture exceeds bound")
+                value["xError"] = latched
+            except Exception as capture_error:
+                value["xError"] = {"captureUnavailable": True, "type": type(capture_error).__name__[:100]}
+            raw = json.dumps(value, allow_nan=False)
+            require(len(raw.encode()) <= 8192, "Dismissal diagnostic exceeds bound")
+            record["nativeDismissalFailure"] = json.loads(raw)
+        except Exception as capture_error:
+            record["nativeDismissalFailure"] = {**flags, "captureUnavailable": True, "type": type(capture_error).__name__[:100]}
+        self.checkpoint()
 
     def close(self):
         self.checkpoint("close")
