@@ -1,0 +1,68 @@
+name: Finite headless systemd exec and PAM contrast
+
+on:
+  push:
+    branches: [validation/native-linux-unit-start-ack]
+  workflow_dispatch:
+    inputs:
+      execute_probe:
+        description: Allow only three bounded sleep units and a fresh locked synthetic user on this disposable runner
+        type: boolean
+        required: true
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    if: >-
+      github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.repository_id == '1364807512' &&
+      github.ref == 'refs/heads/validation/native-linux-unit-start-ack' && github.event_name == 'workflow_dispatch' &&
+      github.workflow_ref == 'BOBWORKS-XR/CREATOR-HUB/.github/workflows/native-linux-unit-start-ack.yml@refs/heads/validation/native-linux-unit-start-ack' &&
+      inputs.execute_probe == true
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    env:
+      CREATOR_UNIT_ACK_EXECUTE: ${{ inputs.execute_probe }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24.17.0
+      - uses: actions/setup-python@v6
+        id: preflight_python
+        with:
+          python-version: '3.11.17'
+          update-environment: false
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Pure contracts before privilege or any native unit
+        env:
+          PREFLIGHT_PYTHON: ${{ steps.preflight_python.outputs.python-path }}
+        run: |
+          "$PREFLIGHT_PYTHON" -I -S -B scripts/native-linux-unit-start-ack.test.py
+          node --test scripts/native-linux-unit-start-ack-workflow.test.cjs
+      - name: One headless contrast, no GUI, product downloads or input
+        run: |
+          /usr/bin/python3 -I -S -B - <<'PY'
+          import importlib.util, os, subprocess
+          from pathlib import Path
+          source = Path('scripts/native-linux-unit-start-ack.py').resolve(strict=True)
+          spec = importlib.util.spec_from_file_location('ack_probe', source)
+          probe = importlib.util.module_from_spec(spec); spec.loader.exec_module(probe)
+          probe.admission(os.environ, uid=0)
+          values = [key + '=' + os.environ[key] for key in probe.ENVIRONMENT]
+          subprocess.run(['/usr/bin/sudo', '-n', '/usr/bin/env', '-i', *values, 'PATH=/usr/bin:/bin:/usr/sbin',
+                          'LANG=C', 'LC_ALL=C', '/usr/bin/python3', '-I', '-S', '-B', str(source), 'prepare'],
+                         stdin=subprocess.DEVNULL, check=True)
+          PY
+      - name: Retain only bounded synthetic unit evidence, never release acceptance
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-linux-unit-start-ack-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: /usr/lib/creator-unit-start-ack-${{ github.run_id }}-a1/report.json
