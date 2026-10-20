@@ -269,6 +269,158 @@ test('historical contract, admission and neutral TLS engine retain their reviewe
   assert.equal(hash(Buffer.from(bodies.join('\n'))), '2d25eca0c463d67a022f61c05a2a4d30a9dac59176a1a85340656e1abf4ff2cc');
 });
 
+const updateRunner = mode => ({ ...bootstrapRunner(), GITHUB_REF: lab.UPDATE_BRANCH,
+  GITHUB_WORKFLOW_REF: `BOBWORKS-XR/CREATOR-HUB/${lab.UPDATE_WORKFLOW}@${lab.UPDATE_BRANCH}`,
+  UPDATE_EXECUTE: 'true', UPDATE_SCENARIO: mode === 'deb' ? 'deb-approve' : 'portable-approve' });
+const canonical = value => Buffer.from(`${JSON.stringify(value, null, 2)}\n`);
+function updateInput(mode = 'portable', baseline = '9') {
+  // Deliberately unsigned, non-package structural fixtures. Production DEB admission refuses these bytes.
+  const input = {}, sig = Buffer.from('untrusted comment: SYNTHETIC NONCRYPTOGRAPHIC UPDATE FIXTURE\n');
+  if (mode === 'deb') {
+    const installer = Buffer.from('SYNTHETIC NON-DEB. Never install.');
+    input[`deb17/${lab.UPDATE_ASSET}`] = installer;
+    input[`deb17/${lab.DESCRIPTOR}`] = canonical({ schemaVersion: 1, appId: 'creator-hub', version: '0.1.17', platform: 'linux',
+      architecture: 'x86_64', packageType: 'deb', assetName: lab.UPDATE_ASSET, byteLength: installer.length, sha256: hash(installer),
+      executableSha256: lab.UPDATE_DEB.executableSha256, identityProtocol: 0, lifecycleProtocol: 0, installerProtocol: 1, minHubVersion: '0.1.16' });
+    input[`deb17/${lab.DESCRIPTOR}.minisig`] = Buffer.from(sig);
+    input['deb17/latest.json'] = canonical({ version: '0.1.17', notes: 'Structural fixture only.', platforms: {
+      [lab.PLATFORM]: { url: `https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/download/v0.1.17/${lab.UPDATE_ASSET}`, signature: sig.toString('base64') } } });
+  } else {
+    for (const version of ['16', '17']) {
+      const prefix = `portable${version}/`, manifestName = `creator-hub-linux-x86_64-0.1.${version}.portable-manifest.json`;
+      const archiveName = `creator-hub-linux-x86_64-0.1.${version}.appdir.tar.gz`, archive = Buffer.from(`SYNTHETIC NON-TAR ${version === '16' ? baseline : '17'}`);
+      const manifest = { schemaVersion: 1, appId: 'creator-hub', platform: 'linux', architecture: 'x86_64', version: `0.1.${version}`,
+        sourceCommit: version === '17' ? lab.UPDATE_SOURCE17.commit : baseline.repeat(40),
+        sourceTree: version === '17' ? lab.UPDATE_SOURCE17.tree : baseline.repeat(40), format: 'appdir-tar-gzip-v1', entrypoint: 'usr/bin/creator-hub',
+        archive: { size: archive.length, sha256: hash(archive), unpackedSize: 100 },
+        entries: { 'usr/bin/creator-hub': { kind: 'file', mode: 0o755, size: 64, sha256: (version === '16' ? baseline : 'b').repeat(64) } } };
+      const body = canonical(manifest); input[prefix + manifestName] = body; input[prefix + archiveName] = archive;
+      input[prefix + 'creator-hub-linux-x86_64-portable.json'] = canonical({ schemaVersion: 1, appId: 'creator-hub', version: `0.1.${version}`,
+        platform: 'linux', architecture: 'x86_64', packageType: 'portable-appdir',
+        manifest: { assetName: manifestName, byteLength: body.length, sha256: hash(body) },
+        archive: { assetName: archiveName, byteLength: archive.length, sha256: hash(archive) },
+        executableSha256: manifest.entries['usr/bin/creator-hub'].sha256, restartProtocol: 1, minHubVersion: '0.1.16' });
+      input[prefix + manifestName + '.minisig'] = Buffer.from(sig); input[prefix + 'creator-hub-linux-x86_64-portable.json.minisig'] = Buffer.from(sig);
+    }
+  }
+  return { config: { schemaVersion: 1, mode, fromVersion: '0.1.16', targetVersion: '0.1.17',
+    files: Object.fromEntries(Object.entries(input).map(([name, body]) => [name, { size: body.length, sha256: hash(body) }])) }, input };
+}
+function updateChange(fixture, name, change) {
+  const value = JSON.parse(fixture.input[name]); change(value); fixture.input[name] = canonical(value);
+  fixture.config.files[name] = { size: fixture.input[name].length, sha256: hash(fixture.input[name]) }; return fixture;
+}
+function updateContract(fixture) { return lab.createUpdate016017(fixture.config, fixture.input); }
+
+test('all28 existing functions including bootstrap016 remain byte-identical', () => {
+  const names = ['keys', 'bounded', 'decode', 'json', 'plainMinisig', 'canonicalBase64', 'createContract', 'readBounded', 'loadContract',
+    'reviewedTargetPins', 'assertBootstrapRunner', 'bootstrapFile', 'loadBootstrap016', 'assertRunner', 'connectHost', 'headersAllowed',
+    'newState', 'chargeRequest', 'resolveRequest', 'labReport', 'tlsContext', 'startLoopbackTransport', 'startLabProxy',
+    'startBootstrap016Proxy', 'saveLabReport', 'bootstrapMain', 'inside', 'main'];
+  const normalized = source.replace(/\r\n/g, '\n');
+  const bodies = names.map(name => { const at = normalized.indexOf(`function ${name}(`), end = normalized.indexOf('\n}\n', at);
+    assert.ok(at >= 0 && end > at); return normalized.slice(at, end + 3); });
+  assert.equal(hash(Buffer.from(bodies.join('\n'))), '3ea49f96dd49f4c49b2a00c61de530e264149b4eea4f2d0ae5605926ce0cf4c7');
+});
+
+test('production update profiles expose exactly five DEB or eleven portable routes with no defaults or aliases', () => {
+  for (const mode of ['deb', 'portable']) {
+    const contract = updateContract(updateInput(mode));
+    assert.equal(contract.mode, mode); assert.equal(contract.fromVersion, '0.1.16'); assert.equal(contract.targetVersion, '0.1.17');
+    assert.equal(contract.routes.length, mode === 'deb' ? 5 : 11);
+    assert.deepEqual(contract.routes.map(r => r.path), [lab.FEED_PATH, ...lab.updateFiles(mode).map(name =>
+      `/BOBWORKS-XR/CREATOR-HUB/releases/download/v0.1.${name.startsWith('portable16/') ? '16' : '17'}/${name.slice(name.indexOf('/') + 1)}`)]);
+    assert.ok(Object.isFrozen(contract) && Object.isFrozen(contract.pins));
+    const feed = lab.resolveRequest(contract, 'api.github.com', request(contract.routes[0]), lab.newState()).route.bytes;
+    assert.deepEqual(JSON.parse(feed)[0].assets.map(a => a.name), lab.updateFiles(mode).filter(n => !n.startsWith('portable16/')).map(n => n.slice(n.indexOf('/') + 1)));
+    for (const route of contract.routes) {
+      assert.equal(lab.resolveRequest(contract, route.host, request(route), lab.newState()).status, 200);
+      for (const suffix of ['?token=private', '#fragment', '/extra']) assert.equal(lab.resolveRequest(contract, route.host, request(route, { url: route.path + suffix }), lab.newState()).status, 404);
+    }
+  }
+  for (const mode of [undefined, '', 'legacy', 'constructor', 'portable17']) assert.throws(() => lab.updateFiles(mode));
+  const fixture = updateInput(); fixture.config.profile = 'caller-profile'; assert.throws(() => updateContract(fixture));
+});
+
+test('actual017 DEB and installed ELF are mandatory at native/loader boundaries; synthetic bytes cannot pass', () => {
+  assert.deepEqual(lab.UPDATE_DEB, { size: 64296202, sha256: 'efc71fb740ab87e2d8a3d8519cbe8fff38edaa6ee95f358e50b2eccc0f5f80fe',
+    executableSha256: '147d7847a1437adbd33d161029307eb32bc1e406482d8f93247822eb805c47cd' });
+  assert.throws(() => lab.reviewedUpdateTarget(updateContract(updateInput('deb'))));
+  assert.throws(() => lab.reviewedUpdateTarget({ ...updateContract(updateInput()) }));
+  assert.ok(lab.loadUpdate016017.toString().includes('reviewedUpdateTarget(contract)'));
+  assert.ok(lab.startUpdate016017Proxy.toString().includes('reviewedUpdateTarget(contract)'));
+});
+
+test('portable16 baseline is externally pinned without c13 restriction while portable17 source is fixed75', () => {
+  const first = updateContract(updateInput('portable', '8')), second = updateContract(updateInput('portable', '9'));
+  lab.reviewedUpdateTarget(first); lab.reviewedUpdateTarget(second);
+  assert.notDeepEqual(first.pins, second.pins);
+  assert.notEqual(first.pins['portable16/creator-hub-linux-x86_64-0.1.16.appdir.tar.gz'].sha256,
+    lab.BOOTSTRAP_FILES['creator-hub-linux-x86_64-0.1.16.appdir.tar.gz'].sha256);
+  const changed = updateChange(updateInput(), 'portable17/creator-hub-linux-x86_64-0.1.17.portable-manifest.json', m => { m.sourceCommit = 'a'.repeat(40); });
+  assert.throws(() => updateContract(changed));
+});
+
+test('independent pins cannot hide changed version, source, route, schema, signature envelope or package bindings', () => {
+  for (const [mode, name, mutate] of [
+    ['deb', `deb17/${lab.DESCRIPTOR}`, d => { d.minHubVersion = '0.1.14'; }],
+    ['deb', `deb17/${lab.DESCRIPTOR}`, d => { d.identityProtocol = 1; }],
+    ['deb', 'deb17/latest.json', d => { d.platforms[lab.PLATFORM].url += '?token=private'; }],
+    ['deb', 'deb17/latest.json', d => { d.platforms['windows-x86_64'] = d.platforms[lab.PLATFORM]; }],
+    ['portable', 'portable16/creator-hub-linux-x86_64-portable.json', d => { d.version = '0.1.15'; }],
+    ['portable', 'portable17/creator-hub-linux-x86_64-portable.json', d => { d.archive.assetName = '../archive'; }],
+    ['portable', 'portable17/creator-hub-linux-x86_64-portable.json', d => { d.executableSha256 = 'c'.repeat(64); }],
+  ]) assert.throws(() => updateContract(updateChange(updateInput(mode), name, mutate)), undefined, name);
+  for (const mode of ['deb', 'portable']) {
+    const fixture = updateInput(mode), name = lab.updateFiles(mode)[0]; fixture.input[name][0] ^= 1;
+    assert.throws(() => updateContract(fixture));
+    const unknown = updateInput(mode); unknown.config.files['../unknown'] = { size: 1, sha256: 'a'.repeat(64) }; assert.throws(() => updateContract(unknown));
+    const duplicate = updateInput(mode); duplicate.input[name] = Buffer.from('{"version":"0.1.17","version":"0.1.17"}\n');
+    duplicate.config.files[name] = { size: duplicate.input[name].length, sha256: hash(duplicate.input[name]) }; assert.throws(() => updateContract(duplicate));
+  }
+  const signature = updateInput(); const name = 'portable17/creator-hub-linux-x86_64-portable.json.minisig';
+  signature.input[name] = Buffer.from('not a Minisign envelope'); signature.config.files[name] = { size: signature.input[name].length, sha256: hash(signature.input[name]) };
+  assert.throws(() => updateContract(signature));
+});
+
+test('exact five scenario dispatch guard refuses wrong modes, local execution and inherited trust before file/control reads', async () => {
+  for (const mode of ['deb', 'portable']) {
+    for (const scenario of lab.UPDATE_SCENARIOS[mode]) lab.assertUpdateRunner(mode, { ...updateRunner(mode), UPDATE_SCENARIO: scenario }, 'linux', 'x64', 1001, 1001);
+    for (const [name, value] of [['GITHUB_REF', lab.BOOTSTRAP_BRANCH], ['GITHUB_EVENT_NAME', 'push'], ['UPDATE_EXECUTE', 'false'],
+      ['UPDATE_SCENARIO', mode === 'deb' ? 'portable-approve' : 'deb-approve'], ['GITHUB_WORKFLOW_REF', 'foreign'],
+      ...['HTTPS_PROXY', 'NO_PROXY', 'SSL_CERT_FILE', 'NODE_EXTRA_CA_CERTS', 'NODE_TLS_REJECT_UNAUTHORIZED', 'APPIMAGE', 'LD_PRELOAD', 'PYTHONPATH'].map(n => [n, 'forbidden'])]) {
+      assert.throws(() => lab.assertUpdateRunner(mode, { ...updateRunner(mode), [name]: value }, 'linux', 'x64', 1001, 1001), undefined, name);
+    }
+    for (const args of [['win32', 'x64', 1001, 1001], ['linux', 'arm64', 1001, 1001], ['linux', 'x64', 0, 0], ['linux', 'x64', 1001, 0]]) {
+      assert.throws(() => lab.assertUpdateRunner(mode, updateRunner(mode), ...args));
+    }
+    await assert.rejects(lab.startUpdate016017Proxy(updateContract(updateInput(mode)), null, { GITHUB_ACTIONS: 'false' }));
+  }
+});
+
+test('new loader reads only the exact fixed layout, bounded independent pins and complete input set', t => {
+  const directory = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'production-update-feed-'))), fixture = updateInput();
+  t.after(() => { assert.equal(path.dirname(directory), fs.realpathSync(os.tmpdir())); assert.ok(path.basename(directory).startsWith('production-update-feed-'));
+    assert.equal(fs.realpathSync(directory), directory); fs.rmSync(directory, { recursive: true }); });
+  for (const [name, raw] of Object.entries(fixture.input)) { const file = path.join(directory, 'inputs', name); fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, raw, { flag: 'wx' }); }
+  fs.writeFileSync(path.join(directory, 'transport-pins.json'), canonical(fixture.config), { flag: 'wx' });
+  const loaded = lab.loadUpdate016017(directory, 'portable'); assert.equal(loaded.mode, 'portable');
+  assert.throws(() => lab.loadUpdate016017(directory, 'deb')); assert.throws(() => lab.loadUpdate016017('.','portable'));
+  const extra = path.join(directory, 'inputs/portable16/foreign'); fs.writeFileSync(extra, 'unreviewed', { flag: 'wx' });
+  assert.throws(() => lab.loadUpdate016017(directory, 'portable')); fs.unlinkSync(extra);
+  const file = path.join(directory, 'inputs', lab.updateFiles('portable')[0]); fs.appendFileSync(file, 'changed');
+  assert.throws(() => lab.loadUpdate016017(directory, 'portable'));
+});
+
+test('new contract snapshots input bytes and its transport receipt never claims signatures/native/public acceptance', () => {
+  const fixture = updateInput(), contract = updateContract(fixture), route = contract.routes[1];
+  fixture.input[lab.updateFiles('portable')[0]][0] ^= 1;
+  assert.equal(hash(lab.resolveRequest(contract, route.host, request(route), lab.newState()).route.bytes), route.sha256);
+  const report = lab.updateReport(contract, lab.labReport(contract, lab.newState())); assert.equal(report.mode, 'portable');
+  assert.equal(report.scope, 'linux-portable-production016-to-private017-lab-transport');
+  for (const name of ['publicDiscovery', 'nativeAcceptanceTested', 'signaturesVerifiedByHarness', 'signedUpdateAccepted', 'migrationAccepted', 'restartAccepted', 'releaseReady']) assert.equal(report[name], false);
+});
+
 test('bootstrap016 input refusal precedes any output or transport and refuses changed original ZIP', t => {
   const directory = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'bootstrap016-refuse-')));
   t.after(() => { fs.unlinkSync(path.join(directory, 'portable.zip')); fs.rmdirSync(directory); });
@@ -392,6 +544,22 @@ test('actual loopback CONNECT/TLS serves all five exact pinned snapshots with ve
   assert.equal(server.report().closeReason, 'caller');
 });
 
+test('new portable16-to17 route set serves eleven exact snapshots through the unchanged TLS engine', { timeout: 15000 }, async t => {
+  const contract = updateContract(updateInput());
+  // Mechanism-only synthetic bytes, never native dispatch, package or signature acceptance.
+  const server = await lab.testing.startLoopbackTransport(contract, { key: ephemeral.key, cert: ephemeral.cert });
+  t.after(() => server.close()); const port = Number(new URL(server.proxyUrl).port);
+  for (const route of contract.routes) {
+    const raw = await tlsRequest(port, `${route.host}:443`, `GET ${route.path} HTTP/1.1\r\nHost: ${route.host}\r\nConnection: close\r\n\r\n`);
+    assert.equal(raw.error, null); assert.equal(raw.authorized, true);
+    const res = response(raw.bytes); assert.equal(res.status, 200); assert.equal(hash(res.body), route.sha256);
+    assert.equal(res.headers.location, undefined);
+  }
+  const report = lab.updateReport(contract, server.report()); assert.deepEqual(report.requests, contract.routes);
+  assert.equal(report.signaturesVerifiedByHarness, false); assert.equal(report.publicDiscovery, false); assert.equal(report.releaseReady, false);
+  await server.close(); await server.closed;
+});
+
 test('actual CONNECT rejects unknown destinations, mismatched Host, credentials and bodies without a relay', { timeout: 15000 }, async t => {
   const { server, port } = await proxy(t);
   for (const [authority, headers] of [['evil.test:443', { Host: 'evil.test:443' }],
@@ -477,6 +645,18 @@ test('CLI refuses non-native admission before reading paths/stdin and never prin
     env: { ...process.env, GITHUB_ACTIONS: 'false' } });
   assert.notEqual(result.status, 0); assert.equal(result.stdout, '');
   assert.match(result.stderr, /no native\/public acceptance/); assert.ok(!result.stderr.includes('DO-NOT-LOG'));
+});
+
+test('both new CLI entrypoints refuse outside the fixed hosted scenario before touching paths or TLS control', () => {
+  for (const command of ['update-016-017-inspect', 'update-016-017']) for (const mode of ['deb', 'portable']) {
+    const result = spawnSync(process.execPath, [require.resolve('./linux-update-lab-feed.cjs'), command, mode, 'never-read'], {
+      encoding: 'utf8', input: 'DO-NOT-LOG-TLS-CONTROL', timeout: 10000, windowsHide: true,
+      env: { ...process.env, GITHUB_ACTIONS: 'false', UPDATE_EXECUTE: 'false' } });
+    assert.notEqual(result.status, 0); assert.equal(result.stdout, ''); assert.match(result.stderr, /no native\/public acceptance/);
+    assert.ok(!result.stderr.includes('DO-NOT-LOG'));
+  }
+  for (const required of ["'native-linux-production-016-update', 'transport'", "'update-016-017-ready'", 'pid: process.pid, mode, proxyUrl: proxy.proxyUrl',
+    "saveLabReport(path.join(root, 'lab-transport.json')", "fs.fstatSync(0).isFIFO()", "closed.equals(Buffer.from('close'))"]) assert.ok(source.includes(required), required);
 });
 
 test('new sidecar has no outbound forwarding, signing, install, trust-store, UI or Windows helper invocation', () => {

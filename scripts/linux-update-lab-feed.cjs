@@ -5,6 +5,7 @@
 // hashes of immutable already-signed inputs; this harness never authenticates them.
 // The native caller owns its isolated ephemeral TLS trust/session and recovery.
 // CLI CONFIG REPORT paths live below $RUNNER_TEMP/creator-linux-update-lab.
+// Separate update-016-017[-inspect] MODE ROOT paths are fixed to the production update controller.
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -53,6 +54,14 @@ const BOOTSTRAP_FILES = Object.freeze(Object.fromEntries(Object.entries({
   'creator-hub-linux-x86_64-0.1.16.appdir.tar.gz': { size: 164407254, sha256: '06f934ca6afd1c04d91f89a651d356535049ca303ee37884090cad65f0645fa2' },
 }).map(([name, value]) => [name, Object.freeze(value)])));
 const BOOTSTRAP_ZIP = Object.freeze({ size: 451643263, sha256: '2de3e4ab845de60d46c52c03f73fd2941da889b1464271335f4b8d49aa0e29e5' });
+const UPDATE_BRANCH = 'refs/heads/validation/native-linux-production-016-update';
+const UPDATE_WORKFLOW = '.github/workflows/native-linux-production-016-update.yml';
+const UPDATE_SCENARIOS = Object.freeze({ deb: Object.freeze(['deb-native-cancel', 'deb-auth-cancel', 'deb-approve']),
+  portable: Object.freeze(['portable-native-cancel', 'portable-approve']) });
+const UPDATE_DEB = Object.freeze({ size: 64296202, sha256: 'efc71fb740ab87e2d8a3d8519cbe8fff38edaa6ee95f358e50b2eccc0f5f80fe',
+  executableSha256: '147d7847a1437adbd33d161029307eb32bc1e406482d8f93247822eb805c47cd' });
+const UPDATE_ASSET = 'Creator_Hub_0.1.17_amd64-acceptance-only.deb';
+const UPDATE_SOURCE17 = Object.freeze({ commit: '75a99ff4a267064aaa3ac9e30039bc91dc791d89', tree: '5f62bf4bc1ba85eb293ca9a5a30330b06b6b4351' });
 const contracts = new WeakMap();
 const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 
@@ -474,6 +483,175 @@ function inside(root, file) {
   assert.ok(path.isAbsolute(file) && path.resolve(file) === file && relative && relative !== '..'
     && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative), 'Owned isolated lab path required');
 }
+
+function updateFiles(mode) {
+  assert.ok(Object.hasOwn(UPDATE_SCENARIOS, mode), 'Explicit deb or portable mode required');
+  return mode === 'deb' ? [DESCRIPTOR, `${DESCRIPTOR}.minisig`, UPDATE_ASSET, 'latest.json'].map(name => `deb17/${name}`)
+    : ['16', '17'].flatMap(version => ['creator-hub-linux-x86_64-portable.json', 'creator-hub-linux-x86_64-portable.json.minisig',
+      `creator-hub-linux-x86_64-0.1.${version}.portable-manifest.json`, `creator-hub-linux-x86_64-0.1.${version}.portable-manifest.json.minisig`,
+      `creator-hub-linux-x86_64-0.1.${version}.appdir.tar.gz`].map(name => `portable${version}/${name}`));
+}
+function updateJson(bytes, maximum = LIMITS.metadata) {
+  const value = json(bounded(bytes, maximum, 'Production update JSON'));
+  assert.ok(bytes.equals(Buffer.from(`${JSON.stringify(value, null, 2)}\n`)), 'Canonical unambiguous update JSON required');
+  return value;
+}
+function updateMaximum(name) {
+  return name.endsWith('.deb') || name.endsWith('.tar.gz') ? 256 * 1024 * 1024
+    : name.endsWith('.portable-manifest.json') ? 128 * 1024 : name.endsWith('.minisig') ? LIMITS.signature : LIMITS.metadata;
+}
+function createUpdate016017(config, input) {
+  keys(config, ['schemaVersion', 'mode', 'fromVersion', 'targetVersion', 'files'], 'Production update config');
+  assert.equal(config.schemaVersion, 1); assert.equal(config.fromVersion, '0.1.16'); assert.equal(config.targetVersion, '0.1.17');
+  const names = updateFiles(config.mode); keys(config.files, names, 'Independently bound update pins'); keys(input, names, 'Exact update bytes');
+  const bytes = {}, pins = {};
+  for (const name of names) {
+    const expected = config.files[name]; keys(expected, ['size', 'sha256'], 'External update pin');
+    assert.ok(Number.isSafeInteger(expected.size) && expected.size > 0 && expected.size <= updateMaximum(name));
+    assert.match(expected.sha256, /^(?!0{64}$)[a-f0-9]{64}$/);
+    bytes[name] = Buffer.from(bounded(input[name], updateMaximum(name), name));
+    assert.deepEqual({ size: bytes[name].length, sha256: hash(bytes[name]) }, expected, 'Exact independently pinned update input required');
+    pins[name] = Object.freeze({ ...expected });
+  }
+  let executableSha256;
+  if (config.mode === 'deb') {
+    const release = updateJson(bytes[`deb17/${DESCRIPTOR}`]);
+    keys(release, ['schemaVersion', 'appId', 'version', 'platform', 'architecture', 'packageType', 'assetName',
+      'byteLength', 'sha256', 'executableSha256', 'identityProtocol', 'lifecycleProtocol', 'installerProtocol', 'minHubVersion'], 'Private017 DEB descriptor');
+    for (const [name, expected] of Object.entries({ schemaVersion: 1, appId: 'creator-hub', version: '0.1.17', platform: 'linux',
+      architecture: 'x86_64', packageType: 'deb', assetName: UPDATE_ASSET, byteLength: bytes[`deb17/${UPDATE_ASSET}`].length,
+      sha256: pins[`deb17/${UPDATE_ASSET}`].sha256, identityProtocol: 0, lifecycleProtocol: 0, installerProtocol: 1, minHubVersion: '0.1.16' })) {
+      assert.equal(release[name], expected, `Private017 DEB ${name} differs`);
+    }
+    assert.match(release.executableSha256, /^(?!0{64}$)[a-f0-9]{64}$/); executableSha256 = release.executableSha256;
+    plainMinisig(bytes[`deb17/${DESCRIPTOR}.minisig`]);
+    const latest = updateJson(bytes['deb17/latest.json']); keys(latest, ['version', 'notes', 'platforms'], 'Private017 latest');
+    assert.equal(latest.version, '0.1.17'); assert.equal(typeof latest.notes, 'string'); keys(latest.platforms, [PLATFORM], 'Private017 platforms');
+    keys(latest.platforms[PLATFORM], ['url', 'signature'], 'Private017 package');
+    assert.equal(latest.platforms[PLATFORM].url, `https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/download/v0.1.17/${UPDATE_ASSET}`);
+    plainMinisig(canonicalBase64(latest.platforms[PLATFORM].signature, LIMITS.signature));
+  } else {
+    for (const version of ['16', '17']) {
+      const directory = `portable${version}/`, descriptor = 'creator-hub-linux-x86_64-portable.json';
+      const manifestName = `creator-hub-linux-x86_64-0.1.${version}.portable-manifest.json`, archiveName = `creator-hub-linux-x86_64-0.1.${version}.appdir.tar.gz`;
+      const release = updateJson(bytes[directory + descriptor]), manifest = updateJson(bytes[directory + manifestName], 128 * 1024);
+      keys(release, ['schemaVersion', 'appId', 'version', 'platform', 'architecture', 'packageType', 'manifest', 'archive', 'executableSha256', 'restartProtocol', 'minHubVersion'], 'Portable update descriptor');
+      for (const [name, expected] of Object.entries({ schemaVersion: 1, appId: 'creator-hub', version: `0.1.${version}`, platform: 'linux',
+        architecture: 'x86_64', packageType: 'portable-appdir', restartProtocol: 1, minHubVersion: '0.1.16' })) assert.equal(release[name], expected);
+      for (const [role, name] of [['manifest', manifestName], ['archive', archiveName]]) {
+        assert.deepEqual(release[role], { assetName: name, byteLength: pins[directory + name].size, sha256: pins[directory + name].sha256 });
+      }
+      keys(manifest, ['schemaVersion', 'appId', 'platform', 'architecture', 'version', 'sourceCommit', 'sourceTree', 'format', 'entrypoint', 'archive', 'entries'], 'Signed portable manifest');
+      for (const name of ['schemaVersion', 'appId', 'platform', 'architecture', 'version']) assert.equal(manifest[name], release[name]);
+      assert.equal(manifest.format, 'appdir-tar-gzip-v1'); assert.equal(manifest.entrypoint, 'usr/bin/creator-hub');
+      for (const name of ['sourceCommit', 'sourceTree']) assert.match(manifest[name], /^[a-f0-9]{40}$/);
+      if (version === '17') { assert.equal(manifest.sourceCommit, UPDATE_SOURCE17.commit); assert.equal(manifest.sourceTree, UPDATE_SOURCE17.tree); }
+      keys(manifest.archive, ['size', 'sha256', 'unpackedSize'], 'Signed archive binding');
+      assert.equal(manifest.archive.size, release.archive.byteLength); assert.equal(manifest.archive.sha256, release.archive.sha256);
+      assert.ok(Number.isSafeInteger(manifest.archive.unpackedSize) && manifest.archive.unpackedSize > 0 && manifest.archive.unpackedSize <= 512 * 1024 * 1024);
+      assert.ok(manifest.entries && typeof manifest.entries === 'object' && !Array.isArray(manifest.entries)
+        && Object.keys(manifest.entries).length > 0 && Object.keys(manifest.entries).length <= 8192);
+      const root = manifest.entries['usr/bin/creator-hub']; keys(root, ['kind', 'mode', 'size', 'sha256'], 'Signed Root entry');
+      assert.equal(root.kind, 'file'); assert.equal(root.mode, 0o755); assert.ok(Number.isSafeInteger(root.size) && root.size > 0 && root.size <= 256 * 1024 * 1024);
+      assert.match(root.sha256, /^(?!0{64}$)[a-f0-9]{64}$/); assert.equal(release.executableSha256, root.sha256);
+      plainMinisig(bytes[directory + descriptor + '.minisig']); plainMinisig(bytes[directory + manifestName + '.minisig']);
+    }
+  }
+  const feedNames = config.mode === 'deb' ? [DESCRIPTOR, `${DESCRIPTOR}.minisig`, UPDATE_ASSET, 'latest.json']
+    : names.filter(name => name.startsWith('portable17/')).map(name => name.slice('portable17/'.length));
+  const feed = Buffer.from(JSON.stringify([{ tag_name: 'v0.1.17', draft: false, prerelease: false, assets: feedNames.map(name => ({ name })) }]));
+  const routes = [{ host: 'api.github.com', path: FEED_PATH, bytes: bounded(feed, LIMITS.feed, 'Private017 feed'), type: 'application/json' },
+    ...names.map(name => ({ host: 'github.com', path: `/BOBWORKS-XR/CREATOR-HUB/releases/download/v0.1.${name.startsWith('portable16/') ? '16' : '17'}/${name.slice(name.indexOf('/') + 1)}`,
+      bytes: bytes[name], type: name.endsWith('.minisig') ? 'text/plain; charset=utf-8' : name.endsWith('.json') ? 'application/json' : 'application/octet-stream' }))]
+    .map(route => ({ ...route, sha256: hash(route.bytes) }));
+  const contract = Object.freeze({ profile: `016-${config.mode}-to-private017`, mode: config.mode, fromVersion: '0.1.16', targetVersion: '0.1.17',
+    pins: Object.freeze(pins), ...(config.mode === 'deb' ? { executableSha256 } : {}),
+    routes: Object.freeze(routes.map(({ host, path: routePath, sha256 }) => Object.freeze({ host, path: routePath, sha256 }))) });
+  contracts.set(contract, routes); return contract;
+}
+function reviewedUpdateTarget(contract) {
+  assert.ok(contracts.has(contract) && ['deb', 'portable'].includes(contract.mode)
+    && contract.profile === `016-${contract.mode}-to-private017`, 'Distinct production update contract required');
+  if (contract.mode === 'deb') {
+    assert.deepEqual(contract.pins[`deb17/${UPDATE_ASSET}`], { size: UPDATE_DEB.size, sha256: UPDATE_DEB.sha256 }, 'Exact actual39352480021 DEB required');
+    assert.equal(contract.executableSha256, UPDATE_DEB.executableSha256, 'Exact installed private017 Root required');
+  }
+}
+function loadUpdate016017(root, mode) {
+  assert.ok(path.isAbsolute(root) && path.resolve(root) === root);
+  assert.deepEqual(fs.readdirSync(root).sort(), ['inputs', 'transport-pins.json']);
+  const config = updateJson(readBounded(path.join(root, 'transport-pins.json'), LIMITS.metadata)); assert.equal(config.mode, mode);
+  const names = updateFiles(mode), directories = mode === 'deb' ? ['deb17'] : ['portable16', 'portable17'];
+  assert.deepEqual(fs.readdirSync(path.join(root, 'inputs')).sort(), directories);
+  for (const directory of directories) assert.deepEqual(fs.readdirSync(path.join(root, 'inputs', directory)).sort(),
+    names.filter(name => name.startsWith(directory + '/')).map(name => name.slice(directory.length + 1)).sort());
+  keys(config.files, names, 'Exact external update inventory');
+  const input = {};
+  for (const name of names) {
+    const expected = config.files[name]; keys(expected, ['size', 'sha256'], 'External update pin');
+    assert.ok(Number.isSafeInteger(expected.size) && expected.size > 0 && expected.size <= updateMaximum(name));
+    assert.match(expected.sha256, /^(?!0{64}$)[a-f0-9]{64}$/);
+    input[name] = bootstrapFile(path.join(root, 'inputs', ...name.split('/')), expected);
+  }
+  const contract = createUpdate016017(config, input); reviewedUpdateTarget(contract); return contract;
+}
+function assertUpdateRunner(mode, env = process.env, platform = process.platform, arch = process.arch, uid = process.getuid?.(), euid = process.geteuid?.()) {
+  updateFiles(mode); assert.equal(platform, 'linux'); assert.equal(arch, 'x64');
+  assert.ok(Number.isInteger(uid) && uid > 0 && uid === euid);
+  for (const [name, expected] of Object.entries({ GITHUB_ACTIONS: 'true', RUNNER_ENVIRONMENT: 'github-hosted', RUNNER_OS: 'Linux', RUNNER_ARCH: 'X64',
+    GITHUB_REPOSITORY: 'BOBWORKS-XR/CREATOR-HUB', GITHUB_REPOSITORY_ID: '1364807512', GITHUB_EVENT_NAME: 'workflow_dispatch',
+    GITHUB_REF: UPDATE_BRANCH, GITHUB_WORKFLOW_REF: `BOBWORKS-XR/CREATOR-HUB/${UPDATE_WORKFLOW}@${UPDATE_BRANCH}`, UPDATE_EXECUTE: 'true' })) assert.equal(env[name], expected, name);
+  assert.ok(UPDATE_SCENARIOS[mode].includes(env.UPDATE_SCENARIO), 'Exact mode/scenario pairing required');
+  assert.match(env.GITHUB_SHA || '', /^[a-f0-9]{40}$/);
+  for (const name of ['GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT']) assert.match(env[name] || '', /^[1-9][0-9]*$/);
+  assert.ok(path.isAbsolute(env.RUNNER_TEMP || '') && path.resolve(env.RUNNER_TEMP) === env.RUNNER_TEMP && !env.FLATPAK_ID);
+  for (const name of Object.keys(env)) assert.ok(!/^(LD_|DYLD_|TAURI_|WEBKIT_|APPIMAGE$|APPDIR$|PYTHON|NODE_OPTIONS$|NODE_EXTRA_CA_CERTS$|NODE_TLS_REJECT_UNAUTHORIZED$|SSL_CERT_|CURL_CA_BUNDLE$|BASH_ENV$|ENV$|CREATOR_HUB_SIGNING_)/.test(name)
+    && !name.toLowerCase().endsWith('proxy'), 'Inherited update injection/trust/proxy refused');
+}
+function updateReport(contract, report) {
+  reviewedUpdateTarget(contract);
+  return { ...report, scope: `linux-${contract.mode}-production016-to-private017-lab-transport`, mode: contract.mode,
+    fromVersion: '0.1.16', targetVersion: '0.1.17', publicDiscovery: false, releaseReady: false };
+}
+async function startUpdate016017Proxy(contract, options, env = process.env) {
+  assertUpdateRunner(contract?.mode, env); reviewedUpdateTarget(contract); assert.ok(!fs.existsSync('/.flatpak-info'));
+  const proxy = await startLoopbackTransport(contract, options);
+  return { ...proxy, report: () => updateReport(contract, proxy.report()) };
+}
+async function updateMain() {
+  const mode = process.argv[3]; assertUpdateRunner(mode); assert.equal(process.argv.length, 5);
+  const inspect = process.argv[2] === 'update-016-017-inspect'; assert.ok(inspect || process.argv[2] === 'update-016-017');
+  const root = path.join(process.env.RUNNER_TEMP, 'native-linux-production-016-update', 'transport'); assert.equal(process.argv[4], root);
+  const folder = fs.lstatSync(root); assert.ok(folder.isDirectory() && !folder.isSymbolicLink() && folder.uid === process.getuid() && (folder.mode & 0o7777) === 0o700);
+  const contract = loadUpdate016017(root, mode);
+  if (inspect) { console.log(JSON.stringify(updateReport(contract, labReport(contract, newState())))); return; }
+  assert.ok(fs.fstatSync(0).isFIFO(), 'Inherited private update pipe required');
+  const iterator = process.stdin[Symbol.asyncIterator](); let pending = Buffer.alloc(0);
+  async function line(maximum, timeout) {
+    let timer;
+    try {
+      return await Promise.race([(async () => {
+        while (!pending.includes(10)) {
+          const next = await iterator.next(); if (next.done) return null;
+          pending = Buffer.concat([pending, next.value]); assert.ok(pending.length <= maximum);
+        }
+        const at = pending.indexOf(10), result = pending.subarray(0, at); pending = pending.subarray(at + 1); return result;
+      })(), new Promise((_, reject) => { timer = setTimeout(() => reject(Error('Private update control deadline')), timeout); })]);
+    } finally { clearTimeout(timer); }
+  }
+  const control = json(bounded(await line(2 * LIMITS.tls, LIMITS.handshakeMs), 2 * LIMITS.tls, 'Update TLS control'));
+  keys(control, ['key', 'cert'], 'Ephemeral update TLS');
+  const key = canonicalBase64(control.key, LIMITS.tls), cert = canonicalBase64(control.cert, LIMITS.tls);
+  const proxy = await startUpdate016017Proxy(contract, { key, cert }); key.fill(0);
+  console.log(JSON.stringify({ kind: 'update-016-017-ready', pid: process.pid, mode, proxyUrl: proxy.proxyUrl,
+    publicDiscovery: false, nativeAcceptanceTested: false, signaturesVerifiedByHarness: false, releaseReady: false }));
+  try {
+    const closed = await Promise.race([line(32, LIMITS.durationMs), proxy.closed.then(() => null)]);
+    assert.ok((closed === null || closed.equals(Buffer.from('close'))) && pending.length === 0);
+  } finally {
+    await proxy.close(); process.stdin.destroy(); saveLabReport(path.join(root, 'lab-transport.json'), proxy.report());
+  }
+}
 async function main() {
   assertRunner();
   assert.equal(process.argv.length, 4, 'Use CONFIG REPORT');
@@ -508,8 +686,11 @@ module.exports = { FROM, TO, BRANCH, INTEGRATED_BRANCH, INTEGRATED_TARGET, DESCR
   readBounded, assertRunner, connectHost, headersAllowed, newState, resolveRequest, labReport, startLabProxy,
   BOOTSTRAP_PROFILE, BOOTSTRAP_BRANCH, BOOTSTRAP_WORKFLOW, BOOTSTRAP_REQUEST, BOOTSTRAP_PREFIX, BOOTSTRAP_FILES, BOOTSTRAP_ZIP,
   assertBootstrapRunner, loadBootstrap016, startBootstrap016Proxy,
+  UPDATE_BRANCH, UPDATE_WORKFLOW, UPDATE_SCENARIOS, UPDATE_DEB, UPDATE_ASSET, UPDATE_SOURCE17,
+  updateFiles, createUpdate016017, loadUpdate016017, reviewedUpdateTarget, assertUpdateRunner, startUpdate016017Proxy, updateReport,
   testing: Object.freeze({ startLoopbackTransport }) };
-if (require.main === module) (['bootstrap-016', 'bootstrap-016-inspect'].includes(process.argv[2]) ? bootstrapMain() : main()).catch(() => {
+if (require.main === module) (['update-016-017', 'update-016-017-inspect'].includes(process.argv[2]) ? updateMain()
+  : ['bootstrap-016', 'bootstrap-016-inspect'].includes(process.argv[2]) ? bootstrapMain() : main()).catch(() => {
   // Never log TLS material, HTTP headers, file contents, or parser exceptions.
   console.error('Linux lab transport refused or failed; no native/public acceptance established.'); process.exitCode = 1;
 });
