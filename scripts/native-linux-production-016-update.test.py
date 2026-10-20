@@ -1,6 +1,6 @@
 """Pure tests only. No native application, auth, trust-store or package writes."""
 import ast
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 import copy
 import gzip
 import hashlib
@@ -320,6 +320,59 @@ class Pure(unittest.TestCase):
                     return SimpleNamespace(returncode=0)
                 with patch.object(M.subprocess, "run", side_effect=child):
                     M.run_tool(command, **kwargs)
+
+    def test_native_home_mismatch_reports_only_four_approved_synthetic_paths_before_same_guard(self):
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp).resolve(); home = base / "result/home"; account = base / "synthetic-account"
+            expected = {key: str(home / leaf) for key, leaf in {"HOME": ".", "XDG_CONFIG_HOME": "config", "XDG_DATA_HOME": "data", "XDG_CACHE_HOME": "cache"}.items()}
+            env = {**expected, "HOME": str(account), "UNRELATED_SECRET": "NEVER-EXPORT"}; original = dict(env)
+            path_type = M.Path
+            def path(value): return account if value == "/var/lib/creator-polkit-fixture" else path_type(value)
+            with patch.object(M, "BASE", base), patch.object(M, "Path", side_effect=path), patch.object(M, "admission", return_value="deb-native-cancel"), \
+                 patch.object(M.os, "getuid", return_value=M.UID, create=True), patch.object(M.os, "geteuid", return_value=M.UID, create=True), \
+                 patch.object(M, "read", side_effect=AssertionError("No request or UI read before the home guard")) as read, patch("builtins.print") as printed:
+                with self.assertRaisesRegex(RuntimeError, "^Exact isolated native home required$"):
+                    M.native_session(env)
+            self.assertEqual(env, original); read.assert_not_called(); self.assertEqual(printed.call_count, 1)
+            call = printed.call_args; self.assertEqual(call.kwargs, {"flush": True}); raw = call.args[0]; evidence = json.loads(raw)
+            self.assertLessEqual(len(raw.encode()), 4096); self.assertEqual(evidence["kind"], "production016-native-home-mismatch")
+            self.assertEqual(set(evidence["paths"]), set(expected)); self.assertNotIn("UNRELATED_SECRET", raw); self.assertNotIn("NEVER-EXPORT", raw)
+            for key, row in evidence["paths"].items():
+                self.assertEqual(row["expected"], expected[key]); self.assertEqual(row["actual"], {"present": True, "path": env[key]})
+
+    def test_native_home_mismatch_redacts_outside_noncanonical_missing_and_oversize_values_without_env_dump(self):
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp).resolve(); home = base / "result/home"
+            for oversized in (False, True):
+                env = {"HOME": str(base / ("x" * 5000)) if oversized else "/home/REAL_ACCOUNT_PRIVATE_SENTINEL",
+                       "XDG_CONFIG_HOME": str(home / ".." / "foreign"), "XDG_DATA_HOME": str(base) + "-foreign/private"}
+                with self.subTest(oversized=oversized), patch.object(M, "BASE", base), \
+                     patch.object(M.Path, "resolve", side_effect=AssertionError("Do not resolve outside/noncanonical/oversized paths")), patch("builtins.print") as printed:
+                    M.native_home_guard_diagnostic(env, home)
+                raw = printed.call_args.args[0]; evidence = json.loads(raw)
+                self.assertLessEqual(len(raw.encode()), 4096); self.assertNotIn("REAL_ACCOUNT_PRIVATE_SENTINEL", raw); self.assertNotIn("x" * 100, raw)
+                for key, row in evidence["paths"].items():
+                    actual = row["actual"]
+                    self.assertEqual(actual["present"], key in env)
+                    if key in env:
+                        self.assertEqual(actual, {"present": True, "redacted": True, "sha256": hashlib.sha256(os.fsencode(env[key])).hexdigest()})
+                    else:
+                        self.assertEqual(actual, {"present": False})
+
+    def test_native_home_guard_success_stays_silent_and_failed_diagnostic_cannot_change_refusal(self):
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp).resolve(); home = base / "result/home"
+            env = {key: str(home / leaf) for key, leaf in {"HOME": ".", "XDG_CONFIG_HOME": "config", "XDG_DATA_HOME": "data", "XDG_CACHE_HOME": "cache"}.items()}
+            with patch.object(M, "BASE", base), patch.object(M, "admission", return_value="deb-native-cancel"), \
+                 patch.object(M.os, "getuid", return_value=M.UID, create=True), patch.object(M.os, "geteuid", return_value=M.UID, create=True), \
+                 patch.object(M, "read", side_effect=RuntimeError("stopped after unchanged home guard")), patch("builtins.print") as printed:
+                with self.assertRaisesRegex(RuntimeError, "stopped after unchanged home guard"):
+                    M.native_session(env)
+                printed.assert_not_called()
+                env["HOME"] = ""
+                printed.side_effect = OSError("diagnostic stdout unavailable")
+                with self.assertRaisesRegex(RuntimeError, "^Exact isolated native home required$"):
+                    M.native_session(env)
 
     def parent_fixture(self, *, mode=0o777, fault=None, context=None, log_error=None, guard_only=False):
         root = dict(st_dev=10, st_ino=1, st_uid=0, st_gid=0, st_mode=stat.S_IFDIR | 0o755)
@@ -1071,8 +1124,10 @@ class Pure(unittest.TestCase):
             real_read = M.read
             with patch.object(M, "BASE", base), patch.object(M, "TLS_CERT", cert), patch.object(M, "tls_arm", return_value={"certificate": expected, "before": {"original": True}}), \
                  patch.object(M, "read", side_effect=lambda file, maximum, **kwargs: real_read(file, maximum)), \
+                 patch.object(M, "cleanup_owned_trust_aliases") as aliases, \
                  patch.object(M, "trust_snapshot", return_value={"original": True}), patch.object(M, "run_tool", return_value=b"") as command:
                 self.assertTrue(M.tls_cleanup_locked(environment())["originalTrustRestored"])
+                aliases.assert_called_once()
                 command.assert_called_once_with(["/usr/sbin/update-ca-certificates"], timeout=60)
 
     def trust_fixture(self):
@@ -1080,6 +1135,199 @@ class Pure(unittest.TestCase):
         return {"entries": {"ca-certificates.crt": {"mode": 0o644, "bytes": bundle},
                             "root.pem": {"link": "/synthetic/target-not-exported.crt"},
                             "java": {"kind": "directory", "mode": 0o755}}, "bundle": bundle}
+
+    @contextmanager
+    def trust_alias_fixture(self):
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp).resolve(); folder = base / "trust"; folder.mkdir(); (base / "tls").mkdir()
+            pem, hashed = "creator-production016-update.pem", "99383ae7.0"
+            def info(ino, mode, size=0):
+                return SimpleNamespace(st_dev=12, st_ino=ino, st_mode=mode, st_uid=0, st_gid=0, st_nlink=1,
+                                       st_size=size, st_mtime_ns=100, st_ctime_ns=100)
+            directory = info(1, stat.S_IFDIR | 0o755)
+            links = {pem: {"target": str(M.TLS_CERT), "info": info(2, stat.S_IFLNK | 0o777)},
+                     hashed: {"target": pem, "info": info(3, stat.S_IFLNK | 0o777)},
+                     "foreign.pem": {"target": "/preserved/foreign.crt", "info": info(4, stat.S_IFLNK | 0o777)}}
+            before = {"entries": {"foreign.pem": {"link": "/preserved/foreign.crt"}}, "bundle": M.pin(b"original bundle")}
+            arm = {"certificate": M.pin(b"synthetic public certificate"), "before": before}
+            published = {"certificate": arm["certificate"], "stamp": [1, 2, 3]}
+            (base / "tls/published.json").write_text(json.dumps(published))
+            originals = {name: getattr(os, name) for name in ("open", "close", "stat", "lstat", "fstat", "fsync", "listdir", "readlink", "unlink")}
+            original_read, original_save, original_lexists = M.read, M.save, os.path.lexists
+            state = SimpleNamespace(base=base, folder=folder, pem=pem, hashed=hashed, links=links, arm=arm, published=published,
+                                    removed=[], events=[], fault=None, counts={}, handles={}, counter=100002, directory=directory)
+            def opened(file, flags, mode=0o777, *, dir_fd=None):
+                if file == folder or file == base / "tls":
+                    fd = 100000 if file == folder else 100001
+                    self.assertEqual(flags, os.O_RDONLY | M.os.O_DIRECTORY | M.os.O_NOFOLLOW | M.os.O_CLOEXEC)
+                    state.handles[fd] = directory; return fd
+                if dir_fd == 100000:
+                    self.assertEqual(flags, M.os.O_PATH | M.os.O_NOFOLLOW | M.os.O_CLOEXEC)
+                    if state.fault == "replace-at-open" and file == hashed:
+                        state.links[file] = {"target": pem, "info": info(99, stat.S_IFLNK | 0o777)}
+                    fd = state.counter; state.counter += 1; state.handles[fd] = copy.deepcopy(state.links[file]); return fd
+                return originals["open"](file, flags, mode, **({"dir_fd": dir_fd} if dir_fd is not None else {}))
+            def lstat(file, **kwargs):
+                return state.directory if file == folder else originals["lstat"](file, **kwargs)
+            def stat_at(file, **kwargs):
+                if kwargs.get("dir_fd") == 100000:
+                    self.assertEqual(kwargs, {"dir_fd": 100000, "follow_symlinks": False})
+                    return state.links[file]["info"]
+                if file == folder: return state.directory
+                return originals["stat"](file, **kwargs)
+            def fstat(fd):
+                held = state.handles.get(fd)
+                return held["info"] if isinstance(held, dict) else held if held is not None else originals["fstat"](fd)
+            def readlink(name, **kwargs):
+                fd = kwargs.get("dir_fd")
+                if name == "" and fd in state.handles: return state.handles[fd]["target"]
+                if fd == 100000:
+                    count = state.counts[name] = state.counts.get(name, 0) + 1
+                    if state.fault == "retarget-before-unlink" and name == hashed and count == 4:
+                        state.links[name] = {"target": "/foreign/replacement", "info": info(88, stat.S_IFLNK | 0o777)}
+                    return state.links[name]["target"]
+                return originals["readlink"](name, **kwargs)
+            def unlink(name, **kwargs):
+                if kwargs.get("dir_fd") == 100000:
+                    self.assertIn("journal-fsynced", state.events)
+                    self.assertIn(name, (pem, hashed)); state.removed.append(name); del state.links[name]
+                    if state.fault == "interrupt-after-hash" and name == hashed: raise OSError("interrupted after owned hash unlink")
+                    return
+                return originals["unlink"](name, **kwargs)
+            def closed(fd):
+                if fd in state.handles: del state.handles[fd]
+                else: originals["close"](fd)
+            def fsync(fd):
+                if fd == 100001: state.events.append("journal-fsynced")
+                else: originals["fsync"](fd)
+            def read(file, maximum=262144, **kwargs):
+                if Path(file).parent == base / "tls": kwargs.pop("uid", None); kwargs.pop("mode", None)
+                return original_read(file, maximum, **kwargs)
+            def save(file, value, mode=0o600):
+                original_save(file, value, mode)
+                if file == base / "tls/aliases.json": state.events.append("journal-saved")
+            def snapshot():
+                return {"entries": {name: {"link": row["target"]} for name, row in state.links.items()}, "bundle": before["bundle"]}
+            with ExitStack() as stack:
+                for manager in (patch.object(M, "BASE", base), patch.object(M, "TLS_TRUST", folder),
+                                patch.object(M, "protected_ancestry", side_effect=lambda path: self.assertIn(path, (folder, base / "tls"))),
+                                patch.object(M.os, "getuid", return_value=0, create=True), patch.object(M.os, "geteuid", return_value=0, create=True),
+                                patch.object(M.os, "O_DIRECTORY", getattr(os, "O_DIRECTORY", 0), create=True),
+                                patch.object(M.os, "O_NOFOLLOW", getattr(os, "O_NOFOLLOW", 0), create=True),
+                                patch.object(M.os, "O_CLOEXEC", getattr(os, "O_CLOEXEC", 0), create=True),
+                                patch.object(M.os, "O_PATH", getattr(os, "O_PATH", 0x200000), create=True),
+                                patch.object(M.os, "open", side_effect=opened), patch.object(M.os, "lstat", side_effect=lstat),
+                                patch.object(M.os, "stat", side_effect=stat_at), patch.object(M.os, "fstat", side_effect=fstat),
+                                patch.object(M.os, "readlink", side_effect=readlink), patch.object(M.os, "unlink", side_effect=unlink),
+                                patch.object(M.os, "close", side_effect=closed), patch.object(M.os, "fsync", side_effect=fsync),
+                                patch.object(M.os, "listdir", side_effect=lambda fd: list(state.links) if fd == 100000 else originals["listdir"](fd)),
+                                patch.object(M.os.path, "lexists", side_effect=lambda file: False if file == M.TLS_CERT else original_lexists(file)),
+                                patch.object(M, "read", side_effect=read), patch.object(M, "save", side_effect=save),
+                                patch.object(M, "tls_arm", return_value=arm), patch.object(M, "trust_snapshot", side_effect=snapshot)):
+                    stack.enter_context(manager)
+                yield state
+                self.assertFalse(state.handles, "All held alias/directory FDs must close")
+
+    def test_actual_two_dangling_aliases_fail_old_behavior_then_exact_cleanup_restores_snapshot(self):
+        with self.trust_alias_fixture() as fixture, patch.object(M, "run_tool", return_value=b"") as command, patch("builtins.print"):
+            with patch.object(M, "cleanup_owned_trust_aliases"), self.assertRaisesRegex(RuntimeError, "Original CI trust snapshot not restored"):
+                M.tls_cleanup_locked(environment())
+            command.reset_mock()
+            self.assertTrue(M.tls_cleanup_locked(environment())["originalTrustRestored"])
+            self.assertEqual(fixture.removed, [fixture.hashed, fixture.pem])
+            self.assertEqual(set(fixture.links), {"foreign.pem"})
+            command.assert_called_once_with(["/usr/sbin/update-ca-certificates"], timeout=60)
+            self.assertLess(fixture.events.index("journal-saved"), fixture.events.index("journal-fsynced"))
+
+    def test_alias_cleanup_refuses_original_foreign_type_target_extra_and_identity_changes_before_unlink(self):
+        for fault in ("original-pem", "original-hash", "original-removed", "foreign-owner", "hardlink", "regular-pem", "wrong-target", "wrong-hash", "extra-link", "extra-hash", "wrong-publication", "replace-at-open", "retarget-before-unlink", "directory-owner"):
+            with self.subTest(fault=fault), self.trust_alias_fixture() as fixture:
+                if fault in ("original-pem", "original-hash"):
+                    name = fixture.pem if fault == "original-pem" else fixture.hashed
+                    fixture.arm["before"]["entries"][name] = {"link": fixture.links[name]["target"]}
+                if fault == "foreign-owner": fixture.links[fixture.pem]["info"].st_uid = 1001
+                if fault == "original-removed": del fixture.links["foreign.pem"]
+                if fault == "hardlink": fixture.links[fixture.pem]["info"].st_nlink = 2
+                if fault == "regular-pem": fixture.links[fixture.pem]["info"].st_mode = stat.S_IFREG | 0o644
+                if fault == "wrong-target": fixture.links[fixture.pem]["target"] = "/foreign.crt"
+                if fault == "wrong-hash": fixture.links[fixture.hashed]["target"] = "/foreign.pem"
+                if fault == "extra-link": fixture.links["unexpected.pem"] = copy.deepcopy(fixture.links[fixture.pem])
+                if fault == "extra-hash": fixture.links["12345678.0"] = copy.deepcopy(fixture.links[fixture.hashed])
+                if fault == "wrong-publication": fixture.published["certificate"] = M.pin(b"foreign certificate")
+                if fault == "directory-owner": fixture.directory.st_uid = 1001
+                fixture.fault = fault
+                with self.assertRaises(RuntimeError): M.cleanup_owned_trust_aliases(fixture.arm, fixture.published)
+                self.assertFalse(fixture.removed)
+
+    def test_alias_cleanup_foreign_journal_appearing_before_publication_is_never_overwritten_or_adopted(self):
+        with self.trust_alias_fixture() as fixture:
+            save = M.save; file = fixture.base / "tls/aliases.json"
+            def publish(path, value, mode=0o600):
+                if path == file: file.write_bytes(b"foreign journal appeared")
+                save(path, value, mode)
+            with patch.object(M, "save", side_effect=publish), self.assertRaises(FileExistsError):
+                M.cleanup_owned_trust_aliases(fixture.arm, fixture.published)
+            self.assertEqual(file.read_bytes(), b"foreign journal appeared")
+            self.assertFalse(fixture.removed)
+
+    def test_alias_cleanup_partial_unlink_resumes_only_journaled_original_link_identities(self):
+        with self.trust_alias_fixture() as fixture:
+            fixture.fault = "interrupt-after-hash"
+            with self.assertRaises(OSError): M.cleanup_owned_trust_aliases(fixture.arm, fixture.published)
+            proof = (fixture.base / "tls/aliases.json").read_bytes()
+            self.assertEqual(fixture.removed, [fixture.hashed]); fixture.fault = None
+            M.cleanup_owned_trust_aliases(fixture.arm, fixture.published)
+            M.cleanup_owned_trust_aliases(fixture.arm, fixture.published)
+            self.assertEqual(fixture.removed, [fixture.hashed, fixture.pem])
+            self.assertEqual((fixture.base / "tls/aliases.json").read_bytes(), proof)
+
+    def test_alias_cleanup_partial_retry_never_adopts_reappeared_replaced_or_foreign_journal(self):
+        for fault in ("reappeared", "replaced", "foreign-journal"):
+            with self.subTest(fault=fault), self.trust_alias_fixture() as fixture:
+                old_hash = copy.deepcopy(fixture.links[fixture.hashed]); fixture.fault = "interrupt-after-hash"
+                with self.assertRaises(OSError): M.cleanup_owned_trust_aliases(fixture.arm, fixture.published)
+                fixture.fault = None
+                if fault == "reappeared":
+                    old_hash["info"].st_ino += 100; fixture.links[fixture.hashed] = old_hash
+                if fault == "replaced": fixture.links[fixture.pem]["info"].st_ino += 100
+                if fault == "foreign-journal":
+                    file = fixture.base / "tls/aliases.json"; proof = json.loads(file.read_text()); proof["certificate"] = M.pin(b"foreign")
+                    file.write_text(json.dumps(proof))
+                with self.assertRaises(RuntimeError): M.cleanup_owned_trust_aliases(fixture.arm, fixture.published)
+                self.assertEqual(fixture.removed, [fixture.hashed])
+
+    def test_alias_cleanup_unrelated_trust_drift_still_refuses_exact_before_image_without_foreign_unlink(self):
+        with self.trust_alias_fixture() as fixture, patch.object(M, "run_tool", return_value=b""), patch("builtins.print"):
+            fixture.links["foreign.pem"]["target"] = "/changed/foreign.crt"
+            with self.assertRaisesRegex(RuntimeError, "Original CI trust snapshot not restored"):
+                M.tls_cleanup_locked(environment())
+            self.assertEqual(fixture.removed, [fixture.hashed, fixture.pem])
+            self.assertEqual(fixture.links["foreign.pem"]["target"], "/changed/foreign.crt")
+
+    @unittest.skipUnless(sys.platform == "linux" and hasattr(os, "O_PATH"), "Actual Linux held-symlink syscalls required")
+    def test_unix_alias_pair_uses_real_held_symlinks_and_preserves_foreign_target(self):
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp).resolve(); folder = base / "trust"; folder.mkdir(mode=0o755); (base / "tls").mkdir(mode=0o700)
+            pem = folder / "creator-production016-update.pem"; hashed = folder / "99383ae7.0"; foreign = folder / "foreign.pem"
+            pem.symlink_to(M.TLS_CERT); hashed.symlink_to(pem.name); foreign.symlink_to("/preserved/foreign.crt")
+            arm = {"certificate": M.pin(b"synthetic certificate"), "before": {"entries": {foreign.name: {"link": os.readlink(foreign)}}, "bundle": M.pin(b"bundle")}}
+            published = {"certificate": arm["certificate"], "stamp": [1, 2, 3]}
+            actual = {name: getattr(os, name) for name in ("stat", "lstat", "fstat")}; lexists = os.path.lexists
+            def root_metadata(info):
+                # Only fixture ownership is injected; fd/readlink/unlink syscalls are real.
+                values = {name: getattr(info, name) for name in ("st_dev", "st_ino", "st_mode", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns")}
+                return SimpleNamespace(**values, st_uid=0, st_gid=0)
+            with patch.object(M, "BASE", base), patch.object(M, "TLS_TRUST", folder), \
+                 patch.object(M, "protected_ancestry", side_effect=lambda path: self.assertIn(path, (folder, base / "tls"))), \
+                 patch.object(M.os, "getuid", return_value=0), patch.object(M.os, "geteuid", return_value=0), \
+                 patch.object(M.os, "stat", side_effect=lambda *args, **kwargs: root_metadata(actual["stat"](*args, **kwargs))), \
+                 patch.object(M.os, "lstat", side_effect=lambda *args, **kwargs: root_metadata(actual["lstat"](*args, **kwargs))), \
+                 patch.object(M.os, "fstat", side_effect=lambda fd: root_metadata(actual["fstat"](fd))), \
+                 patch.object(M.os.path, "lexists", side_effect=lambda file: False if file == M.TLS_CERT else lexists(file)):
+                M.cleanup_owned_trust_aliases(arm, published)
+                M.cleanup_owned_trust_aliases(arm, published)
+                self.assertFalse(pem.is_symlink()); self.assertFalse(hashed.is_symlink())
+                self.assertEqual(os.readlink(foreign), "/preserved/foreign.crt")
 
     def test_tls_before_image_roundtrip_keeps_exact_equality_and_no_diagnostic(self):
         before = self.trust_fixture(); restored = M.parse(json.dumps(before, sort_keys=True).encode())

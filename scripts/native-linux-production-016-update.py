@@ -72,6 +72,7 @@ VERIFIER_PINS = {
 MAX_ZIP, MAX_FILE, MAX_TOTAL = 768 * 1024**2, 256 * 1024**2, 512 * 1024**2
 ROOT_TOOL_PATH = "/usr/sbin:/usr/bin:/sbin:/bin"
 TLS_CERT = Path("/usr/local/share/ca-certificates/creator-production016-update.crt")
+TLS_TRUST = Path("/etc/ssl/certs")
 TLS_CONFIG = (b"[req]\nprompt=no\ndistinguished_name=dn\nx509_extensions=ext\n[dn]\nCN=api.github.com\n"
               b"[ext]\nsubjectAltName=DNS:api.github.com,DNS:github.com\nbasicConstraints=critical,CA:TRUE\n"
               b"keyUsage=critical,digitalSignature,keyEncipherment,keyCertSign\nextendedKeyUsage=serverAuth\n")
@@ -1400,10 +1401,37 @@ def bootstrap16(folder, profile, review, env, helper, native, atspi, x11):
     return {"actualSetupUi": True, "installedSignedGeneration": generation, "normalExitCode": child.returncode}
 
 
+def native_home_guard_diagnostic(env, home):
+    paths = {}
+    for key, leaf in {"HOME": ".", "XDG_CONFIG_HOME": "config", "XDG_DATA_HOME": "data", "XDG_CACHE_HOME": "cache"}.items():
+        actual = {"present": key in env}
+        if key in env:
+            value = env[key]
+            actual.update(redacted=True, sha256=hashlib.sha256(os.fsencode(value)).hexdigest())
+            path = Path(value)
+            if path.is_absolute() and str(path) == value and ".." not in path.parts and len(json.dumps(value)) <= 512:
+                roots = (BASE, Path("/var/lib/creator-polkit-fixture"))
+                if any(path == root or root in path.parents for root in roots):
+                    try:
+                        if path.resolve(strict=False) == path:
+                            actual = {"present": True, "path": value}
+                    except (OSError, RuntimeError):
+                        pass
+        paths[key] = {"expected": str(home / leaf), "actual": actual}
+    raw = json.dumps({"kind": "production016-native-home-mismatch", "paths": paths}, separators=(",", ":"), allow_nan=False)
+    require(len(raw.encode()) <= 4096, "Bounded synthetic home diagnostic exceeded")
+    print(raw, flush=True)
+
+
 def native_session(env):
     scenario = admission(env)
     require(os.getuid() == os.geteuid() == UID, "Only the fresh synthetic account may run the GUI")
     home, folder = BASE / "result/home", BASE / "inputs"
+    if not all(env.get(key) == str(home / leaf) for key, leaf in {"HOME": ".", "XDG_CONFIG_HOME": "config", "XDG_DATA_HOME": "data", "XDG_CACHE_HOME": "cache"}.items()):
+        try:
+            native_home_guard_diagnostic(env, home)
+        except Exception:
+            pass  # Diagnostic failure cannot change the original home refusal.
     require(all(env.get(key) == str(home / leaf) for key, leaf in {"HOME": ".", "XDG_CONFIG_HOME": "config", "XDG_DATA_HOME": "data", "XDG_CACHE_HOME": "cache"}.items()), "Exact isolated native home required")
     original_request = parse(read(BASE / "request.json", 65536, uid=0, mode=0o644))
     profile_raw, api_raw = read(folder / "profile.json", 65536), read(folder / "api.json", 512 * 1024)
@@ -1824,7 +1852,7 @@ def verify_stock_sources():
 
 
 def trust_snapshot():
-    folder = Path("/etc/ssl/certs")
+    folder = TLS_TRUST
     protected_ancestry(folder)
     entries = {}
     for file in folder.iterdir():
@@ -1908,6 +1936,98 @@ def tls_arm(env):
     return value
 
 
+def cleanup_owned_trust_aliases(arm, published):
+    require(os.getuid() == os.geteuid() == 0 and published["certificate"] == arm["certificate"]
+            and not os.path.lexists(TLS_CERT), "Owned removed TLS certificate required before alias cleanup")
+    protected_ancestry(TLS_TRUST)
+    pem = TLS_CERT.stem + ".pem"
+    require(pem not in arm["before"]["entries"], "Original PEM alias must not be removed")
+    initial = TLS_TRUST.lstat()
+    directory_key = lambda info: (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid)
+    expected_directory = directory_key(initial)
+    directory = os.open(TLS_TRUST, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    held = {}
+    try:
+        def recheck_directory():
+            for info in (os.fstat(directory), TLS_TRUST.lstat()):
+                require(stat.S_ISDIR(info.st_mode) and info.st_uid == info.st_gid == 0 and not info.st_mode & 0o022
+                        and directory_key(info) == expected_directory, "Protected trust directory changed")
+            require(TLS_TRUST.resolve(strict=True) == TLS_TRUST, "Redirected trust directory refused")
+
+        def inventory():
+            recheck_directory()
+            names = os.listdir(directory)
+            require(len(names) <= 2048 and set(arm["before"]["entries"]).issubset(names), "Original bounded trust inventory required")
+            aliases = {}
+            for name in names:
+                info = os.stat(name, dir_fd=directory, follow_symlinks=False)
+                target = os.readlink(name, dir_fd=directory) if stat.S_ISLNK(info.st_mode) else None
+                if name != pem and target not in (pem, str(TLS_CERT)):
+                    require(name in arm["before"]["entries"], "Unknown trust entry appeared during alias cleanup")
+                    continue
+                require(name not in arm["before"]["entries"] and stat.S_ISLNK(info.st_mode)
+                        and info.st_uid == info.st_gid == 0 and info.st_nlink == 1,
+                        "Original, foreign or non-symlink trust alias refused")
+                require((name == pem and target == str(TLS_CERT))
+                        or (re.fullmatch(r"[a-f0-9]{8}\.[0-9]{1,2}", name) and target == pem), "Unknown trust alias relationship refused")
+                aliases[name] = {"stamp": list(stamp(info)), "target": target}
+            require(len(aliases) <= 2 and sum(name != pem for name in aliases) <= 1, "Only one owned PEM/hash alias pair allowed")
+            return aliases
+
+        aliases = inventory()
+        proof_path = BASE / "tls/aliases.json"
+        protected_ancestry(proof_path.parent)
+        binding = {"schemaVersion": 1, "certificate": arm["certificate"], "publishedStamp": published["stamp"],
+                   "before": pin(json.dumps(arm["before"], sort_keys=True, separators=(",", ":")).encode()),
+                   "directory": list(expected_directory)}
+        new_proof = not os.path.lexists(proof_path)
+        if not new_proof:
+            proof = parse(read(proof_path, 16384, uid=0, mode=0o600))
+            keys(proof, (*binding, "aliases"))
+            require(all(proof[key] == value for key, value in binding.items()) and type(proof["aliases"]) is dict
+                    and len(proof["aliases"]) <= 2 and sum(name != pem for name in proof["aliases"]) <= 1, "Foreign trust alias cleanup journal refused")
+            require(all(name in proof["aliases"] and value == proof["aliases"][name] for name, value in aliases.items()),
+                    "New or replaced trust alias cannot be adopted")
+            for name, value in proof["aliases"].items():
+                keys(value, ("stamp", "target"))
+                require(type(value["stamp"]) is list and len(value["stamp"]) == len(stamp(initial))
+                        and all(type(field) is int for field in value["stamp"]) and stat.S_ISLNK(value["stamp"][2])
+                        and value["stamp"][3:6] == [0, 0, 1] and name not in arm["before"]["entries"] and ((name == pem and value["target"] == str(TLS_CERT))
+                        or (re.fullmatch(r"[a-f0-9]{8}\.[0-9]{1,2}", name) and value["target"] == pem)), "Unknown journaled trust alias refused")
+                if name not in aliases:
+                    require(name not in os.listdir(directory), "Journaled trust alias was replaced by foreign content")
+        else:
+            proof = {**binding, "aliases": aliases}
+
+        def recheck_link(name, value, fd):
+            recheck_directory()
+            for info in (os.fstat(fd), os.stat(name, dir_fd=directory, follow_symlinks=False)):
+                require(stat.S_ISLNK(info.st_mode) and info.st_uid == info.st_gid == 0 and info.st_nlink == 1
+                        and list(stamp(info)) == value["stamp"], "Owned trust alias identity changed")
+            require(os.readlink("", dir_fd=fd) == os.readlink(name, dir_fd=directory) == value["target"], "Owned trust alias target changed")
+
+        for name, value in aliases.items():
+            held[name] = os.open(name, os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=directory)
+            recheck_link(name, value, held[name])
+        require(inventory() == aliases, "Trust alias inventory changed before cleanup")
+        if new_proof:
+            save(proof_path, proof)
+            parent = os.open(proof_path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+            try:
+                os.fsync(parent)
+            finally:
+                os.close(parent)
+        # Remove the hash link first; an interruption leaves a journal-bound PEM.
+        for name in sorted(aliases, key=lambda name: name == pem):
+            recheck_link(name, aliases[name], held[name])
+            os.unlink(name, dir_fd=directory)
+        require(not inventory(), "Owned trust aliases reappeared during cleanup")
+    finally:
+        for fd in held.values():
+            os.close(fd)
+        os.close(directory)
+
+
 def tls_cleanup_locked(env):
     arm = tls_arm(env)
     published = None
@@ -1924,6 +2044,7 @@ def tls_cleanup_locked(env):
     if published is not None:
         # An interrupted rebuild after the exact owned unlink is recoverable;
         # an unknown/unrecorded certificate still has no cleanup authority.
+        cleanup_owned_trust_aliases(arm, published)
         run_tool(["/usr/sbin/update-ca-certificates"], timeout=60)
     certificate_absent = not os.path.lexists(TLS_CERT)
     after = trust_snapshot()
