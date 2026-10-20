@@ -708,6 +708,122 @@ class Pure(unittest.TestCase):
                 M.run_tool(argv, **kwargs)
         return failure.exception, [json.loads(call.args[0]) for call in printed.call_args_list]
 
+    def synthetic_useradd_command(self):
+        return ["/usr/sbin/useradd", "--uid", "21314", "--user-group", "--create-home", "--home-dir",
+                "/var/lib/creator-polkit-fixture", "--shell", "/bin/bash", "--groups", "sudo", "creator-polkit-fixture"]
+
+    def test_exact_synthetic_useradd_capture_matches_unchanged_create_account_call(self):
+        command = self.synthetic_useradd_command()
+        self.assertEqual(M.public_root_tool(command), "synthetic-useradd")
+        tree = ast.parse(Path(M.__file__).read_text())
+        account = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "create_account")
+        calls = [n for n in ast.walk(account) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "run_tool"]
+        self.assertEqual(len(calls), 1); self.assertFalse(calls[0].keywords)
+        expression = ast.Expression(body=calls[0].args[0])
+        self.assertEqual(eval(compile(expression, "fixed-create-account-command", "eval"),
+                              {"__builtins__": {}, "str": str, "UID": M.UID, "USER": M.USER}), command)
+
+    def test_synthetic_useradd_timeout_captures_bounded_output_without_execution_contract_change(self):
+        command = self.synthetic_useradd_command()
+        original = subprocess.TimeoutExpired(command, 90)
+        with tempfile.TemporaryDirectory() as temp, patch.object(M, "BASE", Path(temp).resolve()):
+            def child(actual, **options):
+                self.assertEqual(actual, command)
+                self.assertEqual(options["timeout"], 90)
+                self.assertEqual(options["env"], {"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"})
+                self.assertEqual(options["cwd"], "/"); self.assertFalse(options["check"])
+                self.assertIsNone(options["input"]); self.assertEqual(options["stdin"], subprocess.DEVNULL)
+                self.assertEqual(set(options), {"input", "stdin", "stdout", "stderr", "env", "cwd", "timeout", "check"})
+                for label in ("stdout", "stderr"):
+                    self.assertTrue(stat.S_ISREG(os.fstat(options[label].fileno()).st_mode))
+                options["stdout"].write(b"public useradd stdout\n")
+                options["stderr"].write(b"e" * 9000)
+                raise original
+            with patch.object(M.subprocess, "run", side_effect=child) as run, patch("builtins.print") as printed:
+                with self.assertRaises(subprocess.TimeoutExpired) as caught:
+                    M.run_tool(command)
+            self.assertIs(caught.exception, original); self.assertEqual(run.call_count, 1)
+            self.assertEqual(len(printed.call_args_list), 1)
+            evidence = json.loads(printed.call_args_list[0].args[0])
+            self.assertEqual(evidence["tool"], "synthetic-useradd")
+            self.assertEqual(evidence["pidScope"], "controller"); self.assertEqual(evidence["pid"], os.getpid())
+            self.assertEqual(evidence["failureType"], "TimeoutExpired"); self.assertIsNone(evidence["returncode"])
+            self.assertEqual(evidence["stdout"], {"bytes": len(b"public useradd stdout\n"), "truncated": False, "text": "public useradd stdout\n"})
+            self.assertEqual(evidence["stderr"], {"bytes": 9000, "truncated": True, "text": "e" * 8192})
+            self.assertFalse(set(evidence) & {"argv", "env", "stdin", "input", "childPid", "poll", "waitStatus"})
+            files = list(M.BASE.iterdir()); self.assertEqual(len(files), 1)
+            self.assertEqual(files[0].name, f"public-tool-failure-synthetic-useradd-{os.getpid()}.json")
+            self.assertEqual(json.loads(files[0].read_text()), evidence)
+
+    def test_synthetic_useradd_changed_argv_input_and_environment_never_expose_output(self):
+        command = self.synthetic_useradd_command()
+        variants = []
+        for index, value in ((0, "/usr/bin/useradd"), (2, "21315"), (6, "/var/lib/foreign"),
+                             (8, "/bin/sh"), (10, "sudo,adm"), (11, "foreign-user")):
+            changed = command.copy(); changed[index] = value; variants.append(changed)
+        variants.extend((command + ["--extra"], command[:-1],
+                         command[:-1] + ["--password", "SYNTHETIC_PRIVATE_PASSWORD", command[-1]],
+                         command[:-1] + ["-p", "SYNTHETIC_PRIVATE_PASSWORD", command[-1]],
+                         [command[0], "--system", *command[1:]],
+                         ["/usr/bin/passwd", "creator-polkit-fixture"]))
+        cases = [(changed, {}) for changed in variants]
+        cases.extend((command, kwargs) for kwargs in ({"input": b"SYNTHETIC_PRIVATE_INPUT"}, {"input": b""},
+                     {"env": {"PRIVATE": "SYNTHETIC_PRIVATE_ENV"}}, {"env": {}},
+                     {"env": {"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"}}))
+        with tempfile.TemporaryDirectory() as temp, patch.object(M, "BASE", Path(temp).resolve()):
+            for actual, kwargs in cases:
+                with self.subTest(command=actual, options=tuple(kwargs)):
+                    self.assertIsNone(M.public_root_tool(actual, **kwargs))
+                    _, logs = self.public_tool_failure(actual, output=b"SYNTHETIC_PRIVATE_STDOUT",
+                                                       error=b"SYNTHETIC_PRIVATE_STDERR", **kwargs)
+                    self.assertFalse(logs)
+                    self.assertFalse(list(M.BASE.iterdir()))
+
+    def test_synthetic_useradd_nonzero_and_success_preserve_existing_outcomes(self):
+        command = self.synthetic_useradd_command()
+        with tempfile.TemporaryDirectory() as temp, patch.object(M, "BASE", Path(temp).resolve()):
+            failure, logs = self.public_tool_failure(command, code=23)
+            self.assertEqual(str(failure), "Fixed tool failed: useradd")
+            self.assertEqual(len(logs), 1)
+            self.assertEqual(logs[0]["returncode"], 23)
+            self.assertEqual(logs[0]["pidScope"], "controller")
+        with tempfile.TemporaryDirectory() as temp, patch.object(M, "BASE", Path(temp).resolve()):
+            def child(actual, **options):
+                self.assertEqual(actual, command); self.assertEqual(options["timeout"], 90)
+                self.assertEqual(options["env"], {"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"})
+                options["stdout"].write(b"success")
+                return SimpleNamespace(returncode=0)
+            with patch.object(M.subprocess, "run", side_effect=child) as run, patch("builtins.print") as printed:
+                self.assertEqual(M.run_tool(command), b"success")
+            self.assertEqual(run.call_count, 1); printed.assert_not_called()
+            self.assertFalse(list(M.BASE.iterdir()))
+
+    def test_synthetic_useradd_timeout_publication_failure_preserves_original_exception(self):
+        command = self.synthetic_useradd_command(); original = subprocess.TimeoutExpired(command, 90)
+        def child(actual, **options):
+            self.assertEqual(actual, command); options["stderr"].write(b"public timeout detail")
+            raise original
+        with patch.object(M.subprocess, "run", side_effect=child) as run, \
+             patch.object(M, "save", side_effect=OSError("diagnostic sink unavailable")), \
+             patch("builtins.print", side_effect=OSError("diagnostic stderr unavailable")):
+            with self.assertRaises(subprocess.TimeoutExpired) as caught:
+                M.run_tool(command)
+        self.assertIs(caught.exception, original); self.assertEqual(run.call_count, 1)
+
+    def test_synthetic_useradd_export_adds_only_fixed_name_and_preserves_original_limit(self):
+        tree = ast.parse(Path(M.__file__).read_text())
+        exporter = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "export_evidence")
+        patterns = [n.args[0].value for n in ast.walk(exporter) if isinstance(n, ast.Call)
+                    and ast.unparse(n.func) == "re.fullmatch" and isinstance(n.args[0], ast.Constant)]
+        self.assertEqual(len(patterns), 1)
+        for tool in ("baseline-dpkg-install", "update-ca-certificates", "synthetic-useradd"):
+            self.assertIsNotNone(re.fullmatch(patterns[0], f"public-tool-failure-{tool}-123.json"))
+        for name in ("public-tool-failure-useradd-123.json", "public-tool-failure-synthetic-useradd-extra-123.json",
+                     "public-tool-failure-synthetic-useradd-0.json", "public-tool-failure-passwd-123.json"):
+            self.assertIsNone(re.fullmatch(patterns[0], name))
+        self.assertIn("len(diagnostics) <= 8", ast.unparse(exporter))
+        self.assertIn("file.lstat().st_uid == 0", ast.unparse(exporter))
+
     def test_exact_baseline_install_failure_captures_public_output_without_argv_or_context(self):
         with tempfile.TemporaryDirectory() as temp, patch.object(M, "BASE", Path(temp).resolve()):
             command = ["/usr/bin/dpkg", "--install", str(M.BASE / "inputs/members/assembly16/native-packages/Creator Hub_0.1.16_amd64.deb")]

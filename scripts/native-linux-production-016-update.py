@@ -395,6 +395,9 @@ def public_root_tool(argv, *, input=None, env=None):
         return "baseline-dpkg-install"
     if argv == ["/usr/sbin/update-ca-certificates"]:
         return "update-ca-certificates"
+    if argv == ["/usr/sbin/useradd", "--uid", "21314", "--user-group", "--create-home", "--home-dir",
+                "/var/lib/creator-polkit-fixture", "--shell", "/bin/bash", "--groups", "sudo", "creator-polkit-fixture"]:
+        return "synthetic-useradd"
     return None
 
 
@@ -403,7 +406,7 @@ def public_tool_failure(argv, out, err, failure_type, returncode=None, *, input=
     tool = public_root_tool(argv, input=input, env=env)
     if tool is None:
         return
-    record = {"kind": "production016-public-tool-failure", "tool": tool, "pid": os.getpid(),
+    record = {"kind": "production016-public-tool-failure", "tool": tool, "pid": os.getpid(), "pidScope": "controller",
               "failureType": failure_type, "returncode": returncode}
     try:
         for label, stream in (("stdout", out), ("stderr", err)):
@@ -419,7 +422,7 @@ def public_tool_failure(argv, out, err, failure_type, returncode=None, *, input=
 
 
 def run_tool(argv, *, input=None, allowed=(0,), timeout=90, env=None, limit=2 * 1024**2):
-    path = ROOT_TOOL_PATH if public_root_tool(argv, input=input, env=env) else "/usr/bin:/bin"
+    path = ROOT_TOOL_PATH if public_root_tool(argv, input=input, env=env) in ("baseline-dpkg-install", "update-ca-certificates") else "/usr/bin:/bin"
     with __import__("tempfile").TemporaryFile() as out, __import__("tempfile").TemporaryFile() as err:
         try:
             result = subprocess.run(argv, input=input, stdin=subprocess.DEVNULL if input is None else None, stdout=out, stderr=err,
@@ -3355,7 +3358,7 @@ def export_evidence(env):
              "result/bootstrap-failure-bitmap/root-window.png", "result/transport-diagnostic.json",
              "result/portable-ancestry-before-launch.json", "result/portable-ancestry-after-refusal.json")
     diagnostics = sorted((*BASE.glob("public-tool-failure-*.json"), *BASE.glob("tls-restore-failure-*.json")))
-    require(len(diagnostics) <= 8 and all(re.fullmatch(r"(?:public-tool-failure-(baseline-dpkg-install|update-ca-certificates)|tls-restore-failure)-[1-9][0-9]*\.json", file.name)
+    require(len(diagnostics) <= 8 and all(re.fullmatch(r"(?:public-tool-failure-(baseline-dpkg-install|update-ca-certificates|synthetic-useradd)|tls-restore-failure)-[1-9][0-9]*\.json", file.name)
                                         and file.lstat().st_uid == 0 for file in diagnostics), "Unknown public tool evidence refused")
     names += tuple(file.name for file in diagnostics)
     for name in names:
