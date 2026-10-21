@@ -1679,6 +1679,29 @@ class ObserverPidfds:
 class Session:
     observer_context = 'flatpak-016'
 
+    @property
+    def evidence_root(self):
+        return self.root
+
+    def harness_sources(self, names):
+        binding = parse(regular(self.root / 'api-binding.json', 32768, 0o600))
+        require(binding['profile'] == PROFILE and all(binding[k] is False for k in GATES)
+                and set(binding['harnessFiles']) == set(names), 'Exact baseline harness binding required')
+        return binding, {name: bound(HERE.parent / name, binding['harnessFiles'][name], 1024 * 1024) for name in names}
+
+    def launcher_source(self, name):
+        return bound(self.root / 'stage/source' / name, self.review['flatpak']['source']['files'][name], 262144)
+
+    def disclosure_source(self):
+        return regular(self.root / 'stage/source/native/flatpak-native-activation/src/lib.rs', 262144)
+
+    def host_identity(self):
+        return (self.review['portable']['root']['sha256'], self.root / 'home/data/creator-hub-portable/generations'
+                / self.review['generation'] / 'AppDir/usr/bin/creator-hub')
+
+    def installed_flatpak(self):
+        return parse(regular(self.root / 'installed-flatpak.json', 32768, 0o600))
+
     def __init__(self, root, review, *, observer_context='flatpak-016'):
         observer_uid(observer_context)
         self.observer_context = observer_context
@@ -1686,7 +1709,9 @@ class Session:
         self.app_env = clean_environment(root)
         self.app_env.update({key: os.environ[key] for key in ("DISPLAY", "DBUS_SESSION_BUS_ADDRESS", "XAUTHORITY") if key in os.environ})
         self.helper, self.native = P.helpers()
-        self.x11, self.driver = self.helper.X11(), P.Driver()
+        # Driver failure must not leave an unassigned X11 connection/handler.
+        self.driver = P.Driver()
+        self.x11 = self.helper.X11()
         self.children, self.captures, self.fds = [], [], []
         self.portal_client = None
         self.flatpak_launch = None
@@ -1699,7 +1724,7 @@ class Session:
     def launch(self, args, label, *, env=None, pass_fds=()):
         child = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                  env=self.app_env if env is None else env, **({'pass_fds': pass_fds} if pass_fds else {}))
-        self.children.append(child); self.captures.append(self.native.Capture(child, self.root, label))
+        self.children.append(child); self.captures.append(self.native.Capture(child, self.evidence_root, label))
         return child
 
     def wait(self, test, seconds=30):
@@ -1883,7 +1908,7 @@ class Session:
             diagnostic["actionAttempted"] = True; diagnostic["actionReturned"] = interface.do_action(0) is True
             require(diagnostic["actionReturned"], "GTK action outcome unknown; no retry")
         finally:
-            diagnostic["rows"] = rows; save(self.root / (phase + "-gtk.json"), diagnostic); bus.close_sync(None)
+            diagnostic["rows"] = rows; save(self.evidence_root / (phase + "-gtk.json"), diagnostic); bus.close_sync(None)
 
     def flatpak_guard(self):
         child, origin = self.flatpak_child, self.flatpak_origin
@@ -1921,12 +1946,13 @@ class Session:
                      'scripts/native-linux-flatpak-activation-observer.py', 'scripts/native-linux-flatpak-activation-observer.test.py',
                      'scripts/native-linux-flatpak-dialog-input.py', 'scripts/native-linux-flatpak-dialog-input.test.py',
                      'scripts/native-unix-window.py', 'scripts/native-unix-window.test.py')
-            binding = parse(regular(self.root / 'api-binding.json', 32768, 0o600))
+            binding, sources = self.harness_sources(names)
             require(binding['harnessSource'] == os.environ.get('GITHUB_SHA')
                     and re.fullmatch(r'[a-f0-9]{40}', binding['harnessSource'])
-                    and binding['profile'] == PROFILE and all(binding[k] is False for k in GATES)
-                    and set(binding['harnessFiles']) == set(names), 'Exact independently bound diagnostic harness sources required')
-            sources = {name: bound(HERE.parent / name, binding['harnessFiles'][name], 1024 * 1024) for name in names}
+                    and set(binding['harnessFiles']) == set(names) and set(sources) == set(names)
+                    and all(type(sources[name]) is bytes and 0 < len(sources[name]) <= 1024 * 1024
+                            and binding['harnessFiles'][name] == {'size': len(sources[name]), 'sha256': hashlib.sha256(sources[name]).hexdigest()}
+                            for name in names), 'Exact independently bound diagnostic harness sources required')
             state['record'].update(harnessSource=binding['harnessSource'], harnessFiles=binding['harnessFiles'])
             spec = importlib.util.spec_from_loader('owned_flatpak_activation_diagnostic', loader=None)
             module = importlib.util.module_from_spec(spec)
@@ -1965,7 +1991,7 @@ class Session:
             snapshot = None
             if not any(row.get('executable') == '/usr/bin/xdg-dbus-proxy' for row in tree.values()):
                 stage = 'external-instance-admission'
-                installed = parse(regular(self.root / 'installed-flatpak.json', 32768, 0o600))
+                installed = self.installed_flatpak()
                 require(installed['ref'] == REF and installed['runtime'] == RUNTIME
                         and installed['commit'] == self.review['flatpak']['commit'], 'Actual installed Flatpak commit binding required')
                 snapshot = RootProxySnapshot(module, self.root, binding['harnessSource'],
@@ -2051,7 +2077,7 @@ class Session:
             if 'preInputProxyPeers' in record and len(json_bytes(record)) > 32768:
                 del record['preInputProxyPeers']  # Optional capture must not displace the original outcome.
             require(len(json_bytes(record)) <= 32768, 'Bounded passive diagnostic receipt required')
-            save(self.root / 'warm-activation-observer-gtk.json', record)
+            save(self.evidence_root / 'warm-activation-observer-gtk.json', record)
         except Exception:
             pass
         return record
@@ -2066,7 +2092,7 @@ class Session:
                     and client['kernelImageSha256'] == self.review['flatpak']['files']['creator-hub-flatpak-activate']['sha256'],
                     "Only the exact signed Flatpak launcher can use keyboard decisions")
             name = 'native/flatpak-native-activation/src/linux.rs'
-            source = bound(self.root / 'stage/source' / name, self.review['flatpak']['source']['files'][name], 262144)
+            source = self.launcher_source(name)
             mapping = launcher_button_mapping(source.decode('utf8'), question, action)
             diagnostic['sourceDialogButtonMapping'] = {**mapping, 'sourceFile': name, 'sourceSha256': hashlib.sha256(source).hexdigest()}
             self.flatpak_guard(); self.stable(client)
@@ -2076,8 +2102,8 @@ class Session:
                         "Companion only authorizes warm disclosure Enter")
                 require(self.report.get('coldActivationAccepted') is True, "An independently qualified cold Root is required before warm input")
                 cold = self.report['coldRoot']
-                expected = self.root / 'home/data/creator-hub-portable/generations' / self.review['generation'] / 'AppDir/usr/bin/creator-hub'
-                require(cold['kernelImageSha256'] == self.review['portable']['root']['sha256'] and cold['executable'] == str(expected),
+                digest, expected = self.host_identity()
+                require(cold['kernelImageSha256'] == digest and cold['executable'] == str(expected),
                         "Warm companion is not the independently signed cold generation")
                 companion = K.bind_warm_root(self.helper, self.native, self.x11, cold, self.report['coldRootWindow'],
                                              self.report['coldHost1Owner'], self.host_owner, cold_xres=self.report['coldRootXres'])
@@ -2122,7 +2148,7 @@ class Session:
                         if companion is not None:
                             companion.close()
                     finally:
-                        save(self.root / (phase + '-gtk.json'), diagnostic)
+                        save(self.evidence_root / (phase + '-gtk.json'), diagnostic)
 
     def consumed_warm_outcome(self):
         # Dispose in handler-installation order; the old latch/receipt are never reset.
@@ -2163,8 +2189,8 @@ class Session:
         self.wait(lambda: self.host_owner() is not None and len(self.windows()) == 1)
         owner = self.host_owner()
         require(owner is not None, "Expected native Host1 activation was not observed")
-        native = self.process(owner['pid'], self.review['portable']['root']['sha256'])
-        expected = self.root / 'home/data/creator-hub-portable/generations' / self.review['generation'] / 'AppDir/usr/bin/creator-hub'
+        digest, expected = self.host_identity()
+        native = self.process(owner['pid'], digest)
         require(native['executable'] == str(expected) and os.readlink(f'/proc/{native["pid"]}/ns/mnt') == os.readlink('/proc/self/ns/mnt'),
                 "Activated Root is not the exact signed native generation")
         window = self.owned_window(native, P.TITLE)
@@ -2288,7 +2314,7 @@ class Session:
         except Exception as diagnostic_error:
             result['unavailable'] = type(diagnostic_error).__name__ if type(diagnostic_error) in known_errors else 'OtherError'
         require(len(json_bytes(result)) <= 16384, 'Bounded readiness diagnostic output required')
-        save(self.root / (phase + '-readiness-gtk.json'), result)
+        save(self.evidence_root / (phase + '-readiness-gtk.json'), result)
 
     def flatpak(self, action, phase, missing=False):
         require((action, phase, missing) in (('Cancel', 'disclosure-cancel', False), ('Open Creator Hub', 'missing-host', True),
@@ -2409,11 +2435,10 @@ class Session:
             self.portal_client = None
             for diagnostic in self.launcher_keys:
                 # Delivery evidence is immutable; phase outcome is a separate record.
-                save(self.root / (diagnostic['phase'] + '-outcome-gtk.json'), diagnostic)
+                save(self.evidence_root / (diagnostic['phase'] + '-outcome-gtk.json'), diagnostic)
 
     def disclosure(self):
-        file = self.root / "stage/source/native/flatpak-native-activation/src/lib.rs"
-        source = regular(file, 262144).decode("utf8")
+        source = self.disclosure_source().decode("utf8")
         match = re.search(r'pub const DISCLOSURE: &str = ("(?:[^"\\]|\\.)*");', source)
         require(match is not None, "Source-bound disclosure missing")
         return parse(match[1])

@@ -174,7 +174,8 @@ class PreInputDiagnosticHookTests(unittest.TestCase):
         original = copy.deepcopy(record)
         record['preInputProxyPeers'] = {'padding': 'y' * 2000}
         state = dict(record=record, capture=None)
-        session = SimpleNamespace(root=Path('unused-fixture-root'))
+        session = object.__new__(M.Session)
+        session.root = Path('unused-fixture-root')
         with patch.object(M, 'save') as save:
             result = M.Session.finish_warm_activation_diagnostic(session, state)
         self.assertEqual(result, original)
@@ -4763,6 +4764,99 @@ class AliasCleanupTests(unittest.TestCase):
         result = self.helper_fixture('reappeared')
         self.assertIsNotNone(result.error); self.assertEqual(result.unlinked, [self.HASH, self.PEM])
         self.assertEqual(result.nodes[self.HASH].target, 'foreign'); self.assertFalse(result.held)
+
+
+class SessionConstructionTests(unittest.TestCase):
+    def test_driver_failure_never_opens_owned_x11_or_installs_its_handler(self):
+        for options in ({}, {'observer_context': 'portable-update-016'}):
+            with self.subTest(options=options):
+                x11 = SimpleNamespace(dispose=Mock())
+                helper = SimpleNamespace(X11=Mock(return_value=x11))
+                failure = RuntimeError('driver-construction-failed')
+                with patch.object(M.P, 'helpers', return_value=(helper, object())), \
+                        patch.object(M.P, 'Driver', side_effect=failure) as driver:
+                    with self.assertRaises(RuntimeError) as caught:
+                        M.Session(Path('/fixture'), {}, **options)
+                self.assertIs(caught.exception, failure)
+                driver.assert_called_once_with()
+                helper.X11.assert_not_called()
+                x11.dispose.assert_not_called()
+
+    def test_success_assigns_driver_before_constructing_owned_x11(self):
+        for options in ({}, {'observer_context': 'portable-update-016'}):
+            with self.subTest(options=options):
+                session = object.__new__(M.Session)
+                events, driver, native = [], object(), object()
+                x11 = SimpleNamespace(dispose=Mock())
+                def create_driver():
+                    events.append('driver')
+                    return driver
+                def create_x11():
+                    events.append('x11')
+                    self.assertIs(session.driver, driver)
+                    return x11
+                helper = SimpleNamespace(X11=Mock(side_effect=create_x11))
+                with patch.object(M.P, 'helpers', return_value=(helper, native)), \
+                        patch.object(M.P, 'Driver', side_effect=create_driver) as constructor:
+                    M.Session.__init__(session, Path('/fixture'), {}, **options)
+                self.assertEqual(events, ['driver', 'x11'])
+                constructor.assert_called_once_with()
+                helper.X11.assert_called_once_with()
+                self.assertIs(session.x11, x11)
+                self.assertIs(session.native, native)
+                self.assertEqual((session.children, session.captures, session.fds), ([], [], []))
+                self.assertEqual(session.observer_context, options.get('observer_context', 'flatpak-016'))
+                x11.dispose.assert_not_called()
+
+
+class SessionCompositionHooksTests(unittest.TestCase):
+    def test_baseline_disclosure_read_keeps_original_contract(self):
+        session = object.__new__(M.Session); session.root = Path('/fixture')
+        with patch.object(M, 'regular', return_value=b'original') as regular, patch.object(M, 'bound') as bound:
+            self.assertEqual(session.disclosure_source(), b'original')
+            regular.assert_called_once_with(Path('/fixture/stage/source/native/flatpak-native-activation/src/lib.rs'), 262144)
+            bound.assert_not_called()
+
+    def test_default_paths_and_host_identity_are_still_baseline16(self):
+        session = object.__new__(M.Session)
+        session.root = Path('/fixture')
+        session.review = {'generation': 'a' * 64, 'portable': {'root': {'sha256': 'b' * 64}}}
+        self.assertEqual(session.evidence_root, session.root)
+        self.assertEqual(session.host_identity(), ('b' * 64,
+            Path('/fixture/home/data/creator-hub-portable/generations') / ('a' * 64) / 'AppDir/usr/bin/creator-hub'))
+
+    def test_baseline_binding_rejects_updater_profile_and_extra_or_missing_sources(self):
+        session = object.__new__(M.Session); session.root = Path('/fixture')
+        names = ('scripts/one.py',)
+        binding = dict(profile=M.PROFILE, harnessSource='a' * 40, harnessFiles={names[0]: pin(b'one')}, **M.GATES)
+        for mutation in ('none', 'profile', 'extra', 'missing', 'authority'):
+            value = copy.deepcopy(binding)
+            if mutation == 'profile': value['profile'] = 'production016-private017-native-update'
+            if mutation == 'extra': value['harnessFiles']['scripts/extra.py'] = pin(b'extra')
+            if mutation == 'missing': value['harnessFiles'].clear()
+            if mutation == 'authority': value['releaseReady'] = True
+            with self.subTest(mutation=mutation), patch.object(M, 'regular', return_value=M.json_bytes(value)), \
+                    patch.object(M, 'bound', return_value=b'one') as bound:
+                if mutation == 'none':
+                    self.assertEqual(session.harness_sources(names), (value, {names[0]: b'one'}))
+                else:
+                    with self.assertRaises(RuntimeError): session.harness_sources(names)
+                    bound.assert_not_called()
+
+    def test_evidence_hook_does_not_redirect_state_or_accept_foreign_source(self):
+        class SeparateEvidence(M.Session):
+            @property
+            def evidence_root(self): return Path('/evidence')
+        session = object.__new__(SeparateEvidence); session.root = Path('/state')
+        session.review = {'flatpak': {'source': {'files': {'original.rs': pin(b'original')}}}}
+        with patch.object(M, 'bound', return_value=b'original') as bound:
+            self.assertEqual(session.launcher_source('original.rs'), b'original')
+            bound.assert_called_once_with(Path('/state/stage/source/original.rs'), pin(b'original'), 262144)
+            with self.assertRaises(KeyError): session.launcher_source('../other')
+        with patch.object(M, 'save') as save:
+            session.finish_warm_activation_diagnostic({'record': {}, 'capture': None})
+            save.assert_called_once_with(Path('/evidence/warm-activation-observer-gtk.json'), {})
+        self.assertEqual(session.root, Path('/state'))
 
 
 if __name__ == '__main__':
