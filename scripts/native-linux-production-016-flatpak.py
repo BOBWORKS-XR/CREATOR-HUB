@@ -1202,12 +1202,22 @@ def attributed_warm_activation(record, client, admitted, owner, *, association_v
             and reply['sender'] == owner['name'] and reply['destination'] == call['sender'] and reply['replySerial'] == call['serial']
             and value.get('observedHeaders') == [call, reply], 'Exact empty Host1 Start and successful matched reply required')
     historical = sender.get('historicalDisconnected') if type(sender) is dict else None
-    historical_verified = (type(historical) is dict and historical == dict(method='GetNameOwner', step='owner-before',
+    historical_complete = dict(method='GetNameOwner', step='owner-before',
         registeredGIError=True, domain='g-dbus-error-quark', code=3,
         remoteErrorName='org.freedesktop.DBus.Error.NameHasNoOwner', initialCredentialsVerified=True,
         heldProxyRechecked=True, sameBusConnection=True)
+    late_exit = historical.get('lateProxyExit') if type(historical) is dict else None
+    late_exit_expected = dict(check='process-after', error='FileNotFoundError',
+        priorChecksMatched=True, heldPidfdSignalled=True)
+    complete_proxy = (type(historical) is dict and historical == historical_complete
+        and historical.get('heldProxyRechecked') is True)
+    exited_proxy = (type(historical) is dict and historical == dict(historical_complete,
+        heldProxyRechecked=False, lateProxyExit=late_exit_expected)
+        and historical.get('heldProxyRechecked') is False and type(late_exit) is dict
+        and all(late_exit[k] is True for k in ('priorChecksMatched', 'heldPidfdSignalled')))
+    historical_verified = (type(historical) is dict and (complete_proxy or exited_proxy)
         and type(historical['code']) is int
-        and all(historical[k] is True for k in ('registeredGIError', 'initialCredentialsVerified', 'heldProxyRechecked', 'sameBusConnection'))
+        and all(historical[k] is True for k in ('registeredGIError', 'initialCredentialsVerified', 'sameBusConnection'))
         and sender.get('stable') is False and sender.get('connectionLive') is False and 'externalAssociation' in sender)
     live_verified = (type(sender) is dict and sender.get('stable') is True
         and 'historicalDisconnected' not in sender and 'connectionLive' not in sender)

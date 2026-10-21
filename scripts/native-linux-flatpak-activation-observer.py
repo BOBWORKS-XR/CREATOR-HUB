@@ -2013,6 +2013,7 @@ class OwnedLineage:
             stage = 'sealed-baseline'
             proxy_check = None
             proxy_actual = proxy_expected = None
+            late_proxy_exit = False
             try:
                 require(not self.closed and self.started and not self.used)
                 self.used = True
@@ -2047,22 +2048,35 @@ class OwnedLineage:
                 require(proxy_actual == proxy_expected)
                 proxy_check = 'process-after'
                 proxy_actual, proxy_expected = None, row
-                proxy_actual = self.read(pid, True)
-                require(proxy_actual == proxy_expected)
-                proxy_check = 'pidfd-after'
-                proxy_actual = proxy_expected = None
-                require(not self.pidfds.ready(self.fds[pid]))
+                try:
+                    proxy_actual = self.read(pid, True)
+                except FileNotFoundError as error:
+                    if type(error) is not FileNotFoundError or type(self) is not AssociatedProxyLineage:
+                        raise
+                    budget()
+                    if self.pidfds.ready(self.fds[pid]) is not True:
+                        raise
+                    late_proxy_exit = True
+                if not late_proxy_exit:
+                    require(proxy_actual == proxy_expected)
+                    proxy_check = 'pidfd-after'
+                    proxy_actual = proxy_expected = None
+                    require(not self.pidfds.ready(self.fds[pid]))
                 stage = 'sender-credentials-recheck'
                 budget()
                 second = (peer if recheck_peer is None else recheck_peer)(name)
                 disconnected = second is DISCONNECTED_PEER
                 require(type(self) is AssociatedProxyLineage if disconnected else second == credentials)
+                require(not late_proxy_exit or disconnected)
                 budget()
                 if disconnected:
                     value.update(connectionLive=False, historicalDisconnected=dict(method='GetNameOwner', step='owner-before',
                         registeredGIError=True, domain='g-dbus-error-quark', code=3,
                         remoteErrorName='org.freedesktop.DBus.Error.NameHasNoOwner', initialCredentialsVerified=True,
-                        heldProxyRechecked=True, sameBusConnection=True))
+                        heldProxyRechecked=not late_proxy_exit, sameBusConnection=True))
+                    if late_proxy_exit:
+                        value['historicalDisconnected']['lateProxyExit'] = dict(check='process-after',
+                            error='FileNotFoundError', priorChecksMatched=True, heldPidfdSignalled=True)
                 # These are lifetime observations, not replacements for the sealed ancestry proof.
                 value['historicalAncestors'] = [dict(pid=p, startTime=self.rows[p]['startTime'],
                     lifetime='pidfd-signalled-exit' if self.pidfds.ready(self.fds[p]) else 'not-signalled') for p in self.chains[pid]]

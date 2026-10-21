@@ -1573,6 +1573,42 @@ class RootProxySnapshotTests(unittest.TestCase):
             with self.subTest(change=change), self.assertRaises((RuntimeError, ValueError)):
                 M.attributed_warm_activation(changed, client, original, owner, association_validator=observer.validate_association)
 
+    def test_late_proxy_exit_requires_exact_partial_recheck_marker(self):
+        observer, record, client, original, owner = self.external_attribution_fixture()
+        sender = record['observation']['senderObservation']
+        self.historical_sender(sender)
+        sender['historicalDisconnected'].update(heldProxyRechecked=False,
+            lateProxyExit=dict(check='process-after', error='FileNotFoundError', priorChecksMatched=True, heldPidfdSignalled=True))
+        M.attributed_warm_activation(record, client, original, owner, association_validator=observer.validate_association)
+        for change in (lambda s: s.update(stable=True), lambda s: s.update(connectionLive=True),
+                       lambda s: s.pop('externalAssociation'), lambda s: s.update(qualified=True),
+                       lambda s: s.update(inputPermitted=True), lambda s: s.update(failureStage='live-prebound-proxy'),
+                       lambda s: s['historicalDisconnected'].update(heldProxyRechecked=True),
+                       lambda s: s['historicalDisconnected'].update(heldProxyRechecked=0),
+                       lambda s: s['historicalDisconnected'].update(sameBusConnection=False),
+                       lambda s: s['historicalDisconnected'].update(initialCredentialsVerified=False),
+                       lambda s: s['historicalDisconnected'].pop('lateProxyExit'),
+                       lambda s: s['historicalDisconnected']['lateProxyExit'].update(check='process-before'),
+                       lambda s: s['historicalDisconnected']['lateProxyExit'].update(error='OSError'),
+                       lambda s: s['historicalDisconnected']['lateProxyExit'].update(priorChecksMatched=False),
+                       lambda s: s['historicalDisconnected']['lateProxyExit'].update(priorChecksMatched=1),
+                       lambda s: s['historicalDisconnected']['lateProxyExit'].update(heldPidfdSignalled=False),
+                       lambda s: s['historicalDisconnected']['lateProxyExit'].update(heldPidfdSignalled=1),
+                       lambda s: s['historicalDisconnected']['lateProxyExit'].update(extra=True)):
+            changed = copy.deepcopy(record); change(changed['observation']['senderObservation'])
+            with self.subTest(change=change), self.assertRaises((RuntimeError, ValueError)):
+                M.attributed_warm_activation(changed, client, original, owner, association_validator=observer.validate_association)
+
+    def test_late_proxy_exit_preserves_all_terminal_and_bus_requirements(self):
+        original = self.historical_sender
+        def late(sender):
+            original(sender)
+            sender['historicalDisconnected'].update(heldProxyRechecked=False,
+                lateProxyExit=dict(check='process-after', error='FileNotFoundError', priorChecksMatched=True, heldPidfdSignalled=True))
+        with patch.object(type(self), 'historical_sender', side_effect=late):
+            self.test_historical_disconnect_never_substitutes_for_exact_call_reply_or_bus_continuity()
+            self.test_historical_disconnect_keeps_normal_exit_root_host_window_and_preservation_requirements()
+
     def test_historical_disconnect_keeps_normal_exit_root_host_window_and_preservation_requirements(self):
         for failure in (None, 'exit', 'preserved', 'root', 'host', 'window'):
             with self.subTest(failure=failure), LauncherKeyboardTests().fixture('Open Creator Hub', 'warm',
