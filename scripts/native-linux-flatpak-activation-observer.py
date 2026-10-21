@@ -45,6 +45,46 @@ def bounded(value, maximum=MAX_OUTPUT):
     return copy.deepcopy(value)
 
 
+def diagnostic_time(values, key):
+    try:
+        value = time.monotonic_ns()
+        if type(value) is int and 0 <= value < 2**64:
+            values.setdefault(key, value)
+    except Exception:
+        pass
+
+
+def query_error_metadata(error, Gio, GLib):
+    """Local registered-GError access only; never retain its message or arbitrary names."""
+    result = dict(registeredGIError=False)
+    try:
+        if not isinstance(error, GLib.Error):
+            return result
+        result['registeredGIError'] = True
+        domain, code = error.domain, error.code
+        if type(domain) is str and domain in ('g-dbus-error-quark', 'g-io-error-quark'):
+            result['domain'] = domain
+        else:
+            result['domainUnavailable'] = True
+        if type(code) is int and -(2**31) <= code < 2**31:
+            result['code'] = code
+        else:
+            result['codeUnavailable'] = True
+        # Supported since Gio 2.26. No message parsing, stripping or bus call.
+        remote = Gio.DBusError.get_remote_error(error)
+        allowed = ('NameHasNoOwner', 'ServiceUnknown', 'NoReply', 'Timeout', 'TimedOut',
+                   'Disconnected', 'AccessDenied', 'AuthFailed', 'NotSupported', 'Failed', 'LimitsExceeded')
+        if remote is None:
+            result['remoteErrorName'] = None
+        elif type(remote) is str and remote in {'org.freedesktop.DBus.Error.' + name for name in allowed}:
+            result['remoteErrorName'] = remote
+        else:
+            result['remoteErrorNameUnavailable'] = True
+    except Exception:
+        result['metadataUnavailable'] = True
+    return result
+
+
 class Transcript:
     def __init__(self, owner, *, clock=time.monotonic):
         require(unique(owner))
@@ -2130,6 +2170,7 @@ class PassiveCapture:
         self.monitor, self.control, self.filter_id, self.worker, self.timer, self.cancellable = None, None, None, None, None, None
         self.sender, self.armed, self.bus_identity_matched, self.final = None, False, False, None
         self.baseline, self.input_started, self.settled = None, False, threading.Event()
+        self.timing, self.query_failure = {}, None
 
     def begin_input(self):
         require(type(self.baseline) in (OwnedLineage, AssociatedProxyLineage) and self.armed)
@@ -2154,18 +2195,32 @@ class PassiveCapture:
                     deadlineExceeded=time.monotonic() > self.transcript.deadline,
                     cancelled=False if self.cancellable is None else self.cancellable.is_cancelled())
 
-    def query(self, method, value, kind):
+    def query(self, method, value, kind, *, step='query'):
         self.budget()
         require(method in ('GetNameOwner', 'GetConnectionUnixProcessID', 'GetConnectionUnixUser'))
         Gio, GLib = self.Gio, self.GLib
-        return self.control.call_sync('org.freedesktop.DBus', '/org/freedesktop/DBus', 'org.freedesktop.DBus', method,
-            GLib.Variant('(s)', (value,)), GLib.VariantType.new(kind), Gio.DBusCallFlags.NONE, 500, self.cancellable).unpack()[0]
+        timing = {}
+        diagnostic_time(timing, 'startedMonotonicNs')
+        try:
+            return self.control.call_sync('org.freedesktop.DBus', '/org/freedesktop/DBus', 'org.freedesktop.DBus', method,
+                GLib.Variant('(s)', (value,)), GLib.VariantType.new(kind), Gio.DBusCallFlags.NONE, 500, self.cancellable).unpack()[0]
+        except Exception as error:
+            # Metadata failure must not replace, consume or retry this exact query failure.
+            try:
+                if self.query_failure is None:
+                    diagnostic_time(timing, 'failedMonotonicNs')
+                    self.query_failure = bounded(dict(method=method,
+                        step=step if step in ('query', 'owner-before', 'pid', 'uid', 'owner-after') else 'query',
+                        **timing, **query_error_metadata(error, Gio, GLib)), 2048)
+            except Exception:
+                pass
+            raise
 
     def peer(self, name):
-        require(unique(name) and self.query('GetNameOwner', name, '(s)') == name)
-        value = dict(name=name, pid=self.query('GetConnectionUnixProcessID', name, '(u)'),
-                     uid=self.query('GetConnectionUnixUser', name, '(u)'))
-        require(self.query('GetNameOwner', name, '(s)') == name)
+        require(unique(name) and self.query('GetNameOwner', name, '(s)', step='owner-before') == name)
+        value = dict(name=name, pid=self.query('GetConnectionUnixProcessID', name, '(u)', step='pid'),
+                     uid=self.query('GetConnectionUnixUser', name, '(u)', step='uid'))
+        require(self.query('GetNameOwner', name, '(s)', step='owner-after') == name)
         return value
 
     def target(self):
@@ -2250,6 +2305,7 @@ class PassiveCapture:
                 if not self.closed and len(self.headers) < MAX_PENDING:
                     self.headers.append(record)
                     self.pending.append(record)
+                    diagnostic_time(self.timing, 'callHeaderQueuedMonotonicNs' if kind == 1 else 'replyHeaderQueuedMonotonicNs')
                 elif not self.closed:
                     self.failure = 'PendingLimit'; self.stop.set()
             self.wake.set()
@@ -2271,6 +2327,7 @@ class PassiveCapture:
                     self.budget(); self.transcript.add(record)
                     value = self.transcript.snapshot()
                     if record['kind'] == 1 and value.get('call') == record and self.sender is None:
+                        diagnostic_time(self.timing, 'senderObservationStartedMonotonicNs')
                         if self.baseline is not None:
                             result = self.baseline.observe(record['sender'], self.peer, budget=self.budget) if self.input_started else dict(
                                 qualified=False, inputPermitted=False, stable=False, correlatesToOriginalPopen=False, unavailable='BeforeInput')
@@ -2279,6 +2336,7 @@ class PassiveCapture:
                                                      self.redact, budget=self.budget, diagnostic_state=self.diagnostic_state)
                         with self.lock:
                             self.sender = result
+                            diagnostic_time(self.timing, 'senderObservationFinishedMonotonicNs')
                     if self.transcript.snapshot().get('unknown') or self.sender is not None and self.transcript.snapshot().get('reply'):
                         self.settled.set()
         except Exception as error:
@@ -2342,6 +2400,9 @@ class PassiveCapture:
                 result['drainUnavailable'] = drain_unavailable
             if self.sender is not None:
                 result['senderObservation'] = copy.deepcopy(self.sender)
+            result['timing'] = copy.deepcopy(self.timing)
+            if self.query_failure is not None:
+                result['queryFailure'] = copy.deepcopy(self.query_failure)
             if self.failure:
                 result['unavailable'] = self.failure
         result = bounded(result)

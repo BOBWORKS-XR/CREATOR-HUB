@@ -386,6 +386,7 @@ class LauncherKeyboardTests(unittest.TestCase):
                     self.assertFalse(record['actionReturned']); self.assertFalse(record['releaseReady'])
                     self.assertFalse(record['keyboard']['widgetFocusVerified'])
                     self.assertEqual(record['ownedPhaseExit']['exitCode'], 1 if missing else 0)
+                    if phase != 'warm': self.assertNotIn('ownedExitObservedMonotonicNs', record)
                     original = M.parse((session.root / (record['phase'] + '-gtk.json')).read_bytes())
                     self.assertFalse(original['outcomeVerified']); self.assertNotIn('ownedPhaseExit', original)
                     self.assertEqual(original['keyboard'], record['keyboard'])
@@ -761,6 +762,19 @@ class WarmConsumedTerminalTests(unittest.TestCase):
             self.assertTrue(original_x.error); self.assertIsNot(session.x11, original_x)
             self.assertEqual(state.x_events, ['dispose-old', 'open-fresh'])
             self.assertEqual(state.observer_events, ['armed', 'before-input', 'finished'])
+
+    def test_owned_exit_clock_is_diagnostic_only_and_cannot_relax_sender_refusal(self):
+        for broken_clock in (False, True):
+            with self.subTest(broken_clock=broken_clock), self.fixture() as (session, state, _):
+                state.observer_result['senderObservation']['stable'] = False
+                with patch.object(M.time, 'monotonic_ns', side_effect=OSError('clock unavailable')) if broken_clock else \
+                        patch.object(M.time, 'monotonic_ns', return_value=123456):
+                    with self.assertRaisesRegex(RuntimeError, 'Live sender'): session.flatpak('Open Creator Hub', 'warm')
+                record = session.launcher_keys[0]
+                self.assertEqual(record['ownedPhaseExit']['exitCode'], 0)
+                if broken_clock: self.assertNotIn('ownedExitObservedMonotonicNs', record)
+                else: self.assertEqual(record['ownedExitObservedMonotonicNs'], 123456)
+                self.assertFalse(record['outcomeVerified']); self.assertEqual(state.sends, ['Enter'])
 
     def test_wrong_serial_xid_display_opcode_extra_error_or_dirty_latch_never_reaches_exit_proof(self):
         changes = [lambda f: f['events'][0].update(serial=201), lambda f: f['events'][0].update(resourceId=999),

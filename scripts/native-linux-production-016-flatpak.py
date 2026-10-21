@@ -2262,8 +2262,17 @@ class Session:
                 self.launcher_keyboard(client, 'missing', 'Close', phase + '-missing', terminal=True)
             self.wait(lambda: child.poll() is not None)
             code = child.wait()
+            exit_timing = {}
+            if phase == 'warm':
+                try:
+                    observed = time.monotonic_ns()
+                    if type(observed) is int and 0 <= observed < 2**64:
+                        exit_timing['ownedExitObservedMonotonicNs'] = observed
+                except Exception:
+                    pass
             for diagnostic in self.launcher_keys:
                 diagnostic['ownedPhaseExit'] = {**self.flatpak_popen, 'exitCode': code, 'expectedExitCode': 1 if missing else 0}
+                diagnostic.update(exit_timing)
             require(type(code) is int and code == (1 if missing else 0), "Launcher outcome differs")
             self.snapshot_preserved()
             if phase == 'warm':

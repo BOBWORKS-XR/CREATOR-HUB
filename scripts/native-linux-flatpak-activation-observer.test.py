@@ -1,4 +1,4 @@
-"""Pure passive-observer tests: no bus, app, native input or credentials read."""
+"""Passive-observer tests; optional real GI uses a new disposable private bus only."""
 import ast
 import copy
 import importlib.util
@@ -2750,6 +2750,173 @@ class GioAdapterTests(unittest.TestCase):
             self.assertFalse(value['qualified']); self.assertFalse(value['inputPermitted'])
         shared.close.assert_not_called()
         for connection in connections: connection.close.assert_called_once_with(None, None)
+
+
+class QueryDiagnosticTests(unittest.TestCase):
+    @staticmethod
+    def fixture():
+        class RegisteredError(Exception):
+            def __init__(self, *, domain='g-dbus-error-quark', code=3,
+                         remote='org.freedesktop.DBus.Error.NameHasNoOwner'):
+                super().__init__('PRIVATE ERROR TEXT')
+                self.domain, self.code, self.remote = domain, code, remote
+        observer = GioAdapterTests.capture()
+        observer.Gio = SimpleNamespace(DBusCallFlags=SimpleNamespace(NONE=0),
+            DBusError=SimpleNamespace(get_remote_error=Mock(side_effect=lambda error: error.remote)))
+        observer.GLib = SimpleNamespace(Error=RegisteredError, Variant=lambda *args: args,
+                                       VariantType=SimpleNamespace(new=lambda value: value))
+        observer.control, observer.cancellable = Mock(), Mock()
+        observer.budget = Mock()
+        return observer, RegisteredError
+
+    def test_peer_query_order_timeout_and_cancellable_are_unchanged(self):
+        observer, _ = self.fixture()
+        observer.control.call_sync.side_effect = [SimpleNamespace(unpack=lambda v=v: (v,)) for v in (':1.40', 12, 1001, ':1.40')]
+        self.assertEqual(observer.peer(':1.40'), dict(name=':1.40', pid=12, uid=1001))
+        calls = observer.control.call_sync.call_args_list
+        self.assertEqual([call.args[3] for call in calls],
+                         ['GetNameOwner', 'GetConnectionUnixProcessID', 'GetConnectionUnixUser', 'GetNameOwner'])
+        self.assertTrue(all(call.args[7:] == (500, observer.cancellable) for call in calls))
+        self.assertIsNone(observer.query_failure)
+
+    def test_each_original_query_error_keeps_exact_step_metadata_and_exception_without_retry(self):
+        values = (':1.40', 12, 1001, ':1.40')
+        for index, step in enumerate(('owner-before', 'pid', 'uid', 'owner-after')):
+            with self.subTest(step=step):
+                observer, Error = self.fixture(); error = Error()
+                observer.control.call_sync.side_effect = [SimpleNamespace(unpack=lambda v=v: (v,)) for v in values[:index]] + [error]
+                with patch.object(M.time, 'monotonic_ns', side_effect=range(100, 120)):
+                    with self.assertRaises(Error) as caught: observer.peer(':1.40')
+                self.assertIs(caught.exception, error)
+                self.assertEqual(observer.control.call_sync.call_count, index + 1)
+                failure = observer.query_failure
+                self.assertEqual(failure['step'], step); self.assertTrue(failure['registeredGIError'])
+                self.assertEqual(failure['method'], ('GetNameOwner', 'GetConnectionUnixProcessID', 'GetConnectionUnixUser', 'GetNameOwner')[index])
+                self.assertEqual((failure['domain'], failure['code']), ('g-dbus-error-quark', 3))
+                self.assertEqual(failure['remoteErrorName'], 'org.freedesktop.DBus.Error.NameHasNoOwner')
+                self.assertLess(failure['startedMonotonicNs'], failure['failedMonotonicNs'])
+                self.assertNotIn('PRIVATE', str(failure)); self.assertNotIn(':1.40', str(failure))
+
+    def test_local_timeout_remote_name_and_unknown_metadata_are_distinct_and_bounded(self):
+        for remote in (None, 'org.freedesktop.DBus.Error.Timeout', 'org.freedesktop.DBus.Error.NoReply', 'PRIVATE.remote'):
+            observer, Error = self.fixture()
+            value = M.query_error_metadata(Error(domain='g-io-error-quark', code=24, remote=remote), observer.Gio, observer.GLib)
+            self.assertEqual((value['domain'], value['code']), ('g-io-error-quark', 24))
+            self.assertNotIn('PRIVATE', str(value))
+            if remote == 'PRIVATE.remote': self.assertTrue(value['remoteErrorNameUnavailable'])
+            else: self.assertEqual(value['remoteErrorName'], remote)
+        observer, Error = self.fixture()
+        value = M.query_error_metadata(Error(domain='PRIVATE.domain'), observer.Gio, observer.GLib)
+        self.assertTrue(value['domainUnavailable']); self.assertNotIn('PRIVATE', str(value))
+        duck = RuntimeError('PRIVATE'); duck.domain, duck.code, duck.remote = 'g-dbus-error-quark', 3, 'PRIVATE'
+        observer.Gio.DBusError.get_remote_error.reset_mock()
+        self.assertEqual(M.query_error_metadata(duck, observer.Gio, observer.GLib), {'registeredGIError': False})
+        observer.Gio.DBusError.get_remote_error.assert_not_called()
+
+    def test_diagnostic_clock_accessor_or_serialization_failure_preserves_original_query_error(self):
+        for failure in ('clock', 'accessor', 'serialization'):
+            with self.subTest(failure=failure):
+                observer, Error = self.fixture(); error = Error()
+                observer.control.call_sync.side_effect = error
+                if failure == 'accessor': observer.Gio.DBusError.get_remote_error.side_effect = OSError('PRIVATE')
+                with patch.object(M.time, 'monotonic_ns', side_effect=OSError('PRIVATE')) if failure == 'clock' else ExitStack(), \
+                        patch.object(M, 'bounded', side_effect=ValueError('PRIVATE')) if failure == 'serialization' else ExitStack():
+                    with self.assertRaises(Error) as caught: observer.peer(':1.40')
+                self.assertIs(caught.exception, error); observer.control.call_sync.assert_called_once()
+                self.assertNotIn('PRIVATE', str(observer.query_failure))
+        observer, Error = self.fixture()
+        observer.control.call_sync.side_effect = [Error(), Error(remote='org.freedesktop.DBus.Error.Timeout')]
+        for _ in range(2):
+            with self.assertRaises(Error): observer.peer(':1.40')
+        self.assertEqual(observer.query_failure['remoteErrorName'], 'org.freedesktop.DBus.Error.NameHasNoOwner')
+
+    def test_delayed_worker_after_disconnected_peer_still_refuses_without_new_process_reads(self):
+        observer, Error = self.fixture()
+        state = PreInputLineageTests().fixture()
+        observer.baseline, observer.armed = state.build(), True
+        observer.begin_input(); state.reads.clear()
+        observer.control.call_sync.side_effect = Error()
+        gate = threading.Event()
+        observer.worker = threading.Thread(target=lambda: (gate.wait(2), observer.run()), daemon=True)
+        observer.worker.start()
+        try:
+            observer.filter(None, GioAdapterTests.wire(message()), True, None)
+            observer.filter(None, GioAdapterTests.wire(message(2)), True, None)
+            exit_observed = M.time.monotonic_ns()
+            state.dead.update(state.rows)
+            gate.set()
+            self.assertTrue(observer.settled.wait(2), 'Bounded synthetic worker did not settle')
+            value = observer.close()
+            self.assertTrue(value['callReplyMatched'])
+            self.assertFalse(value['senderObservation']['stable']); self.assertFalse(value['qualified'])
+            self.assertEqual(value['senderObservation']['failureStage'], 'live-sender-credentials')
+            self.assertEqual(value['queryFailure']['remoteErrorName'], 'org.freedesktop.DBus.Error.NameHasNoOwner')
+            self.assertGreaterEqual(value['queryFailure']['startedMonotonicNs'], exit_observed)
+            self.assertLessEqual(value['timing']['callHeaderQueuedMonotonicNs'], exit_observed)
+            observer.control.call_sync.assert_called_once(); self.assertEqual(state.reads, [])
+        finally:
+            gate.set(); observer.close()
+            observer.worker.join(timeout=2)
+            self.assertFalse(observer.worker.is_alive())
+
+
+class RealGioQueryTests(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == 'linux', 'Linux registered GI and disposable private bus')
+    def test_nonexistent_name_on_new_private_bus_retains_registered_error_and_timeout_distinction(self):
+        import subprocess
+        required = os.environ.get('CREATOR_FLATPAK_REAL_GI_REQUIRED') == 'true'
+        if importlib.util.find_spec('gi') is None or not all(Path(p).is_file() for p in ('/usr/bin/dbus-run-session', '/usr/bin/dbus-daemon')):
+            if required: self.fail('Required registered GI/private-bus tooling is unavailable')
+            self.skipTest('Registered GI/private-bus tooling unavailable; mandatory post-provision probe required')
+        code = r'''
+import importlib.util,json,os,signal,sys
+from gi.repository import Gio,GLib
+signal.alarm(5)
+spec=importlib.util.spec_from_file_location('private_query_probe',sys.argv[1])
+m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
+address=os.environ['DBUS_SESSION_BUS_ADDRESS']
+assert address.startswith('unix:')
+flags=Gio.DBusConnectionFlags.AUTHENTICATION_CLIENT|Gio.DBusConnectionFlags.MESSAGE_BUS_CONNECTION
+connection=Gio.DBusConnection.new_for_address_sync(address,flags,None,None)
+connection.set_exit_on_close(False)
+observer=object.__new__(m.PassiveCapture)
+observer.Gio,observer.GLib,observer.control=Gio,GLib,connection
+observer.cancellable=Gio.Cancellable.new();observer.budget=lambda:None;observer.query_failure=None
+try:
+    try: observer.query('GetNameOwner',':999999.999999','(s)',step='owner-before')
+    except GLib.Error as error:
+        assert isinstance(error,GLib.Error)
+        value=observer.query_failure
+        assert value['registeredGIError'] is True and value['domain']=='g-dbus-error-quark'
+        assert value['code']==int(Gio.DBusError.NAME_HAS_NO_OWNER)
+        assert value['remoteErrorName']=='org.freedesktop.DBus.Error.NameHasNoOwner'
+        assert value['method']=='GetNameOwner' and value['step']=='owner-before'
+        assert value['failedMonotonicNs']>=value['startedMonotonicNs']
+        assert 'message' not in value
+    else: raise AssertionError('Nonexistent private-bus name unexpectedly exists')
+    timeout=GLib.Error.new_literal(Gio.io_error_quark(),'PRIVATE_SYNTHETIC_LOCAL_TIMEOUT',int(Gio.IOErrorEnum.TIMED_OUT))
+    local=m.query_error_metadata(timeout,Gio,GLib)
+    assert local['registeredGIError'] is True and local['domain']=='g-io-error-quark'
+    assert local['code']==int(Gio.IOErrorEnum.TIMED_OUT) and local['remoteErrorName'] is None
+    assert 'PRIVATE' not in str(local)
+    print(json.dumps({'privateBusNameHasNoOwner':value,'registeredLocalTimeout':local,'sharedBusUsed':False,'nativeInput':False}))
+finally:
+    connection.close_sync(None)
+'''
+        with tempfile.TemporaryDirectory(prefix='creator-private-gi-query-') as directory:
+            root = Path(directory)
+            for name in ('config', 'data', 'cache', 'runtime'): (root / name).mkdir(mode=0o700)
+            env = {'PATH': '/usr/bin:/bin', 'HOME': str(root), 'XDG_CONFIG_HOME': str(root / 'config'),
+                   'XDG_DATA_HOME': str(root / 'data'), 'XDG_CACHE_HOME': str(root / 'cache'),
+                   'XDG_RUNTIME_DIR': str(root / 'runtime'), 'LC_ALL': 'C.UTF-8'}
+            result = subprocess.run(['/usr/bin/dbus-run-session', '--dbus-daemon=/usr/bin/dbus-daemon', '--',
+                sys.executable, '-I', '-B', '-c', code, str(Path(M.__file__).resolve())],
+                env=env, capture_output=True, timeout=10, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr[-4096:].decode('utf8', errors='replace'))
+        self.assertLessEqual(len(result.stdout), 8192); self.assertLessEqual(len(result.stderr), 4096)
+        value = M.json.loads(result.stdout)
+        self.assertFalse(value['sharedBusUsed']); self.assertFalse(value['nativeInput'])
+        self.assertEqual(value['privateBusNameHasNoOwner']['remoteErrorName'], 'org.freedesktop.DBus.Error.NameHasNoOwner')
 
 
 if __name__ == '__main__':
