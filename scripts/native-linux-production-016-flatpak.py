@@ -1603,8 +1603,9 @@ class Session:
         self.real_portal = None
         self.report = {"schemaVersion": 1, "profile": PROFILE, "phase": "starting", **GATES}
 
-    def launch(self, args, label, *, env=None):
-        child = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=self.app_env if env is None else env)
+    def launch(self, args, label, *, env=None, pass_fds=()):
+        child = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                 env=self.app_env if env is None else env, **({'pass_fds': pass_fds} if pass_fds else {}))
         self.children.append(child); self.captures.append(self.native.Capture(child, self.root, label))
         return child
 
@@ -2483,21 +2484,193 @@ def portal_worker(root, args):
         portal_frame(parse(channel.recv(4097)), 'release', nonce)
 
 
-def portal_provider(role):
+PORTAL_SESSION_SECONDS = 600
+
+
+class PortalControlClosed(RuntimeError):
+    pass
+
+
+def portal_control_receive(channel, credentials):
+    try:
+        raw, controls, flags, _ = channel.recvmsg(4097, socket.CMSG_SPACE(12), socket.MSG_CMSG_CLOEXEC)
+    except BlockingIOError:
+        return None
+    if raw == b'' and not controls and not flags & ~socket.MSG_CMSG_CLOEXEC:
+        raise PortalControlClosed('Private portal supervisor channel closed')
+    for level, kind, data in controls:
+        if level == socket.SOL_SOCKET and kind == socket.SCM_RIGHTS:
+            for offset in range(0, len(data) - len(data) % 4, 4):
+                os.close(struct.unpack('i', data[offset:offset + 4])[0])
+    require(not flags & (socket.MSG_TRUNC | socket.MSG_CTRUNC) and 0 < len(raw) <= 4096 and len(controls) == 1
+            and controls[0][:2] == (socket.SOL_SOCKET, socket.SCM_CREDENTIALS)
+            and controls[0][2] == struct.pack('3i', *credentials), 'Exact private portal supervisor credentials required')
+    return parse(raw)
+
+
+def portal_control_send(channel, frame):
+    raw = json_bytes(frame)
+    require(len(raw) <= 4096 and channel.send(raw) == len(raw), 'One bounded portal supervisor packet required')
+
+
+def portal_wait_owned_daemon(daemon, deadline):
+    # Do not detach the owned daemon when the controller closes its private bus.
+    # Popen.poll reaps only this child; no signal or broad wait is permitted.
+    while True:
+        status = daemon.poll()
+        if status is not None:
+            return status
+        remaining = deadline - time.monotonic()
+        require(remaining > 0, 'Portal daemon teardown remains unconfirmed')
+        select.select([], [], [], min(0.05, remaining))
+
+
+class PortalOwnedWorker:
+    """One live-verified adopted child; only its exact nonblocking wait is permitted."""
+    def __init__(self, expected, nonce, source, python, helper, native):
+        self.pidfd, self.image = None, None
+        self.expected, self.nonce, self.source = copy.deepcopy(expected), nonce, source
+        self.python, self.helper, self.native = python, helper, native
+        self.reaped = False
+        try:
+            K.validate_process(self.expected, full=True)
+            portal_worker_identity(self.expected, (expected['pid'], os.getuid(), os.getgid()), os.getpid(),
+                                   python.path, python.pin[1], os.getuid(), os.getgid())
+            self.pidfd = os.pidfd_open(expected['pid'])
+            self.image = K.HeldImage(expected['pid'])
+            self.recheck_live()
+        except Exception as error:
+            try:
+                self.close()
+            except Exception:
+                error.portal_cleanup_failed = True
+            raise
+
+    def recheck_live(self):
+        self.python.recheck()
+        require(self.native.native_process(self.expected['pid'], self.helper) == self.expected
+                and self.image.snapshot() == self.python.pin == (self.expected['image'], self.expected['kernelImageSha256'])
+                and not select.select([self.pidfd], [], [], 0)[0], 'Owned portal worker changed before release')
+        args = ['/usr/bin/python3', '-I', '-S', '-B', str(self.source), '_portal_capture', self.nonce, PORTAL_URL]
+        with open(f'/proc/{self.expected["pid"]}/cmdline', 'rb', buffering=0) as stream:
+            require(stream.read(8193) == b'\0'.join(os.fsencode(arg) for arg in args) + b'\0', 'Exact retained portal worker argv required')
+        require(self.native.native_process(self.expected['pid'], self.helper) == self.expected, 'Portal worker changed during retention')
+
+    def reap(self):
+        require(not self.reaped and self.pidfd is not None and self.image is not None, 'One retained portal child wait required')
+        self.python.recheck()
+        require(self.image.snapshot() == self.python.pin, 'Held portal worker image changed')
+        proc, pid = self.helper.Proc(), self.expected['pid']
+        before = proc.stat(pid)
+        start = self.helper.parse_start(before, pid, require_live=False)
+        fields = before[before.rfind(')') + 2:].split()
+        require(start == self.expected['startTime'] and int(fields[1]) == self.expected['parentPid'] == os.getpid()
+                and self.native.process_uids(pid) == self.expected['uids'] == [os.getuid()] * 4,
+                'Exact adopted portal child identity required before wait')
+        after = proc.stat(pid)
+        require(self.helper.parse_start(after, pid, require_live=False) == start
+                and after[after.rfind(')') + 2:].split()[1] == fields[1], 'Adopted portal child changed before wait')
+        waited, status = os.waitpid(pid, os.WNOHANG)
+        if waited == 0:
+            return None
+        self.reaped = True
+        require(waited == pid and os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0
+                and not proc.exists(pid), 'Portal worker did not exit zero and reap exactly')
+        return {'kind': 'reaped', 'nonce': self.nonce, 'pid': pid, 'startTime': start, 'exitCode': 0}
+
+    def close(self):
+        try:
+            if self.image is not None:
+                self.image.close(); self.image = None
+        finally:
+            if self.pidfd is not None:
+                os.close(self.pidfd); self.pidfd = None
+
+
+def portal_provider(role, control_fd=None, nonce=None):
     require(role in PORTAL_PROVIDERS, 'Only fixed native portal providers allowed')
-    if role == 'portal':
-        # GLib 2.72 gdesktopappinfo.c uses G_SPAWN_SEARCH_PATH without DO_NOT_REAP.
-        # Its default-handler spawn double-forks. Keep its orphan under this
-        # exact owned portal, rather than accepting PID 1 or a name/UID exemption.
+    path = PORTAL_PROVIDERS[role][0]
+    if role != 'portal':
+        require(control_fd is None and nonce is None, 'Only the portal may retain a supervisor')
+        os.execve(path, [path], dict(os.environ))
+        return
+    require(type(control_fd) is int and 2 < control_fd < 65536 and type(nonce) is str
+            and re.fullmatch('[a-f0-9]{64}', nonce), 'Fixed private portal supervisor control required')
+    channel = socket.socket(fileno=control_fd)
+    worker = python = daemon = None
+    failure = None
+    session_deadline = time.monotonic() + PORTAL_SESSION_SECONDS
+    try:
+        require(channel.family == socket.AF_UNIX and channel.getsockopt(socket.SOL_SOCKET, socket.SO_TYPE) == socket.SOCK_SEQPACKET
+                and channel.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
+                == struct.pack('3i', os.getppid(), os.getuid(), os.getgid()), 'Original private supervisor parent required')
+        channel.set_inheritable(False); channel.setblocking(False)
+        channel.setsockopt(socket.SOL_SOCKET, socket.SO_PASSCRED, 1)
+        # The wrapper must remain the adoption/wait owner, not exec the daemon.
         libc = ctypes.CDLL(None, use_errno=True)
         libc.prctl.argtypes = [ctypes.c_int, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong]
         libc.prctl.restype = ctypes.c_int
         require(libc.prctl(36, 1, 0, 0, 0) == 0, 'Portal subreaper setup refused')
         enabled = ctypes.c_int(0)
-        require(libc.prctl(37, ctypes.addressof(enabled), 0, 0, 0) == 0 and enabled.value == 1,
-                'Portal subreaper readback refused')
-    path = PORTAL_PROVIDERS[role][0]
-    os.execve(path, [path], dict(os.environ))
+        require(libc.prctl(37, ctypes.addressof(enabled), 0, 0, 0) == 0 and enabled.value == 1, 'Portal subreaper readback refused')
+        daemon = subprocess.Popen([path], stdin=subprocess.DEVNULL, close_fds=True)
+        portal_control_send(channel, {'kind': 'provider', 'nonce': nonce, 'pid': daemon.pid})
+        helper, native = P.helpers()
+        python = PortalImage('python')
+        state, deadline = 'idle', None
+        while True:
+            require(time.monotonic() < session_deadline, 'Original private portal session lifetime expired')
+            require(daemon.poll() is None, 'Owned portal daemon exited')
+            require(deadline is None or time.monotonic() < deadline, 'Original portal capture deadline expired')
+            try:
+                frame = portal_control_receive(channel, (os.getppid(), os.getuid(), os.getgid()))
+            except PortalControlClosed:
+                require(state == 'complete', 'Portal controller closed before verified capture completion')
+                break
+            if frame is not None:
+                require(type(frame) is dict and frame.get('nonce') == nonce, 'Bound portal supervisor nonce required')
+                if state == 'idle':
+                    require(set(frame) == {'kind', 'nonce', 'worker', 'deadline'} and frame['kind'] == 'retain'
+                            and type(frame['deadline']) in (int, float) and time.monotonic() < frame['deadline'] <= time.monotonic() + 30,
+                            'One finite portal child retention required')
+                    deadline = frame['deadline']
+                    worker = PortalOwnedWorker(frame['worker'], nonce, Path(__file__).resolve(), python, helper, native)
+                    require(time.monotonic() < deadline, 'Portal retention exceeded original capture deadline')
+                    portal_control_send(channel, {'kind': 'retained', 'nonce': nonce, 'pid': worker.expected['pid'],
+                                                  'startTime': worker.expected['startTime']})
+                    state = 'retained'
+                else:
+                    require(state == 'retained' and frame == {'kind': 'reap', 'nonce': nonce}, 'One retained portal child reap required')
+                    state = 'reaping'
+            if state == 'reaping':
+                result = worker.reap()
+                if result is not None:
+                    require(time.monotonic() < deadline, 'Portal reap exceeded original capture deadline')
+                    portal_control_send(channel, result)
+                    worker.close(); worker = None
+                    state, deadline = 'complete', None
+            select.select([channel], [], [], 0.05)
+    except BaseException as error:
+        failure = error
+        raise
+    finally:
+        cleanup_error = None
+        if daemon is not None:
+            try:
+                portal_wait_owned_daemon(daemon, session_deadline)
+            except Exception as error:
+                cleanup_error = error
+        for value in (worker, python, channel):
+            try:
+                if value is not None:
+                    value.close()
+            except Exception as error:
+                cleanup_error = cleanup_error or error
+        if cleanup_error is not None:
+            if failure is not None:
+                failure.portal_cleanup_failed = True
+            else:
+                raise cleanup_error
 
 
 class PortalImage(K.HeldImage):
@@ -2562,34 +2735,89 @@ class PortalImage(K.HeldImage):
 
 
 class PortalProvider:
-    def __init__(self, session, role, image, bus):
+    def __init__(self, session, role, image, bus, *, python=None, nonce=None):
         self.session, self.role, self.image, self.bus = session, role, image, bus
         self.process, self.owner = None, None
+        self.control, self.wrapper, self.wrapper_image, self.provider_pid = None, None, None, None
+        self.python, self.nonce, self.reap_requested = python, nonce, False
         env = {**session.app_env, **lab_environment(session.root)}
-        if role == 'portal':
-            env['XDG_DESKTOP_PORTAL_DIR'] = str(session.root / 'portal-backends')
-        self.child = session.launch(['/usr/bin/python3', '-I', '-S', '-B', str(Path(__file__).resolve()), '_portal_provider', role],
-                                    'real-portal-' + role, env=env)
-        self.start = session.helper.parse_start(session.helper.Proc().stat(self.child.pid), self.child.pid)
+        args = ['/usr/bin/python3', '-I', '-S', '-B', str(Path(__file__).resolve()), '_portal_provider', role]
+        peer = None
+        try:
+            if role == 'portal':
+                env['XDG_DESKTOP_PORTAL_DIR'] = str(session.root / 'portal-backends')
+                require(python is not None and type(nonce) is str and re.fullmatch('[a-f0-9]{64}', nonce), 'Private portal supervisor identity required')
+                self.control, peer = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+                for channel in (self.control, peer):
+                    channel.setsockopt(socket.SOL_SOCKET, socket.SO_PASSCRED, 1)
+                    channel.setblocking(False); channel.set_inheritable(False)
+                args.extend((str(peer.fileno()), nonce))
+            self.args = args
+            self.child = session.launch(args, 'real-portal-' + role, env=env,
+                                        **({'pass_fds': (peer.fileno(),)} if peer is not None else {}))
+            self.start = session.helper.parse_start(session.helper.Proc().stat(self.child.pid), self.child.pid)
+            if peer is not None:
+                peer.close(); peer = None
+        except Exception as error:
+            for value in (peer, self):
+                try:
+                    if value is not None:
+                        value.close()
+                except Exception:
+                    error.portal_cleanup_failed = True
+            raise
+
+    def supervisor_guard(self):
+        require(self.control is not None and self.child.poll() is None, 'Original portal supervisor must remain live')
+        self.python.recheck()
+        current = self.session.native.native_process(self.child.pid, self.session.helper, False)
+        require(current['pid'] == self.child.pid and current['startTime'] == self.start and current['parentPid'] == os.getpid()
+                and current['uids'] == [os.getuid()] * 4 and current['executable'] == self.python.path and current['image'] == self.python.pin[0],
+                'Private portal supervisor kernel image differs')
+        actual = self.session.native.native_process(self.child.pid, self.session.helper)
+        require({key: value for key, value in actual.items() if key != 'kernelImageSha256'} == current
+                and (actual['image'], actual['kernelImageSha256']) == self.python.pin, 'Portal supervisor image changed during binding')
+        if self.wrapper is None:
+            self.wrapper, self.wrapper_image = copy.deepcopy(actual), K.HeldImage(self.child.pid)
+        require(actual == self.wrapper and self.wrapper_image.snapshot() == self.python.pin, 'Held portal supervisor identity changed')
+        with open(f'/proc/{self.child.pid}/cmdline', 'rb', buffering=0) as stream:
+            require(stream.read(8193) == b'\0'.join(os.fsencode(arg) for arg in self.args) + b'\0', 'Portal supervisor exact source/argv differs')
+        self.session.stable(actual)
+
+    def supervisor_receive(self):
+        self.supervisor_guard()
+        frame = portal_control_receive(self.control, (self.child.pid, os.getuid(), os.getgid()))
+        self.supervisor_guard()
+        return frame
 
     def bind(self):
         require(self.child.poll() is None, 'Owned portal provider exited during startup')
-        current = self.session.native.native_process(self.child.pid, self.session.helper, False)
-        require(current['pid'] == self.child.pid and current['startTime'] == self.start
-                and current['parentPid'] == os.getpid() and current['uids'] == [os.getuid()] * 4,
+        supervised = self.role == 'portal'
+        if supervised and self.provider_pid is None:
+            frame = self.supervisor_receive()
+            if frame is None:
+                return False
+            require(type(frame) is dict and set(frame) == {'kind', 'nonce', 'pid'} and frame['kind'] == 'provider'
+                    and frame['nonce'] == self.nonce and type(frame['pid']) is int and frame['pid'] > 1
+                    and frame['pid'] != self.child.pid, 'Exact owned portal daemon announcement required')
+            self.provider_pid = frame['pid']
+        pid = self.provider_pid if supervised else self.child.pid
+        current = self.session.native.native_process(pid, self.session.helper, False)
+        require(current['pid'] == pid and (int(current['startTime']) >= int(self.start) if supervised else current['startTime'] == self.start)
+                and current['parentPid'] == (self.child.pid if supervised else os.getpid()) and current['uids'] == [os.getuid()] * 4,
                 'Original portal Popen continuity changed')
         if current['executable'] != self.image.path:
             require(current['executable'] == str(Path('/usr/bin/python3').resolve(strict=True)), 'Unexpected portal startup image')
             return False
         self.image.recheck()
-        actual = self.session.native.native_process(self.child.pid, self.session.helper)
+        actual = self.session.native.native_process(pid, self.session.helper)
         require({k: v for k, v in actual.items() if k != 'kernelImageSha256'} == current
                 and (actual['image'], actual['kernelImageSha256']) == self.image.pin,
                 'Portal kernel image differs from held package bytes')
         owner = self.bus_owner()
         if owner is None:
             return False
-        require(owner['pid'] == self.child.pid and owner['uid'] == os.getuid(), 'Portal name is not the exact owned provider')
+        require(owner['pid'] == pid and owner['uid'] == os.getuid(), 'Portal name is not the exact owned provider')
         self.process, self.owner = actual, owner
         self.guard()
         return True
@@ -2613,8 +2841,35 @@ class PortalProvider:
         require(self.child.poll() is None and self.process is not None and self.owner is not None,
                 'Original bound portal provider must remain live')
         self.image.recheck()
+        if self.role == 'portal':
+            self.supervisor_guard()
         self.session.stable(self.process)
         require(self.bus_owner() == self.owner, 'Bound portal provider bus owner changed')
+
+    def retain_worker(self, worker, deadline):
+        self.guard()
+        require(self.role == 'portal' and not self.reap_requested, 'Only one portal worker may be retained')
+        self.reap_requested = True
+        portal_control_send(self.control, {'kind': 'retain', 'nonce': self.nonce, 'worker': worker, 'deadline': deadline})
+        self.guard()
+
+    def begin_reap(self):
+        self.guard()
+        portal_control_send(self.control, {'kind': 'reap', 'nonce': self.nonce})
+        self.guard()
+
+    def close(self):
+        control, image = self.control, self.wrapper_image
+        self.control, self.wrapper_image = None, None
+        failure = None
+        for value in (control, image):
+            try:
+                if value is not None:
+                    value.close()
+            except Exception as error:
+                failure = failure or error
+        if failure is not None:
+            raise failure
 
 
 class RealPortalCapture:
@@ -2664,11 +2919,12 @@ class RealPortalCapture:
             self.socket_stamp = P.stamp(Path(address).lstat())
             self.listener.listen(2); self.listener.setblocking(False)
             bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+            self.images['python'] = PortalImage('python')
             for role in PORTAL_PROVIDERS:
                 image = self.images[role] = PortalImage(role)
-                provider = self.providers[role] = PortalProvider(session, role, image, bus)
+                provider = self.providers[role] = PortalProvider(session, role, image, bus,
+                    **({'python': self.images['python'], 'nonce': self.nonce} if role == 'portal' else {}))
                 session.wait(provider.bind)
-            self.images['python'] = PortalImage('python')
             self.state = 'listening'
             self.guard()
         except Exception as error:
@@ -2676,7 +2932,10 @@ class RealPortalCapture:
                 save(session.root / 'real-portal-gtk.json', {**self.evidence(), 'error': str(error)[:512]})
             except Exception:
                 pass
-            self.close()
+            try:
+                self.close()
+            except Exception:
+                error.portal_cleanup_failed = True
             raise
 
     def protected_state(self):
@@ -2769,29 +3028,65 @@ class RealPortalCapture:
                     self.state = 'await-complete'
                 else:
                     self.worker_guard()
-                    self.receipt.update(workerCompleted=True, worker=self.worker, credentials=list(self.credentials),
-                        portalParent=self.providers['portal'].process, source=self.source_pin,
-                        protectedStateVerified=True, invocationCount=self.connections)
-                    self.channel.sendall(json_bytes({'kind': 'release', 'nonce': self.nonce}))
-                    self.state = 'complete'
-                    self.channel.close(); self.channel = None
-                    self.calls.append({'url': PORTAL_URL, 'browserOpened': False, 'downloadAttempted': False, 'senderUid': os.getuid()})
+                    self.providers['portal'].retain_worker(self.worker, self.deadline)
+                    self.state = 'await-retained'
+        if self.state == 'await-retained':
+            provider = self.providers['portal']
+            frame = provider.supervisor_receive()
+            if frame is not None:
+                require(time.monotonic() <= self.deadline, 'Portal retention acknowledgement exceeded original deadline')
+                require(frame == {'kind': 'retained', 'nonce': self.nonce, 'pid': self.worker['pid'],
+                                  'startTime': self.worker['startTime']}, 'Exact live-retained portal child acknowledgement required')
+                self.worker_guard()
+                provider.begin_reap()
+                self.channel.sendall(json_bytes({'kind': 'release', 'nonce': self.nonce}))
+                self.channel.close(); self.channel = None
+                self.state = 'await-reaped'
+        if self.state == 'await-reaped':
+            provider = self.providers['portal']
+            frame = provider.supervisor_receive()
+            if frame is not None:
+                require(time.monotonic() <= self.deadline, 'Portal reap acknowledgement exceeded original deadline')
+                require(frame == {'kind': 'reaped', 'nonce': self.nonce, 'pid': self.worker['pid'],
+                                  'startTime': self.worker['startTime'], 'exitCode': 0}
+                        and not self.session.helper.Proc().exists(self.worker['pid']), 'Exact zero-exit portal worker reaping required')
+                self.protected_state()
+                require(self.worker_image.snapshot() == self.images['python'].pin, 'Held completed portal worker image changed')
+                provider.guard()
+                require(time.monotonic() <= self.deadline, 'Portal final recheck exceeded original capture deadline')
+                self.receipt.update(workerCompleted=True, workerReaped=True, workerExitCode=0,
+                    worker=self.worker, credentials=list(self.credentials), portalParent=provider.process,
+                    portalSupervisor=provider.wrapper, source=self.source_pin,
+                    protectedStateVerified=True, invocationCount=self.connections)
+                self.state = 'complete'
+                self.calls.append({'url': PORTAL_URL, 'browserOpened': False, 'downloadAttempted': False, 'senderUid': os.getuid()})
         require(not self.armed or self.state == 'complete' or time.monotonic() <= self.deadline,
                 'Independent real-portal capture completion deadline')
 
     def complete(self):
         self.poll()
         require(self.armed and self.state == 'complete' and self.connections == 1 and len(self.calls) == 1
-                and self.receipt['workerCompleted'] is True, 'Launcher exit alone is not portal capture completion')
+                and self.receipt['workerCompleted'] is True and self.receipt['workerReaped'] is True,
+                'Launcher exit alone is not portal capture completion')
         self.protected_state()
 
     def close(self):
-        for value in (self.channel, self.listener, self.worker_image, *self.images.values()):
-            if value is not None:
-                value.close()
+        failure = None
+        for value in (*self.providers.values(), self.channel, self.listener, self.worker_image, *self.images.values()):
+            try:
+                if value is not None:
+                    value.close()
+            except Exception as error:
+                failure = failure or error
         self.channel, self.listener, self.worker_image = None, None, None
         if self.source_fd is not None:
-            os.close(self.source_fd); self.source_fd = None
+            fd, self.source_fd = self.source_fd, None
+            try:
+                os.close(fd)
+            except Exception as error:
+                failure = failure or error
+        if failure is not None:
+            raise failure
 
     def evidence(self):
         return {**self.receipt, 'state': self.state, 'invocationCount': self.connections,
@@ -3002,7 +3297,7 @@ def session(root):
     guard = prepare_tls(root, review)
     try:
         command(["/usr/bin/xvfb-run", "-a", "-s", "-screen 0 1280x1000x24", "/usr/bin/dbus-run-session", "--",
-                 "/usr/bin/python3", "-B", str(Path(__file__).resolve()), "_run"], env={**env, **context}, timeout=600)
+                 "/usr/bin/python3", "-B", str(Path(__file__).resolve()), "_run"], env={**env, **context}, timeout=PORTAL_SESSION_SECONDS)
     finally:
         try:
             guard.finish()
@@ -3019,7 +3314,9 @@ def main():
     require(os.getuid() == os.geteuid(), "No privileged identity transition")
     args = sys.argv[1:]
     capture = bool(args) and args[0] == '_portal_capture'
-    provider = len(args) == 2 and args[0] == '_portal_provider' and args[1] in PORTAL_PROVIDERS
+    provider = (len(args) == 2 and args[0] == '_portal_provider' and args[1] in PORTAL_PROVIDERS and args[1] != 'portal'
+                or len(args) == 4 and args[:2] == ['_portal_provider', 'portal'] and re.fullmatch('[0-9]{1,5}', args[2])
+                and 2 < int(args[2]) < 65536 and re.fullmatch('[a-f0-9]{64}', args[3]))
     if capture:
         portal_worker_args(args)
     else:
@@ -3040,7 +3337,7 @@ def main():
         if capture:
             portal_worker(root, args)
         else:
-            portal_provider(args[1])
+            portal_provider(args[1], *((int(args[2]), args[3]) if len(args) == 4 else ()))
         return
     if sys.argv[1] == "stage":
         stage(root)
