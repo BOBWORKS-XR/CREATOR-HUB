@@ -154,6 +154,19 @@ test('Root portable schema matches the independently prepared envelope', () => {
   assert.doesNotMatch(rust, /updater_builder|latest\.json"|request_restart|\.activate\(/);
 });
 
+test('portable download temporary factory requests private permissions before creation', () => {
+  const rust = fs.readFileSync(path.join(__dirname, '../src-tauri/src/portable_package.rs'), 'utf8');
+  const start = rust.indexOf('fn fetch_download('), end = rust.indexOf('\n#[cfg(test)]', start);
+  assert.ok(start >= 0 && end > start);
+  const download = rust.slice(start, end);
+  const factory = /let temporary = tempfile::Builder::new\(\)\s*\.prefix\("portable-download-"\)\s*\.permissions\(fs::Permissions::from_mode\(0o700\)\)\s*\.tempdir_in\(&root\)/;
+  assert.match(download, factory, 'The exact download factory must request 0700 before tempdir_in');
+  assert.match(rust, /os::unix::fs::\{[^}]*\bPermissionsExt\b/);
+  const omitted = download.replace(/\s*\.permissions\(fs::Permissions::from_mode\(0o700\)\)/, '');
+  assert.notEqual(omitted, download, 'The omission mutant must remove the real permission request');
+  assert.throws(() => assert.match(omitted, factory), { name: 'AssertionError' });
+});
+
 test('shared package authority is opaque and exact-current bootstrap does not inherit updater admission', () => {
   const shared = fs.readFileSync(path.join(__dirname, '../src-tauri/src/portable_package.rs'), 'utf8');
   const root = fs.readFileSync(path.join(__dirname, '../src-tauri/src/main.rs'), 'utf8');
