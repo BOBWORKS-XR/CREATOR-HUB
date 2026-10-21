@@ -1909,6 +1909,17 @@ class Session:
                     tree, capture.read, proxy_process_snapshot, snapshot=snapshot, **options)
             stage = 'observer-arm'
             capture.arm()
+            try:
+                preinput = capture.preinput_proxy_peers()
+                if preinput is not None:
+                    require(type(preinput) is dict and len(json_bytes(preinput)) <= 8192
+                            and preinput.get('readOnly') is True
+                            and all(preinput.get(key) is False for key in ('qualified', 'inputPermitted', 'authorityGranted', 'releaseReady')),
+                            'Only bounded read-only pre-input diagnostics may be retained')
+                    state['record']['preInputProxyPeers'] = preinput
+            except Exception:
+                state['record']['preInputProxyPeers'] = dict(readOnly=True, inputPermitted=False,
+                    authorityGranted=False, qualified=False, releaseReady=False, captureUnavailable=True)
         except Exception as error:
             state['record']['unavailable'] = type(error).__name__
             state['record']['setupFailureStage'] = stage
@@ -1961,6 +1972,8 @@ class Session:
         except Exception as error:
             record['captureUnavailable'] = type(error).__name__
         try:
+            if 'preInputProxyPeers' in record and len(json_bytes(record)) > 32768:
+                del record['preInputProxyPeers']  # Optional capture must not displace the original outcome.
             require(len(json_bytes(record)) <= 32768, 'Bounded passive diagnostic receipt required')
             save(self.root / 'warm-activation-observer-gtk.json', record)
         except Exception:

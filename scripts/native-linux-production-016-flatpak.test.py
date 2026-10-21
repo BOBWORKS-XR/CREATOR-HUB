@@ -168,6 +168,54 @@ class DriverReadiness(unittest.TestCase):
         self.assertIn("self.driver.guard = setup_guard", ast.get_source_segment(source, setup))
 
 
+class PreInputDiagnosticHookTests(unittest.TestCase):
+    def test_optional_preinput_diagnostic_cannot_displace_original_bounded_receipt(self):
+        record = dict(unavailable='OriginalRefusal', originalEvidence='x' * 32000)
+        original = copy.deepcopy(record)
+        record['preInputProxyPeers'] = {'padding': 'y' * 2000}
+        state = dict(record=record, capture=None)
+        session = SimpleNamespace(root=Path('unused-fixture-root'))
+        with patch.object(M, 'save') as save:
+            result = M.Session.finish_warm_activation_diagnostic(session, state)
+        self.assertEqual(result, original)
+        save.assert_called_once_with(session.root / 'warm-activation-observer-gtk.json', original)
+
+    def hook(self, capture, record):
+        tree = ast.parse((HERE / 'native-linux-production-016-flatpak.py').read_text())
+        session = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == 'Session')
+        start = next(n for n in session.body if isinstance(n, ast.FunctionDef) and n.name == 'start_warm_activation_diagnostic')
+        parent = next(n for n in ast.walk(start) if isinstance(n, ast.Try)
+            and any(isinstance(s, ast.Expr) and ast.unparse(s) == 'capture.arm()' for s in n.body))
+        index = next(i for i, n in enumerate(parent.body) if isinstance(n, ast.Expr) and ast.unparse(n) == 'capture.arm()')
+        hook = parent.body[index + 1]
+        self.assertIsInstance(hook, ast.Try)
+        calls = [ast.unparse(n.func) for n in ast.walk(hook) if isinstance(n, ast.Call)]
+        self.assertEqual(calls.count('capture.preinput_proxy_peers'), 1)
+        for forbidden in ('capture.begin_input', 'capture.peer', 'capture.query', 'capture.baseline.observe', 'capture.arm'):
+            self.assertNotIn(forbidden, calls)
+        namespace = dict(capture=capture, state={'record': record}, require=M.require, json_bytes=M.json_bytes)
+        exec(compile(ast.fix_missing_locations(ast.Module(body=[hook], type_ignores=[])), '<captured-preinput-hook>', 'exec'), namespace)
+
+    def test_hook_retains_only_bounded_readonly_results_and_keeps_original_refusals(self):
+        good = dict(readOnly=True, inputPermitted=False, authorityGranted=False, qualified=False, releaseReady=False,
+                    complete=True, matches=[dict(name=':1.40', pid=12, uid=1001)])
+        for result in (None, good, dict(good, authorityGranted=True), dict(good, inputPermitted=True),
+                       dict(good, private='PRIVATE' * 2000), Mock(), PermissionError('PRIVATE diagnostic failure')):
+            capture = Mock()
+            if isinstance(result, Exception): capture.preinput_proxy_peers.side_effect = result
+            else: capture.preinput_proxy_peers.return_value = result
+            record = {'unavailable': 'OriginalRefusal'}
+            self.hook(capture, record)
+            capture.preinput_proxy_peers.assert_called_once_with()
+            self.assertEqual(record['unavailable'], 'OriginalRefusal')
+            if result is None: self.assertNotIn('preInputProxyPeers', record)
+            elif result is good: self.assertEqual(record['preInputProxyPeers'], good)
+            else:
+                self.assertTrue(record['preInputProxyPeers']['captureUnavailable'])
+                self.assertFalse(record['preInputProxyPeers']['authorityGranted'])
+                self.assertNotIn('PRIVATE', json.dumps(record))
+
+
 class LauncherKeyboardTests(unittest.TestCase):
     @staticmethod
     def process(pid, parent, executable, full=True):

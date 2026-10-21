@@ -2321,6 +2321,137 @@ class PassiveCapture:
         value = self.peer(self.owner)
         require(value == dict(name=self.owner, pid=self.expected_owner['pid'], uid=self.uid))
 
+    def preinput_proxy_peers(self):
+        """One diagnostic enumeration; never feeds observe(), query_failure or input authority."""
+        baseline = self.baseline
+        if type(baseline) is not AssociatedProxyLineage:
+            return None
+        result = dict(readOnly=True, inputPermitted=False, authorityGranted=False, qualified=False,
+                      releaseReady=False, complete=False, heldBefore=False, heldAfter=False,
+                      associationRechecked=False,
+                      listedCount=0, uniqueCount=0, pidQueries=0, matchedPidCount=0, peerQueries=0,
+                      matches=[], errorCounts={})
+        stage = 'preconditions'
+        control, monitor = self.control, self.monitor
+
+        def stamp():
+            value = time.monotonic_ns()
+            require(type(value) is int and 0 <= value < 2**63)
+            return value
+
+        def error_record(error):
+            kind = type(error).__name__ if type(error) in (ValueError, TypeError, KeyError, RuntimeError,
+                OSError, PermissionError, FileNotFoundError, ProcessLookupError, TimeoutError) else 'OtherError'
+            metadata = query_error_metadata(error, getattr(self, 'Gio', None), getattr(self, 'GLib', None))
+            remote = metadata.get('remoteErrorName')
+            if metadata.get('registeredGIError') is True:
+                kind = remote.rsplit('.', 1)[-1] if type(remote) is str else 'GIError'
+            result['errorCounts'][kind] = result['errorCounts'].get(kind, 0) + 1
+            result.setdefault('firstErrorStage', stage)
+
+        def locked_state():
+            require(self.armed and self.bus_identity_matched and not self.closed and not self.input_started
+                    and not self.headers and not self.pending and self.baseline is baseline
+                    and self.bound_bus_connections == (control, monitor)
+                    and self.control is control and self.monitor is monitor)
+
+        def guard():
+            # Never hold capture.lock over lineage checks or synchronous bus calls.
+            with self.lock:
+                locked_state()
+            require(control.is_closed() is False and monitor.is_closed() is False
+                    and self.cancellable.is_cancelled() is False)
+            self.budget()
+
+        def rpc(method, name=None):
+            self.budget()
+            require(method in ('ListNames', 'GetId', 'GetNameOwner', 'GetConnectionUnixProcessID', 'GetConnectionUnixUser'))
+            require(name is None if method in ('ListNames', 'GetId') else unique(name))
+            kind = '(as)' if method == 'ListNames' else '(u)' if method in ('GetConnectionUnixProcessID', 'GetConnectionUnixUser') else '(s)'
+            reply = control.call_sync('org.freedesktop.DBus', '/org/freedesktop/DBus', 'org.freedesktop.DBus', method,
+                None if name is None else self.GLib.Variant('(s)', (name,)), self.GLib.VariantType.new(kind),
+                self.Gio.DBusCallFlags.NONE, 500, self.cancellable)
+            require(type(reply.get_size()) is int and 0 <= reply.get_size() <= (32768 if method == 'ListNames' else 1024))
+            value = reply.unpack()
+            require(type(value) is tuple and len(value) == 1)
+            require(type(value[0]) is (list if kind == '(as)' else int if kind == '(u)' else str))
+            self.budget()
+            return value[0]
+
+        try:
+            stage = 'started-clock'; result['startedMonotonicNs'] = stamp()
+            stage = 'preconditions'
+            guard()
+            with baseline.lock:
+                require(not baseline.started and not baseline.closed and not baseline.used
+                        and 0 < len(baseline.chains) <= 4)
+                pids = set(baseline.chains)
+                require(all(type(pid) is int and 1 < pid < 2**31 and pid in baseline.rows
+                            and baseline.rows[pid]['executable'] == '/usr/bin/xdg-dbus-proxy'
+                            and baseline.rows[pid]['uids'] == [self.uid] * 4 for pid in pids))
+                stage = 'held-before'
+                # Held rows/images only: do not spend additional privileged association snapshots.
+                # begin_input() still performs its unchanged complete association recheck.
+                OwnedLineage.verify_live(baseline)
+                result['heldBefore'] = True
+                stage = 'bus-identity'
+                bus_id = rpc('GetId')
+                names = (control.get_unique_name(), monitor.get_unique_name())
+                require(type(bus_id) is str and re.fullmatch(r'[a-f0-9]{32}', bus_id)
+                        and all(unique(name) for name in names) and names[0] != names[1])
+                result.update(busId=bus_id, controlName=names[0], monitorName=names[1])
+                stage = 'list-names'
+                listed = rpc('ListNames')
+                require(type(listed) is list and len(listed) <= 128)
+                result['listedCount'] = len(listed)
+                require(all(type(name) is str and len(name) <= 255 and (unique(name) or
+                    re.fullmatch(r'[A-Za-z_][A-Za-z0-9_-]*(?:\.[A-Za-z_][A-Za-z0-9_-]*)+', name)) for name in listed)
+                    and len(set(listed)) == len(listed))
+                candidates = [name for name in listed if unique(name)]
+                result['uniqueCount'] = len(candidates)
+                require(len(candidates) <= 64)
+                matches = []
+                for name in candidates:
+                    stage = 'enumeration-guard'; guard()
+                    try:
+                        stage = 'pid-filter'; result['pidQueries'] += 1
+                        pid = rpc('GetConnectionUnixProcessID', name)
+                        require(type(pid) is int and 1 < pid < 2**31)
+                        if pid not in pids:
+                            continue
+                        result['matchedPidCount'] += 1
+                        stage = 'match-cap'; require(result['matchedPidCount'] <= 8)
+                        result['peerQueries'] += 1
+                        stage = 'peer-owner-before'; require(rpc('GetNameOwner', name) == name)
+                        stage = 'peer-pid'; actual_pid = rpc('GetConnectionUnixProcessID', name)
+                        require(type(actual_pid) is int and actual_pid == pid)
+                        stage = 'peer-uid'; uid = rpc('GetConnectionUnixUser', name)
+                        require(type(uid) is int and uid == self.uid)
+                        stage = 'peer-owner-after'; require(rpc('GetNameOwner', name) == name)
+                        matches.append(dict(name=name, pid=pid, uid=uid))
+                    except Exception as error:
+                        error_record(error)
+                        if stage == 'match-cap':
+                            break
+                stage = 'held-after'
+                OwnedLineage.verify_live(baseline)
+                result['heldAfter'] = True
+                stage = 'final-guard'; guard()
+                require((control.get_unique_name(), monitor.get_unique_name()) == names)
+                with self.lock:
+                    locked_state()
+                    result.update(matches=matches, complete=not result['errorCounts'])
+        except Exception as error:
+            error_record(error)
+            result['failureStage'] = stage
+        try:
+            stage = 'finished-clock'; result['finishedMonotonicNs'] = stamp()
+            require(result['finishedMonotonicNs'] >= result['startedMonotonicNs'])
+        except Exception as error:
+            result.update(complete=False, matches=[], failureStage=stage)
+            error_record(error)
+        return bounded(result, 8192)
+
     def arm(self):
         require(not self.closed and not self.armed and self.control is None)
         from gi.repository import Gio, GLib

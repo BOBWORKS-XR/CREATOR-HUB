@@ -2761,6 +2761,186 @@ class GioAdapterTests(unittest.TestCase):
         for connection in connections: connection.close.assert_called_once_with(None, None)
 
 
+class PreInputPeerDiagnosticTests(unittest.TestCase):
+    def fixture(self):
+        state = RootAssociationTests().fixture()
+        observer = GioAdapterTests().capture()
+        observer.baseline = state.build_associated()
+        self.addCleanup(observer.baseline.close)
+        observer.armed = observer.bus_identity_matched = True
+        control, monitor = Mock(), Mock()
+        control.is_closed.return_value = monitor.is_closed.return_value = False
+        control.get_unique_name.return_value, monitor.get_unique_name.return_value = ':1.70', ':1.71'
+        observer.control, observer.monitor = control, monitor
+        observer.bound_bus_connections = (control, monitor)
+        observer.cancellable = Mock(); observer.cancellable.is_cancelled.return_value = False
+        observer.Gio = SimpleNamespace(DBusCallFlags=SimpleNamespace(NONE=0))
+        observer.GLib = SimpleNamespace(Variant=lambda kind, values: (kind, values),
+            VariantType=SimpleNamespace(new=lambda kind: kind))
+        state.listed = ['org.freedesktop.DBus', 'PRIVATE.foreign.Service', ':1.90', ':1.40']
+        state.calls, state.overrides = [], {}
+        def invoke(destination, path, interface, method, parameters, kind, flags, timeout, cancelled):
+            self.assertEqual((destination, path, interface), ('org.freedesktop.DBus', '/org/freedesktop/DBus', 'org.freedesktop.DBus'))
+            self.assertEqual(timeout, 500); self.assertIs(cancelled, observer.cancellable)
+            name = parameters[1][0] if parameters is not None else None
+            state.calls.append((method, name))
+            # A synchronous RPC must not execute under the non-reentrant capture lock.
+            self.assertTrue(observer.lock.acquire(blocking=False)); observer.lock.release()
+            if method == 'GetId': value = 'a' * 32
+            elif method == 'ListNames': value = state.listed
+            elif method == 'GetConnectionUnixProcessID': value = 99 if name == ':1.90' else 12
+            elif method == 'GetNameOwner': value = name
+            elif method == 'GetConnectionUnixUser': value = 1001
+            else: self.fail(method)
+            count = state.calls.count((method, name))
+            override = state.overrides.get((method, name, count), state.overrides.get((method, name)))
+            if override is not None:
+                if isinstance(override, Exception): raise override
+                value = override() if callable(override) else override
+            return SimpleNamespace(unpack=lambda: (value,), get_size=lambda: len(json.dumps(value)))
+        control.call_sync.side_effect = invoke
+        state.observer = observer
+        return state
+
+    def assert_no_authority(self, value):
+        self.assertTrue(value['readOnly'])
+        for key in ('inputPermitted', 'authorityGranted', 'qualified', 'releaseReady'):
+            self.assertIs(value[key], False)
+
+    def test_only_sealed_pid_full_peers_retained_with_held_guards_and_no_new_root_snapshot(self):
+        state = self.fixture(); observer = state.observer; baseline = observer.baseline
+        snapshot_count = state.snapshots.call_count
+        prior = {'original': True}; observer.query_failure = prior
+        with patch.object(observer, 'peer', side_effect=AssertionError('Live sender reader must not be used')), \
+                patch.object(observer, 'query', side_effect=AssertionError('Live query reader must not be used')), \
+                patch.object(baseline, 'observe', side_effect=AssertionError('No input authority')):
+            value = observer.preinput_proxy_peers()
+        self.assertTrue(value['complete']); self.assertTrue(value['heldBefore']); self.assertTrue(value['heldAfter'])
+        self.assertEqual(value['matches'], [dict(name=':1.40', pid=12, uid=1001)])
+        self.assertIs(value['associationRechecked'], False)
+        self.assertLessEqual(value['startedMonotonicNs'], value['finishedMonotonicNs'])
+        self.assertEqual((value['busId'], value['controlName'], value['monitorName']), ('a' * 32, ':1.70', ':1.71'))
+        self.assertEqual([method for method, name in state.calls if name == ':1.40'],
+            ['GetConnectionUnixProcessID', 'GetNameOwner', 'GetConnectionUnixProcessID', 'GetConnectionUnixUser', 'GetNameOwner'])
+        self.assertEqual([method for method, name in state.calls if name == ':1.90'], ['GetConnectionUnixProcessID'])
+        self.assertNotIn(':1.90', json.dumps(value)); self.assertNotIn('PRIVATE', json.dumps(value))
+        self.assertEqual(state.snapshots.call_count, snapshot_count)
+        self.assertIs(observer.query_failure, prior)
+        self.assertFalse(baseline.started); self.assertFalse(baseline.used); self.assertFalse(observer.input_started)
+        self.assert_no_authority(value)
+        baseline.begin_input()
+        self.assertEqual(state.snapshots.call_count, snapshot_count + 1)
+
+    def test_exact_associated_type_only_and_no_read_for_others(self):
+        for baseline in (None, Mock(), object.__new__(M.OwnedLineage),
+                         object.__new__(type('DerivedAssociation', (M.AssociatedProxyLineage,), {}))):
+            observer = GioAdapterTests().capture(); observer.baseline = baseline
+            with patch.object(observer, 'budget', side_effect=AssertionError('Not applicable')):
+                self.assertIsNone(observer.preinput_proxy_peers())
+
+    def test_list_caps_malformed_duplicate_and_reply_size_refuse_before_pid_queries(self):
+        for listed in ([':1.' + str(i) for i in range(65)], ['example.name' + str(i) for i in range(129)],
+                       [':1.40', ':1.40'], [False], ['/PRIVATE/path'], [':1.x'], ['a' * 256], {'bad': True}):
+            with self.subTest(listed=type(listed).__name__):
+                state = self.fixture(); state.listed = listed
+                value = state.observer.preinput_proxy_peers()
+                self.assertFalse(value['complete']); self.assertEqual(value['matches'], [])
+                self.assertEqual(value['pidQueries'], 0); self.assert_no_authority(value)
+                self.assertEqual(sum(method == 'ListNames' for method, _ in state.calls), 1)
+                self.assertNotIn('PRIVATE', json.dumps(value))
+        state = self.fixture()
+        state.listed = ['example.' + 'x' * 250] * 128
+        value = state.observer.preinput_proxy_peers()
+        self.assertFalse(value['complete']); self.assertEqual(value['pidQueries'], 0)
+
+    def test_64_unique_names_are_bounded_and_foreign_names_never_retained(self):
+        state = self.fixture(); state.listed = [':1.' + str(i) for i in range(100, 164)]
+        state.overrides.update({('GetConnectionUnixProcessID', name): 99 for name in state.listed})
+        value = state.observer.preinput_proxy_peers()
+        self.assertTrue(value['complete']); self.assertEqual(value['pidQueries'], 64)
+        self.assertEqual(value['matches'], []); self.assertEqual(value['peerQueries'], 0)
+        self.assertFalse(any(name in json.dumps(value) for name in state.listed))
+
+    def test_matching_peer_cap_bounds_full_credentials_without_granting_authority(self):
+        state = self.fixture(); state.listed = [':1.' + str(i) for i in range(100, 164)]
+        value = state.observer.preinput_proxy_peers()
+        self.assertFalse(value['complete']); self.assertEqual(value['peerQueries'], 8)
+        self.assertEqual(value['pidQueries'], 9); self.assertEqual(len(value['matches']), 8)
+        self.assertLessEqual(len(json.dumps(value)), 8192); self.assert_no_authority(value)
+
+    def test_vanished_foreign_malformed_credentials_and_rpc_errors_are_not_retried_or_retained(self):
+        for key, override in (
+            (('GetConnectionUnixProcessID', ':1.40', 1), ProcessLookupError('PRIVATE vanished')),
+            (('GetConnectionUnixProcessID', ':1.40', 1), True),
+            (('GetConnectionUnixProcessID', ':1.40', 2), 13),
+            (('GetConnectionUnixUser', ':1.40'), 1002),
+            (('GetConnectionUnixUser', ':1.40'), True),
+            (('GetNameOwner', ':1.40', 1), ':1.999'),
+            (('GetNameOwner', ':1.40', 2), ':1.999'),
+            (('GetNameOwner', ':1.40', 2), PermissionError('PRIVATE denied'))):
+            with self.subTest(key=key, kind=type(override).__name__):
+                state = self.fixture(); state.listed = [':1.40']; state.overrides[key] = override
+                value = state.observer.preinput_proxy_peers()
+                self.assertFalse(value['complete']); self.assertEqual(value['matches'], [])
+                self.assertEqual(sum(value['errorCounts'].values()), 1)
+                self.assertNotIn(':1.40', json.dumps(value)); self.assertNotIn('PRIVATE', json.dumps(value))
+                self.assertLessEqual(len(state.calls), 7); self.assert_no_authority(value)
+
+    def test_errors_do_not_overwrite_concurrent_sender_failure(self):
+        state = self.fixture(); observer = state.observer
+        original = {'original': True}; observer.query_failure = original
+        live = {'live': 'must-survive'}
+        def failure():
+            observer.query_failure = live
+            raise PermissionError('PRIVATE diagnostic error')
+        state.overrides[('ListNames', None)] = failure
+        value = observer.preinput_proxy_peers()
+        self.assertIs(observer.query_failure, live)
+        self.assertEqual(value['errorCounts'], {'PermissionError': 1})
+        self.assertFalse(observer.input_started); self.assertIsNone(observer.failure)
+
+    def test_races_or_identity_drift_discard_all_matches_without_masking_original_guards(self):
+        for mutation in ('headers', 'input', 'closed', 'connection', 'cancelled', 'pidfd', 'row', 'image', 'guard'):
+            state = self.fixture(); observer = state.observer; state.listed = [':1.40']
+            def change():
+                if mutation == 'headers': observer.headers.append(message())
+                if mutation == 'input': observer.input_started = True
+                if mutation == 'closed': observer.closed = True
+                if mutation == 'connection': observer.control = Mock()
+                if mutation == 'cancelled': observer.cancellable.is_cancelled.return_value = True
+                if mutation == 'pidfd': state.pidfds.ready.return_value = True
+                if mutation == 'row': state.rows[12]['startTime'] = '999'
+                if mutation == 'image': observer.baseline.held[12].snapshot = lambda: ({}, 'bad')
+                if mutation == 'guard': state.guard.side_effect = FileNotFoundError('PRIVATE guard')
+                return ':1.40'
+            state.overrides[('GetNameOwner', ':1.40', 2)] = change
+            with self.subTest(mutation=mutation):
+                value = observer.preinput_proxy_peers()
+                self.assertFalse(value['complete']); self.assertEqual(value['matches'], [])
+                self.assert_no_authority(value); self.assertNotIn('PRIVATE', json.dumps(value))
+                self.assertFalse(observer.baseline.used)
+
+    def test_unarmed_started_and_failed_held_before_never_call_bus(self):
+        for mutation in ('unarmed', 'baseline-started', 'input-started', 'held-failed'):
+            state = self.fixture(); observer = state.observer
+            if mutation == 'unarmed': observer.armed = False
+            if mutation == 'baseline-started': observer.baseline.started = True
+            if mutation == 'input-started': observer.input_started = True
+            if mutation == 'held-failed': state.guard.side_effect = FileNotFoundError('PRIVATE guard')
+            value = observer.preinput_proxy_peers()
+            self.assertFalse(value['complete']); self.assertEqual(state.calls, [])
+            self.assert_no_authority(value)
+
+    def test_clock_bounds_and_reversed_chronology_refuse_diagnostic_only(self):
+        for values in ((True, 20), (-1, 20), (2**63, 20), (20, 10), (10, 2**63)):
+            state = self.fixture(); observer = state.observer
+            with patch.object(M.time, 'monotonic_ns', side_effect=values):
+                value = observer.preinput_proxy_peers()
+            self.assertFalse(value['complete']); self.assertEqual(value['matches'], [])
+            self.assertIsNone(observer.query_failure); self.assertFalse(observer.input_started)
+            self.assert_no_authority(value)
+
+
 class QueryDiagnosticTests(unittest.TestCase):
     @staticmethod
     def fixture():
@@ -3212,6 +3392,85 @@ class HistoricalDisconnectTests(unittest.TestCase):
 
 
 class RealGioQueryTests(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == 'linux', 'Linux GI and disposable private bus')
+    def test_preinput_enumeration_real_private_peer_with_mocked_held_lineage_only(self):
+        import subprocess
+        required = os.environ.get('CREATOR_FLATPAK_REAL_GI_REQUIRED') == 'true'
+        if importlib.util.find_spec('gi') is None or not all(Path(p).is_file() for p in ('/usr/bin/dbus-run-session', '/usr/bin/dbus-daemon')):
+            if required: self.fail('Required registered GI/private-bus tooling is unavailable')
+            self.skipTest('Registered GI/private-bus tooling unavailable')
+        code = r'''
+import importlib.util,json,os,signal,subprocess,sys,threading
+from unittest.mock import patch
+from gi.repository import Gio,GLib
+signal.alarm(10)
+spec=importlib.util.spec_from_file_location('preinput_private_bus',sys.argv[1])
+m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
+address=os.environ['DBUS_SESSION_BUS_ADDRESS']
+flags=Gio.DBusConnectionFlags.AUTHENTICATION_CLIENT|Gio.DBusConnectionFlags.MESSAGE_BUS_CONNECTION
+connections=[Gio.DBusConnection.new_for_address_sync(address,flags,None,None) for _ in range(2)]
+for connection in connections: connection.set_exit_on_close(False)
+control,monitor=connections
+child_code="""import os,signal,sys
+from gi.repository import Gio
+signal.alarm(8)
+flags=Gio.DBusConnectionFlags.AUTHENTICATION_CLIENT|Gio.DBusConnectionFlags.MESSAGE_BUS_CONNECTION
+c=Gio.DBusConnection.new_for_address_sync(os.environ['DBUS_SESSION_BUS_ADDRESS'],flags,None,None)
+c.set_exit_on_close(False)
+print(c.get_unique_name(),flush=True)
+sys.stdin.buffer.read(1)
+c.close_sync(None)
+"""
+child=subprocess.Popen([sys.executable,'-I','-B','-c',child_code],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+try:
+    name=child.stdout.readline().decode().strip();assert m.unique(name)
+    ids=[c.call_sync('org.freedesktop.DBus','/org/freedesktop/DBus','org.freedesktop.DBus','GetId',
+        None,GLib.VariantType.new('(s)'),Gio.DBusCallFlags.NONE,500,None).unpack()[0] for c in connections]
+    assert ids[0]==ids[1]
+    monitor_name=monitor.get_unique_name()
+    monitor.call_sync('org.freedesktop.DBus','/org/freedesktop/DBus','org.freedesktop.DBus.Monitoring','BecomeMonitor',
+        GLib.Variant('(asu)',(["type='method_call',interface='com.creatorworks.hub.Host1',member='Start'"],0)),
+        GLib.VariantType.new('()'),Gio.DBusCallFlags.NONE,1000,None)
+    observer=m.PassiveCapture(dict(name=':1.999999',pid=os.getpid()),{},{},None,None,None,address,os.getuid())
+    observer.Gio,observer.GLib,observer.control,observer.monitor=Gio,GLib,control,monitor
+    observer.cancellable=Gio.Cancellable.new();observer.armed=observer.bus_identity_matched=True
+    observer.bound_bus_connections=(control,monitor)
+    baseline=object.__new__(m.AssociatedProxyLineage)
+    baseline.lock=threading.RLock();baseline.started=baseline.closed=baseline.used=False
+    baseline.chains={child.pid:[child.pid]}
+    baseline.rows={child.pid:dict(executable='/usr/bin/xdg-dbus-proxy',uids=[os.getuid()]*4)}
+    observer.baseline=baseline
+    with patch.object(m.OwnedLineage,'verify_live') as held:
+        value=observer.preinput_proxy_peers()
+        assert held.call_count==2
+    assert value['complete'],value
+    assert value['matches']==[dict(name=name,pid=child.pid,uid=os.getuid())],value
+    assert value['busId']==ids[0] and value['monitorName']==monitor_name
+    assert value['controlName']==control.get_unique_name()
+    assert not any(value[k] for k in ('inputPermitted','authorityGranted','qualified','releaseReady'))
+    assert not observer.input_started and not baseline.used and not baseline.started and observer.query_failure is None
+    print(json.dumps(dict(realPrivateBusCredentials=True,monitorMode=True,mockedHeldLineage=True,nativeInput=False,releaseReady=False)))
+finally:
+    child.stdin.close()
+    try: child.wait(timeout=3)
+    except subprocess.TimeoutExpired: child.terminate();child.wait(timeout=3)
+    for connection in reversed(connections):
+        if not connection.is_closed(): connection.close_sync(None)
+'''
+        with tempfile.TemporaryDirectory(prefix='creator-private-preinput-') as directory:
+            root = Path(directory)
+            for name in ('config', 'data', 'cache', 'runtime'): (root / name).mkdir(mode=0o700)
+            env = {'PATH': '/usr/bin:/bin', 'HOME': str(root), 'XDG_CONFIG_HOME': str(root / 'config'),
+                   'XDG_DATA_HOME': str(root / 'data'), 'XDG_CACHE_HOME': str(root / 'cache'),
+                   'XDG_RUNTIME_DIR': str(root / 'runtime'), 'LC_ALL': 'C.UTF-8'}
+            result = subprocess.run(['/usr/bin/dbus-run-session', '--dbus-daemon=/usr/bin/dbus-daemon', '--',
+                sys.executable, '-I', '-B', '-c', code, str(Path(M.__file__).resolve())],
+                env=env, capture_output=True, timeout=15, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr[-4096:].decode('utf8', errors='replace'))
+        self.assertLessEqual(len(result.stdout), 4096); self.assertLessEqual(len(result.stderr), 4096)
+        self.assertEqual(json.loads(result.stdout), dict(realPrivateBusCredentials=True, monitorMode=True,
+            mockedHeldLineage=True, nativeInput=False, releaseReady=False))
+
     @unittest.skipUnless(sys.platform == 'linux', 'Linux held pidfd and disposable private bus')
     def test_real_child_exit_and_private_bus_disconnect_feed_only_the_late_historical_branch(self):
         import subprocess
