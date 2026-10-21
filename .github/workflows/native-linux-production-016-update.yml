@@ -139,11 +139,12 @@ jobs:
           UPDATE_PROFILE: ${{ inputs.profile }}
           INPUT_ARTIFACT: ${{ needs.stage-input.outputs.artifact }}
         with:
+          retries: 0
           script: |
             const assert = require('node:assert/strict'), fs = require('node:fs'), path = require('node:path');
             const { execFileSync } = require('node:child_process');
             const script = path.join(process.env.GITHUB_WORKSPACE, 'scripts/native-linux-production-016-update.py');
-            const run = mode => execFileSync('/usr/bin/python3', ['-I', '-S', '-B', script, mode], {env: process.env, stdio: 'pipe', timeout: 30000});
+            const run = (mode, input, timeout = 30000) => execFileSync('/usr/bin/python3', ['-I', '-S', '-B', script, mode], {env: process.env, stdio: 'pipe', input, timeout});
             run('profile');
             const root = path.join(process.env.RUNNER_TEMP, 'native-linux-production-016-update');
             const profile = JSON.parse(fs.readFileSync(path.join(root, 'profile.json'))), proof = {};
@@ -155,15 +156,75 @@ jobs:
               const commit = (await github.rest.git.getCommit({owner: 'BOBWORKS-XR', repo: 'CREATOR-HUB', commit_sha: expected.source})).data;
               proof[role] = {run: runApi, job, artifact, commit};
             }
-            const runApi = (await github.rest.actions.getWorkflowRun({owner:'BOBWORKS-XR',repo:'CREATOR-HUB',run_id:context.runId})).data;
-            const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun,{owner:'BOBWORKS-XR',repo:'CREATOR-HUB',run_id:context.runId,filter:'latest',per_page:100});
-            const stages = jobs.filter(j => j.name === 'stage-input'); assert.equal(stages.length,1);
             assert.ok(/^[1-9][0-9]*$/.test(process.env.INPUT_ARTIFACT));
-            const artifact = (await github.rest.actions.getArtifact({owner:'BOBWORKS-XR',repo:'CREATOR-HUB',artifact_id:Number(process.env.INPUT_ARTIFACT)})).data;
-            proof.private = {run:runApi,job:stages[0],artifact};
-            const bytes = Buffer.from(JSON.stringify(proof)); assert.ok(bytes.length <= 512 * 1024);
-            fs.writeFileSync(path.join(root, 'api.json'), bytes, {flag: 'wx', mode: 0o600});
-            run('api');
+            const encode = value => { const bytes = Buffer.from(JSON.stringify(value)); assert.ok(bytes.length <= 512 * 1024); return bytes; };
+            const now = () => Number(process.hrtime.bigint()) / 1e6, deadline = now() + 30000;
+            const remaining = () => { const ms = Math.floor(deadline - now()); assert.ok(ms > 0, 'Current-run API observation deadline'); return ms; };
+            const headers = value => Object.fromEntries(Object.entries(value || {}).filter(([k, v]) =>
+              ['date', 'etag', 'last-modified', 'cache-control', 'age', 'vary', 'via', 'x-cache', 'x-cache-hits', 'x-github-request-id'].includes(k.toLowerCase())
+              && typeof v === 'string' && v.length <= 1024).map(([k, v]) => [k.toLowerCase(), v]));
+            const observations = path.join(root, 'api-observations'); fs.mkdirSync(observations, {mode: 0o700});
+            let firstIdentity;
+            // These are refusal bounds, not a presumed GitHub consistency window. No sleeps or API-error retries.
+            for (let index = 1; index <= 6; index++) {
+              const observation = {index, startedAt: new Date().toISOString(), startedMs: now(), requests: [], responses: {}, producerProof: proof, decision: 'refused'};
+              let candidate, state, phase = 'run';
+              const get = async (label, method, params) => {
+                phase = label;
+                const request = {label, startedAt: new Date().toISOString(), startedMs: now(), timeoutMs: Math.min(5000, remaining())};
+                observation.requests.push(request);
+                try {
+                  const response = await method({owner: 'BOBWORKS-XR', repo: 'CREATOR-HUB', ...params,
+                    request: {signal: AbortSignal.timeout(request.timeoutMs)}});
+                  request.status = response.status; request.headers = headers(response.headers);
+                  assert.equal(response.status, 200, 'Current-run API response status');
+                  encode(response.data); observation.responses[label] = response.data;
+                  assert.ok(now() - request.startedMs < request.timeoutMs, 'Current-run API GET deadline');
+                  remaining(); assert.ok(response.data && typeof response.data === 'object' && !Array.isArray(response.data), 'Malformed current-run API response');
+                  return response.data;
+                } catch (error) {
+                  request.failed = true;
+                  if (Number.isInteger(error.status)) request.status = error.status;
+                  if (error.response) request.headers = headers(error.response.headers);
+                  throw new Error('Current-run API read refused: ' + label);
+                } finally {
+                  request.finishedAt = new Date().toISOString(); request.finishedMs = now();
+                }
+              };
+              try {
+                const runApi = await get('run', github.rest.actions.getWorkflowRun, {run_id: context.runId});
+                phase = 'run-identity'; run('api-run-observe', encode(runApi), Math.min(5000, remaining())); remaining();
+                const listing = await get('jobs', github.rest.actions.listJobsForWorkflowRun, {run_id: context.runId, filter: 'latest', per_page: 100});
+                assert.ok(Number.isInteger(listing.total_count) && listing.total_count < 100 && Array.isArray(listing.jobs) && listing.jobs.length === listing.total_count);
+                const stages = listing.jobs.filter(j => j.name === 'stage-input'), current = listing.jobs.filter(j => j.name === 'update');
+                assert.equal(stages.length, 1); assert.equal(current.length, 1);
+                for (const job of [stages[0], current[0]]) {
+                  assert.ok(Number.isSafeInteger(job.id) && job.id > 0);
+                  assert.equal(job.run_id, context.runId); assert.equal(job.run_attempt, Number(process.env.GITHUB_RUN_ATTEMPT)); assert.equal(job.head_sha, context.sha);
+                }
+                assert.ok(['queued', 'in_progress'].includes(current[0].status) && current[0].conclusion === null, 'Current job is terminal or malformed');
+                const artifact = await get('artifact', github.rest.actions.getArtifact, {artifact_id: Number(process.env.INPUT_ARTIFACT)});
+                assert.equal(artifact.id, Number(process.env.INPUT_ARTIFACT));
+                const identity = {stage: stages[0].id, current: current[0].id, artifact: [artifact.id, artifact.name, artifact.digest, artifact.size_in_bytes, artifact.workflow_run]};
+                if (firstIdentity) assert.deepEqual(identity, firstIdentity, 'Current-run API observation identity drift');
+                candidate = {...proof, private: {run: runApi, job: stages[0], artifact}};
+                phase = 'all-guards'; state = JSON.parse(run('api-observe', encode(candidate), Math.min(5000, remaining()))).state;
+                remaining(); assert.ok(['queued', 'in_progress'].includes(state));
+                firstIdentity = identity;
+                observation.decision = state === 'queued' ? 'queued-not-admitted' : 'strict-validation';
+              } finally {
+                observation.phase = phase; observation.finishedAt = new Date().toISOString(); observation.finishedMs = now();
+                const bytes = Buffer.from(JSON.stringify(observation)); assert.ok(bytes.length <= 2 * 1024 * 1024);
+                fs.writeFileSync(path.join(observations, String(index).padStart(2, '0') + '.json'), bytes, {flag: 'wx', mode: 0o600});
+              }
+              remaining();
+              if (state === 'in_progress') {
+                fs.writeFileSync(path.join(root, 'api.json'), encode(candidate), {flag: 'wx', mode: 0o600});
+                run('api', undefined, Math.min(5000, remaining())); remaining();
+                return;
+              }
+            }
+            throw new Error('Current-run API observation cap reached; queued was not admitted');
       - name: Download only the already API-bound immutable artifacts
         uses: actions/github-script@v8
         with:
@@ -255,6 +316,7 @@ jobs:
           path: |
             ${{ runner.temp }}/native-linux-production-016-update/profile.json
             ${{ runner.temp }}/native-linux-production-016-update/api.json
+            ${{ runner.temp }}/native-linux-production-016-update/api-observations/
             ${{ runner.temp }}/native-linux-production-016-update/request.json
             ${{ runner.temp }}/native-linux-production-016-update/review.json
             ${{ runner.temp }}/native-linux-production-016-verifier/receipt.json

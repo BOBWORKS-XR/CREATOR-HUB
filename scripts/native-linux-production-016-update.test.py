@@ -1617,6 +1617,213 @@ class Pure(unittest.TestCase):
             proof = delivery_api(p, env); mutate(proof)
             with self.assertRaises(RuntimeError): M.validate_delivery_api(proof, p, env)
 
+    def sample_current_api(self, samples, **options):
+        p, env = profile(True), environment()
+        for index, role in enumerate(("portable16", "portable17")):
+            p["artifacts"][role].update(run=700 + index * 10, job=701 + index * 10, artifact=702 + index * 10)
+        proof = {role: api(expected) for role, expected in p["artifacts"].items()}
+        if options.get("invalidProducer"):
+            proof["assembly16"]["job"]["conclusion"] = "failure"
+        value = delivery_api(p, env); value["job"]["id"] = 71
+        env.update(INPUT_ARTIFACT="70", RUNNER_TEMP="/unit-only", GITHUB_WORKSPACE=str(HERE.parent))
+        step = next(s for s in self.workflow["jobs"]["update"]["steps"] if s.get("name", "").startswith("Bind independent profile"))
+        self.assertEqual(step["with"]["retries"], 0)
+        checker = r'''
+import importlib.util,json,sys
+spec=importlib.util.spec_from_file_location("sample_checked",sys.argv[1]);m=importlib.util.module_from_spec(spec);sys.modules[spec.name]=m;spec.loader.exec_module(m)
+x=json.load(sys.stdin)
+if x["mode"]=="api":m.validate_all_api(x["profile"],x["value"],x["env"]);state="in_progress"
+elif x["mode"]=="api-run-observe":state=m.observe_delivery_run(x["value"],x["env"])
+else:
+    assert x["mode"]=="api-observe"
+    state=m.observe_all_api(x["profile"],x["value"],x["env"])
+print(json.dumps({"state":state}))
+'''
+        harness = r'''
+const fs=require('node:fs'),path=require('node:path'),assert=require('node:assert/strict'),cp=require('node:child_process');
+const input=JSON.parse(fs.readFileSync(0,'utf8')), clone=x=>JSON.parse(JSON.stringify(x));
+const root=path.join(input.env.RUNNER_TEMP,'native-linux-production-016-update'), files=new Map(), calls=[], phases=[], signals=[];
+files.set(path.join(root,'profile.json'),Buffer.from(JSON.stringify(input.profile)));
+let clock=0,index=-1,sample={},abortEvents=0;
+const response=data=>({status:200,data,headers:{Date:'fixed-date',ETag:'safe-tag','Cache-Control':'private, max-age=60',Authorization:'SECRET','set-cookie':'SECRET'}});
+const upstream=(field,id)=>input.proof[Object.keys(input.profile.artifacts).find(role=>input.profile.artifacts[role][field]===id)];
+const get=async(label,params)=>{
+  if(label==='run'){index++;sample=input.samples[Math.min(index,input.samples.length-1)];}
+  assert.equal(params.owner,'BOBWORKS-XR');assert.equal(params.repo,'CREATOR-HUB');
+  assert.ok(signals.at(-1)>0&&signals.at(-1)<=5000);
+  calls.push({label,index,timeoutMs:signals.at(-1)});
+  clock+=(sample.elapsed||{})[label]||0;
+  if(sample.fault===label+'-stall')return new Promise((resolve,reject)=>{
+    const timer=setTimeout(()=>reject(new Error('Unit abort signal did not fire')),100);
+    params.request.signal.addEventListener('abort',()=>{clearTimeout(timer);abortEvents++;reject(new Error('Aborted'));},{once:true});
+  });
+  if(sample.fault===label+'-api')throw Object.assign(new Error('SECRET'),{status:503,response:response(null)});
+  if(label==='run'){
+    const r=clone(input.delivery.run);r.status=sample.state;
+    if(sample.fault==='run-source')r.head_sha='f'.repeat(40);
+    if(sample.fault==='run-attempt')r.run_attempt++;
+    if(sample.fault==='run-repository')r.repository.id++;
+    if(sample.fault==='run-conclusion')r.conclusion='failure';
+    if(sample.fault==='run-missing-conclusion')delete r.conclusion;
+    return response(sample.fault==='run-malformed'?'malformed':r);
+  }
+  if(label==='jobs'){
+    assert.equal(params.run_id,123);assert.equal(params.filter,'latest');assert.equal(params.per_page,100);
+    const stage=clone(input.delivery.job),current={...clone(stage),id:72,name:'update',status:sample.currentState||sample.state,conclusion:null};
+    if(sample.fault==='stage-failed')stage.conclusion='failure';
+    if(sample.fault==='stage-drift')stage.id++;
+    if(sample.fault==='current-source')current.head_sha='f'.repeat(40);
+    const jobs=[stage,current];if(sample.fault==='duplicate-current')jobs.push(current);
+    return response({total_count:jobs.length,jobs});
+  }
+  assert.equal(label,'artifact');assert.equal(params.artifact_id,70);
+  const artifact=clone(input.delivery.artifact);
+  if(sample.fault==='artifact-drift')artifact.digest='sha256:'+'b'.repeat(64);
+  if(sample.fault==='artifact-expired')artifact.expired=true;
+  return response(artifact);
+};
+const github={rest:{actions:{
+  getWorkflowRun:async p=>p.request?get('run',p):response(clone(upstream('run',p.run_id).run)),
+  getJobForWorkflowRun:async p=>response(clone(upstream('job',p.job_id).job)),
+  getArtifact:async p=>p.request?get('artifact',p):response(clone(upstream('artifact',p.artifact_id).artifact)),
+  listJobsForWorkflowRun:p=>get('jobs',p)
+},git:{getCommit:async p=>response(clone(upstream('source',p.commit_sha).commit))}}};
+const fakeFs={readFileSync:p=>{assert.ok(files.has(p));return files.get(p);},mkdirSync:()=>{},
+  writeFileSync:(p,b,opts)=>{assert.equal(opts.flag,'wx');assert.equal(opts.mode,0o600);assert.ok(!files.has(p));
+    if(input.tamperFinal&&p===path.join(root,'api.json')){const x=JSON.parse(b);x.private.run.status='queued';b=Buffer.from(JSON.stringify(x));}
+    files.set(p,Buffer.from(b));}};
+const execFileSync=(cmd,args,opts)=>{
+  assert.equal(cmd,'/usr/bin/python3');assert.deepEqual(args.slice(0,3),['-I','-S','-B']);
+  const mode=args[4];phases.push(mode);if(mode==='profile')return Buffer.alloc(0);
+  assert.ok(opts.timeout>0&&opts.timeout<=5000);
+  const value=JSON.parse(mode==='api'?files.get(path.join(root,'api.json')):opts.input);
+  const result=cp.execFileSync(input.python,['-I','-S','-B','-c',input.checker,input.module],
+    {input:JSON.stringify({mode,value,profile:input.profile,env:input.env}),timeout:opts.timeout,stdio:'pipe'});
+  if(mode==='api-run-observe'&&sample.fault==='remaining-budget')clock=27000;
+  if(mode==='api-observe'&&sample.fault==='validation-deadline')clock=30000;
+  return result;
+};
+const fakeRequire=n=>n==='node:fs'?fakeFs:n==='node:child_process'?{execFileSync}:require(n);
+const fakeProcess={env:input.env,hrtime:{bigint:()=>BigInt(clock)*1000000n}};
+const signal={timeout:ms=>{signals.push(ms);return input.realAbort?AbortSignal.timeout(1):{timeoutMs:ms};}};
+const AsyncFunction=Object.getPrototypeOf(async function(){}).constructor;
+(async()=>{let error=null;try{await new AsyncFunction('github','context','require','process','AbortSignal',input.script)
+  (github,{runId:123,sha:input.env.GITHUB_SHA},fakeRequire,fakeProcess,signal);}catch(e){error=e.message.split('\n')[0]+(e.stderr?' '+e.stderr.toString().trim().split('\n').at(-1):'');}
+process.stdout.write(JSON.stringify({error,calls,phases,signals,abortEvents,files:Object.fromEntries([...files].map(([p,b])=>[path.relative(root,p).replaceAll('\\','/'),JSON.parse(b)]))}));})();
+'''
+        fixture = {"profile": p, "env": env, "proof": proof, "delivery": value, "samples": samples,
+                   "script": step["with"]["script"], "checker": checker, "python": sys.executable,
+                   "module": str(HERE / "native-linux-production-016-update.py"), **options}
+        result = subprocess.run([shutil.which("node"), "-e", harness], input=json.dumps(fixture).encode(),
+                                cwd=HERE.parent, capture_output=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr.decode(errors="replace")[:2000])
+        self.assertLess(len(result.stdout), 8 * 1024**2)
+        return json.loads(result.stdout)
+
+    def test_current_api_queued_then_active_preserves_first_and_admits_only_actual_active(self):
+        result = self.sample_current_api([{"state": "queued"}, {"state": "in_progress"}])
+        self.assertIsNone(result["error"])
+        self.assertEqual(result["files"]["api-observations/01.json"]["responses"]["run"]["status"], "queued")
+        self.assertEqual(result["files"]["api-observations/02.json"]["responses"]["run"]["status"], "in_progress")
+        self.assertEqual(result["files"]["api.json"]["private"]["run"]["status"], "in_progress")
+        self.assertEqual(result["phases"].count("api"), 1)
+        self.assertEqual([x["label"] for x in result["calls"]], ["run", "jobs", "artifact"] * 2)
+        self.assertNotIn("SECRET", json.dumps(result["files"]))
+        for index in (1, 2):
+            for request in result["files"][f"api-observations/{index:02}.json"]["requests"]:
+                self.assertEqual(set(request["headers"]), {"date", "etag", "cache-control"})
+                self.assertGreaterEqual(request["finishedMs"], request["startedMs"])
+                self.assertIn("startedAt", request); self.assertIn("finishedAt", request)
+
+    def test_current_api_permanent_queue_hits_six_sample_cap_without_admission(self):
+        result = self.sample_current_api([{"state": "queued", "currentState": "in_progress"}])
+        self.assertIn("cap reached", result["error"])
+        self.assertEqual(len(result["calls"]), 18)
+        self.assertEqual(result["phases"].count("api-observe"), 6)
+        self.assertEqual(len([n for n in result["files"] if n.startswith("api-observations/")]), 6)
+        self.assertNotIn("api.json", result["files"]); self.assertNotIn("api", result["phases"])
+
+    def test_current_api_terminal_and_run_drift_stop_before_more_gets(self):
+        for state, fault in [("completed", None), ("waiting", None), ("queued", "run-source"),
+                             ("queued", "run-attempt"), ("queued", "run-repository"), ("queued", "run-conclusion"),
+                             ("queued", "run-missing-conclusion"), ("queued", "run-malformed")]:
+            with self.subTest(state=state, fault=fault):
+                result = self.sample_current_api([{"state": state, "fault": fault}])
+                self.assertIsNotNone(result["error"]); self.assertEqual(len(result["calls"]), 1)
+                self.assertNotIn("api.json", result["files"])
+                self.assertIn("api-observations/01.json", result["files"])
+
+    def test_current_api_all_existing_guards_and_cross_sample_identity_still_refuse(self):
+        for fault in ("stage-failed", "current-source", "duplicate-current", "stage-drift", "artifact-drift", "artifact-expired"):
+            with self.subTest(fault=fault):
+                result = self.sample_current_api([{"state": "queued"}, {"state": "queued", "fault": fault}])
+                self.assertIsNotNone(result["error"]); self.assertNotIn("api.json", result["files"])
+                self.assertEqual(result["files"]["api-observations/01.json"]["decision"], "queued-not-admitted")
+                self.assertEqual(result["files"]["api-observations/02.json"]["decision"], "refused")
+
+    def test_current_api_errors_are_not_retried_and_only_safe_headers_survive(self):
+        for index, label in enumerate(("run", "jobs", "artifact"), 1):
+            with self.subTest(label=label):
+                result = self.sample_current_api([{"state": "queued", "fault": label + "-api"}])
+                self.assertEqual(len(result["calls"]), index); self.assertNotIn("api.json", result["files"])
+                request = result["files"]["api-observations/01.json"]["requests"][-1]
+                self.assertTrue(request["failed"]); self.assertEqual(request["status"], 503)
+                self.assertNotIn("SECRET", json.dumps(result))
+
+    def test_current_api_deadline_bounds_gets_validation_and_late_success(self):
+        for sample in ({"state": "in_progress", "elapsed": {"run": 30000}},
+                       {"state": "in_progress", "elapsed": {"run": 5000}},
+                       {"state": "in_progress", "fault": "validation-deadline"},
+                       {"state": "queued", "elapsed": {"run": 10000, "jobs": 10000, "artifact": 9999}}):
+            with self.subTest(sample=sample):
+                result = self.sample_current_api([sample])
+                self.assertIsNotNone(result["error"]); self.assertNotIn("api.json", result["files"])
+                self.assertTrue(all(0 < n <= 5000 for n in result["signals"]))
+                self.assertIn("api-observations/01.json", result["files"])
+
+    def test_current_api_request_budget_shrinks_with_remaining_monotonic_time(self):
+        result = self.sample_current_api([{"state": "in_progress", "fault": "remaining-budget"}])
+        self.assertIsNone(result["error"]); self.assertEqual(result["signals"], [5000, 3000, 3000])
+
+    def test_current_api_abort_signal_cancels_stalled_get_without_retry(self):
+        result = self.sample_current_api([{"state": "queued", "fault": "run-stall"}], realAbort=True)
+        self.assertIsNotNone(result["error"]); self.assertEqual(result["abortEvents"], 1)
+        self.assertEqual(len(result["calls"]), 1); self.assertEqual(result["signals"], [5000])
+        self.assertNotIn("api.json", result["files"])
+        self.assertTrue(result["files"]["api-observations/01.json"]["requests"][0]["failed"])
+
+    def test_current_api_failed_producer_is_not_eligible_for_reobservation(self):
+        result = self.sample_current_api([{"state": "queued"}], invalidProducer=True)
+        self.assertIsNotNone(result["error"]); self.assertEqual(len(result["calls"]), 3)
+        self.assertNotIn("api.json", result["files"]); self.assertNotIn("api-observations/02.json", result["files"])
+
+    def test_current_api_terminal_after_queued_preserves_both_observations(self):
+        result = self.sample_current_api([{"state": "queued"}, {"state": "completed"}])
+        self.assertIsNotNone(result["error"]); self.assertEqual(len(result["calls"]), 4)
+        self.assertEqual(result["files"]["api-observations/01.json"]["decision"], "queued-not-admitted")
+        self.assertEqual(result["files"]["api-observations/02.json"]["decision"], "refused")
+        self.assertNotIn("api.json", result["files"])
+
+    def test_current_api_final_validator_still_refuses_queued_bytes(self):
+        result = self.sample_current_api([{"state": "in_progress"}], tamperFinal=True)
+        self.assertIsNotNone(result["error"]); self.assertIn("api", result["phases"])
+        p, env = profile(True), environment()
+        with self.assertRaises(RuntimeError): M.validate_all_api(p, result["files"]["api.json"], env)
+
+    def test_current_api_observation_modes_read_stdin_not_admitted_file(self):
+        p, env = profile(True), environment(); raw = json.dumps(p).encode()
+        env.update(RUNNER_TEMP="/unit-only", UPDATE_PROFILE_SHA256=hashlib.sha256(raw).hexdigest())
+        value = {role: api(expected) for role, expected in p["artifacts"].items()}
+        value["private"] = delivery_api(p, env); value["private"]["run"]["status"] = "queued"
+        for mode, observed in (("api-run-observe", value["private"]["run"]), ("api-observe", value)):
+            with self.subTest(mode=mode), patch.dict(os.environ, env, clear=True), patch.object(M, "admission", return_value="portable-approve"), \
+                    patch.object(M, "read", return_value=raw) as read, patch.object(sys, "argv", ["controller", mode]), \
+                    patch.object(sys, "stdin", SimpleNamespace(buffer=io.BytesIO(json.dumps(observed).encode()))), \
+                    patch.object(sys, "stdout", new_callable=io.StringIO) as output:
+                M.main(); self.assertEqual(json.loads(output.getvalue()), {"state": "queued"})
+                self.assertEqual([call.args[0].name for call in read.call_args_list], ["profile.json"])
+        with self.assertRaises(RuntimeError): M.validate_all_api(p, value, env)
+
     def test_data_receipt_bound_to_scenario_profile_run_source(self):
         p, env = profile(), environment(); receipt = M.delivery_receipt(p, env)
         self.assertEqual(receipt["profileSha256"], env["UPDATE_PROFILE_SHA256"])

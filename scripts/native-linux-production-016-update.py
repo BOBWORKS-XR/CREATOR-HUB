@@ -329,16 +329,30 @@ def delivery_receipt(profile, env):
             "dataOnly": True, **FALSE}
 
 
-def validate_delivery_api(value, profile, env):
+def validate_delivery_run(run, env):
+    require(isinstance(run, dict) and "conclusion" in run and all(run.get(k) == v for k, v in {
+            "id": int(env["GITHUB_RUN_ID"]), "run_attempt": int(env["GITHUB_RUN_ATTEMPT"]),
+            "head_sha": env["GITHUB_SHA"], "head_branch": BRANCH.removeprefix("refs/heads/"),
+            "path": WORKFLOW.split("/CREATOR-HUB/", 1)[1].split("@", 1)[0],
+            "event": "workflow_dispatch", "conclusion": None}.items())
+            and all(isinstance(run.get(n), dict) and run[n].get("id") == 1364807512
+                    and run[n].get("full_name") == REPO for n in ("repository", "head_repository")),
+            "Current data-only carrier run/source differs")
+
+
+def observe_delivery_run(run, env):
+    validate_delivery_run(run, env)
+    require(run.get("status") in ("queued", "in_progress"), "Current run observation state refused")
+    return run["status"]
+
+
+def validate_delivery_identity(value, env):
     # Draft access stays in the data-only write-token job. The read-only native
     # job binds that exact successful job, source/run and immutable output; its
     # inner receipt and independently pinned original ZIPs are checked below.
     keys(value, ("run", "job", "artifact"))
     run, job, artifact = (value[k] for k in ("run", "job", "artifact"))
-    require(all(run.get(k) == v for k, v in {"id": int(env["GITHUB_RUN_ID"]), "run_attempt": int(env["GITHUB_RUN_ATTEMPT"]),
-            "head_sha": env["GITHUB_SHA"], "head_branch": BRANCH.removeprefix("refs/heads/"), "path": WORKFLOW.split("/CREATOR-HUB/", 1)[1].split("@", 1)[0],
-            "event": "workflow_dispatch", "status": "in_progress", "conclusion": None}.items())
-            and all(run.get(n, {}).get("id") == 1364807512 and run[n].get("full_name") == REPO for n in ("repository", "head_repository")), "Current data-only carrier run/source differs")
+    validate_delivery_run(run, env)
     require(all(job.get(k) == v for k, v in {"name": "stage-input", "run_id": run["id"], "run_attempt": run["run_attempt"],
             "head_sha": run["head_sha"], "status": "completed", "conclusion": "success"}.items()) and "ubuntu-22.04" in job.get("labels", []), "Completed exact data-only stage job required")
     require(type(artifact.get("id")) is int and artifact["id"] > 0 and artifact.get("expired") is False
@@ -346,6 +360,23 @@ def validate_delivery_api(value, profile, env):
             and all(artifact.get("workflow_run", {}).get(k) == v for k, v in {"id": run["id"], "head_sha": run["head_sha"], "head_branch": run["head_branch"]}.items())
             and re.fullmatch(r"sha256:[a-f0-9]{64}", artifact.get("digest", "")) and type(artifact.get("size_in_bytes")) is int
             and 0 < artifact["size_in_bytes"] <= MAX_ZIP, "Current stage artifact identity differs")
+
+
+def validate_delivery_api(value, profile, env):
+    validate_delivery_identity(value, env)
+    require(value["run"].get("status") == "in_progress" and value["run"].get("conclusion") is None,
+            "Current data-only carrier run/source differs")
+
+
+def observe_all_api(profile, api, env):
+    keys(api, (*profile["artifacts"], "private"))
+    for role, expected in profile["artifacts"].items():
+        validate_api(api[role], expected)
+    validate_delivery_identity(api["private"], env)
+    state = observe_delivery_run(api["private"]["run"], env)
+    if state == "in_progress":
+        validate_delivery_api(api["private"], profile, env)
+    return state
 
 
 def validate_all_api(profile, api, env):
@@ -4194,10 +4225,18 @@ def main():
         root.mkdir(mode=0o700); write(root / "profile.json", raw)
     elif mode == "stage":
         stage(root, os.environ)
-    elif mode == "api":
+    elif mode in ("api", "api-run-observe", "api-observe"):
         raw = read(root / "profile.json", 65536, mode=0o600)
         require(hashlib.sha256(raw).hexdigest() == os.environ["UPDATE_PROFILE_SHA256"], "Profile changed")
-        validate_all_api(validate_profile(parse(raw), scenario), parse(read(root / "api.json", 512 * 1024, mode=0o600)), os.environ)
+        profile = validate_profile(parse(raw), scenario)
+        if mode == "api":
+            validate_all_api(profile, parse(read(root / "api.json", 512 * 1024, mode=0o600)), os.environ)
+        else:
+            observed = sys.stdin.buffer.read(512 * 1024 + 1)
+            require(0 < len(observed) <= 512 * 1024, "Bounded API observation required")
+            value = parse(observed)
+            state = observe_delivery_run(value, os.environ) if mode == "api-run-observe" else observe_all_api(profile, value, os.environ)
+            print(json.dumps({"state": state}))
     elif mode == "carrier":
         unpack_carrier(root, os.environ)
     elif mode == "verifier":
