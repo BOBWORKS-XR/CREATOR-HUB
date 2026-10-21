@@ -1085,6 +1085,34 @@ def fingerprint(file):
     return {**pin(raw), "dev": first.st_dev, "ino": first.st_ino, "uid": first.st_uid, "gid": first.st_gid, "mode": stat.S_IMODE(first.st_mode)}
 
 
+def fixture_parent(home, relative):
+    home, relative = Path(home), Path(relative)
+    require(home.is_absolute() and not relative.anchor and ".." not in relative.parts,
+            "Fixture parent must stay within the owned home")
+
+    def check(path, created=False):
+        info = path.lstat()
+        require(stat.S_ISDIR(info.st_mode) and path.resolve(strict=True) == path,
+                "Nonlinked fixture directory required")
+        if os.name != "nt":
+            require(info.st_uid == os.geteuid() and info.st_mode & 0o022 == 0
+                    and (not created or stat.S_IMODE(info.st_mode) == 0o700),
+                    "Owned non-foreign-writable fixture directory required")
+
+    check(home)
+    current = home
+    # parents=True applies mode only to the leaf; create and check every component.
+    for part in relative.parts:
+        current = current / part
+        try:
+            current.mkdir(mode=0o700)
+            created = True
+        except FileExistsError:
+            created = False
+        check(current, created)
+    return current
+
+
 def fixtures(home):
     selected, other = home / "selected-project", home / "other-project"
     files = {
@@ -1107,7 +1135,7 @@ def fixtures(home):
         files[project + "/Packages/manifest.json"] = {"dependencies": {"com.sidequest.creator-sdk": "4.0.14"}, "unknown": "keep"}
         files[project + "/ProjectSettings/ProjectVersion.txt"] = "m_EditorVersion: 6000.3.21f1\n"
     for name, value in files.items():
-        file = home / name; file.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        file = home / name; fixture_parent(home, Path(name).parent)
         write(file, value.encode() if type(value) is str else (json.dumps(value) + "\n").encode())
     return {name: fingerprint(home / name) for name in files}
 

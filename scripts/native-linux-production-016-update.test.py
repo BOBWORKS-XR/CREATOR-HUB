@@ -2593,6 +2593,155 @@ class Pure(unittest.TestCase):
         self.assertIn("Your open Hub tool page will reopen.", M.question(True))
 
 
+class FixtureParentCreation(unittest.TestCase):
+    def test_each_missing_component_requests_private_mode_without_recursive_mkdir(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp).resolve()
+            original, calls = Path.mkdir, []
+
+            def mkdir(path, *args, **kwargs):
+                calls.append((path.relative_to(home).as_posix(), args, kwargs))
+                return original(path, *args, **kwargs)
+
+            with patch.object(Path, "mkdir", mkdir):
+                target = M.fixture_parent(home, Path("data/CreatorHub/preferences"))
+            self.assertEqual(target, home / "data/CreatorHub/preferences")
+            self.assertEqual(calls, [(name, (), {"mode": 0o700}) for name in
+                                    ("data", "data/CreatorHub", "data/CreatorHub/preferences")])
+
+    def test_repeat_and_home_level_file_leave_existing_settings_unchanged(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp).resolve()
+            before = M.fixtures(home)
+            self.assertEqual(len(before), 15)
+            with patch.object(M.os, "chmod", side_effect=AssertionError("No directory chmod")), \
+                 patch.object(M.os, "fchmod", side_effect=AssertionError("No directory fchmod"), create=True), \
+                 patch.object(M.os, "chown", side_effect=AssertionError("No directory chown"), create=True):
+                self.assertEqual(M.fixture_parent(home, Path(".")), home)
+                for name in before:
+                    M.fixture_parent(home, Path(name).parent)
+                    M.fixture_parent(home, Path(name).parent)
+            self.assertEqual(M.preserved(home, before), before)
+            with self.assertRaises(FileExistsError):
+                M.fixtures(home)
+            self.assertEqual(M.preserved(home, before), before)
+
+    def test_escape_and_existing_file_refuse_before_new_descendants(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp).resolve()
+            occupied = home / "occupied"; occupied.write_bytes(b"retain")
+            before = M.fingerprint(occupied)
+            for relative in (Path("../escape"), home / "absolute", Path("occupied/child")):
+                with self.subTest(relative=str(relative)), self.assertRaises(RuntimeError):
+                    M.fixture_parent(home, relative)
+                self.assertEqual(list(home.iterdir()), [occupied])
+                self.assertEqual(M.fingerprint(occupied), before)
+
+    @unittest.skipUnless(sys.platform == "linux", "Actual Linux owner/mode contract required")
+    def test_real_linux_new_components_are_0700_under_permissive_umasks(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp).resolve()
+            for mask in (0, 0o002, 0o077):
+                case = home / str(mask); case.mkdir(mode=0o700)
+                old = os.umask(mask)
+                try:
+                    M.fixture_parent(case, Path("data/CreatorHub/preferences"))
+                finally:
+                    os.umask(old)
+                for path in case.rglob("*"):
+                    self.assertEqual((path.lstat().st_uid, stat.S_IMODE(path.lstat().st_mode)),
+                                     (os.geteuid(), 0o700))
+
+    @unittest.skipUnless(sys.platform == "linux", "Actual Linux owner/mode contract required")
+    def test_existing_safe_modes_and_files_are_not_changed(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp).resolve()
+            data = home / "data"; data.mkdir(mode=0o700); data.chmod(0o755)
+            hub = data / "CreatorHub"; hub.mkdir(mode=0o700); hub.chmod(0o750)
+            keep = hub / "keep.json"; keep.write_bytes(b'{"retained":true}')
+            before = M.fingerprint(keep)
+            identities = [(p, p.lstat().st_ino, stat.S_IMODE(p.lstat().st_mode)) for p in (home, data, hub)]
+            with patch.object(M.os, "chmod", side_effect=AssertionError("No chmod")), \
+                 patch.object(M.os, "fchmod", side_effect=AssertionError("No fchmod")), \
+                 patch.object(M.os, "chown", side_effect=AssertionError("No chown")):
+                M.fixture_parent(home, Path("data/CreatorHub/preferences"))
+                M.fixture_parent(home, Path("data/CreatorHub/preferences"))
+            for path, inode, mode in identities:
+                self.assertEqual((path.lstat().st_ino, stat.S_IMODE(path.lstat().st_mode)), (inode, mode))
+            self.assertEqual(M.fingerprint(keep), before)
+
+    @unittest.skipUnless(sys.platform == "linux", "Actual Linux owner/mode contract required")
+    def test_foreign_writable_or_foreign_owned_existing_parent_refuses_without_repair(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp).resolve()
+            parent = home / "data"; parent.mkdir(mode=0o700)
+            keep = parent / "keep"; keep.write_bytes(b"unchanged")
+            before = M.fingerprint(keep)
+            for mode in (0o777, 0o775, 0o770, 0o702):
+                parent.chmod(mode)
+                with self.subTest(mode=oct(mode)), self.assertRaises(RuntimeError):
+                    M.fixture_parent(home, Path("data/CreatorHub/preferences"))
+                self.assertEqual(stat.S_IMODE(parent.lstat().st_mode), mode)
+                self.assertFalse((parent / "CreatorHub").exists())
+                self.assertEqual(M.fingerprint(keep), before)
+            parent.chmod(0o700)
+            original = Path.lstat
+
+            def foreign(path):
+                info = original(path)
+                return SimpleNamespace(st_mode=info.st_mode, st_uid=os.geteuid() + 1) if path == parent else info
+
+            with patch.object(Path, "lstat", foreign), self.assertRaises(RuntimeError):
+                M.fixture_parent(home, Path("data/CreatorHub/preferences"))
+            self.assertFalse((parent / "CreatorHub").exists())
+            self.assertEqual(M.fingerprint(keep), before)
+
+    @unittest.skipUnless(sys.platform == "linux", "Actual Linux symlinks required")
+    def test_symlink_home_or_parent_refuses_without_touching_target(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            home = root / "home"; home.mkdir(mode=0o700)
+            other = root / "other"; other.mkdir(mode=0o700)
+            keep = other / "keep"; keep.write_bytes(b"untouched")
+            before = M.fingerprint(keep)
+            alias = root / "alias"; alias.symlink_to(home, target_is_directory=True)
+            (home / "data").symlink_to(other, target_is_directory=True)
+            for base, relative in ((alias, Path("child")), (home, Path("data/CreatorHub/preferences"))):
+                with self.subTest(base=str(base)), self.assertRaises(RuntimeError):
+                    M.fixture_parent(base, relative)
+            self.assertEqual(list(other.iterdir()), [keep])
+            self.assertEqual(M.fingerprint(keep), before)
+
+    @unittest.skipUnless(sys.platform == "linux", "Actual Linux default ACL inheritance required")
+    def test_real_default_acl_nested_first_write_and_all_protected_fingerprints(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp).resolve()
+            acl = bytes.fromhex("0200000001000700ffffffff04000700ffffffff20000700ffffffff")
+            try:
+                os.setxattr(home, "system.posix_acl_default", acl, follow_symlinks=False)
+            except OSError as error:
+                if error.errno not in (M.errno.ENOTSUP, M.errno.EOPNOTSUPP, M.errno.EPERM):
+                    raise
+                self.skipTest("Owned temporary filesystem cannot set a default ACL")
+            original_acl = os.getxattr(home, "system.posix_acl_default", follow_symlinks=False)
+            old = os.umask(0o002)
+            try:
+                before = M.fixtures(home)
+            finally:
+                os.umask(old)
+            self.assertEqual(len(before), 15)
+            for path in home.rglob("*"):
+                if path.is_dir():
+                    self.assertEqual(stat.S_IMODE(path.lstat().st_mode), 0o700)
+            self.assertEqual(os.getxattr(home, "system.posix_acl_default", follow_symlinks=False), original_acl)
+            for name in before:
+                M.fixture_parent(home, Path(name).parent)
+            self.assertEqual(M.preserved(home, before), before)
+            with self.assertRaises(FileExistsError):
+                M.fixtures(home)
+            self.assertEqual(M.preserved(home, before), before)
+
+
 class DirectMenuLabels(unittest.TestCase):
     LABELS = {
         "mcp": "M Creator Works MCP AI tools for Unity Included in Hub",
