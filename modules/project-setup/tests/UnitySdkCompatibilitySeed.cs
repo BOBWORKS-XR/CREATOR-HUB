@@ -14,7 +14,7 @@ using UnityEngine;
 // logical EditorPrefs keys before Unity starts. This code never restores or writes them.
 public static class UnitySdkCompatibilitySeed
 {
-    private const string Target = "E:/UnityTest/CreatorSetupSdk4022Vs1912-20261021";
+    private const string Target = "E:/UnityTest/CreatorSetupSdk4022Vs1912-Repair-20261021";
     private const string ExpectedEditor = "@@EDITOR_VERSION@@";
     private const string Marker = "Banter_GeneratedVSNodesVersion";
     private static string StatusFolder => Path.Combine(Target, ".creator-project-setup");
@@ -75,6 +75,7 @@ public static class UnitySdkCompatibilitySeed
             || Environment.GetEnvironmentVariable("CREATOR_SETUP_SDK_COMPATIBILITY_GUARDS_REVIEWED") != "yes"
             || Environment.GetEnvironmentVariable("CREATOR_SETUP_SDK_COMPATIBILITY_EDITORS_CLOSED") != "yes"
             || Environment.GetEnvironmentVariable("CREATOR_SETUP_SDK_COMPATIBILITY_PREF_GUARD_REVIEWED") != "yes"
+            || Environment.GetEnvironmentVariable("CREATOR_SETUP_SDK_COMPATIBILITY_PREPARED_BASELINE_REVIEWED") != "yes"
             || Environment.GetEnvironmentVariable("CREATOR_SETUP_SDK_COMPATIBILITY_VS38_PREF_BACKUP_APPROVED") != "yes"
             || Environment.GetEnvironmentVariable("CREATOR_SETUP_REAL_SDK_CACHE_EXPECTED_BEFORE") == null
             || (Environment.GetEnvironmentVariable("CREATOR_SETUP_SDK_COMPATIBILITY_MARKER_EXPECTED_PRESENT") != "yes"
@@ -132,25 +133,12 @@ public static class UnitySdkCompatibilitySeed
     public static void Seed()
     {
         try {
-            RequireFixture();
-            VSUsageUtility.isVisualScriptingUsed = true;
-            var config = BoltCore.Configuration;
-            foreach (var type in new[] { typeof(StringBuilder), typeof(System.Xml.Linq.XDocument) })
-                if (!config.typeOptions.Contains(type)) config.typeOptions.Add(type);
-            var assembly = new LooseAssemblyName(typeof(System.Xml.Linq.XDocument).Assembly.GetName().Name);
-            if (!config.assemblyOptions.Contains(assembly)) config.assemblyOptions.Add(assembly);
-            foreach (var setting in config.projectSettings) setting.Save();
-            config.SaveProjectSettingsAsset(true);
-            Codebase.UpdateSettings();
-            EditorApplication.delayCall += () => {
-                try {
-                    var receipt = Capture("seed");
-                    if (!receipt.customTypePreserved || !receipt.customAssemblyPreserved)
-                        throw new InvalidOperationException("Custom fixture selections were not seeded.");
-                    AssetDatabase.SaveAssets();
-                    EditorApplication.Exit(0);
-                } catch (Exception error) { Fail(error); }
-            };
+            // The source was already prepared by Unity. Verify it without reseeding
+            // missing custom selections or hiding changes made by this new import.
+            var receipt = Capture("seed");
+            if (!receipt.customTypePreserved || !receipt.customAssemblyPreserved)
+                throw new InvalidOperationException("Prepared custom selections are missing.");
+            EditorApplication.Exit(0);
         } catch (Exception error) { Fail(error); }
     }
 

@@ -46,6 +46,31 @@ whose setter calls `configuration.Save`, including shared VS editor
 preferences. The earlier SDK-marker-only restoration approval does not cover
 these other preferences. A read-only check of that old marker is insufficient.
 
+## Prepared Existing-Pair Fixture
+
+The first guarded run prepared
+`E:/UnityTest/CreatorSetupSdk4022Vs1912-20261021` with resolved registry packages
+4.0.22/1.9.12 and both custom selections present. It stopped before
+`ConfigureExisting`: normal Unity preparation changed the OpenXR settings asset.
+OpenXR stayed at 1.16.1. Its source explains the exact observed feature sorting
+and deserialization migration flags. The original run remains failed; it does
+not prove that upgrading an old SDK preserves raw XR settings bytes.
+
+The next test uses that first fixture as a read-only source and exclusively
+creates `E:/UnityTest/CreatorSetupSdk4022Vs1912-Repair-20261021`. Admission binds
+the exact original failed result and seed receipt, rechecks the original source
+snapshot, and verifies all 50 original protected files. Only this reviewed
+preparation substitution is accepted for `Assets/XR/Settings/OpenXR Package Settings.asset`:
+
+- Original: `70b46e01cc0dff25bbe4eba004043b3546493497bcae15d257e357dce5a9e4f6`.
+- Unity-prepared: `19ad8ebdd2e2018e5e8c577436ba7a8ed5d929d0c5fbe8045cdad237b542709b`.
+
+The source assets and manifests are not rewritten. The measured existing-pair
+repair requires unchanged protected bytes, including the prepared OpenXR asset,
+through every phase. The prior scripts and status are not reused in the target.
+The existing audit test name and final result fields remain unchanged. A fresh
+SDK readiness result of `Done` is still required; no stamp is fabricated.
+
 ## Acceptance
 
 1. Inspect the exact package archives and their startup side effects. Do not
@@ -75,10 +100,13 @@ these other preferences. A read-only check of that old marker is insufficient.
 
 ## Release Boundary
 
-Status: pending real Unity execution. Three existing Unity editors were open
-at preparation time; the user has been asked to save and close them. No newer
-package compatibility is claimed yet. Source/unit checks do not replace the
-real test or the final packaged install, migration, update and restart gates.
+Status: the first guarded preparation failed its strict preservation check.
+The user closed the three existing editors and approved the exact VS38
+preference backup/restoration for that run; preferences were verified unchanged
+with zero restoration writes. The prepared existing-pair repair run remains
+pending review and guarded execution. No newer package compatibility is claimed.
+Source/unit checks do not replace the real test or the final packaged install,
+migration, update and restart gates.
 
 Keep published Windows bytes unchanged. Linux/Flatpak acceptance continues
 separately. macOS remains outside this release.

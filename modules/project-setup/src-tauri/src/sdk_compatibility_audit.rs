@@ -7,8 +7,12 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::io::Write;
 
-const SOURCE: &str = "E:/UnityTest/CreatorSetupSdkAddOrdinary-20261019";
-const TARGET: &str = "E:/UnityTest/CreatorSetupSdk4022Vs1912-20261021";
+const ORIGINAL: &str = "E:/UnityTest/CreatorSetupSdkAddOrdinary-20261019";
+const SOURCE: &str = "E:/UnityTest/CreatorSetupSdk4022Vs1912-20261021";
+const TARGET: &str = "E:/UnityTest/CreatorSetupSdk4022Vs1912-Repair-20261021";
+const OPENXR: &str = "Assets/XR/Settings/OpenXR Package Settings.asset";
+const OPENXR_BEFORE: &str = "70b46e01cc0dff25bbe4eba004043b3546493497bcae15d257e357dce5a9e4f6";
+const OPENXR_PREPARED: &str = "19ad8ebdd2e2018e5e8c577436ba7a8ed5d929d0c5fbe8045cdad237b542709b";
 const SDK: &str = "4.0.22";
 const VS: &str = "1.9.12";
 const SEED: &str = include_str!("../../tests/UnitySdkCompatibilitySeed.cs");
@@ -23,6 +27,10 @@ fn gate(values: &BTreeMap<String, String>) -> Result<(), String> {
         ("CREATOR_SETUP_SDK_COMPATIBILITY_GUARDS_REVIEWED", "yes"),
         ("CREATOR_SETUP_SDK_COMPATIBILITY_EDITORS_CLOSED", "yes"),
         ("CREATOR_SETUP_SDK_COMPATIBILITY_PREF_GUARD_REVIEWED", "yes"),
+        (
+            "CREATOR_SETUP_SDK_COMPATIBILITY_PREPARED_BASELINE_REVIEWED",
+            "yes",
+        ),
         (
             "CREATOR_SETUP_SDK_COMPATIBILITY_VS38_PREF_BACKUP_APPROVED",
             "yes",
@@ -62,21 +70,13 @@ fn seed() -> String {
     SEED.replace("@@EDITOR_VERSION@@", EDITOR_VERSION)
 }
 
-fn manifest_pair(original: &Value) -> Result<Value, String> {
-    let mut result = original.clone();
-    let dependencies = result["dependencies"]
-        .as_object_mut()
+fn existing_pair(original: &Value) -> Result<(), String> {
+    let dependencies = original["dependencies"]
+        .as_object()
         .ok_or("Missing dependency object")?;
-    for (name, before, after) in [
-        ("com.sidequest.creator-sdk", CREATOR_SDK_VERSION, SDK),
-        ("com.unity.visualscripting", "1.9.1", VS),
-    ] {
-        if dependencies.get(name).and_then(Value::as_str) != Some(before) {
-            return Err(format!("Unreviewed source dependency: {name}"));
-        }
-        dependencies.insert(name.into(), json!(after));
-    }
     for (name, expected) in [
+        ("com.sidequest.creator-sdk", SDK),
+        ("com.unity.visualscripting", VS),
         ("com.unity.render-pipelines.universal", URP_VERSION),
         ("com.unity.inputsystem", INPUT_SYSTEM_VERSION),
     ] {
@@ -84,7 +84,98 @@ fn manifest_pair(original: &Value) -> Result<Value, String> {
             return Err(format!("Unreviewed source dependency: {name}"));
         }
     }
-    Ok(result)
+    Ok(())
+}
+
+fn prepared_protected(baseline: &Value, seed: &Value) -> Result<Snapshot, String> {
+    let failure = format!("Protected file changed: {OPENXR}");
+    for (key, expected) in [
+        ("schemaVersion", json!(1)),
+        ("source", json!(ORIGINAL)),
+        ("target", json!(SOURCE)),
+        ("sourcePreserved", json!(true)),
+        ("protectedFilesPreserved", json!(false)),
+        ("packageChecksPassed", json!(false)),
+        ("qualificationPassed", json!(false)),
+        ("releaseAcceptance", json!(false)),
+        ("sourceCheckError", Value::Null),
+        ("error", json!(failure)),
+        ("protectedFilesCheckError", json!(failure)),
+    ] {
+        if baseline[key] != expected {
+            return Err(format!("Unreviewed failed baseline: {key}"));
+        }
+    }
+    for (key, expected) in [
+        ("phase", json!("seed")),
+        ("unityVersion", json!(EDITOR_VERSION)),
+        ("creatorSdkVersion", json!(SDK)),
+        ("visualScriptingVersion", json!(VS)),
+        ("creatorSdkSource", json!("Registry")),
+        ("visualScriptingSource", json!("Registry")),
+        ("customTypePreserved", json!(true)),
+        ("customAssemblyPreserved", json!(true)),
+        ("nodeDatabaseExists", json!(true)),
+        ("markerUnchanged", json!(true)),
+        ("sdkReadyDone", json!(false)),
+        ("nodesBuiltForThisVersion", json!(false)),
+        ("sdkReadinessState", json!("NeedsFix")),
+        ("releaseAcceptance", json!(false)),
+    ] {
+        if seed[key] != expected {
+            return Err(format!("Unreviewed prepared seed: {key}"));
+        }
+    }
+    let mut files: Snapshot =
+        serde_json::from_value(baseline["protectedFiles"].clone()).map_err(|e| e.to_string())?;
+    if files.len() != 50 || files.get(OPENXR).map(String::as_str) != Some(OPENXR_BEFORE) {
+        return Err("The exact original 50-file protection baseline is required.".into());
+    }
+    // Only fixture preparation accepts this exact reviewed before/after pair.
+    // The measured repair continues to compare every protected file byte-for-byte.
+    files.insert(OPENXR.into(), OPENXR_PREPARED.into());
+    Ok(files)
+}
+
+fn reviewed_json(path: &Path, size: usize, sha256: &str) -> Result<Value, String> {
+    ancestors(path.parent().ok_or("Missing reviewed input parent")?)?;
+    if !plain(path)?.is_file()
+        || fs::metadata(path).map_err(|e| e.to_string())?.len() != size as u64
+    {
+        return Err("Reviewed input size or type differs.".into());
+    }
+    let bytes = fs::read(path).map_err(|e| e.to_string())?;
+    if bytes.len() != size || format!("{:x}", Sha256::digest(&bytes)) != sha256 {
+        return Err("Reviewed input hash differs.".into());
+    }
+    serde_json::from_slice(&bytes).map_err(|e| e.to_string())
+}
+
+#[cfg(windows)]
+fn review_prepared_source() -> Result<Value, String> {
+    let folder = Path::new(SOURCE).join(".creator-project-setup");
+    let result_sha = "0b9be50fc0dd421fcc59d90c99e8b42b1b7ff20b2497801a871aec2f88be86ff";
+    let seed_sha = "50a8767074c65a9e119675c8fa43f5854a35eb35e9e46772e333243189e509d1";
+    let baseline = reviewed_json(
+        &folder.join("qualification-result.json"),
+        15_321,
+        result_sha,
+    )?;
+    let seed = reviewed_json(&folder.join("sdk-compatibility-seed.json"), 8_256, seed_sha)?;
+    let expected = prepared_protected(&baseline, &seed)?;
+    let original_before: Snapshot =
+        serde_json::from_value(baseline["sourceBefore"].clone()).map_err(|e| e.to_string())?;
+    if snapshot(Path::new(ORIGINAL))? != original_before {
+        return Err("The first audit's original source changed.".into());
+    }
+    check_files(Path::new(SOURCE), &expected)?;
+    Ok(
+        json!({"schemaVersion":1,"originalSource":ORIGINAL,"preparedSource":SOURCE,
+        "target":TARGET,"failedResultSha256":result_sha,"seedReceiptSha256":seed_sha,
+        "originalSourcePreserved":true,"originalProtectedFileCount":50,
+        "reviewedOpenxrBefore":OPENXR_BEFORE,"reviewedOpenxrPrepared":OPENXR_PREPARED,
+        "measuredRepairAllowsOpenxrChanges":false,"releaseAcceptance":false}),
+    )
 }
 
 fn plain(path: &Path) -> Result<fs::Metadata, String> {
@@ -175,6 +266,8 @@ fn excluded(name: &str) -> bool {
             | "Assets/Editor/UnityPlainUrpSeed.cs.meta"
             | "Assets/Editor/CreatorProjectSetupValidator.cs"
             | "Assets/Editor/CreatorProjectSetupValidator.cs.meta"
+            | "Assets/Editor/UnitySdkCompatibilitySeed.cs"
+            | "Assets/Editor/UnitySdkCompatibilitySeed.cs.meta"
     )
 }
 
@@ -392,6 +485,26 @@ fn test_validator_only_substitutes_the_sdk_expectation() {
     assert!(!seed().contains("EditorPrefs.Set"));
     assert!(!seed().contains("SetConfigValue("));
     assert!(!seed().contains("CREATOR_SETUP_REAL_SDK_CACHE_RESTORE_APPROVED"));
+    let prepared_seed = SEED
+        .split("public static void Seed()")
+        .nth(1)
+        .unwrap()
+        .split("public static void ConfigureExisting()")
+        .next()
+        .unwrap();
+    for forbidden in [
+        ".Add(",
+        ".Clear(",
+        ".Save(",
+        "UnitBase.",
+        "AssetDatabase.SaveAssets",
+        "Codebase.UpdateSettings",
+    ] {
+        assert!(
+            !prepared_seed.contains(forbidden),
+            "Prepared seed must only verify: {forbidden}"
+        );
+    }
     let keys: Vec<_> = SEED
         .lines()
         .flat_map(|line| line.split('"').skip(1).step_by(2))
@@ -436,6 +549,10 @@ fn runtime_gate_requires_every_explicit_review() {
             "yes".into(),
         ),
         (
+            "CREATOR_SETUP_SDK_COMPATIBILITY_PREPARED_BASELINE_REVIEWED".into(),
+            "yes".into(),
+        ),
+        (
             "CREATOR_SETUP_SDK_COMPATIBILITY_VS38_PREF_BACKUP_APPROVED".into(),
             "yes".into(),
         ),
@@ -473,13 +590,11 @@ fn runtime_gate_requires_every_explicit_review() {
 }
 
 #[test]
-fn only_reviewed_pair_changes_and_unknown_fields_survive() {
-    let original = json!({"dependencies": {"com.sidequest.creator-sdk": "4.0.14", "com.unity.visualscripting": "1.9.1", "com.unity.render-pipelines.universal": "17.3.0", "com.unity.inputsystem": "1.20.0", "other": "file:unchanged"}, "scopedRegistries": [{"custom": true}], "unknown": {"preserve": 7}});
-    let changed = manifest_pair(&original).unwrap();
-    let mut restored = changed.clone();
-    restored["dependencies"]["com.sidequest.creator-sdk"] = json!("4.0.14");
-    restored["dependencies"]["com.unity.visualscripting"] = json!("1.9.1");
-    assert_eq!(restored, original);
+fn existing_pair_manifest_is_read_only_and_unknown_fields_survive() {
+    let original = json!({"dependencies": {"com.sidequest.creator-sdk": "4.0.22", "com.unity.visualscripting": "1.9.12", "com.unity.render-pipelines.universal": "17.3.0", "com.unity.inputsystem": "1.20.0", "other": "file:unchanged"}, "scopedRegistries": [{"custom": true}], "unknown": {"preserve": 7}});
+    let before = serde_json::to_vec(&original).unwrap();
+    existing_pair(&original).unwrap();
+    assert_eq!(serde_json::to_vec(&original).unwrap(), before);
     for name in [
         "com.sidequest.creator-sdk",
         "com.unity.visualscripting",
@@ -488,7 +603,102 @@ fn only_reviewed_pair_changes_and_unknown_fields_survive() {
     ] {
         let mut wrong = original.clone();
         wrong["dependencies"][name] = json!("unreviewed");
-        assert!(manifest_pair(&wrong).is_err());
+        assert!(existing_pair(&wrong).is_err());
+    }
+    let mut old = original.clone();
+    old["dependencies"]["com.sidequest.creator-sdk"] = json!("4.0.14");
+    old["dependencies"]["com.unity.visualscripting"] = json!("1.9.1");
+    assert!(
+        existing_pair(&old).is_err(),
+        "This run is not an SDK upgrade test"
+    );
+}
+
+#[test]
+fn prepared_baseline_allows_only_the_exact_reviewed_openxr_hash_change() {
+    let failure = format!("Protected file changed: {OPENXR}");
+    let mut files: Snapshot = (0..49)
+        .map(|i| (format!("Assets/Authored-{i}.asset"), "a".repeat(64)))
+        .collect();
+    files.insert(OPENXR.into(), OPENXR_BEFORE.into());
+    let baseline = json!({"schemaVersion":1,"source":ORIGINAL,"target":SOURCE,
+        "sourcePreserved":true,"protectedFilesPreserved":false,"packageChecksPassed":false,
+        "qualificationPassed":false,"releaseAcceptance":false,"sourceCheckError":null,
+        "error":failure,"protectedFilesCheckError":failure,"protectedFiles":files});
+    let seed = json!({"phase":"seed","unityVersion":EDITOR_VERSION,"creatorSdkVersion":SDK,
+        "visualScriptingVersion":VS,"creatorSdkSource":"Registry","visualScriptingSource":"Registry",
+        "customTypePreserved":true,"customAssemblyPreserved":true,"nodeDatabaseExists":true,
+        "markerUnchanged":true,"sdkReadyDone":false,"nodesBuiltForThisVersion":false,
+        "sdkReadinessState":"NeedsFix","releaseAcceptance":false});
+    let approved = prepared_protected(&baseline, &seed).unwrap();
+    assert_eq!(approved.len(), 50);
+    assert_eq!(approved[OPENXR], OPENXR_PREPARED);
+    for (name, hash) in &files {
+        if name != OPENXR {
+            assert_eq!(&approved[name], hash);
+        }
+    }
+    for (key, value) in [
+        ("sourcePreserved", json!(false)),
+        ("source", json!(SOURCE)),
+        ("target", json!(TARGET)),
+        ("error", json!("different failure")),
+        ("protectedFilesCheckError", json!("another asset")),
+        ("packageChecksPassed", json!(true)),
+    ] {
+        let mut wrong = baseline.clone();
+        wrong[key] = value;
+        assert!(prepared_protected(&wrong, &seed).is_err(), "{key}");
+    }
+    for (key, value) in [
+        ("visualScriptingVersion", json!("1.9.1")),
+        ("creatorSdkVersion", json!("4.0.14")),
+        ("customTypePreserved", json!(false)),
+        ("customAssemblyPreserved", json!(false)),
+        ("creatorSdkSource", json!("Embedded")),
+        ("markerUnchanged", json!(false)),
+    ] {
+        let mut wrong = seed.clone();
+        wrong[key] = value;
+        assert!(prepared_protected(&baseline, &wrong).is_err(), "{key}");
+    }
+    for hash in [OPENXR_PREPARED, "unreviewed"] {
+        let mut wrong = baseline.clone();
+        wrong["protectedFiles"][OPENXR] = json!(hash);
+        assert!(prepared_protected(&wrong, &seed).is_err());
+    }
+    let mut wrong = baseline.clone();
+    wrong["protectedFiles"]
+        .as_object_mut()
+        .unwrap()
+        .remove(OPENXR);
+    assert!(prepared_protected(&wrong, &seed).is_err());
+    let mut wrong = baseline.clone();
+    wrong["protectedFiles"]["Assets/Extra.asset"] = json!("b".repeat(64));
+    assert!(prepared_protected(&wrong, &seed).is_err());
+}
+
+#[test]
+fn reviewed_receipts_and_measured_assets_refuse_any_byte_drift() {
+    let root = tempfile::tempdir().unwrap();
+    let receipt = root.path().join("receipt.json");
+    let bytes = b"{\"reviewed\":true}";
+    fs::write(&receipt, bytes).unwrap();
+    let hash = format!("{:x}", Sha256::digest(bytes));
+    assert_eq!(
+        reviewed_json(&receipt, bytes.len(), &hash).unwrap()["reviewed"],
+        true
+    );
+    assert!(reviewed_json(&receipt, bytes.len() + 1, &hash).is_err());
+    fs::write(&receipt, b"{\"reviewed\":null}").unwrap();
+    assert!(reviewed_json(&receipt, bytes.len(), &hash).is_err());
+    for name in ["Authored.asset", "OpenXR.asset"] {
+        let file = root.path().join(name);
+        fs::write(&file, b"prepared exact bytes").unwrap();
+        let expected = Snapshot::from([(name.to_owned(), digest(&file).unwrap())]);
+        check_files(root.path(), &expected).unwrap();
+        fs::write(&file, b"unapproved repair change").unwrap();
+        assert!(check_files(root.path(), &expected).is_err(), "{name}");
     }
 }
 
@@ -507,6 +717,9 @@ fn exclusive_copy_refuses_overwrite_and_keeps_source() {
     check_files(to.path(), &before).unwrap();
     assert!(!excluded("Assets/Authored.txt"));
     assert!(excluded("Assets/Editor/UnityPlainUrpSeed.cs.meta"));
+    assert!(excluded("Assets/Editor/UnitySdkCompatibilitySeed.cs"));
+    assert!(excluded("Assets/Editor/UnitySdkCompatibilitySeed.cs.meta"));
+    assert!(!excluded("Assets/Authored/UnitySdkCompatibilitySeed.cs"));
 }
 
 #[test]
@@ -576,14 +789,14 @@ fn unity_sdk4022_vs1912_disposable_qualification() {
         "Never resume, overwrite or delete an existing fixture"
     );
     let source_before = snapshot(source).unwrap();
+    let prepared_review = review_prepared_source().unwrap();
     let copied: Snapshot = source_before
         .iter()
         .filter(|(name, _)| !excluded(name))
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
-    let original: Value =
-        serde_json::from_slice(&fs::read(source.join("Packages/manifest.json")).unwrap()).unwrap();
-    let next = manifest_pair(&original).unwrap();
+    let manifest = fs::read(source.join("Packages/manifest.json")).unwrap();
+    existing_pair(&serde_json::from_slice(&manifest).unwrap()).unwrap();
     let environment = probe_environment();
     assert!(environment.ready, "{:?}", environment.blockers);
     let editor = environment
@@ -600,8 +813,11 @@ fn unity_sdk4022_vs1912_disposable_qualification() {
     copy_inventory(target, &initial_backup, &copied).unwrap();
     check_files(&initial_backup, &copied).unwrap();
     let preserved = protected(&copied);
-    let manifest = serde_json::to_vec_pretty(&next).unwrap();
-    fs::write(target.join("Packages/manifest.json"), &manifest).unwrap();
+    write_new(
+        &status.join("prepared-baseline-review.json"),
+        &serde_json::to_vec_pretty(&prepared_review).unwrap(),
+    )
+    .unwrap();
     fs::create_dir_all(target.join("Assets/Editor")).unwrap();
     write_new(
         &target.join("Assets/Editor/CreatorProjectSetupValidator.cs"),
@@ -644,6 +860,7 @@ fn unity_sdk4022_vs1912_disposable_qualification() {
             if snapshot(source)? != source_before {
                 return Err("Read-only source changed.".into());
             }
+            review_prepared_source()?;
             check_files(target, &preserved)?;
             if fs::read(target.join("Packages/manifest.json")).map_err(|e| e.to_string())?
                 != manifest
