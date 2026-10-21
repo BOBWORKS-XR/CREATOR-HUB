@@ -163,7 +163,7 @@ jobs:
             const headers = value => Object.fromEntries(Object.entries(value || {}).filter(([k, v]) =>
               ['date', 'etag', 'last-modified', 'cache-control', 'age', 'vary', 'via', 'x-cache', 'x-cache-hits', 'x-github-request-id'].includes(k.toLowerCase())
               && typeof v === 'string' && v.length <= 1024).map(([k, v]) => [k.toLowerCase(), v]));
-            const observations = path.join(root, 'api-observations'); fs.mkdirSync(observations, {mode: 0o700});
+            const observations = path.join(process.env.RUNNER_TEMP, 'native-linux-production-016-update-api-observations'); fs.mkdirSync(observations, {mode: 0o700});
             let firstIdentity;
             // These are refusal bounds, not a presumed GitHub consistency window. No sleeps or API-error retries.
             for (let index = 1; index <= 6; index++) {
@@ -316,7 +316,7 @@ jobs:
           path: |
             ${{ runner.temp }}/native-linux-production-016-update/profile.json
             ${{ runner.temp }}/native-linux-production-016-update/api.json
-            ${{ runner.temp }}/native-linux-production-016-update/api-observations/
+            ${{ runner.temp }}/native-linux-production-016-update-api-observations/
             ${{ runner.temp }}/native-linux-production-016-update/request.json
             ${{ runner.temp }}/native-linux-production-016-update/review.json
             ${{ runner.temp }}/native-linux-production-016-verifier/receipt.json

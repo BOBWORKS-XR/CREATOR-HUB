@@ -1617,6 +1617,8 @@ class Pure(unittest.TestCase):
             proof = delivery_api(p, env); mutate(proof)
             with self.assertRaises(RuntimeError): M.validate_delivery_api(proof, p, env)
 
+    API_OBSERVATIONS = "../native-linux-production-016-update-api-observations/"
+
     def sample_current_api(self, samples, **options):
         p, env = profile(True), environment()
         for index, role in enumerate(("portable16", "portable17")):
@@ -1642,7 +1644,7 @@ print(json.dumps({"state":state}))
         harness = r'''
 const fs=require('node:fs'),path=require('node:path'),assert=require('node:assert/strict'),cp=require('node:child_process');
 const input=JSON.parse(fs.readFileSync(0,'utf8')), clone=x=>JSON.parse(JSON.stringify(x));
-const root=path.join(input.env.RUNNER_TEMP,'native-linux-production-016-update'), files=new Map(), calls=[], phases=[], signals=[];
+const root=path.join(input.env.RUNNER_TEMP,'native-linux-production-016-update'), files=new Map(), directories=[], calls=[], phases=[], signals=[];
 files.set(path.join(root,'profile.json'),Buffer.from(JSON.stringify(input.profile)));
 let clock=0,index=-1,sample={},abortEvents=0;
 const response=data=>({status:200,data,headers:{Date:'fixed-date',ETag:'safe-tag','Cache-Control':'private, max-age=60',Authorization:'SECRET','set-cookie':'SECRET'}});
@@ -1688,7 +1690,8 @@ const github={rest:{actions:{
   getArtifact:async p=>p.request?get('artifact',p):response(clone(upstream('artifact',p.artifact_id).artifact)),
   listJobsForWorkflowRun:p=>get('jobs',p)
 },git:{getCommit:async p=>response(clone(upstream('source',p.commit_sha).commit))}}};
-const fakeFs={readFileSync:p=>{assert.ok(files.has(p));return files.get(p);},mkdirSync:()=>{},
+const fakeFs={readFileSync:p=>{assert.ok(files.has(p));return files.get(p);},
+  mkdirSync:(p,opts)=>{assert.equal(opts.mode,0o700);assert.ok(!directories.includes(p));directories.push(p);},
   writeFileSync:(p,b,opts)=>{assert.equal(opts.flag,'wx');assert.equal(opts.mode,0o600);assert.ok(!files.has(p));
     if(input.tamperFinal&&p===path.join(root,'api.json')){const x=JSON.parse(b);x.private.run.status='queued';b=Buffer.from(JSON.stringify(x));}
     files.set(p,Buffer.from(b));}};
@@ -1709,7 +1712,11 @@ const signal={timeout:ms=>{signals.push(ms);return input.realAbort?AbortSignal.t
 const AsyncFunction=Object.getPrototypeOf(async function(){}).constructor;
 (async()=>{let error=null;try{await new AsyncFunction('github','context','require','process','AbortSignal',input.script)
   (github,{runId:123,sha:input.env.GITHUB_SHA},fakeRequire,fakeProcess,signal);}catch(e){error=e.message.split('\n')[0]+(e.stderr?' '+e.stderr.toString().trim().split('\n').at(-1):'');}
-process.stdout.write(JSON.stringify({error,calls,phases,signals,abortEvents,files:Object.fromEntries([...files].map(([p,b])=>[path.relative(root,p).replaceAll('\\','/'),JSON.parse(b)]))}));})();
+const relative=p=>path.relative(root,p).replaceAll('\\','/');
+process.stdout.write(JSON.stringify({error,calls,phases,signals,abortEvents,
+  directories:directories.map(relative),
+  inputNames:[...new Set([...files.keys(),...directories].filter(p=>path.dirname(p)===root).map(p=>path.basename(p)))].sort(),
+  files:Object.fromEntries([...files].map(([p,b])=>[relative(p),JSON.parse(b)]))}));})();
 '''
         fixture = {"profile": p, "env": env, "proof": proof, "delivery": value, "samples": samples,
                    "script": step["with"]["script"], "checker": checker, "python": sys.executable,
@@ -1720,17 +1727,93 @@ process.stdout.write(JSON.stringify({error,calls,phases,signals,abortEvents,file
         self.assertLess(len(result.stdout), 8 * 1024**2)
         return json.loads(result.stdout)
 
+    def test_current_api_sibling_observations_preserve_actual_stage_input_boundary(self):
+        result = self.sample_current_api([{"state": "in_progress"}])
+        self.assertIsNone(result["error"])
+        self.assertEqual(result["inputNames"], ["api.json", "profile.json"])
+        self.assertEqual(result["directories"], [self.API_OBSERVATIONS.rstrip("/")])
+        self.assertEqual(set(result["files"]), {"profile.json", "api.json", self.API_OBSERVATIONS + "01.json"})
+        class InventoryAccepted(Exception): pass
+        real_read = M.read
+        def read(file, maximum=262144, **kwargs):
+            if os.name == "nt": kwargs.pop("mode", None)
+            return real_read(file, maximum, **kwargs)
+        for carrier in (False, True):
+            with self.subTest(carrier=carrier), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp).resolve(); folder = root / "native-linux-production-016-update"; folder.mkdir()
+                # Materialize the real inline script's recorded writes, not a hand-built namespace.
+                for directory in result["directories"]:
+                    (folder / directory).mkdir(mode=0o700)
+                for name, value in result["files"].items():
+                    file = folder / name; file.write_bytes(json.dumps(value).encode()); file.chmod(0o600)
+                expected = {"profile.json", "api.json", *(n + ".zip" for n in M.input_roles(result["files"]["profile.json"]))}
+                for name in expected - {"profile.json", "api.json"}:
+                    (folder / name).write_bytes(b"Boundary fixture only; never unpacked.")
+                if carrier:
+                    (folder / "carrier").mkdir(); (folder / "carrier.zip").write_bytes(b"Never unpacked.")
+                self.assertEqual({p.name for p in folder.iterdir()}, expected | ({"carrier", "carrier.zip"} if carrier else set()))
+                before = {p.relative_to(root).as_posix(): M.pin(p.read_bytes()) for p in root.rglob("*") if p.is_file()}
+                with patch.object(M, "admission", return_value="portable-approve"), patch.object(M, "request", return_value={}), \
+                     patch.object(M, "read", side_effect=read), patch.object(M, "offline_verifier", side_effect=InventoryAccepted) as verifier:
+                    # Stop immediately after the actual stage inventory guard, before signatures/unpacking.
+                    with self.assertRaises(InventoryAccepted): M.stage(folder, {})
+                    verifier.assert_called_once_with({})
+                    for unexpected in ("api-observations", "unknown-directory"):
+                        foreign = folder / unexpected; foreign.mkdir()
+                        verifier.reset_mock()
+                        with self.assertRaisesRegex(RuntimeError, "Fresh complete input set"):
+                            M.stage(folder, {})
+                        verifier.assert_not_called()
+                        self.assertTrue(foreign.is_dir())
+                        foreign.rmdir()
+                self.assertEqual({p.relative_to(root).as_posix(): M.pin(p.read_bytes()) for p in root.rglob("*") if p.is_file()}, before)
+
+    def test_current_api_original_inline_placement_still_refused_by_actual_stage(self):
+        step = next(s for s in self.workflow["jobs"]["update"]["steps"] if s.get("name", "").startswith("Bind independent profile"))
+        declaration = "path.join(process.env.RUNNER_TEMP, 'native-linux-production-016-update-api-observations')"
+        self.assertEqual(step["with"]["script"].count(declaration), 1)
+        original = step["with"]["script"].replace(declaration, "path.join(root, 'api-observations')")
+        result = self.sample_current_api([{"state": "in_progress"}], script=original)
+        self.assertIsNone(result["error"])
+        self.assertEqual(result["inputNames"], ["api-observations", "api.json", "profile.json"])
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp).resolve()
+            for directory in result["directories"]: (folder / directory).mkdir(mode=0o700)
+            for name, value in result["files"].items():
+                file = folder / name; file.write_bytes(json.dumps(value).encode()); file.chmod(0o600)
+            for name in M.input_roles(result["files"]["profile.json"]):
+                (folder / (name + ".zip")).write_bytes(b"Boundary fixture only; never unpacked.")
+            diagnostic = folder / "api-observations/01.json"; before = diagnostic.read_bytes()
+            real_read = M.read
+            def read(file, maximum=262144, **kwargs):
+                if os.name == "nt": kwargs.pop("mode", None)
+                return real_read(file, maximum, **kwargs)
+            with patch.object(M, "admission", return_value="portable-approve"), patch.object(M, "request", return_value={}), \
+                 patch.object(M, "read", side_effect=read), patch.object(M, "offline_verifier", side_effect=AssertionError("Inventory was incorrectly accepted")) as verifier:
+                with self.assertRaisesRegex(RuntimeError, "Fresh complete input set"):
+                    M.stage(folder, {})
+                verifier.assert_not_called()
+            self.assertEqual(diagnostic.read_bytes(), before)
+
+    def test_current_api_upload_retains_sibling_diagnostics_without_input_namespace_exception(self):
+        upload = next(s for s in self.workflow["jobs"]["update"]["steps"] if s.get("uses", "").startswith("actions/upload-artifact@"))
+        paths = upload["with"]["path"].splitlines()
+        self.assertEqual(paths.count("${{ runner.temp }}/native-linux-production-016-update-api-observations/"), 1)
+        self.assertNotIn("${{ runner.temp }}/native-linux-production-016-update/api-observations/", paths)
+        self.assertIn("${{ runner.temp }}/native-linux-production-016-update/api.json", paths)
+        self.assertEqual(upload["if"], "always()")
+
     def test_current_api_queued_then_active_preserves_first_and_admits_only_actual_active(self):
         result = self.sample_current_api([{"state": "queued"}, {"state": "in_progress"}])
         self.assertIsNone(result["error"])
-        self.assertEqual(result["files"]["api-observations/01.json"]["responses"]["run"]["status"], "queued")
-        self.assertEqual(result["files"]["api-observations/02.json"]["responses"]["run"]["status"], "in_progress")
+        self.assertEqual(result["files"][self.API_OBSERVATIONS + "01.json"]["responses"]["run"]["status"], "queued")
+        self.assertEqual(result["files"][self.API_OBSERVATIONS + "02.json"]["responses"]["run"]["status"], "in_progress")
         self.assertEqual(result["files"]["api.json"]["private"]["run"]["status"], "in_progress")
         self.assertEqual(result["phases"].count("api"), 1)
         self.assertEqual([x["label"] for x in result["calls"]], ["run", "jobs", "artifact"] * 2)
         self.assertNotIn("SECRET", json.dumps(result["files"]))
         for index in (1, 2):
-            for request in result["files"][f"api-observations/{index:02}.json"]["requests"]:
+            for request in result["files"][self.API_OBSERVATIONS + f"{index:02}.json"]["requests"]:
                 self.assertEqual(set(request["headers"]), {"date", "etag", "cache-control"})
                 self.assertGreaterEqual(request["finishedMs"], request["startedMs"])
                 self.assertIn("startedAt", request); self.assertIn("finishedAt", request)
@@ -1740,7 +1823,7 @@ process.stdout.write(JSON.stringify({error,calls,phases,signals,abortEvents,file
         self.assertIn("cap reached", result["error"])
         self.assertEqual(len(result["calls"]), 18)
         self.assertEqual(result["phases"].count("api-observe"), 6)
-        self.assertEqual(len([n for n in result["files"] if n.startswith("api-observations/")]), 6)
+        self.assertEqual(len([n for n in result["files"] if n.startswith(self.API_OBSERVATIONS)]), 6)
         self.assertNotIn("api.json", result["files"]); self.assertNotIn("api", result["phases"])
 
     def test_current_api_terminal_and_run_drift_stop_before_more_gets(self):
@@ -1751,22 +1834,22 @@ process.stdout.write(JSON.stringify({error,calls,phases,signals,abortEvents,file
                 result = self.sample_current_api([{"state": state, "fault": fault}])
                 self.assertIsNotNone(result["error"]); self.assertEqual(len(result["calls"]), 1)
                 self.assertNotIn("api.json", result["files"])
-                self.assertIn("api-observations/01.json", result["files"])
+                self.assertIn(self.API_OBSERVATIONS + "01.json", result["files"])
 
     def test_current_api_all_existing_guards_and_cross_sample_identity_still_refuse(self):
         for fault in ("stage-failed", "current-source", "duplicate-current", "stage-drift", "artifact-drift", "artifact-expired"):
             with self.subTest(fault=fault):
                 result = self.sample_current_api([{"state": "queued"}, {"state": "queued", "fault": fault}])
                 self.assertIsNotNone(result["error"]); self.assertNotIn("api.json", result["files"])
-                self.assertEqual(result["files"]["api-observations/01.json"]["decision"], "queued-not-admitted")
-                self.assertEqual(result["files"]["api-observations/02.json"]["decision"], "refused")
+                self.assertEqual(result["files"][self.API_OBSERVATIONS + "01.json"]["decision"], "queued-not-admitted")
+                self.assertEqual(result["files"][self.API_OBSERVATIONS + "02.json"]["decision"], "refused")
 
     def test_current_api_errors_are_not_retried_and_only_safe_headers_survive(self):
         for index, label in enumerate(("run", "jobs", "artifact"), 1):
             with self.subTest(label=label):
                 result = self.sample_current_api([{"state": "queued", "fault": label + "-api"}])
                 self.assertEqual(len(result["calls"]), index); self.assertNotIn("api.json", result["files"])
-                request = result["files"]["api-observations/01.json"]["requests"][-1]
+                request = result["files"][self.API_OBSERVATIONS + "01.json"]["requests"][-1]
                 self.assertTrue(request["failed"]); self.assertEqual(request["status"], 503)
                 self.assertNotIn("SECRET", json.dumps(result))
 
@@ -1779,7 +1862,7 @@ process.stdout.write(JSON.stringify({error,calls,phases,signals,abortEvents,file
                 result = self.sample_current_api([sample])
                 self.assertIsNotNone(result["error"]); self.assertNotIn("api.json", result["files"])
                 self.assertTrue(all(0 < n <= 5000 for n in result["signals"]))
-                self.assertIn("api-observations/01.json", result["files"])
+                self.assertIn(self.API_OBSERVATIONS + "01.json", result["files"])
 
     def test_current_api_request_budget_shrinks_with_remaining_monotonic_time(self):
         result = self.sample_current_api([{"state": "in_progress", "fault": "remaining-budget"}])
@@ -1790,18 +1873,18 @@ process.stdout.write(JSON.stringify({error,calls,phases,signals,abortEvents,file
         self.assertIsNotNone(result["error"]); self.assertEqual(result["abortEvents"], 1)
         self.assertEqual(len(result["calls"]), 1); self.assertEqual(result["signals"], [5000])
         self.assertNotIn("api.json", result["files"])
-        self.assertTrue(result["files"]["api-observations/01.json"]["requests"][0]["failed"])
+        self.assertTrue(result["files"][self.API_OBSERVATIONS + "01.json"]["requests"][0]["failed"])
 
     def test_current_api_failed_producer_is_not_eligible_for_reobservation(self):
         result = self.sample_current_api([{"state": "queued"}], invalidProducer=True)
         self.assertIsNotNone(result["error"]); self.assertEqual(len(result["calls"]), 3)
-        self.assertNotIn("api.json", result["files"]); self.assertNotIn("api-observations/02.json", result["files"])
+        self.assertNotIn("api.json", result["files"]); self.assertNotIn(self.API_OBSERVATIONS + "02.json", result["files"])
 
     def test_current_api_terminal_after_queued_preserves_both_observations(self):
         result = self.sample_current_api([{"state": "queued"}, {"state": "completed"}])
         self.assertIsNotNone(result["error"]); self.assertEqual(len(result["calls"]), 4)
-        self.assertEqual(result["files"]["api-observations/01.json"]["decision"], "queued-not-admitted")
-        self.assertEqual(result["files"]["api-observations/02.json"]["decision"], "refused")
+        self.assertEqual(result["files"][self.API_OBSERVATIONS + "01.json"]["decision"], "queued-not-admitted")
+        self.assertEqual(result["files"][self.API_OBSERVATIONS + "02.json"]["decision"], "refused")
         self.assertNotIn("api.json", result["files"])
 
     def test_current_api_final_validator_still_refuses_queued_bytes(self):
