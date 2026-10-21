@@ -1320,6 +1320,14 @@ class ForeignSudoTests(unittest.TestCase):
             'InvocationImage': '0ea708e4bf5feb3f99092f4f8d9923054b4e00e83f60666938ecdea36682290a',
             'InvocationChain': '35cf24dfaf4121d41da107abd6a0a8b014b9fa02794e0276c2816d566cee94f0'}
         class StripDiagnostic(ast.NodeTransformer):
+            def generic_visit(self, node):
+                node = super().generic_visit(node)
+                # Python 3.12 adds empty type-parameter metadata even with the 3.10 grammar.
+                if hasattr(node, 'type_params'):
+                    if node.type_params:
+                        raise ValueError('Unexpected generic source in the frozen contract')
+                    del node.type_params
+                return node
             def visit_Assign(self, node):
                 if all(isinstance(n, ast.Name) and n.id == '_foreign_stage' for n in node.targets): return None
                 return self.generic_visit(node)
