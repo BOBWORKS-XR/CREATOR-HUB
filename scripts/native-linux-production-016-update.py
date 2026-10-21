@@ -404,7 +404,141 @@ def public_root_tool(argv, *, input=None, env=None):
     return None
 
 
-def public_tool_failure(argv, out, err, failure_type, returncode=None, *, input=None, env=None):
+def synthetic_useradd_snapshot(pid, parent, previous=None):
+    result, descriptors, stage = {"verified": False}, [], "proc-open"
+    try:
+        flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW
+        proc = os.open(f"/proc/{pid}", flags | os.O_DIRECTORY); descriptors.append(proc)
+        directory = os.fstat(proc)
+        require(stat.S_ISDIR(directory.st_mode) and directory.st_uid == 0, "Expected child proc directory")
+        result["proc"] = {key: str(getattr(directory, key)) for key in ("st_dev", "st_ino", "st_uid", "st_gid")}
+
+        def read_field(name):
+            limit = {"stat": 4096, "status": 16384, "wchan": 128, "syscall": 16}[name]
+            fd = os.open(name, flags, dir_fd=proc)
+            try:
+                if name == "syscall":
+                    # Never read the argument/address registers following the first token.
+                    raw = b""
+                    for _ in range(limit + 1):
+                        byte = os.read(fd, 1)
+                        if not byte or byte.isspace():
+                            break
+                        raw += byte
+                else:
+                    raw = os.read(fd, limit + 1)
+                require(len(raw) <= limit, "Bounded child field required")
+                return raw
+            finally:
+                os.close(fd)
+
+        def identity():
+            raw = read_field("stat")
+            require(raw.startswith(f"{pid} (".encode()) and raw.rfind(b")") > raw.find(b"("), "Exact child stat required")
+            fields = raw[raw.rfind(b")") + 2:].split()
+            require(len(fields) >= 20 and re.fullmatch(rb"[A-Za-z]", fields[0]) and fields[0] not in (b"Z", b"X", b"x")
+                    and re.fullmatch(rb"[0-9]{1,10}", fields[1]) and re.fullmatch(rb"[0-9]{1,20}", fields[19]), "Live child identity required")
+            value = {"startTime": fields[19].decode("ascii"), "parentPid": int(fields[1]), "state": fields[0].decode("ascii")}
+            status = read_field("status")
+            for key, label in (("uids", b"Uid"), ("gids", b"Gid")):
+                matches = re.findall(rb"^" + label + rb":[ \t]+([0-9]+)[ \t]+([0-9]+)[ \t]+([0-9]+)[ \t]+([0-9]+)[ \t]*$", status, re.M)
+                require(len(matches) == 1 and all(len(n) <= 10 and int(n) < 2**32 for n in matches[0]), "Exact bounded child IDs required")
+                value[key] = [int(n) for n in matches[0]]
+            require(value["parentPid"] == parent and value["uids"] == [0] * 4, "Expected root child of controller required")
+            return value
+
+        def image_stamp(info):
+            return {key: str(getattr(info, key)) for key in
+                    ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns")}
+
+        stage = "identity-before"; result["before"] = identity()
+        stage = "image-open"
+        expected = os.open("/usr/sbin/useradd", flags); descriptors.append(expected)
+        image = os.open("exe", os.O_RDONLY | os.O_CLOEXEC, dir_fd=proc); descriptors.append(image)
+        info = os.fstat(image)
+        require(stat.S_ISREG(info.st_mode) and info.st_uid == 0 and not info.st_mode & 0o022 and info.st_mode & 0o111
+                and 0 < info.st_size <= 16 * 1024**2 and image_stamp(info) == image_stamp(os.fstat(expected)), "Exact protected useradd image required")
+        stage = "image-hash"
+        digest, total = hashlib.sha256(), 0
+        while chunk := os.read(image, 65536):
+            total += len(chunk); require(total <= info.st_size, "Bounded unchanged image required"); digest.update(chunk)
+        require(total == info.st_size, "Complete child image required")
+        result["image"] = {**image_stamp(info), "sha256": digest.hexdigest()}
+        for name, pattern in (("wchan", rb"[A-Za-z0-9_.$]{1,128}"), ("syscall", rb"(?:[0-9]{1,10}|-1|running)")):
+            try:
+                raw = read_field(name).strip()
+                require(re.fullmatch(pattern, raw), "Closed child wait field required")
+                result[name] = raw.decode("ascii")
+            except Exception as error:
+                result[name] = {"unavailable": True, "errno": error.errno if isinstance(error, OSError) else None}
+        stage = "identity-after"; result["after"] = identity(); directory_after = os.fstat(proc)
+        require(all(result["before"][key] == result["after"][key] for key in ("startTime", "parentPid", "uids", "gids"))
+                and result["proc"] == {key: str(getattr(directory_after, key)) for key in ("st_dev", "st_ino", "st_uid", "st_gid")}
+                and image_stamp(os.fstat(image)) == image_stamp(info) == image_stamp(os.stat("exe", dir_fd=proc))
+                and image_stamp(os.fstat(expected)) == image_stamp(info), "Child changed during diagnostic capture")
+        if previous is not None:
+            require(previous["verified"] and result["proc"] == previous["proc"] and result["image"] == previous["image"]
+                    and all(result["before"][key] == previous["after"][key] for key in ("startTime", "parentPid", "uids", "gids")), "Child differs from initial observation")
+        result["verified"] = True
+    except Exception as error:
+        result.update(stage=stage, errorType=type(error).__name__[:64], errno=error.errno if isinstance(error, OSError) else None)
+    finally:
+        for fd in reversed(descriptors):
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+    return result
+
+
+def observe_synthetic_useradd(pid, parent, started, deadline, stop, record):
+    try:
+        for phase in ("launch", "before-timeout"):
+            if stop.is_set() or time.monotonic() >= deadline:
+                return
+            previous = record["samples"][0]["observation"] if record.get("samples") else None
+            value = synthetic_useradd_snapshot(pid, parent, previous) if previous is not None else synthetic_useradd_snapshot(pid, parent)
+            elapsed = time.monotonic() - started
+            if stop.is_set() or started + elapsed >= deadline:
+                return
+            # Replace, never mutate, published rows so the failure writer need not join or lock.
+            record["samples"] = [*record.get("samples", []), {"phase": phase, "elapsedMs": int(elapsed * 1000), "observation": value}]
+            if not value["verified"] or phase == "before-timeout" or stop.wait(max(0, 85 - (time.monotonic() - started))):
+                return
+    except Exception as error:
+        record["observerErrorType"] = type(error).__name__[:64]
+    finally:
+        record["state"] = "stopped" if stop.is_set() else "finished"
+
+
+def run_synthetic_useradd(argv, out, err, timeout, diagnostic):
+    with subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=out, stderr=err,
+                          env={"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"}, cwd="/") as process:
+        started = time.monotonic(); deadline = started + timeout; stop = None
+        try:
+            try:
+                diagnostic.update(childPid=process.pid, controllerPid=os.getpid(), state="pending", samples=[])
+                stop = threading.Event()
+                threading.Thread(target=observe_synthetic_useradd, args=(process.pid, os.getpid(), started, deadline, stop, diagnostic), daemon=True).start()
+            except Exception as error:
+                diagnostic.update(state="unavailable", observerErrorType=type(error).__name__[:64])
+            process.communicate(timeout=max(0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            process.kill(); process.wait()
+            raise
+        except BaseException:
+            process.kill()
+            raise
+        finally:
+            if stop is not None:
+                try:
+                    stop.set()  # No join, extra process wait, or diagnostic I/O on the operation path.
+                except Exception:
+                    pass
+        return subprocess.CompletedProcess(argv, process.returncode)
+
+
+def public_tool_failure(argv, out, err, failure_type, returncode=None, *, input=None, env=None, child=None):
     # Only these public, independently inspected commands may expose output.
     tool = public_root_tool(argv, input=input, env=env)
     if tool is None:
@@ -412,6 +546,8 @@ def public_tool_failure(argv, out, err, failure_type, returncode=None, *, input=
     record = {"kind": "production016-public-tool-failure", "tool": tool, "pid": os.getpid(), "pidScope": "controller",
               "failureType": failure_type, "returncode": returncode}
     try:
+        if tool == "synthetic-useradd" and child is not None:
+            record["childDiagnostics"] = child.copy()
         for label, stream in (("stdout", out), ("stderr", err)):
             size = stream.seek(0, os.SEEK_END); stream.seek(0)
             record[label] = {"bytes": size, "truncated": size > 8192, "text": stream.read(8192).decode("utf-8", errors="replace")}
@@ -426,17 +562,21 @@ def public_tool_failure(argv, out, err, failure_type, returncode=None, *, input=
 
 def run_tool(argv, *, input=None, allowed=(0,), timeout=90, env=None, limit=2 * 1024**2):
     path = ROOT_TOOL_PATH if public_root_tool(argv, input=input, env=env) in ("baseline-dpkg-install", "update-ca-certificates") else "/usr/bin:/bin"
+    child = {} if public_root_tool(argv, input=input, env=env) == "synthetic-useradd" else None
     with __import__("tempfile").TemporaryFile() as out, __import__("tempfile").TemporaryFile() as err:
         try:
-            result = subprocess.run(argv, input=input, stdin=subprocess.DEVNULL if input is None else None, stdout=out, stderr=err,
-                                    env=env or {"PATH": path, "LANG": "C", "LC_ALL": "C"}, cwd="/", timeout=timeout, check=False)
+            if child is not None:
+                result = run_synthetic_useradd(argv, out, err, timeout, child)
+            else:
+                result = subprocess.run(argv, input=input, stdin=subprocess.DEVNULL if input is None else None, stdout=out, stderr=err,
+                                        env=env or {"PATH": path, "LANG": "C", "LC_ALL": "C"}, cwd="/", timeout=timeout, check=False)
         except Exception as error:
-            public_tool_failure(argv, out, err, type(error).__name__, input=input, env=env)
+            public_tool_failure(argv, out, err, type(error).__name__, input=input, env=env, child=child)
             raise
         bounded = out.tell() <= limit and err.tell() <= 65536
         if not bounded or result.returncode not in allowed:
             public_tool_failure(argv, out, err, "NonzeroExit" if bounded else "DiagnosticLimitExceeded",
-                                result.returncode, input=input, env=env)
+                                result.returncode, input=input, env=env, child=child)
         require(bounded, "Bounded tool diagnostics exceeded")
         out.seek(0); raw = out.read(limit + 1)
         require(result.returncode in allowed, "Fixed tool failed: " + Path(argv[0]).name)

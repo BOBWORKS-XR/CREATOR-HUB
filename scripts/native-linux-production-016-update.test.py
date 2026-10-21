@@ -18,7 +18,7 @@ import sys
 import tarfile
 import tempfile
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 from types import ModuleType, SimpleNamespace
 import zipfile
 
@@ -215,6 +215,263 @@ def offline_verifier_inputs(folder):
                "compilers": compilers, "tool": {"pin": M.pin(tool.read_bytes()), "stamp": list(pages.stamp(tool.lstat()))}, "releaseReady": False}
     M.save(work / "receipt.json", receipt)
     return tool, receipt, {**environment(), "RUNNER_TEMP": str(folder), "GITHUB_WORKSPACE": str(workspace)}
+
+
+class SyntheticUseraddDiagnostics(unittest.TestCase):
+    def proc_fixture(self):
+        image = SimpleNamespace(st_dev=1, st_ino=12, st_mode=stat.S_IFREG | 0o755, st_uid=0, st_gid=0,
+                                st_nlink=1, st_size=4, st_mtime_ns=10, st_ctime_ns=11)
+        directory = SimpleNamespace(st_dev=2, st_ino=30, st_mode=stat.S_IFDIR | 0o555, st_uid=0, st_gid=0)
+        state = {"pid": 4321, "parent": 1234, "start": 90, "uids": "0 0 0 0", "gids": "0 0 0 0",
+                 "state": "S", "image": image, "directory": directory, "fds": {}, "opened": [], "closed": [],
+                 "wchan": b"do_wait\n", "syscall": b"61 0xPRIVATE_ARGUMENT 0xPRIVATE_ADDRESS\n", "exeBytes": b"ELF!"}
+        def opened(path, flags, *, dir_fd=None):
+            self.assertIn((path, dir_fd), (("/proc/4321", None), ("/usr/sbin/useradd", None),
+                          ("stat", 10), ("status", 10), ("exe", 10), ("wchan", 10), ("syscall", 10)))
+            state["opened"].append((path, flags, dir_fd))
+            if path == "/proc/4321":
+                return 10
+            if path == "/usr/sbin/useradd":
+                return 11
+            fd = 20 + len(state["fds"])
+            if path == "stat":
+                fields = [state["state"], str(state["parent"]), *(["0"] * 17), str(state["start"])]
+                raw = (str(state["pid"]) + " (PRIVATE_NAME) " + " ".join(fields)).encode()
+            elif path == "status":
+                raw = ("Name:\tPRIVATE_NAME\nUid:\t" + state["uids"] + "\nGid:\t" + state["gids"] + "\n").encode()
+            else:
+                raw = state["exeBytes"] if path == "exe" else state[path]
+            state["fds"][fd] = io.BytesIO(raw)
+            return fd
+        def fstat(fd):
+            return state["directory"] if fd == 10 else image if fd == 11 else state["image"]
+        stack = ExitStack()
+        for name, value in (("O_CLOEXEC", 0x80000), ("O_NOFOLLOW", 0x20000), ("O_DIRECTORY", 0x10000)):
+            stack.enter_context(patch.object(M.os, name, getattr(M.os, name, value), create=True))
+        stack.enter_context(patch.object(M.os, "open", side_effect=opened))
+        stack.enter_context(patch.object(M.os, "read", side_effect=lambda fd, size: state["fds"][fd].read(size)))
+        stack.enter_context(patch.object(M.os, "fstat", side_effect=fstat))
+        stack.enter_context(patch.object(M.os, "stat", return_value=image))
+        stack.enter_context(patch.object(M.os, "close", side_effect=state["closed"].append))
+        return state, stack
+
+    def test_snapshot_binds_child_and_only_fixed_public_fields(self):
+        state, context = self.proc_fixture()
+        with context:
+            value = M.synthetic_useradd_snapshot(4321, 1234)
+        self.assertTrue(value["verified"])
+        self.assertEqual(value["before"], value["after"])
+        self.assertEqual(value["before"], {"startTime": "90", "parentPid": 1234, "state": "S",
+                                           "uids": [0] * 4, "gids": [0] * 4})
+        self.assertEqual(value["image"]["sha256"], hashlib.sha256(b"ELF!").hexdigest())
+        self.assertEqual(value["wchan"], "do_wait")
+        self.assertEqual(value["syscall"], "61")
+        self.assertNotIn("PRIVATE", json.dumps(value))
+        self.assertLess(len(json.dumps(value)), 4096)
+        self.assertEqual(len(state["opened"]), len(state["closed"]))
+
+    def test_snapshot_pid_parent_uid_and_image_drift_are_unverified(self):
+        for field, changed in (("pid", 4322), ("parent", 999), ("uids", "0 1 0 0"),
+                               ("gids", "malformed"), ("state", "Z")):
+            state, context = self.proc_fixture(); state[field] = changed
+            with self.subTest(field=field), context:
+                self.assertFalse(M.synthetic_useradd_snapshot(4321, 1234)["verified"])
+        for field, changed in (("start", 91), ("parent", 999), ("uids", "0 1 0 0")):
+            state, context = self.proc_fixture()
+            with self.subTest(drift=field), context:
+                first = M.synthetic_useradd_snapshot(4321, 1234)
+                state[field] = changed
+                self.assertFalse(M.synthetic_useradd_snapshot(4321, 1234, first)["verified"])
+
+    def test_snapshot_gone_denied_and_unknown_errors_never_retain_raw_text(self):
+        for error in (FileNotFoundError(2, "PRIVATE"), PermissionError(13, "PRIVATE"), RuntimeError("PRIVATE")):
+            _, context = self.proc_fixture()
+            with self.subTest(error=type(error).__name__), context, patch.object(M.os, "open", side_effect=error):
+                value = M.synthetic_useradd_snapshot(4321, 1234)
+            self.assertFalse(value["verified"])
+            self.assertEqual(value["stage"], "proc-open")
+            self.assertEqual(value["errorType"], type(error).__name__)
+            self.assertEqual(value["errno"], error.errno if isinstance(error, OSError) else None)
+            self.assertNotIn("PRIVATE", json.dumps(value))
+
+    def test_snapshot_refuses_wrong_writable_or_oversized_image(self):
+        for field, changed in (("st_uid", 5), ("st_mode", stat.S_IFREG | 0o777), ("st_ino", 99),
+                               ("st_size", 16 * 1024**2 + 1), ("st_mode", stat.S_IFDIR | 0o755)):
+            state, context = self.proc_fixture(); changed_image = copy.copy(state["image"])
+            setattr(changed_image, field, changed); state["image"] = changed_image
+            with self.subTest(field=field, changed=changed), context:
+                value = M.synthetic_useradd_snapshot(4321, 1234)
+            self.assertFalse(value["verified"]); self.assertEqual(value["stage"], "image-open")
+
+    def test_snapshot_refuses_same_identity_with_changed_executable_hash(self):
+        state, context = self.proc_fixture()
+        with context:
+            first = M.synthetic_useradd_snapshot(4321, 1234)
+            state["exeBytes"] = b"BAD!"
+            second = M.synthetic_useradd_snapshot(4321, 1234, first)
+        self.assertTrue(first["verified"]); self.assertFalse(second["verified"])
+        self.assertNotEqual(first["image"]["sha256"], second["image"]["sha256"])
+
+    def test_snapshot_refuses_identity_change_within_one_read(self):
+        state, context = self.proc_fixture()
+        with context:
+            original_read = M.os.read.side_effect
+            count = 0
+            def read(fd, size):
+                nonlocal count
+                result = original_read(fd, size)
+                if b" (PRIVATE_NAME) " in result:
+                    count += 1
+                    if count == 1:
+                        state["start"] = 91
+                return result
+            M.os.read.side_effect = read
+            value = M.synthetic_useradd_snapshot(4321, 1234)
+        self.assertFalse(value["verified"])
+        self.assertEqual(value["before"]["startTime"], "90")
+        self.assertEqual(value["after"]["startTime"], "91")
+
+    def test_wait_fields_are_closed_and_syscall_arguments_are_not_read(self):
+        for value in (b"running\n", b"-1 PRIVATE_REGISTERS\n", b"PRIVATE_SECRET\n", b"12345678901234567 PRIVATE\n"):
+            state, context = self.proc_fixture(); state["syscall"] = value
+            with self.subTest(syscall=value), context:
+                result = M.synthetic_useradd_snapshot(4321, 1234)
+            self.assertTrue(result["verified"])
+            self.assertNotIn("PRIVATE", json.dumps(result))
+            syscall_stream = next(stream for stream in state["fds"].values() if stream.getvalue() == value)
+            self.assertLessEqual(syscall_stream.tell(), 17)
+            if value.startswith((b"running", b"-1")):
+                self.assertEqual(result["syscall"], value.split()[0].decode())
+            else:
+                self.assertEqual(result["syscall"], {"unavailable": True, "errno": None})
+        state, context = self.proc_fixture(); state["wchan"] = b"PRIVATE value with spaces\n"
+        with context:
+            result = M.synthetic_useradd_snapshot(4321, 1234)
+        self.assertTrue(result["verified"]); self.assertNotIn("PRIVATE", json.dumps(result))
+
+    def test_missing_wait_field_does_not_discard_proven_identity(self):
+        state, context = self.proc_fixture()
+        with context:
+            original_open = M.os.open.side_effect
+            def opened(path, flags, **options):
+                if path == "wchan":
+                    raise PermissionError(13, "PRIVATE")
+                return original_open(path, flags, **options)
+            M.os.open.side_effect = opened
+            value = M.synthetic_useradd_snapshot(4321, 1234)
+        self.assertTrue(value["verified"])
+        self.assertEqual(value["wchan"], {"unavailable": True, "errno": 13})
+        self.assertNotIn("PRIVATE", json.dumps(value))
+
+    def test_observer_takes_only_two_samples_before_same_deadline(self):
+        values = {"verified": True}
+        record = {}; stop = Mock(); stop.wait.return_value = False; stop.is_set.return_value = False
+        with patch.object(M.time, "monotonic", side_effect=[100, 101, 101, 185, 186]), \
+             patch.object(M, "synthetic_useradd_snapshot", return_value=values) as capture:
+            M.observe_synthetic_useradd(4321, 1234, 100, 190, stop, record)
+        self.assertEqual(capture.call_args_list, [unittest.mock.call(4321, 1234), unittest.mock.call(4321, 1234, values)])
+        stop.wait.assert_called_once_with(84)
+        self.assertEqual(len(record["samples"]), 2)
+
+    def test_observer_cancel_invalid_baseline_and_deadline_do_not_retry(self):
+        for stopped, deadline, verified in ((True, 190, True), (False, 100, True), (False, 190, False)):
+            record = {}; stop = Mock(); stop.is_set.return_value = stopped
+            with self.subTest(stopped=stopped, deadline=deadline, verified=verified), \
+                 patch.object(M.time, "monotonic", return_value=100), \
+                 patch.object(M, "synthetic_useradd_snapshot", return_value={"verified": verified}) as capture:
+                M.observe_synthetic_useradd(4321, 1234, 100, deadline, stop, record)
+            self.assertEqual(capture.call_count, int(not stopped and deadline > 100))
+            stop.wait.assert_not_called()
+
+    def test_observer_discards_capture_finishing_after_deadline_or_stop(self):
+        for stopped in (False, True):
+            record = {}; stop = Mock(); stop.is_set.side_effect = [False, stopped, stopped]
+            with self.subTest(stopped=stopped), patch.object(M.time, "monotonic", side_effect=[100, 191]), \
+                 patch.object(M, "synthetic_useradd_snapshot", return_value={"verified": True}):
+                M.observe_synthetic_useradd(4321, 1234, 100, 190, stop, record)
+            self.assertFalse(record.get("samples"))
+            stop.wait.assert_not_called()
+
+    def test_runner_keeps_command_environment_files_and_single_budget(self):
+        process = MagicMock(pid=4321, returncode=23); process.__enter__.return_value = process
+        with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err, \
+             patch.object(M.subprocess, "Popen", return_value=process) as launch, \
+             patch.object(M.threading, "Thread") as thread, patch.object(M.time, "monotonic", side_effect=[100, 102]):
+            diagnostic = {}
+            value = M.run_synthetic_useradd(["/usr/sbin/useradd", "fixed-test-only"], out, err, 90, diagnostic)
+            launch.assert_called_once_with(["/usr/sbin/useradd", "fixed-test-only"], stdin=subprocess.DEVNULL,
+                                           stdout=out, stderr=err, env={"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"}, cwd="/")
+        self.assertEqual(value.returncode, 23)
+        process.communicate.assert_called_once_with(timeout=88)
+        process.kill.assert_not_called(); process.wait.assert_not_called()
+        thread.return_value.join.assert_not_called()
+        self.assertTrue(thread.call_args.kwargs["daemon"])
+        self.assertEqual(diagnostic["childPid"], 4321)
+        self.assertEqual(diagnostic["controllerPid"], os.getpid())
+        self.assertTrue(thread.call_args.kwargs["args"][-2].is_set())
+
+    def test_runner_timeout_is_original_with_same_kill_wait_no_extra_budget(self):
+        original = subprocess.TimeoutExpired(["/usr/sbin/useradd"], 90)
+        process = MagicMock(pid=4321); process.__enter__.return_value = process
+        process.communicate.side_effect = original
+        with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err, \
+             patch.object(M.subprocess, "Popen", return_value=process), \
+             patch.object(M.threading, "Thread", side_effect=RuntimeError("PRIVATE")), \
+             patch.object(M.time, "monotonic", side_effect=[100, 103]):
+            diagnostic = {}
+            with self.assertRaises(subprocess.TimeoutExpired) as caught:
+                M.run_synthetic_useradd(["/usr/sbin/useradd"], out, err, 90, diagnostic)
+        self.assertIs(caught.exception, original)
+        process.communicate.assert_called_once_with(timeout=87)
+        process.kill.assert_called_once_with(); process.wait.assert_called_once_with()
+        self.assertEqual(diagnostic["state"], "unavailable")
+        self.assertNotIn("PRIVATE", json.dumps(diagnostic))
+
+    def test_diagnostic_stop_failure_does_not_replace_success_or_failure(self):
+        for original in (None, subprocess.TimeoutExpired(["/usr/sbin/useradd"], 90)):
+            process = MagicMock(pid=4321, returncode=0); process.__enter__.return_value = process
+            process.communicate.side_effect = original
+            event = Mock(); event.set.side_effect = RuntimeError("PRIVATE")
+            with self.subTest(failure=original is not None), tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err, \
+                 patch.object(M.subprocess, "Popen", return_value=process), patch.object(M.threading, "Thread"), \
+                 patch.object(M.threading, "Event", return_value=event):
+                if original is None:
+                    self.assertEqual(M.run_synthetic_useradd(["/usr/sbin/useradd"], out, err, 90, {}).returncode, 0)
+                else:
+                    with self.assertRaises(subprocess.TimeoutExpired) as caught:
+                        M.run_synthetic_useradd(["/usr/sbin/useradd"], out, err, 90, {})
+                    self.assertIs(caught.exception, original)
+
+    def test_thread_start_failure_does_not_change_success(self):
+        process = MagicMock(pid=4321, returncode=0); process.__enter__.return_value = process
+        with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err, \
+             patch.object(M.subprocess, "Popen", return_value=process), \
+             patch.object(M.threading, "Thread", side_effect=RuntimeError("PRIVATE")):
+            self.assertEqual(M.run_synthetic_useradd(["/usr/sbin/useradd"], out, err, 90, {}).returncode, 0)
+        process.kill.assert_not_called(); process.wait.assert_not_called()
+
+    def test_blocked_capture_never_blocks_child_exit_or_requires_join(self):
+        entered, release = M.threading.Event(), M.threading.Event()
+        def capture(*_):
+            entered.set(); release.wait(10)
+            return {"verified": False}
+        worker = "import sys; sys.stdout.write('x'*131072); sys.stderr.write('y'*131072)"
+        diagnostic = {}; threads = []; real_thread = M.threading.Thread
+        def thread(*args, **kwargs):
+            value = real_thread(*args, **kwargs); threads.append(value); return value
+        try:
+            with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err, \
+                 patch.object(M, "synthetic_useradd_snapshot", side_effect=capture), patch.object(M.threading, "Thread", side_effect=thread):
+                value = M.run_synthetic_useradd([sys.executable, "-I", "-B", "-c", worker], out, err, 5, diagnostic)
+                self.assertEqual(value.returncode, 0)
+                self.assertTrue(entered.is_set())
+                self.assertFalse(release.is_set())
+                self.assertEqual(out.tell(), 131072); self.assertEqual(err.tell(), 131072)
+        finally:
+            release.set()
+            for value in threads:
+                value.join(2)
+                self.assertFalse(value.is_alive())
 
 
 class Pure(unittest.TestCase):
@@ -723,10 +980,22 @@ class Pure(unittest.TestCase):
             self.assertEqual(actual, argv)
             options["stdout"].write(output); options["stderr"].write(error)
             return SimpleNamespace(returncode=code)
-        with patch.object(M.subprocess, "run", side_effect=child), patch("builtins.print") as printed:
+        with patch.object(M.subprocess, "run", side_effect=child), \
+             patch.object(M.subprocess, "Popen", side_effect=self.synthetic_useradd_popen(child)), \
+             patch.object(M.threading, "Thread"), patch("builtins.print") as printed:
             with self.assertRaises(RuntimeError) as failure:
                 M.run_tool(argv, **kwargs)
         return failure.exception, [json.loads(call.args[0]) for call in printed.call_args_list]
+
+    def synthetic_useradd_popen(self, child):
+        def launch(argv, **options):
+            process = MagicMock(pid=4321); process.__enter__.return_value = process
+            def communicate(*, timeout):
+                result = child(argv, input=None, check=False, timeout=timeout, **options)
+                process.returncode = result.returncode
+            process.communicate.side_effect = communicate
+            return process
+        return launch
 
     def synthetic_useradd_command(self):
         return ["/usr/sbin/useradd", "--uid", "21314", "--user-group", "--create-home", "--home-dir",
@@ -749,7 +1018,7 @@ class Pure(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp, patch.object(M, "BASE", Path(temp).resolve()):
             def child(actual, **options):
                 self.assertEqual(actual, command)
-                self.assertEqual(options["timeout"], 90)
+                self.assertGreater(options["timeout"], 89); self.assertLessEqual(options["timeout"], 90)
                 self.assertEqual(options["env"], {"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"})
                 self.assertEqual(options["cwd"], "/"); self.assertFalse(options["check"])
                 self.assertIsNone(options["input"]); self.assertEqual(options["stdin"], subprocess.DEVNULL)
@@ -759,10 +1028,12 @@ class Pure(unittest.TestCase):
                 options["stdout"].write(b"public useradd stdout\n")
                 options["stderr"].write(b"e" * 9000)
                 raise original
-            with patch.object(M.subprocess, "run", side_effect=child) as run, patch("builtins.print") as printed:
+            with patch.object(M.subprocess, "run") as run, \
+                 patch.object(M.subprocess, "Popen", side_effect=self.synthetic_useradd_popen(child)) as launch, \
+                 patch.object(M.threading, "Thread"), patch("builtins.print") as printed:
                 with self.assertRaises(subprocess.TimeoutExpired) as caught:
                     M.run_tool(command)
-            self.assertIs(caught.exception, original); self.assertEqual(run.call_count, 1)
+            self.assertIs(caught.exception, original); self.assertEqual(launch.call_count, 1); run.assert_not_called()
             self.assertEqual(len(printed.call_args_list), 1)
             evidence = json.loads(printed.call_args_list[0].args[0])
             self.assertEqual(evidence["tool"], "synthetic-useradd")
@@ -771,6 +1042,7 @@ class Pure(unittest.TestCase):
             self.assertEqual(evidence["stdout"], {"bytes": len(b"public useradd stdout\n"), "truncated": False, "text": "public useradd stdout\n"})
             self.assertEqual(evidence["stderr"], {"bytes": 9000, "truncated": True, "text": "e" * 8192})
             self.assertFalse(set(evidence) & {"argv", "env", "stdin", "input", "childPid", "poll", "waitStatus"})
+            self.assertEqual(evidence["childDiagnostics"]["childPid"], 4321)
             files = list(M.BASE.iterdir()); self.assertEqual(len(files), 1)
             self.assertEqual(files[0].name, f"public-tool-failure-synthetic-useradd-{os.getpid()}.json")
             self.assertEqual(json.loads(files[0].read_text()), evidence)
@@ -809,13 +1081,15 @@ class Pure(unittest.TestCase):
             self.assertEqual(logs[0]["pidScope"], "controller")
         with tempfile.TemporaryDirectory() as temp, patch.object(M, "BASE", Path(temp).resolve()):
             def child(actual, **options):
-                self.assertEqual(actual, command); self.assertEqual(options["timeout"], 90)
+                self.assertEqual(actual, command); self.assertGreater(options["timeout"], 89); self.assertLessEqual(options["timeout"], 90)
                 self.assertEqual(options["env"], {"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"})
                 options["stdout"].write(b"success")
                 return SimpleNamespace(returncode=0)
-            with patch.object(M.subprocess, "run", side_effect=child) as run, patch("builtins.print") as printed:
+            with patch.object(M.subprocess, "run") as run, \
+                 patch.object(M.subprocess, "Popen", side_effect=self.synthetic_useradd_popen(child)) as launch, \
+                 patch.object(M.threading, "Thread"), patch("builtins.print") as printed:
                 self.assertEqual(M.run_tool(command), b"success")
-            self.assertEqual(run.call_count, 1); printed.assert_not_called()
+            self.assertEqual(launch.call_count, 1); run.assert_not_called(); printed.assert_not_called()
             self.assertFalse(list(M.BASE.iterdir()))
 
     def test_synthetic_useradd_timeout_publication_failure_preserves_original_exception(self):
@@ -823,12 +1097,14 @@ class Pure(unittest.TestCase):
         def child(actual, **options):
             self.assertEqual(actual, command); options["stderr"].write(b"public timeout detail")
             raise original
-        with patch.object(M.subprocess, "run", side_effect=child) as run, \
+        with patch.object(M.subprocess, "run") as run, \
+             patch.object(M.subprocess, "Popen", side_effect=self.synthetic_useradd_popen(child)) as launch, \
+             patch.object(M.threading, "Thread"), \
              patch.object(M, "save", side_effect=OSError("diagnostic sink unavailable")), \
              patch("builtins.print", side_effect=OSError("diagnostic stderr unavailable")):
             with self.assertRaises(subprocess.TimeoutExpired) as caught:
                 M.run_tool(command)
-        self.assertIs(caught.exception, original); self.assertEqual(run.call_count, 1)
+        self.assertIs(caught.exception, original); self.assertEqual(launch.call_count, 1); run.assert_not_called()
 
     def test_synthetic_useradd_export_adds_only_fixed_name_and_preserves_original_limit(self):
         tree = ast.parse(Path(M.__file__).read_text())
