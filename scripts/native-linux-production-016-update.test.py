@@ -5580,6 +5580,267 @@ for fd, value in ((1, b'o'), (2, b'e')):
         self.assertIn("daemon=True", ast.unparse(node))
 
 
+class EndpointProcIdentityTests(unittest.TestCase):
+    FIELDS = ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns")
+
+    @staticmethod
+    def info(**changes):
+        return SimpleNamespace(**{**dict(st_dev=1, st_ino=2, st_mode=stat.S_IFREG | 0o444, st_uid=0,
+                                        st_gid=0, st_nlink=1, st_size=0, st_mtime_ns=3, st_ctime_ns=4), **changes})
+
+    @contextmanager
+    def sources(self, part="net/tcp", *, changes=None, errors=None, parser=None):
+        changes, errors = changes or {}, errors or {}
+        info = self.info(); namespace_info = self.info(st_dev=4, st_ino=100)
+        root, path, namespace = MagicMock(), MagicMock(), MagicMock()
+        root.__truediv__.side_effect = lambda name: path if name == part else self.fail("Unexpected proc path")
+        calls = []
+        def value(label, default):
+            calls.append(label)
+            if label in errors:
+                raise errors[label]
+            return changes.get(label, default)
+        def construct(name):
+            self.assertIn(name, ("/proc/12", "/proc/12/ns/net"))
+            return root if name == "/proc/12" else namespace
+        def opened(file, flags):
+            if file is namespace:
+                return value("namespace-open", 8)
+            self.assertIs(file, path)
+            return value("open", 7)
+        path_reads = iter(("before", "after-path"))
+        ns_reads = iter(("namespace-path-before", "namespace-path-after"))
+        file_stats = iter(("opened", "after-fd"))
+        ns_stats = iter(("namespace-opened", "namespace-after-fd"))
+        path.lstat.side_effect = lambda: value(next(path_reads), info)
+        namespace.stat.side_effect = lambda: value(next(ns_reads), namespace_info)
+        def fstat(fd):
+            self.assertIn(fd, (7, 8))
+            return value(next(ns_stats) if fd == 8 else next(file_stats), namespace_info if fd == 8 else info)
+        stream = io.BytesIO(b"bounded fixture")
+        def parse(stream):
+            value("parse", None)
+            return parser(stream) if parser else stream.read(256)
+        with patch.object(M, "Path", side_effect=construct), patch.object(M.os, "name", "posix"), \
+             patch.multiple(M.os, O_NOFOLLOW=0x20000, O_NONBLOCK=0x800, O_CLOEXEC=0x80000, create=True), \
+             patch.object(M.os, "open", side_effect=opened) as open_call, \
+             patch.object(M.os, "fstat", side_effect=fstat) as stat_call, \
+             patch.object(M.os, "fdopen", side_effect=lambda *a, **kw: value("parser-open", stream)) as fdopen, \
+             patch.object(M.os, "close") as close_call:
+            yield SimpleNamespace(path=path, namespace=namespace, opened=open_call, fstat=stat_call,
+                                  fdopen=fdopen, closed=close_call, calls=calls, parser=Mock(side_effect=parse))
+
+    def test_only_fresh_network_lookups_allow_timestamp_changes_for_both_tables(self):
+        for part in ("net/tcp", "net/tcp6"):
+            changed = self.info(st_mtime_ns=103, st_ctime_ns=104)
+            diagnostic = {}
+            with self.subTest(part=part), self.sources(part, changes={"opened": changed, "after-fd": changed,
+                                                                   "after-path": self.info(st_mtime_ns=203, st_ctime_ns=204)}) as s:
+                self.assertEqual(M.endpoint_proc_file(12, part, s.parser, diagnostic=diagnostic), b"bounded fixture")
+                self.assertEqual([c.args[0] for c in s.closed.call_args_list], [7, 8])
+                self.assertEqual(s.calls, ["before", "namespace-open", "namespace-opened", "namespace-path-before",
+                                          "open", "opened", "parser-open", "parse", "after-fd", "after-path",
+                                          "namespace-after-fd", "namespace-path-after"])
+                self.assertEqual(s.opened.call_args_list[0].args, (s.namespace, os.O_RDONLY | os.O_CLOEXEC))
+                self.assertEqual(s.opened.call_args_list[1].args,
+                                 (s.path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC))
+                s.fdopen.assert_called_once_with(7, "rb", closefd=False)
+                s.parser.assert_called_once()
+            self.assertNotIn("changedFields", diagnostic)
+            self.assertEqual(diagnostic["volatileLookupFields"], {part: {
+                "open": ["st_mtime_ns", "st_ctime_ns"], "read-path": ["st_mtime_ns", "st_ctime_ns"]}})
+
+    def test_network_identity_drift_at_open_and_path_read_still_refuses(self):
+        for part in ("net/tcp", "net/tcp6"):
+            for at, comparison in (("opened", "open"), ("after-path", "read-path")):
+                for field in self.FIELDS[:7]:
+                    changed = self.info(**{field: getattr(self.info(), field) + 1, "st_mtime_ns": 103, "st_ctime_ns": 104})
+                    diagnostic = {}
+                    with self.subTest(part=part, at=at, field=field), self.sources(part, changes={at: changed}) as s:
+                        with self.assertRaisesRegex(RuntimeError, "Endpoint proc source changed during"):
+                            M.endpoint_proc_file(12, part, s.parser, diagnostic=diagnostic)
+                        self.assertEqual([c.args[0] for c in s.closed.call_args_list], [7, 8])
+                        if at == "opened": s.parser.assert_not_called()
+                    self.assertEqual(diagnostic["changedFields"], {part: {comparison: [field]}})
+                    self.assertEqual(diagnostic["volatileLookupFields"], {part: {comparison: ["st_mtime_ns", "st_ctime_ns"]}})
+
+    def test_held_network_fd_drift_including_both_timestamps_never_gets_lookup_exception(self):
+        for field in self.FIELDS:
+            diagnostic = {}
+            with self.subTest(field=field), self.sources(changes={"after-fd": self.info(**{field: getattr(self.info(), field) + 1})}) as s:
+                with self.assertRaisesRegex(RuntimeError, "changed during read"):
+                    M.endpoint_proc_file(12, "net/tcp", s.parser, diagnostic=diagnostic)
+                self.assertNotIn("after-path", s.calls)
+                self.assertEqual([c.args[0] for c in s.closed.call_args_list], [7, 8])
+            self.assertEqual(diagnostic["changedFields"], {"net/tcp": {"read-fd": [field]}})
+            self.assertNotIn("volatileLookupFields", diagnostic)
+
+    def test_namespace_path_and_held_fd_are_strict_for_every_field(self):
+        for at, comparison in (("namespace-path-before", "namespace-path-before"),
+                               ("namespace-after-fd", "namespace-fd-after"), ("namespace-path-after", "namespace-path-after")):
+            for field in self.FIELDS:
+                namespace_info = self.info(st_dev=4, st_ino=100)
+                changed = SimpleNamespace(**{**vars(namespace_info), field: getattr(namespace_info, field) + 1})
+                diagnostic = {}
+                with self.subTest(at=at, field=field), self.sources(changes={at: changed}) as s:
+                    with self.assertRaisesRegex(RuntimeError, "Endpoint network namespace changed"):
+                        M.endpoint_proc_file(12, "net/tcp", s.parser, diagnostic=diagnostic)
+                    if at == "namespace-path-before":
+                        s.parser.assert_not_called(); s.closed.assert_called_once_with(8)
+                    else:
+                        self.assertEqual([c.args[0] for c in s.closed.call_args_list], [7, 8])
+                self.assertEqual(diagnostic["changedFields"], {"net/tcp": {comparison: [field]}})
+                self.assertNotIn("volatileLookupFields", diagnostic)
+
+    def test_symlink_directory_fifo_and_socket_table_types_refuse_before_open(self):
+        for kind in (stat.S_IFLNK, stat.S_IFDIR, stat.S_IFIFO, stat.S_IFSOCK):
+            with self.subTest(kind=kind), self.sources(changes={"before": self.info(st_mode=kind | 0o444)}) as s:
+                with self.assertRaisesRegex(RuntimeError, "Ordinary endpoint proc source required"):
+                    M.endpoint_proc_file(12, "net/tcp", s.parser)
+                s.opened.assert_not_called(); s.parser.assert_not_called(); s.closed.assert_not_called()
+            for at in ("opened", "after-fd", "after-path"):
+                with self.subTest(kind=kind, at=at), self.sources(changes={at: self.info(st_mode=kind | 0o444)}) as s:
+                    with self.assertRaisesRegex(RuntimeError, "changed during"):
+                        M.endpoint_proc_file(12, "net/tcp", s.parser)
+        with self.sources(changes={"namespace-opened": self.info(st_mode=stat.S_IFDIR | 0o444)}) as s:
+            with self.assertRaisesRegex(RuntimeError, "network namespace changed before read"):
+                M.endpoint_proc_file(12, "net/tcp", s.parser)
+            s.namespace.stat.assert_not_called(); s.closed.assert_called_once_with(8)
+
+    def test_every_read_open_parse_and_stat_failure_propagates_and_closes_only_owned_fds(self):
+        stages = {"before": [], "namespace-open": [], "namespace-opened": [8], "namespace-path-before": [8],
+                  "open": [8], "opened": [7, 8], "parser-open": [7, 8], "parse": [7, 8], "after-fd": [7, 8],
+                  "after-path": [7, 8], "namespace-after-fd": [7, 8], "namespace-path-after": [7, 8]}
+        for at, closed in stages.items():
+            for error in (FileNotFoundError(2, "PRIVATE"), PermissionError(13, "PRIVATE"), OSError(5, "PRIVATE")):
+                diagnostic = {}
+                with self.subTest(at=at, kind=type(error).__name__), self.sources(errors={at: error}) as s:
+                    with self.assertRaises(type(error)) as raised:
+                        M.endpoint_proc_file(12, "net/tcp", s.parser, diagnostic=diagnostic)
+                    self.assertIs(raised.exception, error)
+                    self.assertEqual(s.calls[-1], at)
+                    self.assertEqual([c.args[0] for c in s.closed.call_args_list], closed)
+                self.assertNotIn("PRIVATE", json.dumps(diagnostic))
+
+    def test_file_close_failure_still_closes_held_namespace(self):
+        with self.sources() as s:
+            original = OSError(5, "Synthetic close failure")
+            s.closed.side_effect = [original, None]
+            with self.assertRaises(OSError) as raised:
+                M.endpoint_proc_file(12, "net/tcp", s.parser)
+            self.assertIs(raised.exception, original)
+            self.assertEqual([c.args[0] for c in s.closed.call_args_list], [7, 8])
+
+    def test_network_parser_bounds_and_malformed_data_still_refuse_and_release_both_fds(self):
+        raw_cases = (b"\xff", b"x" * (1024 * 1024 + 1),
+                     b"header\n0: 0100007F:A028 00000000:0000 0A 0:0 00:0 0 0 0 invalid-inode 1\n")
+        for raw in raw_cases:
+            table = Mock(wraps=io.BytesIO(raw)); diagnostic = {}
+            parser = lambda _: M.endpoint_socket_rows(table, 41000, "tcp", diagnostic=diagnostic)
+            with self.subTest(size=len(raw)), self.sources(parser=parser) as s:
+                with self.assertRaises((RuntimeError, UnicodeDecodeError)):
+                    M.endpoint_proc_file(12, "net/tcp", s.parser, diagnostic=diagnostic)
+                self.assertEqual(s.calls[-1], "parse")
+                self.assertEqual([c.args[0] for c in s.closed.call_args_list], [7, 8])
+            table.read.assert_called_once_with(1024 * 1024 + 1)
+            self.assertNotIn("invalid-inode", json.dumps(diagnostic))
+
+    def test_environ_retains_all_original_identity_checks_without_namespace_reads(self):
+        for at, comparison in (("opened", "open"), ("after-fd", "read-fd"), ("after-path", "read-path")):
+            for field in self.FIELDS:
+                diagnostic = {}
+                with self.subTest(at=at, field=field), self.sources("environ", changes={at: self.info(**{field: getattr(self.info(), field) + 1})}) as s:
+                    with self.assertRaisesRegex(RuntimeError, "changed during"):
+                        M.endpoint_proc_file(12, "environ", s.parser, diagnostic=diagnostic)
+                    s.namespace.stat.assert_not_called()
+                    s.closed.assert_called_once_with(7)
+                    self.assertFalse(any(name.startswith("namespace") for name in s.calls))
+                self.assertEqual(diagnostic["changedFields"], {"environ": {comparison: [field]}})
+                self.assertNotIn("volatileLookupFields", diagnostic)
+
+    def test_diagnostics_keep_only_named_already_read_fields_scoped_to_each_table(self):
+        diagnostic = {}
+        for part in ("net/tcp", "net/tcp6"):
+            with self.sources(part, changes={"after-path": self.info(st_mtime_ns=123)}) as s:
+                M.endpoint_proc_file(12, part, s.parser, diagnostic=diagnostic)
+        self.assertEqual(diagnostic["volatileLookupFields"], {
+            "net/tcp": {"read-path": ["st_mtime_ns"]}, "net/tcp6": {"read-path": ["st_mtime_ns"]}})
+        self.assertLess(len(json.dumps(diagnostic)), 512)
+        with patch.object(M, "Path") as paths, patch.object(M.os, "open") as opened:
+            for pid, part in ((True, "net/tcp"), (1, "net/tcp"), (12, "net/udp"), (12, "cmdline"), (12, "../net/tcp")):
+                with self.subTest(pid=pid, part=part), self.assertRaises(RuntimeError):
+                    M.endpoint_proc_file(pid, part, lambda _: self.fail("No parser"))
+            paths.assert_not_called(); opened.assert_not_called()
+
+    def test_procfs_exception_cannot_reach_ordinary_read_or_acceptance_functions(self):
+        tree = ast.parse(Path(M.__file__).read_text())
+        callers = {n.name for n in tree.body if isinstance(n, (ast.FunctionDef, ast.ClassDef))
+                   and any(isinstance(c, ast.Call) and ast.unparse(c.func) == "endpoint_proc_identity" for c in ast.walk(n))}
+        self.assertEqual(callers, {"endpoint_proc_file"})
+        for name in ("read", "stamp", "outcome", "mcp_protocol_receipt", "native_session"):
+            node = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == name)
+            self.assertNotIn("volatileLookupFields", ast.unparse(node))
+
+    def test_ordinary_file_timestamp_guards_still_refuse(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary).resolve() / "owned-ordinary-file"
+            path.write_bytes(b"unchanged")
+            before = path.stat()
+            for field in (("st_mtime_ns",) if os.name == "nt" else ("st_mtime_ns", "st_ctime_ns")):
+                changed = SimpleNamespace(**{**{name: getattr(before, name) for name in self.FIELDS},
+                                             field: getattr(before, field) + 1})
+                with self.subTest(field=field), patch.object(M.os, "fstat", return_value=changed), \
+                     self.assertRaisesRegex(RuntimeError, "File replaced during open"):
+                    M.read(path)
+            self.assertEqual(path.read_bytes(), b"unchanged")
+
+    def own_proc_lookup(self, family):
+        # Test only this Python process, its held FDs and its own loopback socket.
+        kind = M.socket.AF_INET if family == "tcp" else M.socket.AF_INET6
+        with M.socket.socket(kind, M.socket.SOCK_STREAM) as listener:
+            listener.bind(("127.0.0.1" if family == "tcp" else "::1", 0)); listener.listen(1)
+            port = listener.getsockname()[1]; pid = os.getpid(); path = Path(f"/proc/{pid}/net/{family}")
+            with ExitStack() as held:
+                ns_fd = os.open(f"/proc/{pid}/ns/net", os.O_RDONLY | os.O_CLOEXEC); held.callback(os.close, ns_fd)
+                fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC); held.callback(os.close, fd)
+                original, ns_original = os.fstat(fd), os.fstat(ns_fd)
+                socket_inode = os.readlink(f"/proc/{pid}/fd/{listener.fileno()}")
+                observed = []
+                def parser(stream):
+                    opened = os.fstat(stream.fileno())
+                    rows = M.endpoint_socket_rows(stream, port, family)
+                    # Bounded real lookup churn, not a harness delay/tolerance or mocked stat.
+                    for _ in range(4096):
+                        fresh = path.lstat()
+                        if (fresh.st_mtime_ns, fresh.st_ctime_ns) != (opened.st_mtime_ns, opened.st_ctime_ns):
+                            observed.append(fresh)
+                            break
+                    self.assertTrue(observed, "Actual kernel lookup timestamp change was not reproduced")
+                    self.assertEqual(M.stamp(opened)[:7], M.stamp(observed[0])[:7])
+                    self.assertEqual(M.stamp(opened), M.stamp(os.fstat(stream.fileno())))
+                    return rows
+                diagnostic = {}
+                rows = M.endpoint_proc_file(pid, "net/" + family, parser, diagnostic=diagnostic)
+                self.assertEqual(len(rows), 1)
+                self.assertEqual((rows[0]["state"], rows[0]["uid"], "socket:[" + rows[0]["inode"] + "]"),
+                                 ("0A", os.getuid(), socket_inode))
+                self.assertEqual(M.stamp(original), M.stamp(os.fstat(fd)))
+                self.assertEqual(M.stamp(ns_original), M.stamp(os.fstat(ns_fd)))
+                self.assertNotIn("changedFields", diagnostic)
+                self.assertEqual(set(diagnostic["volatileLookupFields"]["net/" + family]["read-path"]),
+                                 {"st_mtime_ns", "st_ctime_ns"})
+            for closed in (fd, ns_fd):
+                with self.assertRaises(OSError): os.fstat(closed)
+
+    @unittest.skipUnless(sys.platform == "linux", "Own-process Linux procfs required")
+    def test_actual_own_proc_tcp_volatile_lookups_keep_held_fd_namespace_and_socket(self):
+        self.own_proc_lookup("tcp")
+
+    @unittest.skipUnless(sys.platform == "linux" and M.socket.has_ipv6, "Own-process Linux IPv6 procfs required")
+    def test_actual_own_proc_tcp6_volatile_lookups_keep_held_fd_namespace_and_socket(self):
+        self.own_proc_lookup("tcp6")
+
+
 class RootEndpointDiagnosticTests(unittest.TestCase):
     def process(self):
         return {"pid": 12, "startTime": "100", "parentPid": 11, "uids": [M.UID] * 4,
@@ -5663,7 +5924,7 @@ class RootEndpointDiagnosticTests(unittest.TestCase):
         def require(value, message):
             if not value:
                 self.assertEqual(message, str(original)); raise original
-        for part in ("net/tcp", "net/tcp6"):
+        for part in ("environ",):
             diagnostic = {}; parser = Mock(); path.lstat.reset_mock()
             with self.subTest(part=part), patch.object(M, "Path", return_value=path), \
                  patch.multiple(M.os, O_NOFOLLOW=0x20000, O_NONBLOCK=0x800, O_CLOEXEC=0x80000, create=True), \
@@ -5672,7 +5933,8 @@ class RootEndpointDiagnosticTests(unittest.TestCase):
                 with self.assertRaises(RuntimeError) as caught:
                     M.endpoint_proc_file(12, part, parser, diagnostic=diagnostic)
             self.assertIs(caught.exception, original)
-            self.assertEqual(diagnostic, {"stage": "proc-file", "assertion": "open-identity", "source": part})
+            self.assertEqual(diagnostic, {"stage": "proc-file", "assertion": "open-identity", "source": part,
+                                          "changedFields": {part: {"open": ["st_ino"]}}})
             path.lstat.assert_called_once_with(); opened.assert_called_once(); fstat.assert_called_once_with(7)
             parser.assert_not_called(); closed.assert_called_once_with(7)
 
@@ -5718,7 +5980,8 @@ class RootEndpointDiagnosticTests(unittest.TestCase):
 
     def test_changed_pid_start_uid_parent_or_image_before_read_never_reads_proc_sources(self):
         for field, value in (("pid", 14), ("startTime", "101"), ("parentPid", 99),
-                             ("uids", [0] * 4), ("kernelImageSha256", "b" * 64)):
+                             ("uids", [0] * 4), ("kernelImageSha256", "b" * 64),
+                             ("executable", "/other/creator-hub"), ("image", {"st_ino": "16"})):
             changed = {**self.process(), field: value}
             with self.subTest(field=field), self.process_sources(records=[changed]) as (process, _, files):
                 captured = M.endpoint_process_snapshot(process, 41000, object(), object())
@@ -5726,11 +5989,13 @@ class RootEndpointDiagnosticTests(unittest.TestCase):
 
     def test_identity_change_after_read_keeps_observations_explicitly_unverified(self):
         process = self.process()
-        with self.process_sources(records=[process, {**process, "startTime": "200"}]) as (process, _, _):
-            value = M.endpoint_process_snapshot(process, 41000, object(), object())
-        self.assertFalse(value["verified"]); self.assertFalse(value["complete"])
-        self.assertEqual(value["unavailable"], {"type": "RuntimeError", "stage": "process",
-                                              "assertion": "identity-after", "source": "process"})
+        for field, changed in (("pid", 14), ("startTime", "200"), ("parentPid", 99), ("uids", [0] * 4),
+                               ("kernelImageSha256", "b" * 64), ("executable", "/other/creator-hub"), ("image", {"st_ino": "16"})):
+            with self.subTest(field=field), self.process_sources(records=[process, {**process, field: changed}]) as (process, _, _):
+                value = M.endpoint_process_snapshot(process, 41000, object(), object())
+            self.assertFalse(value["verified"]); self.assertFalse(value["complete"])
+            self.assertEqual(value["unavailable"], {"type": "RuntimeError", "stage": "process",
+                                                  "assertion": "identity-after", "source": "process"})
 
     def test_descriptor_bound_and_read_refusals_keep_fixed_stage_without_extra_queries(self):
         for count, error, assertion in ((257, None, "fd-bound"),
@@ -5785,7 +6050,10 @@ class RootEndpointDiagnosticTests(unittest.TestCase):
                 else:
                     self.assertEqual(M.endpoint_proc_file(12, "environ", M.inspector_environment,
                                                          diagnostic=diagnostic)["TAURI_WEBVIEW_AUTOMATION"], "true")
-                self.assertEqual(diagnostic, {"stage": "proc-file", "assertion": "read-identity", "source": "environ"})
+                expected = {"stage": "proc-file", "assertion": "read-identity", "source": "environ"}
+                if changed:
+                    expected["changedFields"] = {"environ": {"read-path": ["st_ino"]}}
+                self.assertEqual(diagnostic, expected)
                 self.assertTrue(opened.call_args.args[1] & os.O_NOFOLLOW)
                 closed.assert_called_once_with(7)
         with self.assertRaises(RuntimeError): M.endpoint_proc_file(12, "cmdline", lambda _: None)

@@ -5,6 +5,7 @@ update. A successor is observed, never launched by this controller. Import and
 pure validation use only the Python 3.10 standard library.
 """
 import base64
+from contextlib import ExitStack
 import ctypes
 import errno
 import hashlib
@@ -1531,6 +1532,20 @@ def inspector_environment(stream):
     return {name: found.get(name) for name in INSPECTOR_ENV_KEYS}
 
 
+def endpoint_proc_identity(before, after, diagnostic, comparison, *, net_lookup=False):
+    fields = ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns")
+    changed = [name for name, old, new in zip(fields, stamp(before), stamp(after)) if old != new]
+    # proc_get_inode assigns fresh timestamps on each forced proc-net lookup.
+    # A held FD and an open nsfs handle do not have that lookup exception.
+    volatile = [name for name in changed if net_lookup and name in ("st_mtime_ns", "st_ctime_ns")]
+    if volatile:
+        diagnostic.setdefault("volatileLookupFields", {}).setdefault(diagnostic["source"], {})[comparison] = volatile
+    changed = [name for name in changed if name not in volatile]
+    if changed:
+        diagnostic.setdefault("changedFields", {}).setdefault(diagnostic["source"], {})[comparison] = changed
+    return not changed
+
+
 def endpoint_proc_file(pid, part, parser, *, diagnostic=None):
     diagnostic = {} if diagnostic is None else diagnostic
     diagnostic.update(stage="proc-file", assertion="fixed-source")
@@ -1540,20 +1555,41 @@ def endpoint_proc_file(pid, part, parser, *, diagnostic=None):
     before = path.lstat()
     diagnostic["assertion"] = "ordinary"
     require(stat.S_ISREG(before.st_mode), "Ordinary endpoint proc source required")
-    diagnostic["assertion"] = "open"
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
-    try:
+    network = part in ("net/tcp", "net/tcp6")
+    with ExitStack() as held:
+        if network:
+            diagnostic["assertion"] = "namespace-open"
+            namespace = Path(f"/proc/{pid}/ns/net")
+            # Follow only this fixed namespace magic link; open before stat so
+            # nsfs retains its inode rather than recreating an unheld one.
+            namespace_fd = os.open(namespace, os.O_RDONLY | os.O_CLOEXEC)
+            held.callback(os.close, namespace_fd)
+            diagnostic["assertion"] = "namespace-fstat"
+            namespace_before = os.fstat(namespace_fd)
+            diagnostic["assertion"] = "namespace-identity-before"
+            require(stat.S_ISREG(namespace_before.st_mode)
+                    and endpoint_proc_identity(namespace_before, namespace.stat(), diagnostic, "namespace-path-before"),
+                    "Endpoint network namespace changed before read")
+        diagnostic["assertion"] = "open"
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+        held.callback(os.close, fd)
         diagnostic["assertion"] = "open-identity"
-        require(stamp(os.fstat(fd)) == stamp(before), "Endpoint proc source changed during open")
+        opened = os.fstat(fd)
+        require(endpoint_proc_identity(before, opened, diagnostic, "open", net_lookup=network), "Endpoint proc source changed during open")
         diagnostic["assertion"] = "parser-open"
         with os.fdopen(fd, "rb", closefd=False) as stream:
             diagnostic["assertion"] = "parse"
             value = parser(stream)
         diagnostic.update(stage="proc-file", assertion="read-identity")
-        require(stamp(os.fstat(fd)) == stamp(before) and stamp(path.lstat()) == stamp(before), "Endpoint proc source changed during read")
+        require(endpoint_proc_identity(opened, os.fstat(fd), diagnostic, "read-fd")
+                and endpoint_proc_identity(before, path.lstat(), diagnostic, "read-path", net_lookup=network),
+                "Endpoint proc source changed during read")
+        if network:
+            diagnostic["assertion"] = "namespace-identity-after"
+            require(endpoint_proc_identity(namespace_before, os.fstat(namespace_fd), diagnostic, "namespace-fd-after")
+                    and endpoint_proc_identity(namespace_before, namespace.stat(), diagnostic, "namespace-path-after"),
+                    "Endpoint network namespace changed during read")
         return value
-    finally:
-        os.close(fd)
 
 
 def endpoint_socket_rows(stream, port, family, *, diagnostic=None):
