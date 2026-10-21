@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import sys
+import tempfile
 from types import ModuleType, SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
@@ -59,6 +60,7 @@ def fixture():
     profile_raw, api_raw = M.encoded(profile), M.encoded({'original': True})
     request = dict(context=environment(), scenario=M.SCENARIO, profile=pin(profile_raw), api=pin(api_raw),
         sources={name: pin(b'source') for name in (*M.EXTRA_SOURCES, 'native-linux-production-016-update.py')})
+    u.source_names = Mock(return_value=tuple(request['sources']))
     before = {name: {**pin(b'keep'), 'dev': 1, 'ino': index, 'uid': M.UID, 'gid': M.UID, 'mode': 0o600}
               for index, name in enumerate(M.PROTECTED, 1)}
     before[M.RETENTION].update(pin(M.RETENTION_BYTES))
@@ -497,6 +499,200 @@ class ActivationPrimitiveTests(unittest.TestCase):
         M.continuation_proof(value)
         for key in value:
             with self.subTest(key=key), self.assertRaises(RuntimeError): M.continuation_proof({**value, key: None})
+
+
+class OuterProvisioningTests(unittest.TestCase):
+    def profile(self):
+        p = M.launcher_contract()
+        return dict(flatpakLauncher=p, artifacts={'flatpak16': copy.deepcopy(p['producer'])})
+
+    def test_profile_requires_supplied_exact_original_not_a_relabelled_package(self):
+        p = self.profile()
+        M.validate_launcher_profile(p)
+        M.validate_source_api(p, dict(sha=M.SOURCE_COMMIT, tree=dict(sha=M.SOURCE_TREE)))
+        for mutate in (lambda p: p.pop('flatpakLauncher'),
+                       lambda p: p['flatpakLauncher'].update(version='0.1.17'),
+                       lambda p: p['artifacts']['flatpak16'].update(run=1),
+                       lambda p: p['flatpakLauncher']['source'].update(sourceTree='0' * 40)):
+            p = self.profile(); mutate(p)
+            with self.assertRaises((RuntimeError, KeyError)): M.validate_launcher_profile(p)
+        for value in ({}, dict(sha=M.SOURCE_COMMIT, tree=dict(sha='0' * 40))):
+            with self.assertRaises(RuntimeError): M.validate_source_api(self.profile(), value)
+
+    def test_sealed_handoff_rechecks_full_outer_closure_not_only_adapter_imports(self):
+        f = fixture()
+        f.u.source_names.return_value += ('missing-transitive.py',)
+        with mocked_context(f.env), self.assertRaises(RuntimeError): f.h.recheck()
+        f.u.bound.assert_not_called()
+
+    def test_source_copy_checks_all_members_before_writing_and_never_invents_bytes(self):
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root).resolve(); source, target = root / 'source', root / 'target'
+            source.mkdir(); target.mkdir(); folder = source / 'flatpak-source'; folder.mkdir()
+            p = self.profile()
+            for name in p['flatpakLauncher']['source']['files']:
+                file = folder / name; file.parent.mkdir(parents=True, exist_ok=True); file.write_bytes(b'exact-fixture')
+            u = SimpleNamespace(bound=Mock(return_value=b'exact-fixture'), write=Mock())
+            M.copy_launcher_source(u, source, target, p)
+            self.assertEqual(u.bound.call_count, 12); self.assertEqual(u.write.call_count, 12)
+            self.assertTrue(all(c.args[1] == b'exact-fixture' for c in u.write.call_args_list))
+            (folder / 'foreign').write_bytes(b'not allowed')
+            with self.assertRaises(RuntimeError): M.launcher_sources(u, source, p)
+            (folder / 'foreign').unlink(); (folder / 'LICENSE').unlink()
+            with self.assertRaises(RuntimeError): M.launcher_sources(u, source, p)
+
+    def test_pure_launcher_validation_uses_only_original_source_api_files_not_other_workflow(self):
+        p = self.profile(); answer = {k: p['flatpakLauncher'][k] for k in ('source', 'commit')}
+        u = SimpleNamespace(parse=json.loads, run_tool=Mock(return_value=M.encoded(answer)), bound=Mock())
+        sealed = dict(nodeImage=pin(b'node'), sources={n: pin(b'source') for n in ('native-linux-production-016-flatpak.cjs', 'flatpak-native-production-016.cjs')})
+        with patch.object(M, 'launcher_sources'):
+            self.assertEqual(M.stage_launcher(u, Path('/inputs'), p,
+                {'flatpakSource': dict(sha=M.SOURCE_COMMIT, tree=dict(sha=M.SOURCE_TREE))}, {'CONTROLLER_NODE': '/node'}, sealed), p['flatpakLauncher'])
+        self.assertEqual(u.bound.call_count, 6)
+        script = u.run_tool.call_args.args[0][2]
+        self.assertIn('lane.flatpakAPI(', script); self.assertIn('lane.flatpakFiles(', script)
+        for forbidden in ('lane.preflight(', 'lane.collect(', 'lane.portableFiles(', 'lane.admission('): self.assertNotIn(forbidden, script)
+        u.run_tool.return_value = b'{}'
+        with patch.object(M, 'launcher_sources'), self.assertRaises(RuntimeError):
+            M.stage_launcher(u, Path('/inputs'), p, {'flatpakSource': dict(sha=M.SOURCE_COMMIT, tree=dict(sha=M.SOURCE_TREE))}, {'CONTROLLER_NODE': '/node'}, sealed)
+
+    def test_policy_is_one_named_user_two_exact_readonly_commands_no_shell_or_wildcard(self):
+        body = M.helper_policy().decode()
+        self.assertEqual(body.count('NOPASSWD:'), 1)
+        self.assertEqual(body, 'creator-polkit-fixture ALL=(root) NOPASSWD: ' + ', '.join(' '.join(c) for c in M.helper_commands()) + '\n')
+        for forbidden in ('*', 'SETENV', '/bin/sh', 'root-proxy-snapshot,', 'uid1001', 'ALL,'):
+            self.assertNotIn(forbidden, body)
+
+    def install_context(self):
+        u = SimpleNamespace(BASE=M.BASE, USER='creator-polkit-fixture', pin=pin, parse=json.loads,
+            admission=Mock(return_value=M.SCENARIO), protected_ancestry=Mock(), write=Mock(), save=Mock(),
+            bound=Mock(return_value=b'original-reader'), run_tool=Mock(return_value=b''),
+            clean_context=Mock(return_value={'GITHUB_SHA': 'a' * 40}), read=Mock())
+        sealed = dict(scenario=M.SCENARIO, context={'GITHUB_SHA': 'a' * 40}, sources={
+            'native-linux-flatpak-activation-observer.py': pin(b'original-reader')})
+        u.read.return_value = M.encoded(dict(harnessSource='a' * 40, context=M.CONTEXT, inventoryProbed=True, codeSha256=pin(b'original-reader')['sha256']))
+        env = {'GITHUB_SHA': 'a' * 40}
+        stack = ExitStack()
+        stack.enter_context(patch.object(M.os, 'getuid', return_value=0, create=True))
+        stack.enter_context(patch.object(M.os, 'geteuid', return_value=0, create=True))
+        stack.enter_context(patch.object(M.os.path, 'lexists', return_value=False))
+        stack.enter_context(patch.object(Path, 'mkdir'))
+        return u, env, sealed, stack
+
+    def test_root_helper_setup_rejects_foreign_authority_existing_policy_and_uid_before_writes(self):
+        for kind in ('uid', 'scenario', 'source', 'existing', 'gui', 'other-workflow'):
+            u, env, sealed, stack = self.install_context()
+            with self.subTest(kind=kind), stack:
+                if kind == 'uid': stack.enter_context(patch.object(M.os, 'getuid', return_value=1001))
+                if kind == 'scenario': sealed['scenario'] = 'portable-approve'
+                if kind == 'source': sealed['context']['GITHUB_SHA'] = 'b' * 40
+                if kind == 'existing': stack.enter_context(patch.object(M.os.path, 'lexists', return_value=True))
+                if kind == 'gui': env['DISPLAY'] = ':1'
+                if kind == 'other-workflow': env['EXECUTION_REQUEST'] = 'true'
+                with self.assertRaises(RuntimeError): M.install_observer(u, env, sealed)
+                u.write.assert_not_called(); u.run_tool.assert_not_called()
+
+    def test_setup_uses_explicit_modes_bounded_unprivileged_probe_and_preserves_first_failure(self):
+        u, env, sealed, stack = self.install_context()
+        with stack: M.install_observer(u, env, sealed)
+        self.assertEqual([c.args[2] for c in u.write.call_args_list], [0o444, 0o440])
+        calls = u.run_tool.call_args_list
+        self.assertEqual(calls[0].args[0], ['/usr/sbin/visudo', '-c', '-f', str(M.OBSERVER_POLICY)])
+        self.assertEqual(calls[1].args[0][:6], ['/usr/sbin/runuser', '--user', 'creator-polkit-fixture', '--', '/usr/bin/env', '-i'])
+        self.assertEqual(calls[1].args[0][-1], 'flatpak-probe')
+        self.assertEqual(calls[1].kwargs, dict(limit=32768, timeout=15))
+        self.assertTrue(u.save.call_args.args[1]['probePassed'])
+        for at in (0, 1):
+            u, env, sealed, stack = self.install_context(); error = RuntimeError('original refusal')
+            u.run_tool.side_effect = [b''] * at + [error]; u.save.side_effect = ValueError('receipt failure')
+            with stack, self.assertRaisesRegex(RuntimeError, 'original refusal'): M.install_observer(u, env, sealed)
+            self.assertFalse(u.save.call_args.args[1]['probePassed'])
+            self.assertEqual(u.run_tool.call_count, at + 1)
+
+    def test_probe_rejects_gui_foreign_workflow_wrong_uid_before_root_exchange(self):
+        f = fixture()
+        for name, value in (('DISPLAY', ':1'), ('EXECUTION_REQUEST', 'true'), ('DBUS_SESSION_BUS_ADDRESS', 'bus')):
+            with mocked_context(f.env), patch.object(M.F, 'root_exchange') as exchange, self.assertRaises(RuntimeError):
+                M.observer_probe(f.u, {name: value}, f.request)
+            exchange.assert_not_called()
+
+    def test_headless_probe_uses_exact_context_and_response_nonce_deadline_with_no_input_authority(self):
+        for failure in (None, 'response', 'exit', 'stderr', 'expired', 'validation'):
+            f = fixture(); f.u.save = Mock(); f.u.bound.return_value = b'pass'
+            module = ModuleType('probe_fixture')
+            context = SimpleNamespace(uid=M.UID, runtime=M.ROOT / 'runtime',
+                probe_operation='flatpak-proxy-inventory-uid21314', probe_command='root-inventory-probe-update016')
+            module.named_context = Mock(return_value=context)
+            module.protected_tool, module.root_process, module.probe_request, module.validate_probe = Mock(), Mock(return_value={}), Mock(), Mock()
+            module.PROXY_TOOL = M.OBSERVER_TOOL
+            if failure == 'validation': module.validate_probe.side_effect = RuntimeError('snapshot refused')
+            def exchange(tool, operation, raw, deadline):
+                self.assertEqual((tool, operation), (M.OBSERVER_TOOL, context.probe_command))
+                request = json.loads(raw)
+                self.assertEqual(request['sequence'], 1); self.assertRegex(request['nonce'], '^[a-f0-9]{64}$')
+                self.assertEqual(request['operation'], context.probe_operation)
+                if failure == 'response': request['nonce'] = '0' * 64
+                return SimpleNamespace(returncode=1 if failure == 'exit' else 0, stderr=b'fail' if failure == 'stderr' else b'',
+                    stdout=M.encoded(dict(ok=True, request=request, snapshot={})))
+            with mocked_context(f.env), patch.object(M, 'ModuleType', return_value=module), \
+                 patch.object(M.F, 'root_exchange', side_effect=exchange) as rpc, \
+                 patch.object(M.time, 'monotonic_ns', side_effect=[10, 11, 10**12 if failure == 'expired' else 12]):
+                if failure:
+                    with self.assertRaises(RuntimeError): M.observer_probe(f.u, {'GITHUB_SHA': 'a' * 40}, f.request)
+                    f.u.save.assert_not_called()
+                else:
+                    M.observer_probe(f.u, {'GITHUB_SHA': 'a' * 40}, f.request)
+                    proof = f.u.save.call_args.args[1]
+                    self.assertTrue(proof['readOnly']); self.assertFalse(proof['inputPermitted']); self.assertFalse(proof['authorityGranted'])
+                    self.assertEqual(module.protected_tool.call_count, 2)
+                self.assertEqual(rpc.call_count, 1)
+
+    def test_launcher_install_only_uses_private_home_original_bundle_and_observed_runtime(self):
+        f = fixture(); f.u.save = Mock(); p = self.profile()
+        f.u.read.side_effect = None
+        proof = dict(scenario=M.SCENARIO, harnessSource='a' * 40, installed=True, probePassed=True,
+            commands=[list(c) for c in M.helper_commands()], tool=f.request['sources']['native-linux-flatpak-activation-observer.py'], policy=pin(M.helper_policy()))
+        f.u.read.return_value = M.encoded(proof)
+        metadata = ('[Application]\nname=com.creatorworks.hub\nruntime=org.gnome.Platform/x86_64/50\n'
+                    'sdk=org.gnome.Sdk/x86_64/50\ncommand=creator-hub-flatpak-activate\n[Context]\n'
+                    'sockets=wayland;fallback-x11;\n[Session Bus Policy]\n' + M.F.NAME + '=talk\n').encode()
+        for failure in (None, 'runtime', 'launcher', 'permissions', 'existing', 'policy'):
+            f.u.save.reset_mock(); calls = []
+            def command(args, *, env, timeout):
+                calls.append(args)
+                self.assertEqual(env['HOME'], str(M.HOME)); self.assertEqual(env['FLATPAK_USER_DIR'], str(M.ROOT / 'installation'))
+                self.assertEqual(args[:2], ['/usr/bin/flatpak', '--user'])
+                if args[2:4] == ['remote-info', '--show-ref']: return M.RUNTIME.encode()
+                if args[2:4] == ['remote-info', '--show-commit']: return b'd' * 64
+                if args[2:4] == ['info', '--show-commit']:
+                    return ((b'e' if failure == 'runtime' else b'd') * 64 if args[-1] == M.RUNTIME else
+                            (b'0' * 64 if failure == 'launcher' else M.COMMIT.encode()))
+                if args[2:4] == ['info', '--show-metadata']: return metadata + (b'[Foreign]\nkey=true\n' if failure == 'permissions' else b'')
+                return b''
+            altered = copy.deepcopy(proof)
+            if failure == 'policy': altered['policy']['sha256'] = '0' * 64
+            f.u.read.return_value = M.encoded(altered)
+            with mocked_context(f.env), patch.object(M.os.path, 'lexists', return_value=failure == 'existing'), patch.object(M.F, 'command', side_effect=command):
+                if failure:
+                    with self.assertRaises(RuntimeError): M.install_launcher(f.u, f.env, f.request, p)
+                    f.u.save.assert_not_called()
+                else:
+                    M.install_launcher(f.u, f.env, f.request, p)
+                    self.assertEqual(f.u.save.call_args.args[1], installed())
+                    self.assertIn(str(M.BASE / 'inputs/members/flatpak16' / M.BUNDLE), calls[-3])
+                if failure in ('existing', 'policy'): self.assertEqual(calls, [])
+
+    def test_evidence_exports_only_bounded_lane_files_never_user_home_or_native_host(self):
+        with tempfile.TemporaryDirectory() as root:
+            base = Path(root).resolve(); evidence = base / 'result/flatpak-evidence'; evidence.mkdir(parents=True)
+            for name in ('report.json', 'cold.stdout', 'warm.stderr', 'cold-disclosure-gtk.json', 'warm-activation-observer-gtk.json'):
+                (evidence / name).write_bytes(b'{}')
+            u = SimpleNamespace(BASE=base)
+            with patch.object(M, 'EVIDENCE', evidence):
+                names = M.evidence_names(u)
+                self.assertEqual(len(names), 8)
+                (evidence / 'settings.json').write_bytes(b'private')
+                with self.assertRaises(RuntimeError): M.evidence_names(u)
 
 
 if __name__ == '__main__':

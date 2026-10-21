@@ -654,7 +654,7 @@ class InventoryRpcTests(unittest.TestCase):
     def test_update_cohort_uses_real_finite_scenarios_without_changing_migration_wire(self):
         self.assertEqual(M.INVENTORY_COHORTS["migration"], M.SCENARIOS)
         self.assertEqual(M.INVENTORY_COHORTS["update"], (
-            "deb-native-cancel", "deb-auth-cancel", "deb-approve", "portable-native-cancel", "portable-approve"))
+            "deb-native-cancel", "deb-auth-cancel", "deb-approve", "portable-native-cancel", "portable-approve", "portable-flatpak-approve"))
         for scenario in M.INVENTORY_COHORTS["update"]:
             with self.subTest(scenario=scenario), inventory_rpc_fixture(cohort="update", scenario=scenario) as f:
                 first = f.client.sample(f.wait); second = f.client.sample(f.wait)
@@ -3729,6 +3729,14 @@ class ControllerTests(unittest.TestCase):
         self.assertIn("= " + M.SDK_LOCK, workflow)
         self.assertIn('digest(read_file(source / "package-lock.json", 2 * 1024 * 1024)) == SDK_LOCK',
                       (HERE / "native-linux-production-016-migration.py").read_text())
+
+
+class CombinedInventoryContract(unittest.TestCase):
+    def test_new_case_is_only_in_updater_cohort_and_original_cases_stay_present(self):
+        self.assertEqual(M.INVENTORY_COHORTS['update'], ('deb-native-cancel', 'deb-auth-cancel', 'deb-approve',
+            'portable-native-cancel', 'portable-approve', 'portable-flatpak-approve'))
+        for name, values in M.INVENTORY_COHORTS.items():
+            if name != 'update': self.assertNotIn('portable-flatpak-approve', values)
 
 
 if __name__ == "__main__":

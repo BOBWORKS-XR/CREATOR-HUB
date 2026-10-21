@@ -1464,8 +1464,9 @@ class Pure(unittest.TestCase):
         result = subprocess.run([sys.executable, "-I", "-S", "-B", "-c", "import runpy; runpy.run_path(" + repr(str(HERE / "native-linux-production-016-update.py")) + ",run_name='import_only')"], capture_output=True)
         self.assertEqual(result.returncode, 0, result.stderr.decode()); self.assertEqual(result.stdout, b"")
 
-    def test_all_five_and_only_five_scenarios(self):
-        self.assertEqual(len(M.SCENARIOS), 5)
+    def test_five_original_scenarios_and_one_closed_combined_scenario(self):
+        self.assertEqual(M.SCENARIOS, ('deb-native-cancel', 'deb-auth-cancel', 'deb-approve',
+            'portable-native-cancel', 'portable-approve', 'portable-flatpak-approve'))
         for scenario in M.SCENARIOS:
             env = environment(); env["UPDATE_SCENARIO"] = scenario
             self.assertEqual(M.admission(env, system="linux", machine="x86_64"), scenario)
@@ -2303,6 +2304,12 @@ process.stdout.write(JSON.stringify({error,calls,phases,signals,abortEvents,
                         "oldRetirementHelperRestored": scenario == "deb-approve"}
             if scenario.endswith("approve"):
                 evidence.update(dict.fromkeys(("oldNormalExit", "automaticRestartObserved", "installed17Verified", "fresh17UiVersion", "directPagesObserved"), True)); evidence["automaticSuccessor"] = {"pid": 2}
+            if scenario == M.COMBINED:
+                adapter = M.combined_adapter()
+                evidence['flatpakContinuation'] = dict(scope=adapter.SCOPE, launcherVersion='0.1.16', hostVersion='0.1.17',
+                    combinedAccepted=False, releaseReady=False, nativeHelperRemovalAccepted=False,
+                    **dict.fromkeys(('coldActivationAccepted', 'warmActivationAccepted', 'normalCloseObserved',
+                                    'launcherRemoved', 'nativeHostRetained', 'settingsRetained'), True))
             if scenario in M.HTML_SCENARIOS:
                 phases = ("htmlWebDriver", "successorHtmlWebDriver") if scenario == "deb-approve" else ("htmlWebDriver",)
                 for phase in phases:
@@ -6596,6 +6603,322 @@ class RootEndpointDiagnosticTests(unittest.TestCase):
         diagnostics = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "RootEndpointDiagnostics")
         calls = [ast.unparse(n.func) for n in ast.walk(diagnostics) if isinstance(n, ast.Call)]
         self.assertFalse(set(calls) & {"wait", "time.sleep", "subprocess.Popen", "os.kill", "os.chmod", "self.child.terminate", "self.child.kill"})
+
+
+class ColdFlatpakPageContracts(unittest.TestCase):
+    # These excerpts are unchanged between the bound private75a target and base9a.
+    SOURCE_CONTRACTS = {
+        'src/app.js': (
+            "if (directFeatures) {\n    current = 'projects';",
+            "const pending = await invoke('pending_hosted_restore');\n      if (!pending?.length) return;",
+            "document.querySelector('.footer-version').textContent = window.CreatorHubNative.version;"),
+        'src/index.html': ('<footer><span>Creator Hub <span class="footer-version">Preview</span></span>',),
+        'src-tauri/src/hosted_restore.rs': (
+            'fs::remove_file(path).map_err(|_| "Cannot claim the saved app views. Nothing was reopened.")?;',),
+        'src-tauri/src/launch.rs': (
+            'if flag == "--flatpak-activate"\n'
+            '                && cfg!(all(\n'
+            '                    target_os = "linux",\n'
+            '                    feature = "experimental-flatpak-host",\n'
+            '                    feature = "integrated-features"\n'
+            '                )) =>\n'
+            '        {\n'
+            '            Ok(View::Hub)\n'
+            '        }',),
+    }
+
+    def test_source_contract_is_projects_after_consumed_restore_and_native_footer_not_feed(self):
+        for name, excerpts in self.SOURCE_CONTRACTS.items():
+            source = (HERE.parent / name).read_text(encoding='utf8')
+            for excerpt in excerpts:
+                with self.subTest(source=name, excerpt=excerpt): self.assertIn(excerpt, source)
+        source = (HERE.parent / 'src-tauri/src/hosted_restore.rs').read_text()
+        self.assertLess(source.index(self.SOURCE_CONTRACTS['src-tauri/src/hosted_restore.rs'][0]),
+                        source.index('Ok(record.views)'))
+        source = (HERE.parent / 'src/app.js').read_text()
+        start = source.index('async function restoreHostedViews()')
+        self.assertLess(source.index('if (!pending?.length) return;', start), source.index('selectView(app);', start))
+
+    @contextmanager
+    def cold_surface(self, fault=None, *, footer_showing=False):
+        state = SimpleNamespace(view='projects', menu=False, home_reads=0, events=[], checks=0)
+        bus, x11, native = Mock(), Mock(), Mock()
+        native.bitmap.return_value = dict(nonblank=True, windowOnly=True)
+        record = dict(pid=99, startTime='31', kernelImageSha256='a' * 64)
+        review = dict(portable={'16': dict(generation='a'), '17': dict(manifest={})})
+        version, wrapper, footer = Mock(), Mock(), Mock()
+        version.get_attributes.return_value = {'tag': 'span'}
+        wrapper.get_attributes.return_value = {'tag': 'span'}
+        footer.get_attributes.return_value = {'tag': 'div' if fault == 'ancestry' else 'footer'}
+        version.get_parent.return_value = wrapper
+        wrapper.get_parent.return_value = footer
+        footer.get_parent.return_value = None
+        def row(name, tag, key, **extra):
+            return dict(name=name, tag=tag, id=key, reference=('owned', key), toolkit='WebKitGTK', role=43,
+                        showing=True, enabled=True, sensitive=True, busy=False, defunct=False, **extra)
+        def action_node(action):
+            node = Mock(); node.get_action_iface.return_value.do_action.side_effect = lambda _: action()
+            return node
+        def toggle():
+            state.events.append('menu'); state.menu = not state.menu; return True
+        def select(feature):
+            state.events.append('navigate-' + feature); state.view = feature; state.menu = False; return True
+        trigger = action_node(toggle)
+        navigation = {key: action_node(lambda key=key: select(key)) for key in ('mcp', 'setup')}
+        def init(value, *args, **kwargs):
+            state.surface = value
+            value.bus, value.x11, value.window, value.request = bus, x11, 11, 'request'
+            value.atspi = SimpleNamespace(Role=SimpleNamespace(PUSH_BUTTON=43))
+            value.last_inventory, value.html_actions = {}, []
+            def snapshot():
+                rows, nodes = [], []
+                def add(item, node=None): rows.append(item); nodes.append(node or Mock())
+                ready = state.home_reads >= 2 and fault != 'home-busy'
+                trigger_row = row('Creator tools', 'button', 'suite-trigger'); trigger_row['enabled'] = ready
+                add(trigger_row, trigger)
+                if state.view == 'projects':
+                    state.home_reads += 1
+                    add(row('Projects', 'h2', 'projects-home-title'))
+                    refresh = row('Refresh projects', 'button', 'refresh-projects'); refresh['busy'] = not ready
+                    add(refresh)
+                    for name in ('Open selected-project', 'Open other-project'): add(row(name, 'button', name))
+                else:
+                    title = 'Creator Works MCP' if state.view == 'mcp' else 'Project Setup'
+                    add(row(title, 'h2', 'heading'))
+                    add(row('MCP controls' if state.view == 'mcp' else 'Project Setup controls', 'fieldset', 'controls'))
+                    add(row('Ready', 'span', 'status'))
+                    if state.view == 'mcp':
+                        add(row('Select Selected update project for MCP', 'button', 'selected', pressed=True))
+                        add(row('Select Other update project for MCP', 'button', 'other', pressed=False))
+                version_row = row('0.1.16' if fault == 'version' else '0.1.17', 'span', 'version')
+                version_row.update(showing=footer_showing, defunct=fault == 'defunct')
+                if fault == 'toolkit': version_row['toolkit'] = 'foreign'
+                if fault == 'tag': version_row['tag'] = 'div'
+                if fault == 'empty-version': version_row['name'] = ''
+                add(version_row, version)
+                if fault == 'duplicate': add(dict(version_row), version)
+                if state.menu:
+                    for key, label in (('mcp', 'M Creator Works MCP AI tools for Unity Included in Hub'),
+                                       ('setup', 'P Project Setup Unity + Creator SDK projects Included in Hub')):
+                        button = row(label, 'button', 'navigation-' + key)
+                        if fault == 'hidden-menu': button['showing'] = False
+                        if fault == 'disabled-menu': button['enabled'] = False
+                        add(button, navigation[key])
+                value.last = rows
+                return rows, nodes
+            def node(item):
+                if fault == 'foreign-node': raise RuntimeError('Foreign AX node')
+                state.events.append('footer-node')
+            def recheck(*args, **kwargs):
+                state.checks += 1
+                if fault == 'root-drift' and 'footer-node' in state.events: raise RuntimeError('Root changed')
+            value.snapshot, value.node, value.recheck = snapshot, node, recheck
+            value.html_action_interface = lambda item, *_: (item.get_action_iface(), {})
+            value.html_action_operands = lambda *_: (1, 'press')
+        def waiting(check, *args):
+            for _ in range(4):
+                result = check()
+                if result: return result
+            raise RuntimeError('Bounded fixture readiness refusal')
+        def feature_ready(surface, feature):
+            state.events.append('ready-' + feature)
+            self.assertEqual(state.view, feature, 'No feature is ready before its explicit navigation')
+            return real_feature_ready(surface, feature)
+        real_feature_ready = M.feature_ready
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(M.Surface, '__init__', init))
+            stack.enter_context(patch.object(M, 'portable_state'))
+            stack.enter_context(patch.object(M, 'phase_processes'))
+            stack.enter_context(patch.object(M, 'windows', return_value=[11]))
+            stack.enter_context(patch.object(M, 'wait', side_effect=waiting))
+            stack.enter_context(patch.object(M, 'feature_ready', side_effect=feature_ready))
+            stack.enter_context(patch.object(M, 'navigate_home', side_effect=AssertionError('Cold launch is already Home')))
+            saved = stack.enter_context(patch.object(M, 'save'))
+            def run():
+                return M.reactivated_pages(record, x11, M.BASE / 'result/flatpak-evidence/cold-pages',
+                                           review, None, None, native, None)
+            yield state, run, bus, x11, saved
+
+    def test_cold_projects_explicitly_navigates_before_each_feature_ready(self):
+        for showing in (False, True):
+            with self.subTest(footer_showing=showing), self.cold_surface(footer_showing=showing) as (state, run, bus, x11, saved):
+                result = run()
+                self.assertTrue(result['ownedAxConnectionClosed'])
+                self.assertEqual(state.view, 'setup')
+                self.assertEqual([event for event in state.events if event != 'footer-node'],
+                                 ['menu', 'navigate-mcp', 'ready-mcp', 'menu', 'navigate-setup', 'ready-setup'])
+                self.assertGreaterEqual(state.home_reads, 2)
+                proof = saved.call_args.args[1]
+                self.assertEqual(proof['actions'], ['view-mcp', 'view-setup'])
+                self.assertEqual(proof['footerVersion']['name'], '0.1.17')
+                self.assertEqual(proof['footerVersion']['showing'], showing)
+                bus.close_sync.assert_called_once_with(None); x11.dispose.assert_not_called()
+
+    def test_readonly_footer_still_refuses_unowned_missing_changed_or_ambiguous_version(self):
+        for fault in ('version', 'empty-version', 'defunct', 'duplicate', 'toolkit', 'tag', 'ancestry', 'foreign-node', 'root-drift'):
+            with self.subTest(fault=fault), self.cold_surface(fault) as (state, run, bus, x11, saved):
+                with self.assertRaises(RuntimeError): run()
+                self.assertNotIn('menu', state.events)
+                saved.assert_not_called(); bus.close_sync.assert_called_once_with(None); x11.dispose.assert_not_called()
+
+    def test_home_readiness_and_navigation_input_visibility_are_not_relaxed(self):
+        for fault in ('home-busy', 'hidden-menu', 'disabled-menu'):
+            with self.subTest(fault=fault), self.cold_surface(fault) as (state, run, bus, x11, saved):
+                with self.assertRaises(RuntimeError): run()
+                self.assertFalse(any(event.startswith('navigate-') for event in state.events))
+                saved.assert_not_called(); bus.close_sync.assert_called_once_with(None); x11.dispose.assert_not_called()
+
+
+class CombinedOuterContracts(unittest.TestCase):
+    def combined_profile(self):
+        value = profile(True)
+        value['flatpakLauncher'] = M.combined_adapter().launcher_contract()
+        value['artifacts']['flatpak16'] = copy.deepcopy(value['flatpakLauncher']['producer'])
+        return value
+
+    def test_old_source_closures_unchanged_combined_closure_complete_and_explicit(self):
+        self.assertEqual(len(M.SOURCES), 14)
+        for scenario in M.SCENARIOS[:-1]: self.assertEqual(M.source_names(scenario), M.SOURCES)
+        self.assertEqual(len(M.source_names(M.COMBINED)), 24)
+        self.assertEqual(len(set(M.source_names(M.COMBINED))), 24)
+        self.assertTrue(set(M.combined_adapter().EXTRA_SOURCES) <= set(M.source_names(M.COMBINED)))
+        with self.assertRaises(RuntimeError): M.source_names('arbitrary')
+
+    def test_combined_profile_never_supplies_missing_product_data_or_relabels_old_bytes(self):
+        value = self.combined_profile()
+        self.assertIs(M.validate_profile(value, M.COMBINED), value)
+        for key in ('flatpakLauncher', 'baseline'):
+            changed = copy.deepcopy(value); changed.pop(key)
+            with self.assertRaises(RuntimeError): M.validate_profile(changed, M.COMBINED)
+        with self.assertRaises(RuntimeError): M.validate_profile(value, 'portable-approve')
+        for key in ('source', 'tree', 'run', 'job', 'artifact'):
+            changed = copy.deepcopy(value); changed['artifacts']['flatpak16'][key] = 1 if key in ('run', 'job', 'artifact') else '0' * 40
+            with self.subTest(key=key), self.assertRaises(RuntimeError): M.validate_profile(changed, M.COMBINED)
+
+    def test_complete_source_binding_precedes_adapter_import_and_requires_exact_copied_set(self):
+        sealed = dict(scenario=M.COMBINED, sources={n: M.pin((HERE / n).read_bytes()) for n in M.source_names(M.COMBINED)})
+        self.assertEqual(M.combined_adapter(sealed).SCENARIO, M.COMBINED)
+        for name in M.source_names(M.COMBINED):
+            changed = copy.deepcopy(sealed); changed['sources'].pop(name)
+            with self.subTest(name=name), self.assertRaises(RuntimeError): M.combined_adapter(changed)
+        changed = copy.deepcopy(sealed); changed['sources'][M.SOURCES[0]]['sha256'] = '0' * 64
+        with self.assertRaises(RuntimeError): M.combined_adapter(changed)
+        with patch.object(M, 'HERE', M.BASE / 'scripts'), self.assertRaises(RuntimeError): M.combined_adapter()
+
+    def test_runtime_python_and_node_imports_close_over_only_the_twenty_four_bound_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory).resolve()
+            names = M.source_names(M.COMBINED)
+            for name in names: (folder / name).write_bytes((HERE / name).read_bytes())
+            sealed = dict(scenario=M.COMBINED, sources={n: M.pin((folder / n).read_bytes()) for n in names})
+            with patch.object(M, 'HERE', folder):
+                self.assertEqual(M.combined_adapter(sealed).SCENARIO, M.COMBINED)
+            result = subprocess.run(['node', '-e', "const m=require(process.argv[1]);if(typeof m.flatpakFiles!=='function'||typeof m.flatpakAPI!=='function')process.exit(1)",
+                str(folder / 'native-linux-production-016-flatpak.cjs')], capture_output=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr.decode())
+
+    def test_native_footerversion_and_page_failures_close_owned_ax_without_closing_borrowed_x11(self):
+        bus, x11, native = Mock(), Mock(), Mock()
+        node = Mock(); node.get_attributes.return_value = {'tag': 'footer'}
+        row = dict(showing=True, defunct=False, tag='span', toolkit='WebKitGTK', name='0.1.17')
+        record = {'pid': 99}
+        def init(value, *args, **kwargs):
+            value.bus, value.request, value.last, value.last_inventory = bus, 'request', [], {}
+            value.snapshot = Mock(return_value=([row], [node]))
+            value.node, value.recheck = Mock(), Mock()
+        review = dict(portable={'16': dict(generation='a'), '17': dict(manifest={})})
+        for failure in (None, 'version', 'pages', 'bitmap'):
+            bus.reset_mock(); x11.reset_mock(); row['name'] = '0.1.16' if failure == 'version' else '0.1.17'
+            native.bitmap.return_value = dict(nonblank=failure != 'bitmap', windowOnly=True)
+            with ExitStack() as stack:
+                for name in ('portable_state', 'navigate_home', 'wait', 'save'): stack.enter_context(patch.object(M, name))
+                stack.enter_context(patch.object(M, 'direct_pages', return_value=failure != 'pages'))
+                stack.enter_context(patch.object(M.Surface, '__init__', init))
+                if failure:
+                    with self.assertRaises(RuntimeError): M.reactivated_pages(record, x11,
+                        M.BASE / 'result/flatpak-evidence/cold-pages', review, None, None, native, None)
+                else:
+                    value = M.reactivated_pages(record, x11, M.BASE / 'result/flatpak-evidence/cold-pages', review, None, None, native, None)
+                    self.assertTrue(value['ownedAxConnectionClosed']); self.assertEqual(value['version'], '0.1.17')
+            bus.close_sync.assert_called_once_with(None); x11.dispose.assert_not_called()
+
+    def test_new_session_wrapper_sets_display_before_bus_and_keeps_old_wrappers(self):
+        env = {key: 'fixture' for key in M.ENVIRONMENT}
+        env['UPDATE_SCENARIO'] = M.COMBINED
+        new = M.system_session_command(env)
+        self.assertLess(new.index('/usr/bin/env'), new.index('/usr/bin/xvfb-run'))
+        self.assertLess(new.index('/usr/bin/xvfb-run'), new.index('/usr/bin/dbus-run-session'))
+        self.assertEqual(new[new.index('/usr/bin/env') + 1:new.index('/usr/bin/xvfb-run')],
+            ['HOME=' + str(M.BASE / 'result/home'), 'XDG_CONFIG_HOME=' + str(M.BASE / 'result/home/config'),
+             'XDG_DATA_HOME=' + str(M.BASE / 'result/home/data'), 'XDG_CACHE_HOME=' + str(M.BASE / 'result/home/cache')])
+        for scenario in M.SCENARIOS[:-1]:
+            old = M.system_session_command({**env, 'UPDATE_SCENARIO': scenario})
+            self.assertLess(old.index('/usr/bin/dbus-run-session'), old.index('/usr/bin/xvfb-run'))
+            self.assertLess(old.index('/usr/bin/xvfb-run'), old.index('/usr/bin/env'))
+            self.assertEqual(new[:8], old[:8])
+
+    def test_initial_only_retention_seed_keeps_all_original_files_and_refuses_reseed(self):
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root).resolve(); home = root / 'home'; home.mkdir()
+            with patch.object(M, 'fixture_parent', side_effect=lambda h, p: (h / p).mkdir(parents=True, exist_ok=True)), \
+                 patch.object(M, 'fingerprint', side_effect=lambda p: M.pin(p.read_bytes())):
+                result = M.fixtures(home, combined=True)
+                self.assertEqual(len(result), 16)
+                adapter = M.combined_adapter()
+                self.assertEqual((home / adapter.RETENTION).read_bytes(), adapter.RETENTION_BYTES)
+                with self.assertRaises((RuntimeError, FileExistsError)): M.fixtures(home, combined=True)
+
+    def test_outer_order_keeps_original_mcp_preservation_and_no_separate_session(self):
+        source = Path(M.__file__).read_text()
+        tree = ast.parse(source)
+        fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'native_session')
+        calls = sorted((n.lineno, ast.unparse(n.func)) for n in ast.walk(fn) if isinstance(n, ast.Call))
+        find = lambda name: [line for line, call in calls if call == name]
+        self.assertEqual(len(find('fixtures')), 2)  # one exclusive conditional, never a second seed
+        self.assertEqual(len(find('adapter.after_update')), 1)
+        handoff = find('adapter.after_update')[0]
+        self.assertLess(find('replacement.close')[0], handoff)
+        self.assertLess(handoff, max(find('preserved')))
+        self.assertLess(max(find('preserved')), find('complete_mcp_protocol')[0])
+        self.assertLess(find('complete_mcp_protocol')[0], find('outcome')[0])
+        self.assertNotIn('F.run_session', [name for _, name in calls])
+
+    def test_combined_cannot_pass_with_only_portable_result_or_without_original_mcp(self):
+        proof = dict(privateTargetQualification=M.private_target_qualification(), oldRetirementHelperRestored=False,
+            **M.FALSE, **dict.fromkeys(('initial16Verified','nativeConfirmationObserved','settingsPreserved',
+            'runtimeSurvived','normalFinalClose','oldNormalExit','automaticRestartObserved','installed17Verified',
+            'fresh17UiVersion','directPagesObserved'), True), nativeActions=['Update Hub'], systemActions=[],
+            automaticSuccessor={}, initialBitmap=dict(nonblank=True), successorBitmap=dict(nonblank=True), mcpProtocol=mcp_receipt())
+        with self.assertRaises(RuntimeError): M.outcome(M.COMBINED, proof)
+        adapter = M.combined_adapter()
+        proof['flatpakContinuation'] = dict(scope=adapter.SCOPE, launcherVersion='0.1.16',hostVersion='0.1.17',
+            combinedAccepted=False, releaseReady=False, nativeHelperRemovalAccepted=False,
+            **dict.fromkeys(('coldActivationAccepted','warmActivationAccepted','normalCloseObserved','launcherRemoved',
+                            'nativeHostRetained','settingsRetained'),True))
+        self.assertTrue(M.outcome(M.COMBINED, proof))
+        changed = copy.deepcopy(proof); changed.pop('mcpProtocol')
+        with self.assertRaises(RuntimeError): M.outcome(M.COMBINED, changed)
+        for key in M.FALSE:
+            changed = copy.deepcopy(proof); changed[key] = True
+            with self.subTest(flag=key), self.assertRaises(RuntimeError): M.outcome(M.COMBINED, changed)
+
+    def test_reactivated_surface_constructor_failure_closes_only_allocated_ax_connection(self):
+        bus, x11 = Mock(), Mock()
+        def init(value, *args, **kwargs):
+            value.bus = bus
+            raise RuntimeError('constructor refused')
+        with patch.object(M, 'portable_state'), patch.object(M.Surface, '__init__', init), self.assertRaisesRegex(RuntimeError, 'constructor refused'):
+            M.reactivated_pages({}, x11, M.BASE / 'result/flatpak-evidence/cold-pages',
+                dict(portable={'16': dict(generation='a'), '17': dict(manifest={})}), None, None, None, None)
+        bus.close_sync.assert_called_once_with(None); x11.dispose.assert_not_called()
+
+    def test_workflow_downloads_original_sources_only_for_new_case_and_keeps_sampler_outside_inputs(self):
+        text = (HERE.parent / '.github/workflows/native-linux-production-016-update.yml').read_text()
+        self.assertIn("if: inputs.scenario == 'portable-flatpak-approve'", text)
+        self.assertIn('ref:source.sourceCommit', text)
+        self.assertIn("sha('sha1',Buffer.concat", text)
+        self.assertIn("sha('sha256',body),pin.sha256", text)
+        self.assertIn('native-linux-production-016-update-api-observations', text)
 
 
 if __name__ == "__main__":

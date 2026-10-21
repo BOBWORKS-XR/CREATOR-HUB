@@ -35,7 +35,8 @@ REPO = "BOBWORKS-XR/CREATOR-HUB"
 BRANCH = "refs/heads/validation/native-linux-production-016-update"
 WORKFLOW = REPO + "/.github/workflows/native-linux-production-016-update.yml@" + BRANCH
 PROFILE = "production016-private017-native-update"
-SCENARIOS = ("deb-native-cancel", "deb-auth-cancel", "deb-approve", "portable-native-cancel", "portable-approve")
+COMBINED = "portable-flatpak-approve"
+SCENARIOS = ("deb-native-cancel", "deb-auth-cancel", "deb-approve", "portable-native-cancel", "portable-approve", COMBINED)
 BASE = Path("/opt/creator-polkit-fixture")
 USER, UID = "creator-polkit-fixture", 21314
 TITLE = "Creator Hub - Development Preview"
@@ -71,6 +72,11 @@ SOURCES = (Path(__file__).name, "native-unix-window.py", "native-linux-root-prob
            "native-linux-update-mcp.py")
 INVENTORY_IMPORTS = ("native-linux-production-016-migration.py", "native-linux-production-016-stage.py",
                      "native-linux-016-stage.py", "linux-retirement-package-verify.py")
+COMBINED_SOURCES = ("native-linux-production-016-flatpak.test.py", "native-linux-flatpak-activation-observer.py",
+                    "native-linux-flatpak-activation-observer.test.py", "native-linux-flatpak-dialog-input.py",
+                    "native-linux-flatpak-dialog-input.test.py", "native-unix-window.test.py",
+                    "native-linux-update-flatpak.py", "native-linux-update-flatpak.test.py",
+                    "native-linux-production-016-flatpak.cjs", "flatpak-native-production-016.cjs")
 PRIVATE_RELEASE, PRIVATE_TAG = 411494394, "v0.1.13-validation"
 VERIFIER_PINS = {
     "src-tauri/examples/verify-package-input.rs": {"size": 2266, "sha256": "81207a9e6b17a288c9ee95acf9c400ed9b047cfa319a3a1fed33df320f6fb135"},
@@ -182,6 +188,31 @@ def load(name):
     return module
 
 
+def source_names(scenario):
+    require(scenario in SCENARIOS, "Unknown source closure")
+    return SOURCES + COMBINED_SOURCES if scenario == COMBINED else SOURCES
+
+
+def combined_adapter(sealed=None):
+    # Rebind the complete transitive closure before imports in the copied session.
+    if sealed is not None:
+        require(sealed["scenario"] == COMBINED and set(sealed["sources"]) == set(source_names(COMBINED)),
+                "Complete combined source closure required")
+        for name, expected in sealed["sources"].items():
+            bound(HERE / name, expected, 2 * 1024**2, **({"uid": 0, "mode": 0o444} if HERE == BASE / "scripts" else {}))
+    require(HERE != BASE / "scripts" or sealed is not None, "Copied adapter requires a sealed source handoff")
+    spec = importlib.util.spec_from_file_location("update016_flatpak", HERE / "native-linux-update-flatpak.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    require(set(module.EXTRA_SOURCES) <= set(source_names(COMBINED)), "Missing transitive adapter source")
+    return module
+
+
+def combined_adapter_for_profile():
+    sealed = parse(read(BASE / "request.json", 65536, uid=0, mode=0o644)) if HERE == BASE / "scripts" else None
+    return combined_adapter(sealed)
+
+
 def inventory_observer(sealed):
     folder = BASE / "scripts"
     protected_ancestry(folder)
@@ -211,7 +242,8 @@ def admission(env, *, system=None, machine=None):
 
 
 def validate_profile(value, scenario):
-    keys(value, ("schemaVersion", "profile", "fromVersion", "toVersion", "baseline", "artifacts", "deliveries", "objects"))
+    keys(value, ("schemaVersion", "profile", "fromVersion", "toVersion", "baseline", "artifacts", "deliveries", "objects",
+                 *(("flatpakLauncher",) if scenario == COMBINED else ())))
     require(value["schemaVersion"] == 1 and value["profile"] == PROFILE and value["fromVersion"] == "0.1.16"
             and value["toVersion"] == "0.1.17" and scenario in SCENARIOS, "Only closed production016/private017 admitted")
     baseline = value["baseline"]
@@ -229,6 +261,10 @@ def validate_profile(value, scenario):
         objects = {"deb16", "deb17", "raw16", "raw17", "assemblyReceipt16", "appimage16", "archive16", "archive17", "portableManifest16", "portableManifest17",
                     "portableDescriptor16", "portableDescriptor17", "portableSignature16", "portableSignature17",
                     "manifestSignature16", "manifestSignature17"}
+    if scenario == COMBINED:
+        roles.add("flatpak16")
+        # No product data is synthesized or relabelled from a different profile.
+        combined_adapter_for_profile().validate_launcher_profile(value)
     keys(value["artifacts"], roles); keys(value["deliveries"], deliveries); keys(value["objects"], objects)
     for role, item in value["artifacts"].items():
         keys(item, ("source", "tree", "branch", "workflow", "run", "attempt", "job", "artifact", "name", "zip", "files"))
@@ -369,7 +405,9 @@ def validate_delivery_api(value, profile, env):
 
 
 def observe_all_api(profile, api, env):
-    keys(api, (*profile["artifacts"], "private"))
+    keys(api, (*profile["artifacts"], "private", *(("flatpakSource",) if env["UPDATE_SCENARIO"] == COMBINED else ())))
+    if env["UPDATE_SCENARIO"] == COMBINED:
+        combined_adapter_for_profile().validate_source_api(profile, api["flatpakSource"])
     for role, expected in profile["artifacts"].items():
         validate_api(api[role], expected)
     validate_delivery_identity(api["private"], env)
@@ -380,7 +418,9 @@ def observe_all_api(profile, api, env):
 
 
 def validate_all_api(profile, api, env):
-    keys(api, (*profile["artifacts"], "private"))
+    keys(api, (*profile["artifacts"], "private", *(("flatpakSource",) if env["UPDATE_SCENARIO"] == COMBINED else ())))
+    if env["UPDATE_SCENARIO"] == COMBINED:
+        combined_adapter_for_profile().validate_source_api(profile, api["flatpakSource"])
     for role, expected in profile["artifacts"].items():
         validate_api(api[role], expected)
     validate_delivery_api(api["private"], profile, env)
@@ -757,7 +797,7 @@ def request(env, profile_raw, api_raw):
     require(node_raw[:4] == b"\x7fELF", "Native workflow-provisioned Node executable required")
     result = {"schemaVersion": 1, "scenario": scenario, "context": {key: env[key] for key in ENVIRONMENT}, "nodeImage": pin(node_raw),
             "profile": pin(profile_raw), "api": pin(api_raw), "verifier": verifier,
-            "sources": {name: pin(read(HERE / name, 2 * 1024**2)) for name in SOURCES},
+            "sources": {name: pin(read(HERE / name, 2 * 1024**2)) for name in source_names(scenario)},
             **FALSE}
     if scenario in HTML_SCENARIOS:
         driver = Path(env["RUNNER_TEMP"]) / "native-linux-production-016-driver/bin/tauri-driver"
@@ -851,6 +891,8 @@ def stage(folder, env):
     profile_raw, api_raw = read(folder / "profile.json", 65536, mode=0o600), read(folder / "api.json", 512 * 1024, mode=0o600)
     sealed = request(env, profile_raw, api_raw); profile = parse(profile_raw)
     expected_names = {"profile.json", "api.json", *(n + ".zip" for n in input_roles(profile))}
+    if scenario == COMBINED:
+        expected_names.add("flatpak-source")
     actual_names = {p.name for p in folder.iterdir()}
     require(actual_names in (expected_names, expected_names | {"carrier", "carrier.zip"}), "Fresh complete input set, no partial stage adoption")
     verifier = offline_verifier(env)
@@ -919,6 +961,8 @@ def stage(folder, env):
         write(alias, bound(source, object_pin(profile, "appimage16")), 0o755)
         bound(alias, object_pin(profile, "appimage16"), mode=0o755)
         require(stamp(source.lstat()) == before, "Original AppImage changed during exact-byte setup alias copy")
+    if scenario == COMBINED:
+        review["flatpakLauncher"] = combined_adapter(sealed).stage_launcher(sys.modules[__name__], folder, profile, parse(api_raw), env, sealed)
     save(folder / "review.json", review)
     save(folder / "request.json", sealed)
 
@@ -980,6 +1024,8 @@ def outcome(scenario, evidence):
                 and type(evidence.get("automaticSuccessor")) is dict, "Full real automatic update/restart/UI proof required")
     require(evidence.get("initialBitmap", {}).get("nonblank") is True and (not scenario.endswith("approve")
             or evidence.get("successorBitmap", {}).get("nonblank") is True), "Actual owned nonblank phase images required")
+    if scenario == COMBINED:
+        combined_adapter_for_profile().continuation_proof(evidence.get("flatpakContinuation", {}))
     require(all(evidence.get(k) is False for k in FALSE), "Scope cannot be promoted to public/Flatpak/release acceptance")
     return True
 
@@ -1144,7 +1190,7 @@ def fixture_parent(home, relative):
     return current
 
 
-def fixtures(home):
+def fixtures(home, *, combined=False):
     selected, other = home / "selected-project", home / "other-project"
     files = {
         CONFIG: {"channels": [{"id": "selected", "name": "Selected update project", "unity_project_path": str(selected), "enabled": True, "scene_path": None},
@@ -1168,6 +1214,12 @@ def fixtures(home):
     for name, value in files.items():
         file = home / name; fixture_parent(home, Path(name).parent)
         write(file, value.encode() if type(value) is str else (json.dumps(value) + "\n").encode())
+    if combined:
+        adapter = combined_adapter_for_profile()
+        for name, raw in adapter.retention_fixture().items():
+            fixture_parent(home, Path(name).parent)
+            write(home / name, raw)
+            files[name] = raw
     return {name: fingerprint(home / name) for name in files}
 
 
@@ -2403,6 +2455,57 @@ def phase_bitmap(surface, name):
     return result
 
 
+def reactivated_pages(record, x11, evidence_dir, review, inventory, helper, native, atspi):
+    require(evidence_dir == BASE / "result/flatpak-evidence/cold-pages", "Fixed continuation page evidence only")
+    generation = portable_state(BASE / "result/home", review, "17", previous=review["portable"]["16"]["generation"])
+    # Retain the partially constructed owner so a failed constructor still closes its AX connection.
+    surface = Surface.__new__(Surface)
+    result = None
+    try:
+        Surface.__init__(surface, record, x11, helper, native, atspi,
+                         manifest=review["portable"]["17"]["manifest"], generation_dir=generation, inventory=inventory)
+        # Cold activation opens Projects; the automatic update successor already claimed restoration.
+        def home_ready():
+            if not surface.source("projects-home-title", optional=True):
+                return False
+            for source_id in ("refresh-projects", "suite-trigger"):
+                control = surface.source(source_id, optional=True)
+                if not control or not control[0]["enabled"] or not control[0]["sensitive"] or control[0]["busy"]:
+                    return False
+            return True
+        wait(home_ready, 90)
+        rows, nodes = surface.snapshot()
+        # Reading the owned footer is not input: it may be below the viewport on Projects.
+        matches = [(r, n) for r, n in zip(rows, nodes) if not r["defunct"] and r["tag"] == "span"
+                   and r["toolkit"] == "WebKitGTK" and (r.get("text") or r["name"]) == "0.1.17"]
+        require(len(matches) == 1, "Actual native17 footer version required, not an update-feed result")
+        parent = matches[0][1]
+        for _ in range(4):
+            surface.node(parent)
+            if parent.get_attributes().get("tag") == "footer":
+                break
+            parent = parent.get_parent()
+            require(parent is not None, "Version is not in the native footer")
+        else:
+            raise RuntimeError("Version footer ancestry unavailable")
+        surface.recheck(full=True)
+        actions = []
+        require(direct_pages(surface, actions), "Actual reactivated pages required")
+        surface.recheck(full=True)
+        bitmap = native.bitmap(surface.request, evidence_dir, helper, x11)
+        surface.recheck(full=True)
+        require(bitmap.get("nonblank") is True and bitmap.get("windowOnly") is True, "Owned reactivated pixels required")
+        save(evidence_dir / "pages.json", {"root": record, "version": "0.1.17", "footerVersion": matches[0][0], "snapshot": surface.last,
+                                           "actions": actions, "inventory": surface.last_inventory})
+        result = {"version": "0.1.17", "root": record, "directPagesObserved": True,
+                  "bitmap": bitmap, "ownedAxConnectionClosed": False}
+    finally:
+        if getattr(surface, "bus", None) is not None:
+            surface.bus.close_sync(None)
+    result["ownedAxConnectionClosed"] = True
+    return result
+
+
 def feature_ready(surface, feature):
     require(feature in ("mcp", "setup"), "Finite direct feature")
     rows, _ = surface.snapshot()
@@ -3010,8 +3113,10 @@ def native_session(env):
         wm_record = kernel_record(wm.pid, native, helper)
         wait(lambda: x11.property(x11.x.XDefaultRootWindow(x11.display), "_NET_SUPPORTING_WM_CHECK"))
         require(windows(x11) == [], "Fresh private display required")
-        before = fixtures(home)
+        before = fixtures(home, combined=True) if scenario == COMBINED else fixtures(home)
         report["before"] = before
+        if scenario == COMBINED:
+            combined_adapter(original_request).install_launcher(sys.modules[__name__], env, original_request, profile)
         app_env = {"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C", "HOME": str(home), "XDG_CONFIG_HOME": str(home / "config"),
                    "XDG_DATA_HOME": str(home / "data"), "XDG_CACHE_HOME": str(home / "cache"), "XDG_RUNTIME_DIR": env["XDG_RUNTIME_DIR"],
                    "TMPDIR": env["TMPDIR"], "GDK_BACKEND": "x11", "NO_AT_BRIDGE": "0", "HTTPS_PROXY": proxy,
@@ -3193,6 +3298,12 @@ def native_session(env):
             report["normalFinalClose"] = True
             if html is not None:
                 html.finish_tools()
+        if scenario == COMBINED:
+            adapter = combined_adapter(original_request)
+            def inspect_pages(record, owned_x11, evidence_dir):
+                return reactivated_pages(record, owned_x11, evidence_dir, review, inventory, helper, native, Atspi)
+            report["flatpakContinuation"] = adapter.after_update(
+                adapter.admit(sys.modules[__name__], env, before, report), inspect_pages)
         report["after"] = preserved(home, before); report["settingsPreserved"] = True
         complete_mcp_protocol(connection, report)
         require(windows(x11) == [] and kernel_record(wm.pid, native, helper) == wm_record, "Visible app remained or WM identity changed")
@@ -3496,6 +3607,8 @@ def copy_inputs(source, target, profile):
         write(target / name, read(source / name, 512 * 1024))
     for name, artifact in input_roles(profile).items():
         write(target / (name + ".zip"), bound(source / (name + ".zip"), artifact["zip"], MAX_ZIP))
+    if "flatpakLauncher" in profile:
+        combined_adapter_for_profile().copy_launcher_source(sys.modules[__name__], source, target, profile)
 
 
 def published_input_mode(file, folder, profile):
@@ -3527,11 +3640,16 @@ def system_session_command(env):
     values.update(HOME=str(result / "home"), USER=USER, RUNNER_TEMP=str(result), XDG_CONFIG_HOME=str(result / "home/config"),
                   XDG_DATA_HOME=str(result / "home/data"), XDG_CACHE_HOME=str(result / "home/cache"), XDG_RUNTIME_DIR=str(result / "runtime"),
                   TMPDIR=str(result / "tmp"), GDK_BACKEND="x11", NO_AT_BRIDGE="0")
+    wrappers = (["/usr/bin/xvfb-run", "-a", "--server-args=-screen 0 1280x1000x24", "/usr/bin/dbus-run-session", "--"]
+                if env["UPDATE_SCENARIO"] == COMBINED else
+                ["/usr/bin/dbus-run-session", "--", "/usr/bin/xvfb-run", "-a", "--server-args=-screen 0 1280x1000x24"])
+    home = ["/usr/bin/env", *(key + "=" + values[key] for key in ("HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME"))]
+    # PAM may set the account home. The new bus must see the isolated service location at creation, not just Python afterward.
+    launch = home + wrappers if env["UPDATE_SCENARIO"] == COMBINED else wrappers + home
     return ["/usr/bin/systemd-run", "--wait", "--pipe", "--collect", "--quiet", "--unit=creator-production016-update-fixture",
             "--uid=" + USER, "--property=PAMName=login", "--property=Type=exec", "--property=LimitCORE=0", "--property=WorkingDirectory=" + str(BASE),
             *("--setenv=" + key + "=" + value for key, value in values.items()),
-            "/usr/bin/dbus-run-session", "--", "/usr/bin/xvfb-run", "-a", "--server-args=-screen 0 1280x1000x24",
-             "/usr/bin/env", *(key + "=" + values[key] for key in ("HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME")),
+            *launch,
             "/usr/bin/python3", "-B", str(BASE / "scripts" / Path(__file__).name), "session"]
 
 
@@ -4055,6 +4173,8 @@ def broker(env):
         file = BASE / "result" / name; file.mkdir(mode=0o700); os.chown(file, UID, UID)
         if name == "home/config":
             config_context = prepare_fixture_config(file.lstat())
+    if scenario == COMBINED:
+        combined_adapter(sealed).install_observer(sys.modules[__name__], env, sealed)
     context = transport_context(env)
     transport, pins = prepare_transport(BASE / "inputs", profile, context)
     for file in (transport.parent, transport, *transport.rglob("*")):
@@ -4119,6 +4239,9 @@ def broker(env):
         result = parse(read(BASE / "result/report.json", 2 * 1024**2, uid=UID, mode=0o600))
         require(result["scenario"] == scenario and result["harnessSource"] == env["GITHUB_SHA"] and result["fromSource"] == profile["baseline"]["source"]
                 and result["toSource"] == FIXED["17"]["source"] and result["scenarioPassed"] is True and outcome(scenario, result), "Native evidence incomplete")
+        if scenario == COMBINED:
+            record["flatpakHelper"] = combined_adapter(sealed).recheck_helper_install(sys.modules[__name__], env, sealed)
+            portable_state(BASE / "result/home", review, "17", previous=review["portable"]["16"]["generation"])
         if scenario.startswith("deb-"):
             verify_installed(review, "17" if scenario == "deb-approve" else "16")
             record["oldRetirementHelperRestored"] = scenario == "deb-approve"
@@ -4200,6 +4323,9 @@ def export_evidence(env):
     require(len(diagnostics) <= 8 and all(re.fullmatch(r"(?:public-tool-failure-(baseline-dpkg-install|update-ca-certificates|synthetic-useradd)|tls-restore-failure)-[1-9][0-9]*\.json", file.name)
                                         and file.lstat().st_uid == 0 for file in diagnostics), "Unknown public tool evidence refused")
     names += tuple(file.name for file in diagnostics)
+    if env.get("UPDATE_SCENARIO") == COMBINED and (BASE / "request.json").exists():
+        sealed = parse(read(BASE / "request.json", 65536, uid=0, mode=0o644))
+        names += combined_adapter(sealed).evidence_names(sys.modules[__name__])
     for name in names:
         file = BASE / name
         if not os.path.lexists(file):
@@ -4246,6 +4372,10 @@ def main():
         verify_stock_sources()
     elif mode == "session":
         native_session(os.environ)
+    elif mode == "flatpak-probe":
+        require(scenario == COMBINED, "Only combined updater may probe its observer")
+        sealed = parse(read(BASE / "request.json", 65536, uid=0, mode=0o644))
+        combined_adapter(sealed).observer_probe(sys.modules[__name__], os.environ, sealed)
     elif mode == "_tls-guard":
         tls_guard(os.environ)
     elif mode == "tls-cleanup":

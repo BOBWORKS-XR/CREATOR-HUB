@@ -1,11 +1,12 @@
-"""Closed, unwired same-session updater continuation; never a standalone runner.
+"""Closed same-session updater continuation; never a standalone application runner.
 
-Outer contract (not yet wired): stage the frozen launcher with the existing pure
+Outer contract: stage the frozen launcher with the existing pure
 Node validators, seal launcher_contract() as review.flatpakLauncher, copy its
 sources to inputs/flatpak-source, and bind EXTRA_SOURCES in request.sources.
 Merge retention_fixture() into the original single seed before fingerprinting.
-Provision installed-flatpak.json and the exact read-only observer authorization
-before the GUI session. After the real signed update/successor/normal close:
+Provision the exact read-only observer authorization before the GUI session;
+install the private launcher in that same session before the first Hub launch.
+After the real signed update/successor/normal close:
 
     handoff = admit(updater_module, env, before, update_report)
     report['flatpakContinuation'] = after_update(handoff, inspect_pages)
@@ -26,7 +27,9 @@ import json
 import os
 from pathlib import Path
 import re
+import secrets
 import sys
+import time
 from types import ModuleType
 
 sys.dont_write_bytecode = True
@@ -114,9 +117,229 @@ def retention_fixture():
 
 
 def helper_commands():
-    """Policy specification only. This module never installs permissions."""
+    """Closed policy specification; provisioning requires the root updater broker."""
     prefix = ('/usr/bin/python3', '-I', '-S', '-B', '/var/lib/creator-hub-flatpak-proxy-observer/observer.py')
     return (prefix + ('root-inventory-probe-update016',), prefix + ('root-proxy-snapshot-update016',))
+
+
+def validate_launcher_profile(profile):
+    require(profile.get('flatpakLauncher') == launcher_contract()
+            and profile['artifacts'].get('flatpak16') == profile['flatpakLauncher']['producer'],
+            'Explicit original launcher profile/producer required; no inferred product defaults')
+
+
+def validate_source_api(profile, value):
+    validate_launcher_profile(profile)
+    source = profile['flatpakLauncher']['source']
+    require(type(value) is dict and value.get('sha') == source['sourceCommit']
+            and value.get('tree', {}).get('sha') == source['sourceTree'], 'Original launcher source/tree API differs')
+
+
+def launcher_sources(u, folder, profile):
+    validate_launcher_profile(profile)
+    directory = folder / 'flatpak-source'
+    require(directory.resolve(strict=True) == directory and directory.is_dir(), 'Ordinary original-source directory required')
+    expected = profile['flatpakLauncher']['source']['files']
+    actual = set()
+    parents = {parent.as_posix() for name in expected for parent in Path(name).parents if parent != Path('.')}
+    for file in directory.rglob('*'):
+        relative = file.relative_to(directory).as_posix()
+        require(not file.is_symlink() and file.resolve(strict=True) == file, 'Redirected launcher source')
+        if file.is_dir():
+            require(relative in parents, 'Unknown source directory')
+        else:
+            actual.add(relative)
+    require(actual == set(expected), 'Complete exact twelve-file launcher source closure required')
+    return {name: u.bound(directory / name, expected[name], 2 * 1024**2) for name in expected}
+
+
+def copy_launcher_source(u, source, target, profile):
+    bodies = launcher_sources(u, source, profile)
+    directory = target / 'flatpak-source'
+    directory.mkdir(mode=0o700)
+    for name, raw in bodies.items():
+        file = directory / name
+        file.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        u.write(file, raw)
+
+
+def stage_launcher(u, folder, profile, api, env, sealed):
+    validate_source_api(profile, api['flatpakSource'])
+    launcher_sources(u, folder, profile)
+    def rebind():
+        u.bound(Path(env['CONTROLLER_NODE']), sealed['nodeImage'], 128 * 1024**2, mode=0o755)
+        for name in ('native-linux-production-016-flatpak.cjs', 'flatpak-native-production-016.cjs'):
+            u.bound(HERE / name, sealed['sources'][name], 2 * 1024**2)
+    rebind()
+    # Only pure validators, never the other workflow's admission, builder or session.
+    script = """const fs=require('node:fs'),path=require('node:path'),a=require('node:assert/strict');
+const lane=require(process.argv[1]),root=process.argv[2];
+const p=JSON.parse(fs.readFileSync(path.join(root,'profile.json'))),api=JSON.parse(fs.readFileSync(path.join(root,'api.json')));
+lane.flatpakAPI(api.flatpak16);
+const read=(base,pins)=>Object.fromEntries(Object.keys(pins).map(n=>[n,fs.readFileSync(path.join(root,base,n))]));
+const result=lane.flatpakFiles(read('members/flatpak16',p.flatpakLauncher.producer.files),read('flatpak-source',p.flatpakLauncher.source.files));
+a.deepEqual(result.source,p.flatpakLauncher.source);a.equal(result.commit,p.flatpakLauncher.commit);
+process.stdout.write(JSON.stringify({source:result.source,commit:result.commit}));"""
+    result = u.parse(u.run_tool([env['CONTROLLER_NODE'], '-e', script,
+        str(HERE / 'native-linux-production-016-flatpak.cjs'), str(folder)], limit=32768, timeout=30))
+    rebind()
+    require(result == {key: profile['flatpakLauncher'][key] for key in ('source', 'commit')}, 'Pure launcher validator result differs')
+    return copy.deepcopy(profile['flatpakLauncher'])
+
+
+OBSERVER_TOOL = Path('/var/lib/creator-hub-flatpak-proxy-observer/observer.py')
+OBSERVER_POLICY = Path('/etc/sudoers.d/creator-hub-update-flatpak-observer')
+
+
+def helper_policy():
+    return ('creator-polkit-fixture ALL=(root) NOPASSWD: ' + ', '.join(' '.join(c) for c in helper_commands()) + '\n').encode()
+
+
+def install_observer(u, env, sealed):
+    require(u.admission(env) == SCENARIO and os.getuid() == os.geteuid() == 0
+            and sealed['scenario'] == SCENARIO and env['GITHUB_SHA'] == sealed['context']['GITHUB_SHA'],
+            'Root updater authority and original source required')
+    require(not any(env.get(k) for k in ('DISPLAY', 'WAYLAND_DISPLAY', 'DBUS_SESSION_BUS_ADDRESS', 'EXECUTION_REQUEST')),
+            'Helper setup must precede the native session')
+    u.protected_ancestry(OBSERVER_TOOL.parent.parent)
+    u.protected_ancestry(OBSERVER_POLICY.parent)
+    require(not os.path.lexists(OBSERVER_TOOL.parent) and not os.path.lexists(OBSERVER_POLICY), 'Existing helper/policy refused')
+    body = u.bound(u.BASE / 'scripts/native-linux-flatpak-activation-observer.py',
+                   sealed['sources']['native-linux-flatpak-activation-observer.py'], 1024 * 1024, uid=0, mode=0o444)
+    policy = helper_policy()
+    receipt = {'schemaVersion': 1, 'scenario': SCENARIO, 'harnessSource': env['GITHUB_SHA'],
+        'context': CONTEXT, 'uid': UID, 'runtime': str(ROOT / 'runtime'), 'commands': [list(c) for c in helper_commands()],
+        'tool': u.pin(body), 'policy': u.pin(policy), 'installed': False, 'probePassed': False,
+        'readOnly': True, 'inputPermitted': False, 'authorityGranted': False}
+    failure = None
+    try:
+        OBSERVER_TOOL.parent.mkdir(mode=0o755)
+        u.write(OBSERVER_TOOL, body, 0o444)
+        u.write(OBSERVER_POLICY, policy, 0o440)
+        u.bound(OBSERVER_TOOL, receipt['tool'], 1024 * 1024, uid=0, mode=0o444)
+        u.bound(OBSERVER_POLICY, receipt['policy'], 8192, uid=0, mode=0o440)
+        u.run_tool(['/usr/sbin/visudo', '-c', '-f', str(OBSERVER_POLICY)], limit=8192, timeout=10)
+        receipt['installed'] = True
+        context = u.clean_context(env)
+        # No desktop, bus, password, alternate workflow intent or arbitrary path.
+        require(u.USER == 'creator-polkit-fixture' and u.BASE == BASE, 'Fixed synthetic caller only')
+        result = u.run_tool(['/usr/sbin/runuser', '--user', u.USER, '--', '/usr/bin/env', '-i',
+            *(key + '=' + value for key, value in context.items()), '/usr/bin/python3', '-I', '-S', '-B',
+            str(u.BASE / 'scripts/native-linux-production-016-update.py'), 'flatpak-probe'], limit=32768, timeout=15)
+        require(not result, 'Updater-owned observer preflight emitted unexpected output')
+        proof = u.parse(u.read(ROOT / 'flatpak-helper-probe.json', 32768, uid=UID, mode=0o600))
+        require(proof['harnessSource'] == env['GITHUB_SHA'] and proof['context'] == CONTEXT
+                and proof['inventoryProbed'] is True and proof['codeSha256'] == receipt['tool']['sha256'], 'Observer preflight receipt differs')
+        receipt['probePassed'] = True
+    except Exception as error:
+        failure = error
+        receipt['refused'] = type(error).__name__
+        raise
+    finally:
+        try:
+            u.save(u.BASE / 'flatpak-helper-install.json', receipt, 0o644)
+        except Exception:
+            if failure is None:
+                raise
+
+
+def observer_probe(u, env, sealed):
+    require(u.admission(env) == SCENARIO and os.getuid() == os.geteuid() == UID
+            and not any(env.get(k) for k in ('DISPLAY', 'WAYLAND_DISPLAY', 'DBUS_SESSION_BUS_ADDRESS', 'EXECUTION_REQUEST')),
+            'Updater-only headless observer preflight required')
+    expected = sealed['sources']['native-linux-flatpak-activation-observer.py']
+    raw = u.bound(HERE / 'native-linux-flatpak-activation-observer.py', expected, 1024 * 1024, uid=0, mode=0o444)
+    module = ModuleType('update016_observer_probe')
+    module.__file__ = str(HERE / 'native-linux-flatpak-activation-observer.py')
+    exec(compile(raw, module.__file__, 'exec'), module.__dict__)
+    context = module.named_context(CONTEXT)
+    require(context.uid == UID and context.runtime == ROOT / 'runtime', 'Fixed updater observer context differs')
+    module.protected_tool(expected['sha256'])
+    request = dict(schemaVersion=1, operation=context.probe_operation, harnessSource=env['GITHUB_SHA'],
+        codeSha256=expected['sha256'], sequence=1, nonce=secrets.token_hex(32),
+        expiresNs=time.monotonic_ns() + 4 * 10**9, caller=module.root_process(os.getpid(), context=context))
+    module.probe_request(request, time.monotonic_ns(), context=context)
+    result = F.root_exchange(module.PROXY_TOOL, context.probe_command, encoded(request), request['expiresNs'] / 10**9)
+    answer = u.parse(result.stdout)
+    require(result.returncode == 0 and not result.stderr and set(answer) == {'request', 'ok', 'snapshot'}
+            and answer['request'] == request and answer['ok'] is True, 'Protected inventory operation refused')
+    module.validate_probe(answer['snapshot'], request, context=context)
+    module.protected_tool(expected['sha256'])
+    require(time.monotonic_ns() < request['expiresNs'], 'Observer preflight expired')
+    u.save(ROOT / 'flatpak-helper-probe.json', dict(schemaVersion=1, harnessSource=env['GITHUB_SHA'], context=CONTEXT,
+        codeSha256=expected['sha256'], inventoryProbed=True, request=request, snapshot=answer['snapshot'],
+        readOnly=True, inputPermitted=False, authorityGranted=False))
+
+
+def install_launcher(u, env, sealed, profile):
+    validate_environment(env)
+    require(u.admission(env) == SCENARIO and os.getuid() == os.geteuid() == UID, 'Original unprivileged session only')
+    validate_launcher_profile(profile)
+    proof = u.parse(u.read(BASE / 'flatpak-helper-install.json', 32768, uid=0, mode=0o644))
+    require(proof['scenario'] == SCENARIO and proof['harnessSource'] == env['GITHUB_SHA']
+            and proof['installed'] is proof['probePassed'] is True and proof['commands'] == [list(c) for c in helper_commands()]
+            and proof['tool'] == sealed['sources']['native-linux-flatpak-activation-observer.py']
+            and proof['policy'] == u.pin(helper_policy()), 'Exact helper authorization/preflight required')
+    u.bound(OBSERVER_TOOL, proof['tool'], 1024 * 1024, uid=0, mode=0o444)
+    require(not os.path.lexists(ROOT / 'installation') and not os.path.lexists(ROOT / 'installed-flatpak.json'), 'Fresh private Flatpak installation required')
+    context = F.clean_environment(ROOT)
+    require(context['HOME'] == str(HOME) and context['FLATPAK_USER_DIR'] == str(ROOT / 'installation'), 'Foreign install roots refused')
+    run = lambda args, timeout=120: F.command(['/usr/bin/flatpak', '--user', *args], env=context, timeout=timeout)
+    bundle = BASE / 'inputs/members/flatpak16' / BUNDLE
+    u.bound(bundle, profile['flatpakLauncher']['producer']['files'][BUNDLE], uid=0, mode=0o644)
+    run(['remote-add', 'flathub', 'https://dl.flathub.org/repo/flathub.flatpakrepo'])
+    require(run(['remote-info', '--show-ref', 'flathub', RUNTIME]).decode().strip() == RUNTIME, 'Exact runtime ref required')
+    commit = run(['remote-info', '--show-commit', 'flathub', RUNTIME]).decode().strip()
+    require(re.fullmatch('[a-f0-9]{64}', commit), 'Exact observed runtime commit required')
+    run(['install', '--noninteractive', '--assumeyes', '--no-related', 'flathub', RUNTIME], timeout=900)
+    run(['update', '--noninteractive', '--assumeyes', '--no-related', '--commit=' + commit, RUNTIME], timeout=900)
+    require(run(['info', '--show-commit', RUNTIME]).decode().strip() == commit, 'Runtime commit changed')
+    run(['install', '--bundle', '--noninteractive', '--assumeyes', '--no-related', '--no-deps', str(bundle)])
+    require(run(['info', '--show-commit', REF]).decode().strip() == profile['flatpakLauncher']['commit'], 'Installed launcher commit differs')
+    import configparser
+    config = configparser.RawConfigParser(strict=True); config.optionxform = str
+    config.read_string(run(['info', '--show-metadata', REF]).decode('utf8'))
+    require(set(config.sections()) == {'Application', 'Context', 'Session Bus Policy'}
+        and dict(config['Application']) == {'name': 'com.creatorworks.hub', 'runtime': 'org.gnome.Platform/x86_64/50',
+             'sdk': 'org.gnome.Sdk/x86_64/50', 'command': 'creator-hub-flatpak-activate'}
+        and dict(config['Context']) == {'sockets': 'wayland;fallback-x11;'}
+        and dict(config['Session Bus Policy']) == {F.NAME: 'talk'}, 'Installed Flatpak permissions differ')
+    u.save(ROOT / 'installed-flatpak.json', dict(ref=REF, commit=profile['flatpakLauncher']['commit'], runtime=RUNTIME,
+        runtimeCommit=commit, manualBundle=True, releaseReady=False))
+
+
+def recheck_helper_install(u, env, sealed):
+    require(u.admission(env) == SCENARIO and os.getuid() == os.geteuid() == 0, 'Root final helper check only')
+    proof = u.parse(u.read(BASE / 'flatpak-helper-install.json', 32768, uid=0, mode=0o644))
+    require(proof['harnessSource'] == env['GITHUB_SHA'] and proof['installed'] is proof['probePassed'] is True
+            and proof['tool'] == sealed['sources']['native-linux-flatpak-activation-observer.py']
+            and proof['policy'] == u.pin(helper_policy()), 'Helper install receipt differs')
+    u.protected_ancestry(OBSERVER_TOOL.parent)
+    u.protected_ancestry(OBSERVER_POLICY.parent)
+    u.bound(OBSERVER_TOOL, proof['tool'], 1024 * 1024, uid=0, mode=0o444)
+    u.bound(OBSERVER_POLICY, proof['policy'], 8192, uid=0, mode=0o440)
+    return proof
+
+
+def evidence_names(u):
+    fixed = ('flatpak-helper-install.json', 'result/flatpak-helper-probe.json', 'result/installed-flatpak.json')
+    if not os.path.lexists(EVIDENCE):
+        return fixed
+    require(EVIDENCE.resolve(strict=True) == EVIDENCE and EVIDENCE.is_dir(), 'Ordinary continuation evidence required')
+    names = []
+    for file in EVIDENCE.rglob('*'):
+        require(not file.is_symlink() and file.resolve(strict=True) == file, 'Redirected continuation evidence')
+        if file.is_dir():
+            require(file.relative_to(EVIDENCE).as_posix() in ('cold-pages', 'warm-surface'), 'Unknown evidence directory')
+            continue
+        relative = file.relative_to(EVIDENCE).as_posix()
+        require(relative in ('report.json', 'cold-pages/pages.json', 'cold-pages/root-window.png', 'warm-surface/root-window.png')
+                or re.fullmatch(r'(?:cold|warm)\.(?:stdout|stderr)', relative)
+                or re.fullmatch(r'(?:warm-activation-observer-gtk|(?:cold|warm)(?:-disclosure)?(?:-readiness|-outcome)?-gtk)\.json', relative),
+                'Unknown continuation evidence member')
+        names.append(file.relative_to(u.BASE).as_posix())
+        require(len(names) <= 64, 'Continuation evidence count bound')
+    return fixed + tuple(sorted(names))
 
 
 def encoded(value):
@@ -194,7 +417,9 @@ class _Handoff:
         request = u.parse(self._request)
         require(u.admission(request['context']) == SCENARIO and request['scenario'] == SCENARIO
                 and request['context']['GITHUB_SHA'] == env['GITHUB_SHA'], 'Original updater intent/source differs')
-        for name in (*EXTRA_SOURCES, 'native-linux-production-016-update.py'):
+        require(set(request['sources']) == set(u.source_names(SCENARIO))
+                and set(EXTRA_SOURCES) <= set(request['sources']), 'Complete bound outer source closure required')
+        for name in request['sources']:
             u.bound(BASE / 'scripts' / name, request['sources'][name], 2 * 1024**2, uid=0, mode=0o444)
         profile_raw = u.read(BASE / 'inputs/profile.json', 65536, uid=0, mode=0o644)
         api_raw = u.read(BASE / 'inputs/api.json', 512 * 1024, uid=0, mode=0o644)

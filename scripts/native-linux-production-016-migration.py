@@ -1601,7 +1601,7 @@ def native_process_inventory(native, helper):
 INVENTORY_MAX_SAMPLES = 2048
 INVENTORY_COHORTS = {
     "migration": SCENARIOS,
-    "update": ("deb-native-cancel", "deb-auth-cancel", "deb-approve", "portable-native-cancel", "portable-approve"),
+    "update": ("deb-native-cancel", "deb-auth-cancel", "deb-approve", "portable-native-cancel", "portable-approve", "portable-flatpak-approve"),
 }
 
 
