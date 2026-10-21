@@ -1201,11 +1201,22 @@ def attributed_warm_activation(record, client, admitted, owner, *, association_v
             and reply['kind'] == 2 and reply['flags'] == 1 and reply['empty'] is True
             and reply['sender'] == owner['name'] and reply['destination'] == call['sender'] and reply['replySerial'] == call['serial']
             and value.get('observedHeaders') == [call, reply], 'Exact empty Host1 Start and successful matched reply required')
+    historical = sender.get('historicalDisconnected') if type(sender) is dict else None
+    historical_verified = (type(historical) is dict and historical == dict(method='GetNameOwner', step='owner-before',
+        registeredGIError=True, domain='g-dbus-error-quark', code=3,
+        remoteErrorName='org.freedesktop.DBus.Error.NameHasNoOwner', initialCredentialsVerified=True,
+        heldProxyRechecked=True, sameBusConnection=True)
+        and type(historical['code']) is int
+        and all(historical[k] is True for k in ('registeredGIError', 'initialCredentialsVerified', 'heldProxyRechecked', 'sameBusConnection'))
+        and sender.get('stable') is False and sender.get('connectionLive') is False and 'externalAssociation' in sender)
+    live_verified = (type(sender) is dict and sender.get('stable') is True
+        and 'historicalDisconnected' not in sender and 'connectionLive' not in sender)
     require(type(sender) is dict and sender.get('qualified') is False and sender.get('inputPermitted') is False
-            and all(sender.get(k) is True for k in ('stable', 'sealedBeforeInput', 'correlatesToOriginalPopen'))
+            and (live_verified or historical_verified)
+            and all(sender.get(k) is True for k in ('sealedBeforeInput', 'correlatesToOriginalPopen'))
             and not any(k in sender for k in ('unavailable', 'failureStage'))
             and sender.get('originalPopen') == proxy_process_snapshot(admitted)
-            and sender.get('expectedClient') == proxy_process_snapshot(client), 'Live sender must match the sealed owned launch')
+            and sender.get('expectedClient') == proxy_process_snapshot(client), 'Verified sender must match the sealed owned launch')
     peer, ancestry = sender.get('peer'), sender.get('senderAncestors')
     require(type(peer) is dict and set(peer) == {'name', 'pid', 'uid'} and peer['name'] == call['sender']
             and type(peer['pid']) is int and peer['pid'] > 1 and type(peer['uid']) is int and peer['uid'] == client['uids'][0]

@@ -2860,7 +2860,223 @@ class QueryDiagnosticTests(unittest.TestCase):
             self.assertFalse(observer.worker.is_alive())
 
 
+class HistoricalDisconnectTests(unittest.TestCase):
+    def fixture(self):
+        observer, error = QueryDiagnosticTests.fixture()
+        state = RootAssociationTests().fixture()
+        observer.baseline = state.build_associated()
+        observer.baseline.begin_input()
+        observer.armed = observer.bus_identity_matched = True
+        observer.monitor = Mock()
+        observer.monitor.is_closed.return_value = observer.control.is_closed.return_value = False
+        observer.cancellable.is_cancelled.return_value = False
+        observer.bound_bus_connections = (observer.control, observer.monitor)
+        observer.Gio.DBusError.NAME_HAS_NO_OWNER = 3
+        observer.control.call_sync.side_effect = [SimpleNamespace(unpack=lambda v=v: (v,))
+            for v in (':1.40', 12, 1001, ':1.40')] + [error()]
+        state.reads.clear()
+        self.addCleanup(observer.close)
+        return observer, state, error
+
+    @staticmethod
+    def observe(observer):
+        return observer.baseline.observe(':1.40', observer.peer, budget=observer.budget,
+            recheck_peer=lambda name: observer.peer(name, historical=True))
+
+    def test_recorded_second_owner_before_disconnect_is_historical_never_live_or_authorizing(self):
+        observer, state, _ = self.fixture()
+        value = self.observe(observer)
+        self.assertIs(value['stable'], False)
+        self.assertIs(value['connectionLive'], False)
+        self.assertTrue(value['correlatesToOriginalPopen'])
+        self.assertEqual(value['externalAssociation'], state.data)
+        self.assertEqual(value['peer'], dict(name=':1.40', pid=12, uid=1001))
+        self.assertEqual(value['historicalDisconnected'], dict(method='GetNameOwner', step='owner-before',
+            registeredGIError=True, domain='g-dbus-error-quark', code=3,
+            remoteErrorName='org.freedesktop.DBus.Error.NameHasNoOwner', initialCredentialsVerified=True,
+            heldProxyRechecked=True, sameBusConnection=True))
+        self.assertNotIn('unavailable', value); self.assertNotIn('failureStage', value)
+        for name in ('qualified', 'inputPermitted'): self.assertIs(value[name], False)
+        self.assertEqual(state.reads, [(12, True), (12, True)])
+        self.assertEqual([call.args[3] for call in observer.control.call_sync.call_args_list],
+            ['GetNameOwner', 'GetConnectionUnixProcessID', 'GetConnectionUnixUser', 'GetNameOwner', 'GetNameOwner'])
+        self.assertTrue(all(call.args[7:] == (500, observer.cancellable)
+                            for call in observer.control.call_sync.call_args_list))
+        self.assertNotIn('PRIVATE', str(value))
+
+    def test_disconnected_before_first_read_or_incomplete_initial_credentials_never_bind(self):
+        values = (':1.40', 12, 1001, ':1.40')
+        for index in range(4):
+            with self.subTest(index=index):
+                observer, state, error = self.fixture()
+                observer.control.call_sync.side_effect = [SimpleNamespace(unpack=lambda v=v: (v,))
+                    for v in values[:index]] + [error()]
+                value = self.observe(observer)
+                self.assertFalse(value['stable']); self.assertFalse(value['correlatesToOriginalPopen'])
+                self.assertEqual(value['failureStage'], 'live-sender-credentials')
+                self.assertNotIn('historicalDisconnected', value)
+                self.assertEqual(observer.control.call_sync.call_count, index + 1)
+                self.assertEqual(state.reads, [])
+
+    def test_only_second_owner_before_exact_registered_no_owner_can_be_historical(self):
+        values = (':1.40', 12, 1001, ':1.40')
+        for case in ('pid', 'uid', 'owner-after', 'timeout', 'domain', 'code', 'remote', 'plain', 'getter'):
+            with self.subTest(case=case):
+                observer, _, error = self.fixture()
+                extra = values[:{'pid': 1, 'uid': 2, 'owner-after': 3}.get(case, 0)]
+                failure = error(domain='g-io-error-quark') if case == 'domain' else error(code=24) if case == 'code' else (
+                    error(remote='org.freedesktop.DBus.Error.Timeout') if case in ('timeout', 'remote') else
+                    RuntimeError('PRIVATE') if case == 'plain' else error())
+                if case == 'getter': observer.Gio.DBusError.get_remote_error.side_effect = ValueError('PRIVATE')
+                observer.control.call_sync.side_effect = [SimpleNamespace(unpack=lambda v=v: (v,)) for v in values + extra] + [failure]
+                value = self.observe(observer)
+                self.assertFalse(value['stable']); self.assertFalse(value['correlatesToOriginalPopen'])
+                self.assertNotIn('historicalDisconnected', value)
+                self.assertEqual(observer.control.call_sync.call_count, 5 + len(extra))
+
+    def test_wrong_credentials_or_reused_changed_dead_proxy_refuse_before_disconnect_fallback(self):
+        for case in ('name', 'pid', 'uid', 'start', 'parent', 'image', 'held-image', 'system-image', 'exit', 'gone'):
+            with self.subTest(case=case):
+                observer, state, error = self.fixture()
+                values = (':1.41' if case == 'name' else ':1.40', 99 if case == 'pid' else 12,
+                          1002 if case == 'uid' else 1001, ':1.40')
+                observer.control.call_sync.side_effect = [SimpleNamespace(unpack=lambda v=v: (v,)) for v in values] + [error()]
+                if case == 'start': state.rows[12]['startTime'] = '999'
+                if case == 'parent': state.rows[12]['parentPid'] = 999
+                if case == 'image': state.rows[12]['kernelImageSha256'] = 'f' * 64
+                if case == 'held-image': observer.baseline.held[12].snapshot = lambda: ({}, 'f' * 64)
+                if case == 'system-image': state.system.snapshot = lambda: ({}, 'f' * 64)
+                if case == 'exit': state.pidfds.ready.return_value = True
+                if case == 'gone': del state.rows[12]
+                value = self.observe(observer)
+                self.assertFalse(value['correlatesToOriginalPopen']); self.assertNotIn('historicalDisconnected', value)
+                self.assertLessEqual(observer.control.call_sync.call_count, 4)
+
+    def test_changed_closed_unmatched_bus_cancel_stop_or_expiry_cannot_be_historical(self):
+        for case in ('unmatched', 'control-replaced', 'monitor-replaced', 'control-closed', 'monitor-closed',
+                     'not-armed', 'closed', 'stop', 'cancel', 'expiry'):
+            with self.subTest(case=case):
+                observer, _, _ = self.fixture()
+                if case == 'unmatched': observer.bus_identity_matched = False
+                if case == 'control-replaced': observer.bound_bus_connections = (Mock(), observer.monitor)
+                if case == 'monitor-replaced': observer.bound_bus_connections = (observer.control, Mock())
+                if case == 'control-closed': observer.control.is_closed.return_value = True
+                if case == 'monitor-closed': observer.monitor.is_closed.return_value = True
+                if case == 'not-armed': observer.armed = False
+                if case == 'closed': observer.closed = True
+                if case == 'cancel': observer.cancellable.is_cancelled.return_value = True
+                if case in ('stop', 'expiry'):
+                    observer.budget = lambda: (_ for _ in ()).throw(ValueError())
+                value = self.observe(observer)
+                self.assertFalse(value['stable']); self.assertNotIn('historicalDisconnected', value)
+                self.assertFalse(value['correlatesToOriginalPopen'])
+
+    def test_replayed_observation_and_ancestry_only_lineage_cannot_use_historical_result(self):
+        observer, _, _ = self.fixture()
+        self.assertIn('historicalDisconnected', self.observe(observer))
+        self.assertNotIn('historicalDisconnected', self.observe(observer))
+        state = PreInputLineageTests().fixture()
+        baseline = state.build(); baseline.begin_input()
+        try:
+            value = baseline.observe(':1.40', lambda name: dict(name=name, pid=12, uid=1001),
+                budget=lambda: None, recheck_peer=lambda _: M.DISCONNECTED_PEER)
+            self.assertFalse(value['stable']); self.assertNotIn('historicalDisconnected', value)
+        finally:
+            baseline.close()
+
+    def test_passive_worker_passes_historical_context_only_after_first_credentials(self):
+        observer, state, _ = self.fixture()
+        observer.input_started = True
+        observer.pending = [message(), message(2)]
+        observer.headers = copy.deepcopy(observer.pending)
+        observer.worker = threading.Thread(target=observer.run, daemon=True)
+        observer.worker.start()
+        try:
+            self.assertTrue(observer.settled.wait(2))
+            value = observer.close()
+            self.assertTrue(value['callReplyMatched']); self.assertTrue(value['workerStopped'])
+            self.assertFalse(value['senderObservation']['stable'])
+            self.assertIn('historicalDisconnected', value['senderObservation'])
+            self.assertFalse(value['authorityGranted']); self.assertFalse(value['inputPermitted'])
+            self.assertEqual(state.reads, [(12, True), (12, True)])
+        finally:
+            observer.close()
+            observer.worker.join(timeout=2)
+            self.assertFalse(observer.worker.is_alive())
+
+
 class RealGioQueryTests(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == 'linux', 'Linux registered GI and disposable private bus')
+    def test_verified_private_peer_disconnect_is_historical_only_on_second_owner_before(self):
+        import subprocess
+        required = os.environ.get('CREATOR_FLATPAK_REAL_GI_REQUIRED') == 'true'
+        if importlib.util.find_spec('gi') is None or not all(Path(p).is_file() for p in ('/usr/bin/dbus-run-session', '/usr/bin/dbus-daemon')):
+            if required: self.fail('Required registered GI/private-bus tooling is unavailable')
+            self.skipTest('Registered GI/private-bus tooling unavailable')
+        code = r'''
+import importlib.util,json,os,signal,sys,time
+from gi.repository import Gio,GLib
+signal.alarm(5)
+spec=importlib.util.spec_from_file_location('private_disconnect_probe',sys.argv[1])
+m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
+flags=Gio.DBusConnectionFlags.AUTHENTICATION_CLIENT|Gio.DBusConnectionFlags.MESSAGE_BUS_CONNECTION
+address=os.environ['DBUS_SESSION_BUS_ADDRESS']
+connections=[Gio.DBusConnection.new_for_address_sync(address,flags,None,None) for _ in range(3)]
+for connection in connections: connection.set_exit_on_close(False)
+control,monitor,peer=connections
+observer=m.PassiveCapture(dict(name=':1.999999',pid=os.getpid()),{},{},None,None,None,address,os.getuid())
+observer.Gio,observer.GLib,observer.control,observer.monitor=Gio,GLib,control,monitor
+observer.cancellable=Gio.Cancellable.new()
+try:
+    ids=[connection.call_sync('org.freedesktop.DBus','/org/freedesktop/DBus','org.freedesktop.DBus','GetId',
+        None,GLib.VariantType.new('(s)'),Gio.DBusCallFlags.NONE,500,None).unpack()[0] for connection in connections]
+    assert len(set(ids))==1
+    observer.armed=observer.bus_identity_matched=True
+    observer.bound_bus_connections=(control,monitor)
+    name=peer.get_unique_name()
+    lost=[]
+    def owner_changed(*args):
+        if args[5].unpack()==(name,name,''): lost.append(True)
+    subscription=control.signal_subscribe('org.freedesktop.DBus','org.freedesktop.DBus','NameOwnerChanged',
+        '/org/freedesktop/DBus',name,Gio.DBusSignalFlags.NONE,owner_changed)
+    initial=observer.peer(name)
+    assert initial==dict(name=name,pid=os.getpid(),uid=os.getuid())
+    peer.close_sync(None)
+    deadline=time.monotonic()+2
+    while not lost and time.monotonic()<deadline:
+        GLib.MainContext.default().iteration(False)
+        time.sleep(.001)
+    assert lost,'Owned private peer disconnect notification missing'
+    assert observer.peer(name,historical=True) is m.DISCONNECTED_PEER
+    failure=observer.query_failure
+    assert failure['method']=='GetNameOwner' and failure['step']=='owner-before'
+    assert failure['registeredGIError'] is True and failure['domain']=='g-dbus-error-quark' and failure['code']==3
+    assert failure['remoteErrorName']=='org.freedesktop.DBus.Error.NameHasNoOwner'
+    try: observer.peer(name)
+    except GLib.Error: pass
+    else: raise AssertionError('Disconnected before first read was accepted')
+    control.signal_unsubscribe(subscription)
+    print(json.dumps(dict(initialCredentialsVerified=True,privatePeerDisconnected=True,
+        exactHistoricalResult=True,firstReadStillRefused=True,sharedBusUsed=False,nativeInput=False,releaseReady=False)))
+finally:
+    for connection in reversed(connections):
+        if not connection.is_closed(): connection.close_sync(None)
+'''
+        with tempfile.TemporaryDirectory(prefix='creator-private-gi-disconnect-') as directory:
+            root = Path(directory)
+            for name in ('config', 'data', 'cache', 'runtime'): (root / name).mkdir(mode=0o700)
+            env = {'PATH': '/usr/bin:/bin', 'HOME': str(root), 'XDG_CONFIG_HOME': str(root / 'config'),
+                   'XDG_DATA_HOME': str(root / 'data'), 'XDG_CACHE_HOME': str(root / 'cache'),
+                   'XDG_RUNTIME_DIR': str(root / 'runtime'), 'LC_ALL': 'C.UTF-8'}
+            result = subprocess.run(['/usr/bin/dbus-run-session', '--dbus-daemon=/usr/bin/dbus-daemon', '--',
+                sys.executable, '-I', '-B', '-c', code, str(Path(M.__file__).resolve())],
+                env=env, capture_output=True, timeout=10, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr[-4096:].decode('utf8', errors='replace'))
+        self.assertLessEqual(len(result.stdout), 4096); self.assertLessEqual(len(result.stderr), 4096)
+        value = M.json.loads(result.stdout)
+        self.assertEqual(value, dict(initialCredentialsVerified=True, privatePeerDisconnected=True,
+            exactHistoricalResult=True, firstReadStillRefused=True, sharedBusUsed=False, nativeInput=False, releaseReady=False))
+
     @unittest.skipUnless(sys.platform == 'linux', 'Linux registered GI and disposable private bus')
     def test_nonexistent_name_on_new_private_bus_retains_registered_error_and_timeout_distinction(self):
         import subprocess

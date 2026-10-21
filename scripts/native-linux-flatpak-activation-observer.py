@@ -29,6 +29,7 @@ PROXY_UID = 1001
 ROOT_WORKER_SECONDS = 5
 PROBE_OPERATION = 'flatpak-uid-inventory-probe-1001'
 ROOT_DIAGNOSTIC_ACTIVE = False
+DISCONNECTED_PEER = object()
 
 
 def require(value):
@@ -2006,7 +2007,7 @@ class OwnedLineage:
                 self.capture_failure(error)
                 raise
 
-    def observe(self, name, peer, *, budget):
+    def observe(self, name, peer, *, budget, recheck_peer=None):
         with self.lock:
             value = dict(qualified=False, inputPermitted=False, stable=False, correlatesToOriginalPopen=False)
             stage = 'sealed-baseline'
@@ -2033,11 +2034,20 @@ class OwnedLineage:
                         and self.system.snapshot() == (row['image'], row['kernelImageSha256'])
                         and self.read(pid, True) == row and not self.pidfds.ready(self.fds[pid]))
                 stage = 'sender-credentials-recheck'
-                budget(); require(peer(name) == credentials); budget()
+                budget()
+                second = (peer if recheck_peer is None else recheck_peer)(name)
+                disconnected = second is DISCONNECTED_PEER
+                require(type(self) is AssociatedProxyLineage if disconnected else second == credentials)
+                budget()
+                if disconnected:
+                    value.update(connectionLive=False, historicalDisconnected=dict(method='GetNameOwner', step='owner-before',
+                        registeredGIError=True, domain='g-dbus-error-quark', code=3,
+                        remoteErrorName='org.freedesktop.DBus.Error.NameHasNoOwner', initialCredentialsVerified=True,
+                        heldProxyRechecked=True, sameBusConnection=True))
                 # These are lifetime observations, not replacements for the sealed ancestry proof.
                 value['historicalAncestors'] = [dict(pid=p, startTime=self.rows[p]['startTime'],
                     lifetime='pidfd-signalled-exit' if self.pidfds.ready(self.fds[p]) else 'not-signalled') for p in self.chains[pid]]
-                value.update(stable=True, correlatesToOriginalPopen=True)
+                value.update(stable=not disconnected, correlatesToOriginalPopen=True)
             except Exception as error:
                 value.update(failureStage=stage, unavailable=type(error).__name__ if type(error) in (
                     ValueError, KeyError, RuntimeError, PermissionError, FileNotFoundError, ProcessLookupError, OSError) else 'OtherError')
@@ -2101,9 +2111,9 @@ class AssociatedProxyLineage(OwnedLineage):
         require(current == self.association and self.instance.snapshot() == current['privateInstance'])
         OwnedLineage.verify_live(self)
 
-    def observe(self, name, peer, *, budget):
-        value = super().observe(name, peer, budget=budget)
-        if value.get('stable') is True:
+    def observe(self, name, peer, *, budget, recheck_peer=None):
+        value = super().observe(name, peer, budget=budget, recheck_peer=recheck_peer)
+        if value.get('stable') is True or ('historicalDisconnected' in value and 'failureStage' not in value):
             value['externalAssociation'] = copy.deepcopy(self.association)
         return bounded(value, 24576)
 
@@ -2171,6 +2181,7 @@ class PassiveCapture:
         self.sender, self.armed, self.bus_identity_matched, self.final = None, False, False, None
         self.baseline, self.input_started, self.settled = None, False, threading.Event()
         self.timing, self.query_failure = {}, None
+        self.bound_bus_connections = None
 
     def begin_input(self):
         require(type(self.baseline) in (OwnedLineage, AssociatedProxyLineage) and self.armed)
@@ -2216,8 +2227,25 @@ class PassiveCapture:
                 pass
             raise
 
-    def peer(self, name):
-        require(unique(name) and self.query('GetNameOwner', name, '(s)', step='owner-before') == name)
+    def peer(self, name, *, historical=False):
+        require(unique(name))
+        try:
+            owner = self.query('GetNameOwner', name, '(s)', step='owner-before')
+        except Exception as error:
+            if not historical or query_error_metadata(error, self.Gio, self.GLib) != dict(registeredGIError=True,
+                    domain='g-dbus-error-quark', code=3, remoteErrorName='org.freedesktop.DBus.Error.NameHasNoOwner'):
+                raise
+            # Retain the exact GetId-matched connections; no reconnection or fallback bus.
+            self.budget()
+            with self.lock:
+                require(self.armed and self.bus_identity_matched and not self.closed
+                        and type(self.bound_bus_connections) is tuple and len(self.bound_bus_connections) == 2
+                        and self.control is self.bound_bus_connections[0] and self.monitor is self.bound_bus_connections[1]
+                        and self.control.is_closed() is False and self.monitor.is_closed() is False
+                        and self.cancellable.is_cancelled() is False)
+            self.budget()
+            return DISCONNECTED_PEER
+        require(owner == name)
         value = dict(name=name, pid=self.query('GetConnectionUnixProcessID', name, '(u)', step='pid'),
                      uid=self.query('GetConnectionUnixUser', name, '(u)', step='uid'))
         require(self.query('GetNameOwner', name, '(s)', step='owner-after') == name)
@@ -2263,6 +2291,7 @@ class PassiveCapture:
         self.filter_id = self.monitor.add_filter(self.filter, None)
         self.target()
         self.armed = True
+        self.bound_bus_connections = (self.control, self.monitor)
         self.worker = threading.Thread(target=self.run, name='owned-Host1-diagnostic', daemon=True)
         self.worker.start()
 
@@ -2329,7 +2358,9 @@ class PassiveCapture:
                     if record['kind'] == 1 and value.get('call') == record and self.sender is None:
                         diagnostic_time(self.timing, 'senderObservationStartedMonotonicNs')
                         if self.baseline is not None:
-                            result = self.baseline.observe(record['sender'], self.peer, budget=self.budget) if self.input_started else dict(
+                            options = {'recheck_peer': lambda name: self.peer(name, historical=True)} \
+                                if type(self.baseline) is AssociatedProxyLineage else {}
+                            result = self.baseline.observe(record['sender'], self.peer, budget=self.budget, **options) if self.input_started else dict(
                                 qualified=False, inputPermitted=False, stable=False, correlatesToOriginalPopen=False, unavailable='BeforeInput')
                         else:
                             result = sender_snapshot(record['sender'], self.original, self.client, self.read, self.peer,

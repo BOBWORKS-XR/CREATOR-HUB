@@ -769,7 +769,7 @@ class WarmConsumedTerminalTests(unittest.TestCase):
                 state.observer_result['senderObservation']['stable'] = False
                 with patch.object(M.time, 'monotonic_ns', side_effect=OSError('clock unavailable')) if broken_clock else \
                         patch.object(M.time, 'monotonic_ns', return_value=123456):
-                    with self.assertRaisesRegex(RuntimeError, 'Live sender'): session.flatpak('Open Creator Hub', 'warm')
+                    with self.assertRaisesRegex(RuntimeError, 'Verified sender'): session.flatpak('Open Creator Hub', 'warm')
                 record = session.launcher_keys[0]
                 self.assertEqual(record['ownedPhaseExit']['exitCode'], 0)
                 if broken_clock: self.assertNotIn('ownedExitObservedMonotonicNs', record)
@@ -1487,7 +1487,7 @@ class RootProxySnapshotTests(unittest.TestCase):
                                     type='PermissionError', stage='complete-uid-inventory', pid=925))
         self.assertTrue(state.adapter.blocked); child.assert_called_once()
 
-    def test_terminal_attribution_requires_bound_association_validator_not_fake_ancestry(self):
+    def external_attribution_fixture(self):
         spec = importlib.util.spec_from_file_location('association_wire_test', HERE / 'native-linux-flatpak-activation-observer.py')
         observer = importlib.util.module_from_spec(spec); spec.loader.exec_module(observer)
         fixture = LauncherKeyboardTests()
@@ -1517,6 +1517,10 @@ class RootProxySnapshotTests(unittest.TestCase):
         value.update({k: False for k in ('qualified', 'inputPermitted', 'authorityGranted', 'releaseReady', 'deadlineExceeded')})
         value.update(messageCount=2, call=call, reply=reply, senderObservation=sender, observedHeaders=[call, reply])
         record = dict(observation=value)
+        return observer, record, client, original, owner
+
+    def test_terminal_attribution_requires_bound_association_validator_not_fake_ancestry(self):
+        observer, record, client, original, owner = self.external_attribution_fixture()
         M.attributed_warm_activation(record, client, original, owner, association_validator=observer.validate_association)
         with self.assertRaises(RuntimeError): M.attributed_warm_activation(record, client, original, owner)
         for change in (lambda r: r['observation']['senderObservation']['externalAssociation'].update(complete=False),
@@ -1526,6 +1530,78 @@ class RootProxySnapshotTests(unittest.TestCase):
             changed = copy.deepcopy(record); change(changed)
             with self.assertRaises((RuntimeError, ValueError)):
                 M.attributed_warm_activation(changed, client, original, owner, association_validator=observer.validate_association)
+
+    @staticmethod
+    def historical_sender(sender):
+        sender.update(stable=False, connectionLive=False, historicalDisconnected=dict(method='GetNameOwner', step='owner-before',
+            registeredGIError=True, domain='g-dbus-error-quark', code=3,
+            remoteErrorName='org.freedesktop.DBus.Error.NameHasNoOwner', initialCredentialsVerified=True,
+            heldProxyRechecked=True, sameBusConnection=True))
+
+    def test_historical_disconnect_requires_closed_exact_proof_and_complete_external_association(self):
+        observer, record, client, original, owner = self.external_attribution_fixture()
+        self.historical_sender(record['observation']['senderObservation'])
+        M.attributed_warm_activation(record, client, original, owner, association_validator=observer.validate_association)
+        for change in (lambda s: s.update(stable=True), lambda s: s.update(connectionLive=True),
+                       lambda s: s.pop('connectionLive'), lambda s: s.pop('externalAssociation'),
+                       lambda s: s.update(unavailable='OtherError'), lambda s: s.update(failureStage='live-sender-credentials'),
+                       lambda s: s['historicalDisconnected'].update(method='GetConnectionUnixUser'),
+                       lambda s: s['historicalDisconnected'].update(step='owner-after'),
+                       lambda s: s['historicalDisconnected'].update(code=24),
+                       lambda s: s['historicalDisconnected'].update(code=3.0),
+                       lambda s: s['historicalDisconnected'].update(domain='g-io-error-quark'),
+                       lambda s: s['historicalDisconnected'].update(remoteErrorName='org.freedesktop.DBus.Error.Timeout'),
+                       lambda s: s['historicalDisconnected'].update(initialCredentialsVerified=False),
+                       lambda s: s['historicalDisconnected'].update(heldProxyRechecked=False),
+                       lambda s: s['historicalDisconnected'].update(sameBusConnection=False),
+                       lambda s: s['historicalDisconnected'].update(registeredGIError=1),
+                       lambda s: s['historicalDisconnected'].update(extra=True)):
+            changed = copy.deepcopy(record); change(changed['observation']['senderObservation'])
+            with self.subTest(change=change), self.assertRaises((RuntimeError, ValueError)):
+                M.attributed_warm_activation(changed, client, original, owner, association_validator=observer.validate_association)
+
+    def test_historical_disconnect_never_substitutes_for_exact_call_reply_or_bus_continuity(self):
+        observer, record, client, original, owner = self.external_attribution_fixture()
+        self.historical_sender(record['observation']['senderObservation'])
+        for change in (lambda v: v.update(busIdentityMatched=False), lambda v: v.update(callReplyMatched=False),
+                       lambda v: v.pop('call'), lambda v: v.pop('reply'), lambda v: v.update(messageCount=3),
+                       lambda v: v['observedHeaders'].append(copy.deepcopy(v['reply'])),
+                       lambda v: v['reply'].update(replySerial=99), lambda v: v['reply'].update(sender=':1.99'),
+                       lambda v: v['call'].update(sender=':1.99'), lambda v: v.update(workerStopped=False),
+                       lambda v: v.update(deadlineExceeded=True)):
+            changed = copy.deepcopy(record); change(changed['observation'])
+            with self.subTest(change=change), self.assertRaises((RuntimeError, ValueError)):
+                M.attributed_warm_activation(changed, client, original, owner, association_validator=observer.validate_association)
+
+    def test_historical_disconnect_keeps_normal_exit_root_host_window_and_preservation_requirements(self):
+        for failure in (None, 'exit', 'preserved', 'root', 'host', 'window'):
+            with self.subTest(failure=failure), LauncherKeyboardTests().fixture('Open Creator Hub', 'warm',
+                    wrong_exit=2 if failure == 'exit' else None, preservation_failure=failure == 'preserved') as (session, state, _):
+                observer, record, _, _, _ = self.external_attribution_fixture()
+                self.historical_sender(record['observation']['senderObservation'])
+                record['observation']['reply']['sender'] = session.report['coldHost1Owner']['name']
+                state.observer_result = record['observation']
+                arm = session.start_warm_activation_diagnostic
+                def armed(*args):
+                    result = arm(*args)
+                    result['associationValidator'] = observer.validate_association
+                    return result
+                session.start_warm_activation_diagnostic = armed
+                def outcome(check, seconds=30):
+                    if state.sends:
+                        if failure == 'root': session.stable = Mock(side_effect=RuntimeError('Root identity changed'))
+                        if failure == 'host': session.host_owner = lambda: dict(name=':1.99', pid=40)
+                        if failure == 'window': session.windows = lambda: [200, 999]
+                    M.require(check(), 'Expected read-only outcome was not reached')
+                session.wait = outcome
+                if failure is None:
+                    session.flatpak('Open Creator Hub', 'warm')
+                    self.assertTrue(session.launcher_keys[0]['outcomeVerified'])
+                else:
+                    with self.assertRaises(RuntimeError): session.flatpak('Open Creator Hub', 'warm')
+                    self.assertFalse(session.launcher_keys[0]['outcomeVerified'])
+                self.assertEqual(state.sends, ['Enter'])
+                self.assertFalse(session.launcher_keys[0]['releaseReady'])
 
     def test_workflow_installs_only_bound_observer_and_runs_real_root_probe_before_collection(self):
         text = (HERE.parent / '.github/workflows/native-linux-production-016-flatpak.yml').read_text()
