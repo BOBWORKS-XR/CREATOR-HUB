@@ -1531,34 +1531,51 @@ def inspector_environment(stream):
     return {name: found.get(name) for name in INSPECTOR_ENV_KEYS}
 
 
-def endpoint_proc_file(pid, part, parser):
+def endpoint_proc_file(pid, part, parser, *, diagnostic=None):
+    diagnostic = {} if diagnostic is None else diagnostic
+    diagnostic.update(stage="proc-file", assertion="fixed-source")
     require(type(pid) is int and pid > 1 and part in ("environ", "net/tcp", "net/tcp6"), "Fixed endpoint proc source required")
+    diagnostic.update(source=part, assertion="lstat")
     path = Path(f"/proc/{pid}") / part
     before = path.lstat()
+    diagnostic["assertion"] = "ordinary"
     require(stat.S_ISREG(before.st_mode), "Ordinary endpoint proc source required")
+    diagnostic["assertion"] = "open"
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
     try:
+        diagnostic["assertion"] = "open-identity"
         require(stamp(os.fstat(fd)) == stamp(before), "Endpoint proc source changed during open")
+        diagnostic["assertion"] = "parser-open"
         with os.fdopen(fd, "rb", closefd=False) as stream:
+            diagnostic["assertion"] = "parse"
             value = parser(stream)
+        diagnostic.update(stage="proc-file", assertion="read-identity")
         require(stamp(os.fstat(fd)) == stamp(before) and stamp(path.lstat()) == stamp(before), "Endpoint proc source changed during read")
         return value
     finally:
         os.close(fd)
 
 
-def endpoint_socket_rows(stream, port, family):
+def endpoint_socket_rows(stream, port, family, *, diagnostic=None):
+    diagnostic = {} if diagnostic is None else diagnostic
+    diagnostic.update(stage="socket-table", assertion="family")
     require(family in ("tcp", "tcp6"), "Fixed endpoint socket family required")
+    diagnostic["assertion"] = "read"
     raw = stream.read(1024 * 1024 + 1)
+    diagnostic["assertion"] = "byte-bound"
     require(len(raw) <= 1024 * 1024, "Bounded endpoint socket table required")
     rows = []
+    diagnostic["assertion"] = "ascii"
     for line in raw.decode("ascii").splitlines()[1:]:
+        diagnostic["assertion"] = "row-select"
         fields = line.split()
         if len(fields) < 2 or fields[1].rsplit(":", 1)[-1] != f"{port:04X}":
             continue
+        diagnostic["assertion"] = "row-bound-shape"
         require(len(rows) < 16 and len(fields) >= 10 and re.fullmatch(r"[0-9A-F]{2}", fields[3])
                 and re.fullmatch(r"[0-9]{1,10}", fields[7]) and re.fullmatch(r"[0-9]{1,20}", fields[9]), "Bounded exact-port socket row required")
         address = fields[1].split(":")[0]
+        diagnostic["assertion"] = "address-shape"
         require(re.fullmatch(r"[0-9A-F]{8}" if family == "tcp" else r"[0-9A-F]{32}", address), "Socket address shape differs")
         rows.append({"family": family, "localAddress": address, "port": port, "state": fields[3],
                      "uid": int(fields[7]), "inode": fields[9]})
@@ -1567,22 +1584,31 @@ def endpoint_socket_rows(stream, port, family):
 
 def endpoint_process_snapshot(process, port, native, helper):
     entry = {"expected": process, "complete": False, "verified": False}
+    diagnostic = {"stage": "process", "assertion": "request", "source": "process"}
     try:
         require(type(process["pid"]) is int and process["pid"] > 1 and process["uids"] == [UID] * 4
                 and type(port) is int and 1024 <= port <= 65535, "Owned endpoint diagnostic required")
+        diagnostic["assertion"] = "kernel-before"
         entry["before"] = kernel_record(process["pid"], native, helper)
+        diagnostic["assertion"] = "identity-before"
         require(entry["before"] == process, "Endpoint diagnostic process changed before read")
-        entry["environment"] = endpoint_proc_file(process["pid"], "environ", inspector_environment)
+        diagnostic.update(assertion="proc-source", source="environ")
+        entry["environment"] = endpoint_proc_file(process["pid"], "environ", inspector_environment, diagnostic=diagnostic)
         entry["environmentScope"] = "kernel initial-exec environment; not a claim about later libc mutations"
         rows = []
         for family in ("tcp", "tcp6"):
+            diagnostic.update(stage="process", assertion="proc-source", source="net/" + family)
             rows.extend(endpoint_proc_file(process["pid"], "net/" + family,
-                                           lambda stream, family=family: endpoint_socket_rows(stream, port, family)))
+                                           lambda stream, family=family: endpoint_socket_rows(stream, port, family, diagnostic=diagnostic),
+                                           diagnostic=diagnostic))
+        diagnostic.update(stage="process", assertion="fd-inventory", source="fd")
         descriptors = list(Path(f'/proc/{process["pid"]}/fd').iterdir())
+        diagnostic["assertion"] = "fd-bound"
         require(len(descriptors) <= 256, "Bounded endpoint descriptor inventory required")
         owned = set(); vanished = 0
         for descriptor in descriptors:
             try:
+                diagnostic["assertion"] = "fd-link"
                 link = os.readlink(descriptor)
             except FileNotFoundError:
                 vanished += 1
@@ -1590,13 +1616,16 @@ def endpoint_process_snapshot(process, port, native, helper):
             match = re.fullmatch(r"socket:\[([0-9]+)\]", link)
             if match:
                 owned.add(match[1])
+        diagnostic["assertion"] = "socket-attribution"
         entry["sockets"] = [{**row, "heldByThisRoot": row["inode"] in owned} for row in rows]
         entry["vanishedDescriptors"] = vanished
+        diagnostic.update(assertion="kernel-after", source="process")
         entry["after"] = kernel_record(process["pid"], native, helper)
+        diagnostic["assertion"] = "identity-after"
         require(entry["after"] == process, "Endpoint diagnostic process changed after read")
         entry.update(complete=True, verified=True)
     except Exception as error:
-        entry["unavailable"] = {"type": type(error).__name__[:80]}
+        entry["unavailable"] = {"type": type(error).__name__[:80], **diagnostic}
         if isinstance(error, OSError) and type(error.errno) is int and 0 < error.errno < 4096:
             entry["unavailable"]["errno"] = error.errno
     return entry

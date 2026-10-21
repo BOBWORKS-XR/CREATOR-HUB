@@ -5638,10 +5638,64 @@ class RootEndpointDiagnosticTests(unittest.TestCase):
             with self.subTest(size=len(raw)), self.assertRaises(RuntimeError):
                 M.endpoint_socket_rows(io.BytesIO(raw), 41000, "tcp")
 
+    def test_socket_refusals_report_only_fixed_stage_and_assertion_without_more_reads(self):
+        for raw, family, assertion in ((self.table(), "udp", "family"),
+                                      (b"x" * (1024 * 1024 + 1), "tcp", "byte-bound"),
+                                      (b"\xff", "tcp", "ascii"),
+                                      (self.table(inode="PRIVATE"), "tcp", "row-bound-shape"),
+                                      (self.table(address="ABC"), "tcp", "address-shape")):
+            diagnostic = {}; stream = Mock(wraps=io.BytesIO(raw))
+            with self.subTest(assertion=assertion), self.assertRaises((RuntimeError, UnicodeDecodeError)):
+                M.endpoint_socket_rows(stream, 41000, family, diagnostic=diagnostic)
+            self.assertEqual(diagnostic, {"stage": "socket-table", "assertion": assertion})
+            if family == "udp":
+                stream.read.assert_not_called()
+            else:
+                stream.read.assert_called_once_with(1024 * 1024 + 1)
+            self.assertNotIn("PRIVATE", json.dumps(diagnostic))
+
+    def test_proc_open_identity_refusal_keeps_same_exception_and_io_count(self):
+        info = SimpleNamespace(st_mode=stat.S_IFREG | 0o400, st_dev=1, st_ino=2, st_uid=M.UID, st_gid=M.UID,
+                               st_nlink=1, st_size=0, st_mtime_ns=3, st_ctime_ns=4)
+        changed = SimpleNamespace(**{**vars(info), "st_ino": 99})
+        original = RuntimeError("Endpoint proc source changed during open")
+        path = Mock(); path.__truediv__ = Mock(return_value=path); path.lstat.return_value = info
+        def require(value, message):
+            if not value:
+                self.assertEqual(message, str(original)); raise original
+        for part in ("net/tcp", "net/tcp6"):
+            diagnostic = {}; parser = Mock(); path.lstat.reset_mock()
+            with self.subTest(part=part), patch.object(M, "Path", return_value=path), \
+                 patch.multiple(M.os, O_NOFOLLOW=0x20000, O_NONBLOCK=0x800, O_CLOEXEC=0x80000, create=True), \
+                 patch.object(M.os, "open", return_value=7) as opened, patch.object(M.os, "fstat", return_value=changed) as fstat, \
+                 patch.object(M.os, "close") as closed, patch.object(M, "require", side_effect=require):
+                with self.assertRaises(RuntimeError) as caught:
+                    M.endpoint_proc_file(12, part, parser, diagnostic=diagnostic)
+            self.assertIs(caught.exception, original)
+            self.assertEqual(diagnostic, {"stage": "proc-file", "assertion": "open-identity", "source": part})
+            path.lstat.assert_called_once_with(); opened.assert_called_once(); fstat.assert_called_once_with(7)
+            parser.assert_not_called(); closed.assert_called_once_with(7)
+
+    def test_process_capture_keeps_inner_socket_stage_and_current_two_environment_keys(self):
+        process = self.process()
+        def proc_file(pid, part, parser, *, diagnostic=None):
+            raw = b"TAURI_WEBVIEW_AUTOMATION=true\0WEBKIT_INSPECTOR_SERVER=127.0.0.1:41000\0" if part == "environ" else self.table(uid="PRIVATE")
+            return parser(io.BytesIO(raw))
+        with patch.object(M, "kernel_record", return_value=process), patch.object(M, "endpoint_proc_file", side_effect=proc_file) as files, \
+             patch.object(Path, "iterdir") as descriptors:
+            value = M.endpoint_process_snapshot(process, 41000, object(), object())
+        self.assertEqual(value["unavailable"], {"type": "RuntimeError", "stage": "socket-table",
+                                              "assertion": "row-bound-shape", "source": "net/tcp"})
+        self.assertEqual(set(value["environment"]), set(M.INSPECTOR_ENV_KEYS))
+        self.assertEqual([c.args[1] for c in files.call_args_list], ["environ", "net/tcp"])
+        descriptors.assert_not_called()
+        self.assertFalse(value["verified"]); self.assertFalse(value["complete"])
+        self.assertNotIn("PRIVATE", json.dumps(value))
+
     @contextmanager
     def process_sources(self, *, records=None, defect=None):
         process = self.process()
-        def proc_file(pid, part, parser):
+        def proc_file(pid, part, parser, *, diagnostic=None):
             self.assertEqual(pid, 12)
             if defect is not None: raise defect
             raw = b"TAURI_WEBVIEW_AUTOMATION=true\0WEBKIT_INSPECTOR_SERVER=127.0.0.1:41000\0" if part == "environ" else self.table(family=part[4:])
@@ -5675,7 +5729,28 @@ class RootEndpointDiagnosticTests(unittest.TestCase):
         with self.process_sources(records=[process, {**process, "startTime": "200"}]) as (process, _, _):
             value = M.endpoint_process_snapshot(process, 41000, object(), object())
         self.assertFalse(value["verified"]); self.assertFalse(value["complete"])
-        self.assertEqual(value["unavailable"], {"type": "RuntimeError"})
+        self.assertEqual(value["unavailable"], {"type": "RuntimeError", "stage": "process",
+                                              "assertion": "identity-after", "source": "process"})
+
+    def test_descriptor_bound_and_read_refusals_keep_fixed_stage_without_extra_queries(self):
+        for count, error, assertion in ((257, None, "fd-bound"),
+                                        (1, PermissionError(13, "PRIVATE"), "fd-link")):
+            with self.subTest(assertion=assertion), self.process_sources() as (process, kernel, files), \
+                 patch.object(Path, "iterdir", return_value=[Path("/proc/12/fd/4")] * count) as inventory, \
+                 patch.object(M.os, "readlink", side_effect=error) as links:
+                value = M.endpoint_process_snapshot(process, 41000, object(), object())
+            expected = {"type": "PermissionError" if error else "RuntimeError", "stage": "process",
+                        "assertion": assertion, "source": "fd"}
+            if error:
+                expected["errno"] = 13
+                links.assert_called_once_with(Path("/proc/12/fd/4"))
+            else:
+                links.assert_not_called()
+            self.assertEqual(value["unavailable"], expected)
+            inventory.assert_called_once_with(); self.assertEqual(kernel.call_count, 1)
+            self.assertEqual([call.args[1] for call in files.call_args_list], ["environ", "net/tcp", "net/tcp6"])
+            self.assertFalse(value["complete"]); self.assertFalse(value["verified"])
+            self.assertNotIn("PRIVATE", json.dumps(value))
 
     def test_matching_port_with_foreign_socket_inode_is_never_attributed_to_root(self):
         with self.process_sources() as (process, _, _), patch.object(M.os, "readlink", return_value="socket:[999]"):
@@ -5696,6 +5771,7 @@ class RootEndpointDiagnosticTests(unittest.TestCase):
         info = SimpleNamespace(st_mode=stat.S_IFREG | 0o400, st_dev=1, st_ino=2, st_uid=M.UID, st_gid=M.UID,
                                st_nlink=1, st_size=0, st_mtime_ns=3, st_ctime_ns=4)
         for changed in (False, True):
+            diagnostic = {}
             path = Mock(); path.__truediv__ = Mock(return_value=path)
             path.lstat.side_effect = [info, SimpleNamespace(**{**vars(info), "st_ino": 5}) if changed else info]
             stream = io.BytesIO(b"TAURI_WEBVIEW_AUTOMATION=true\0")
@@ -5705,9 +5781,11 @@ class RootEndpointDiagnosticTests(unittest.TestCase):
                     patch.object(M.os, "fdopen", return_value=stream), patch.object(M.os, "close") as closed:
                 if changed:
                     with self.assertRaisesRegex(RuntimeError, "changed during read"):
-                        M.endpoint_proc_file(12, "environ", M.inspector_environment)
+                        M.endpoint_proc_file(12, "environ", M.inspector_environment, diagnostic=diagnostic)
                 else:
-                    self.assertEqual(M.endpoint_proc_file(12, "environ", M.inspector_environment)["TAURI_WEBVIEW_AUTOMATION"], "true")
+                    self.assertEqual(M.endpoint_proc_file(12, "environ", M.inspector_environment,
+                                                         diagnostic=diagnostic)["TAURI_WEBVIEW_AUTOMATION"], "true")
+                self.assertEqual(diagnostic, {"stage": "proc-file", "assertion": "read-identity", "source": "environ"})
                 self.assertTrue(opened.call_args.args[1] & os.O_NOFOLLOW)
                 closed.assert_called_once_with(7)
         with self.assertRaises(RuntimeError): M.endpoint_proc_file(12, "cmdline", lambda _: None)
