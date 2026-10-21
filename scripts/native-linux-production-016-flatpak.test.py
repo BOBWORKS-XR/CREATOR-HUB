@@ -1704,6 +1704,124 @@ class RootProxySnapshotTests(unittest.TestCase):
         self.assertNotIn('sudo python3 scripts/native-linux-flatpak-activation-observer.py', text)
 
 
+class HistoricalPreinputAttributionTests(unittest.TestCase):
+    def fixture(self):
+        observer, record, client, original, owner = RootProxySnapshotTests().external_attribution_fixture()
+        sender, value = record['observation']['senderObservation'], record['observation']
+        clocks = dict(captureStartedMonotonicNs=10, captureFinishedMonotonicNs=20, associationVerifiedMonotonicNs=30,
+            inputStartedMonotonicNs=40, callHeaderQueuedMonotonicNs=50, busRecheckedMonotonicNs=60)
+        proof = dict(schemaVersion=1, readOnly=True, authorityGranted=False, inputPermitted=False,
+            initialCredentialsVerified=True, associationRecheckedBeforeInput=True, sameBusConnections=True,
+            currentProcessVerified=False, currentImageVerified=False, busId='a' * 32, postInputBusId='a' * 32,
+            controlName=':1.70', monitorName=':1.71', **clocks)
+        sender.update(stable=False, connectionLiveness='unknown', historicalPreinputBinding=proof)
+        value['timing'] = {k: clocks[k] for k in ('associationVerifiedMonotonicNs', 'inputStartedMonotonicNs', 'callHeaderQueuedMonotonicNs')}
+        record['preInputProxyPeers'] = dict(readOnly=True, qualified=False, inputPermitted=False, authorityGranted=False,
+            releaseReady=False, complete=True, heldBefore=True, heldAfter=True, associationRechecked=False,
+            listedCount=4, uniqueCount=2, pidQueries=2, matchedPidCount=1, peerQueries=1,
+            matches=[copy.deepcopy(sender['peer'])], errorCounts={}, startedMonotonicNs=10, finishedMonotonicNs=20,
+            busId='a' * 32, controlName=':1.70', monitorName=':1.71')
+        return observer, record, client, original, owner
+
+    def accept(self, record):
+        observer, _, client, original, owner = self.fixture()
+        M.attributed_warm_activation(record, client, original, owner, association_validator=observer.validate_association)
+
+    def test_distinct_historical_record_and_actual_observer_output_pass_only_complete_attribution(self):
+        _, record, *_ = self.fixture(); self.accept(record)
+        spec = importlib.util.spec_from_file_location('historical_preinput_observer_tests', HERE / 'native-linux-flatpak-activation-observer.test.py')
+        tests = importlib.util.module_from_spec(spec); spec.loader.exec_module(tests)
+        case = tests.HistoricalPreinputBindingTests(); self.addCleanup(case.doCleanups); case.setUp()
+        state = case.fixture(); capture = state.observer; baseline = capture.baseline
+        baseline.redact = M.proxy_process_snapshot
+        case.queue(capture); case.run_worker(capture)
+        record = dict(preInputProxyPeers=state.pre, observation=capture.close())
+        M.attributed_warm_activation(record, baseline.client, baseline.original, capture.expected_owner,
+                                    association_validator=tests.M.validate_association)
+        self.assertFalse(record['observation']['senderObservation']['stable'])
+        self.assertNotIn('historicalDisconnected', record['observation']['senderObservation'])
+
+    def test_partial_forged_mixed_or_current_identity_claims_refuse(self):
+        changes = (
+            lambda r: r.pop('preInputProxyPeers'),
+            lambda r: r['preInputProxyPeers'].update(complete=False),
+            lambda r: r['preInputProxyPeers'].update(heldBefore=False),
+            lambda r: r['preInputProxyPeers'].update(heldAfter=1),
+            lambda r: r['preInputProxyPeers'].update(associationRechecked=True),
+            lambda r: r['preInputProxyPeers'].update(errorCounts={'NameHasNoOwner': 1}),
+            lambda r: r['preInputProxyPeers'].update(uniqueCount=65),
+            lambda r: r['preInputProxyPeers'].update(pidQueries=1),
+            lambda r: r['preInputProxyPeers'].update(peerQueries=2),
+            lambda r: r['preInputProxyPeers'].update(firstErrorStage='pid-filter'),
+            lambda r: r['preInputProxyPeers']['matches'].append(copy.deepcopy(r['preInputProxyPeers']['matches'][0])),
+            lambda r: r['preInputProxyPeers']['matches'][0].update(name=':1.999'),
+            lambda r: r['preInputProxyPeers']['matches'][0].update(pid=999),
+            lambda r: r['preInputProxyPeers']['matches'][0].update(uid=1002),
+            lambda r: r['observation']['senderObservation'].update(stable=True),
+            lambda r: r['observation']['senderObservation'].update(connectionLive=False),
+            lambda r: r['observation']['senderObservation'].update(connectionLiveness='disconnected'),
+            lambda r: r['observation']['senderObservation'].update(historicalDisconnected={}),
+            lambda r: r['observation']['senderObservation'].update(inputPermitted=True),
+            lambda r: r['observation']['senderObservation'].update(qualified=True),
+            lambda r: r['observation']['senderObservation'].pop('externalAssociation'))
+        for change in changes:
+            _, record, *_ = self.fixture(); change(record)
+            with self.subTest(change=change), self.assertRaises((RuntimeError, ValueError)):
+                self.accept(record)
+        for field, replacement in (('schemaVersion', True), ('associationRecheckedBeforeInput', False),
+                ('initialCredentialsVerified', False), ('sameBusConnections', False), ('authorityGranted', True),
+                ('currentProcessVerified', True), ('currentImageVerified', True), ('busId', 'b' * 32),
+                ('postInputBusId', 'b' * 32), ('controlName', ':1.90'), ('monitorName', ':1.70'),
+                ('inputStartedMonotonicNs', 51), ('associationVerifiedMonotonicNs', 19),
+                ('captureFinishedMonotonicNs', 30), ('callHeaderQueuedMonotonicNs', 40),
+                ('busRecheckedMonotonicNs', 49), ('captureStartedMonotonicNs', True), ('extra', True)):
+            _, record, *_ = self.fixture(); record['observation']['senderObservation']['historicalPreinputBinding'][field] = replacement
+            with self.subTest(field=field), self.assertRaises((RuntimeError, ValueError)):
+                self.accept(record)
+
+    def test_all_existing_paired_message_bus_and_association_refusals_still_apply(self):
+        for change in (lambda v: v.update(busIdentityMatched=False), lambda v: v.update(callReplyMatched=False),
+                lambda v: v.pop('call'), lambda v: v.pop('reply'), lambda v: v.update(messageCount=3),
+                lambda v: v['observedHeaders'].append(copy.deepcopy(v['reply'])),
+                lambda v: v['reply'].update(replySerial=99), lambda v: v['reply'].update(sender=':1.99'),
+                lambda v: v['call'].update(sender=':1.99'), lambda v: v.update(workerStopped=False),
+                lambda v: v.update(deadlineExceeded=True), lambda v: v['timing'].update(inputStartedMonotonicNs=39),
+                lambda v: v['senderObservation']['externalAssociation']['pipes'][0].update(appPid=99),
+                lambda v: v['senderObservation'].update(unavailable='ValueError')):
+            _, record, *_ = self.fixture(); change(record['observation'])
+            with self.subTest(change=change), self.assertRaises((RuntimeError, ValueError)):
+                self.accept(record)
+
+    def test_original_normal_exit_root_host_window_and_preservation_are_still_mandatory(self):
+        for failure in (None, 'exit', 'preserved', 'root', 'host', 'window'):
+            with self.subTest(failure=failure), LauncherKeyboardTests().fixture('Open Creator Hub', 'warm',
+                    wrong_exit=2 if failure == 'exit' else None, preservation_failure=failure == 'preserved') as (session, state, _):
+                observer, record, *_ = self.fixture()
+                record['observation']['reply']['sender'] = session.report['coldHost1Owner']['name']
+                state.observer_result = record['observation']
+                arm = session.start_warm_activation_diagnostic
+                def armed(*args):
+                    result = arm(*args)
+                    result['associationValidator'] = observer.validate_association
+                    result['record']['preInputProxyPeers'] = record['preInputProxyPeers']
+                    return result
+                session.start_warm_activation_diagnostic = armed
+                def outcome(check, seconds=30):
+                    if state.sends:
+                        if failure == 'root': session.stable = Mock(side_effect=RuntimeError('Root identity changed'))
+                        if failure == 'host': session.host_owner = lambda: dict(name=':1.99', pid=40)
+                        if failure == 'window': session.windows = lambda: [200, 999]
+                    M.require(check(), 'Expected read-only outcome was not reached')
+                session.wait = outcome
+                if failure is None:
+                    session.flatpak('Open Creator Hub', 'warm')
+                    self.assertTrue(session.launcher_keys[0]['outcomeVerified'])
+                else:
+                    with self.assertRaises(RuntimeError): session.flatpak('Open Creator Hub', 'warm')
+                    self.assertFalse(session.launcher_keys[0]['outcomeVerified'])
+                self.assertEqual(state.sends, ['Enter']); self.assertFalse(session.launcher_keys[0]['releaseReady'])
+
+
 class WarmLineageWiringTests(unittest.TestCase):
     def test_refused_proxy_capture_reuses_bound_operands_and_checks_both_existing_guards(self):
         session = object.__new__(M.Session)

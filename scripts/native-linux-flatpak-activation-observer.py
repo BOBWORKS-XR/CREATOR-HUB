@@ -7,6 +7,7 @@ dbus.freedesktop.org/doc/dbus-specification.html#bus-messages-become-monitor.
 """
 import copy
 import configparser
+from collections import namedtuple
 import hashlib
 import json
 import os
@@ -30,6 +31,8 @@ ROOT_WORKER_SECONDS = 5
 PROBE_OPERATION = 'flatpak-uid-inventory-probe-1001'
 ROOT_DIAGNOSTIC_ACTIVE = False
 DISCONNECTED_PEER = object()
+_PreinputBinding = namedtuple('_PreinputBinding', 'baseline control monitor cancellable system instance held '
+    'bus_id control_name monitor_name peers lineage started finished association_verified promoted')
 
 
 def require(value):
@@ -2247,14 +2250,116 @@ class PassiveCapture:
         self.baseline, self.input_started, self.settled = None, False, threading.Event()
         self.timing, self.query_failure = {}, None
         self.bound_bus_connections = None
+        self._preinput_attempted, self._preinput_binding = False, None
 
     def begin_input(self):
         require(type(self.baseline) in (OwnedLineage, AssociatedProxyLineage) and self.armed)
-        self.baseline.begin_input()
-        with self.lock:
-            require(not self.closed and not self.stop.is_set() and not self.headers and not self.input_started)
+        with self.baseline.lock:
+            binding = self._preinput_binding
+            require(binding is None or type(binding) is _PreinputBinding and binding.promoted == 0)
+            self.baseline.begin_input()
+            association_verified = self._binding_stamp() if binding is not None else None
+            if binding is not None:
+                self._check_preinput_binding(binding, before_input=True)
+            with self.lock:
+                require(not self.closed and not self.stop.is_set() and not self.headers and not self.input_started)
+                self.budget()
+                if binding is not None:
+                    promoted = self._binding_stamp()
+                    require(self._preinput_binding is binding and binding.finished < association_verified <= promoted)
+                    self._preinput_binding = binding._replace(association_verified=association_verified, promoted=promoted)
+                    self.timing.update(associationVerifiedMonotonicNs=association_verified, inputStartedMonotonicNs=promoted)
+                self.input_started = True
+
+    @staticmethod
+    def _binding_stamp():
+        value = time.monotonic_ns()
+        require(type(value) is int and 0 <= value < 2**63)
+        return value
+
+    def _preinput_lineage(self):
+        baseline = self.baseline
+        require(type(baseline) is AssociatedProxyLineage)
+        value = dict(original=baseline.original, client=baseline.client, rows=baseline.rows,
+            chains=baseline.chains, clientChain=baseline.client_chain, association=baseline.association)
+        return json.dumps(bounded(value, 24576), sort_keys=True, allow_nan=False)
+
+    def _check_preinput_binding(self, binding, *, before_input):
+        require(type(binding) is _PreinputBinding and type(self.baseline) is AssociatedProxyLineage
+                and self.baseline is binding.baseline and not self.baseline.closed
+                and self.baseline.started and self._preinput_binding is binding
+                and self._preinput_lineage() == binding.lineage
+                and self.baseline.system is binding.system and self.baseline.instance is binding.instance
+                and tuple(sorted(self.baseline.rows)) == tuple(pid for pid, fd, image in binding.held)
+                and all(self.baseline.fds[pid] == fd and self.baseline.held[pid] is image for pid, fd, image in binding.held))
+
+        def guard():
+            with self.lock:
+                require(self.armed and self.bus_identity_matched and not self.closed
+                        and self.input_started is not before_input
+                        and (not before_input or not self.headers and not self.pending)
+                        and self.control is binding.control and self.monitor is binding.monitor
+                        and self.cancellable is binding.cancellable
+                        and type(self.bound_bus_connections) is tuple and len(self.bound_bus_connections) == 2
+                        and self.bound_bus_connections[0] is binding.control and self.bound_bus_connections[1] is binding.monitor)
+            require(binding.control.is_closed() is False and binding.monitor.is_closed() is False
+                    and binding.cancellable.is_cancelled() is False
+                    and binding.control.get_unique_name() == binding.control_name
+                    and binding.monitor.get_unique_name() == binding.monitor_name)
             self.budget()
-            self.input_started = True
+
+        guard()
+        reply = binding.control.call_sync('org.freedesktop.DBus', '/org/freedesktop/DBus', 'org.freedesktop.DBus',
+            'GetId', None, self.GLib.VariantType.new('(s)'), self.Gio.DBusCallFlags.NONE, 500, binding.cancellable)
+        require(type(reply.get_size()) is int and 0 <= reply.get_size() <= 1024)
+        value = reply.unpack()
+        require(type(value) is tuple and len(value) == 1 and type(value[0]) is str and value[0] == binding.bus_id)
+        guard()
+        return value[0]
+
+    def observe_preinput_binding(self, name):
+        value = dict(qualified=False, inputPermitted=False, stable=False, correlatesToOriginalPopen=False)
+        stage = 'historical-preinput-seal'
+        baseline = self.baseline
+        try:
+            require(type(baseline) is AssociatedProxyLineage)
+            with baseline.lock:
+                require(baseline.started and not baseline.closed and not baseline.used)
+                baseline.used = True
+                binding = self._preinput_binding
+                require(type(binding) is _PreinputBinding and binding.baseline is baseline and binding.promoted > 0)
+                peers = [peer for peer in binding.peers if peer[0] == name]
+                require(unique(name) and len(peers) == 1)
+                with self.lock:
+                    require(self.input_started and self.headers and self.headers[0]['sender'] == name)
+                    call_time = self.timing.get('callHeaderQueuedMonotonicNs')
+                require(type(call_time) is int and binding.started <= binding.finished < binding.association_verified
+                        <= binding.promoted < call_time < 2**63)
+                stage = 'historical-preinput-bus'
+                bus_id = self._check_preinput_binding(binding, before_input=False)
+                checked = self._binding_stamp(); require(call_time <= checked)
+                # These are immutable pre-input records, never claims about a now-exited process/image.
+                sealed = json.loads(binding.lineage)
+                credentials = dict(zip(('name', 'pid', 'uid'), peers[0]))
+                proxy = sealed['association']['proxy']
+                require(proxy['pid'] == credentials['pid'] and proxy['uids'] == [credentials['uid']] * 4)
+                proof = dict(schemaVersion=1, readOnly=True, authorityGranted=False, inputPermitted=False,
+                    initialCredentialsVerified=True, associationRecheckedBeforeInput=True, sameBusConnections=True,
+                    currentProcessVerified=False, currentImageVerified=False, busId=binding.bus_id,
+                    postInputBusId=bus_id, controlName=binding.control_name, monitorName=binding.monitor_name,
+                    captureStartedMonotonicNs=binding.started, captureFinishedMonotonicNs=binding.finished,
+                    associationVerifiedMonotonicNs=binding.association_verified, inputStartedMonotonicNs=binding.promoted,
+                    callHeaderQueuedMonotonicNs=call_time, busRecheckedMonotonicNs=checked)
+                value.update(peer=credentials, sealedBeforeInput=True, correlatesToOriginalPopen=True,
+                    connectionLiveness='unknown', historicalPreinputBinding=proof,
+                    originalPopen=baseline.redact(sealed['original']), expectedClient=baseline.redact(sealed['client']),
+                    senderAncestors=[baseline.redact(proxy)],
+                    clientAncestors=[baseline.redact(row) for row in sealed['association']['tree']],
+                    externalAssociation=sealed['association'])
+        except Exception as error:
+            value.update(failureStage=stage, unavailable=type(error).__name__ if type(error) in (
+                ValueError, KeyError, RuntimeError, PermissionError, FileNotFoundError, ProcessLookupError, OSError) else 'OtherError')
+        return bounded(value, 24576)
 
     def finish_observation(self):
         # Wait only for this already-armed observation, inside its original fifteen-second budget.
@@ -2322,10 +2427,13 @@ class PassiveCapture:
         require(value == dict(name=self.owner, pid=self.expected_owner['pid'], uid=self.uid))
 
     def preinput_proxy_peers(self):
-        """One diagnostic enumeration; never feeds observe(), query_failure or input authority."""
+        """One enumeration; complete credentials may seed an internal, not-yet-promoted binding."""
         baseline = self.baseline
         if type(baseline) is not AssociatedProxyLineage:
             return None
+        with self.lock:
+            require(not self._preinput_attempted)
+            self._preinput_attempted = True
         result = dict(readOnly=True, inputPermitted=False, authorityGranted=False, qualified=False,
                       releaseReady=False, complete=False, heldBefore=False, heldAfter=False,
                       associationRechecked=False,
@@ -2450,6 +2558,23 @@ class PassiveCapture:
         except Exception as error:
             result.update(complete=False, matches=[], failureStage=stage)
             error_record(error)
+        if result['complete'] and result['matches']:
+            try:
+                stage = 'internal-seal'
+                with baseline.lock:
+                    guard()
+                    require(not baseline.started and not baseline.closed and not baseline.used)
+                    binding = _PreinputBinding(baseline, control, monitor, self.cancellable, baseline.system, baseline.instance,
+                        tuple((pid, baseline.fds[pid], baseline.held[pid]) for pid in sorted(baseline.rows)),
+                        result['busId'], result['controlName'], result['monitorName'],
+                        tuple((peer['name'], peer['pid'], peer['uid']) for peer in matches), self._preinput_lineage(),
+                        result['startedMonotonicNs'], result['finishedMonotonicNs'], 0, 0)
+                    with self.lock:
+                        locked_state(); require(self._preinput_binding is None)
+                        self._preinput_binding = binding
+            except Exception as error:
+                result.update(complete=False, matches=[], failureStage=stage)
+                error_record(error)
         return bounded(result, 8192)
 
     def arm(self):
@@ -2556,8 +2681,13 @@ class PassiveCapture:
                         if self.baseline is not None:
                             options = {'recheck_peer': lambda name: self.peer(name, historical=True)} \
                                 if type(self.baseline) is AssociatedProxyLineage else {}
-                            result = self.baseline.observe(record['sender'], self.peer, budget=self.budget, **options) if self.input_started else dict(
-                                qualified=False, inputPermitted=False, stable=False, correlatesToOriginalPopen=False, unavailable='BeforeInput')
+                            binding = self._preinput_binding
+                            if not self.input_started:
+                                result = dict(qualified=False, inputPermitted=False, stable=False, correlatesToOriginalPopen=False, unavailable='BeforeInput')
+                            elif type(binding) is _PreinputBinding and any(peer[0] == record['sender'] for peer in binding.peers):
+                                result = self.observe_preinput_binding(record['sender'])
+                            else:
+                                result = self.baseline.observe(record['sender'], self.peer, budget=self.budget, **options)
                         else:
                             result = sender_snapshot(record['sender'], self.original, self.client, self.read, self.peer,
                                                      self.redact, budget=self.budget, diagnostic_state=self.diagnostic_state)

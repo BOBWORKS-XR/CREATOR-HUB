@@ -1179,6 +1179,57 @@ def warm_release_error(value, rows, window):
             'Only the exact release SendEvent BadWindow is a candidate; delivery remains incomplete')
 
 
+def historical_preinput_binding(record, value, sender):
+    proof, pre = sender.get('historicalPreinputBinding'), record.get('preInputProxyPeers')
+    fixed = dict(schemaVersion=1, readOnly=True, authorityGranted=False, inputPermitted=False,
+        initialCredentialsVerified=True, associationRecheckedBeforeInput=True, sameBusConnections=True,
+        currentProcessVerified=False, currentImageVerified=False)
+    clocks = ('captureStartedMonotonicNs', 'captureFinishedMonotonicNs', 'associationVerifiedMonotonicNs',
+        'inputStartedMonotonicNs', 'callHeaderQueuedMonotonicNs', 'busRecheckedMonotonicNs')
+    names = ('busId', 'postInputBusId', 'controlName', 'monitorName')
+    require(type(proof) is dict and set(proof) == set(fixed) | set(clocks) | set(names)
+            and all(type(proof[k]) is type(v) and proof[k] == v for k, v in fixed.items())
+            and all(type(proof[k]) is int and 0 <= proof[k] < 2**63 for k in clocks),
+            'Exact historical pre-input proof required')
+    require(type(pre) is dict and all(pre.get(k) is True for k in ('complete', 'readOnly', 'heldBefore', 'heldAfter'))
+            and all(pre.get(k) is False for k in ('associationRechecked', 'qualified', 'inputPermitted', 'authorityGranted', 'releaseReady'))
+            and type(pre.get('errorCounts')) is dict and not pre['errorCounts']
+            and not any(k in pre for k in ('failureStage', 'firstErrorStage', 'captureUnavailable'))
+            and sender.get('stable') is False and sender.get('connectionLiveness') == 'unknown'
+            and not any(k in sender for k in ('connectionLive', 'historicalDisconnected')),
+            'Partial diagnostics or current-liveness claims cannot qualify historical attribution')
+    require(set(pre) == {'readOnly', 'inputPermitted', 'authorityGranted', 'qualified', 'releaseReady', 'complete',
+            'heldBefore', 'heldAfter', 'associationRechecked', 'listedCount', 'uniqueCount', 'pidQueries',
+            'matchedPidCount', 'peerQueries', 'matches', 'errorCounts', 'startedMonotonicNs', 'finishedMonotonicNs',
+            'busId', 'controlName', 'monitorName'}
+            and all(type(pre[k]) is int for k in ('listedCount', 'uniqueCount', 'pidQueries', 'matchedPidCount', 'peerQueries'))
+            and 0 <= pre['uniqueCount'] <= 64 and pre['uniqueCount'] <= pre['listedCount'] <= 128
+            and pre['pidQueries'] == pre['uniqueCount'], 'Complete bounded enumeration required')
+    matches, peer = pre.get('matches'), sender.get('peer')
+    require(type(matches) is list and 0 < len(matches) <= 8
+            and all(type(row) is dict and set(row) == {'name', 'pid', 'uid'} and type(row['name']) is str
+                    and re.fullmatch(r':[0-9]+\.[0-9]+', row['name']) and len(row['name']) <= 255
+                    and all(type(row[k]) is int and 0 < row[k] < 2**31 for k in ('pid', 'uid')) for row in matches)
+            and len({row['name'] for row in matches}) == len(matches)
+            and pre['matchedPidCount'] == pre['peerQueries'] == len(matches)
+            and sum(row == peer for row in matches) == 1, 'Actual sender was not completely bound before input')
+    require(type(proof['busId']) is str and re.fullmatch(r'[a-f0-9]{32}', proof['busId'])
+            and proof['postInputBusId'] == proof['busId'] == pre.get('busId')
+            and all(type(proof[k]) is str and len(proof[k]) <= 255 and re.fullmatch(r':[0-9]+\.[0-9]+', proof[k])
+                    and proof[k] == pre.get(k) for k in ('controlName', 'monitorName'))
+            and len({proof['controlName'], proof['monitorName'], peer['name']}) == 3,
+            'Historical sender requires the exact held control/monitor and bus identity')
+    times = [proof[k] for k in clocks]
+    timing = value.get('timing')
+    require(times[0] <= times[1] < times[2] <= times[3] < times[4] <= times[5]
+            and type(pre.get('startedMonotonicNs')) is int and pre['startedMonotonicNs'] == times[0]
+            and type(pre.get('finishedMonotonicNs')) is int and pre['finishedMonotonicNs'] == times[1]
+            and type(timing) is dict and all(type(timing.get(k)) is int and timing[k] == proof[k]
+                for k in ('associationVerifiedMonotonicNs', 'inputStartedMonotonicNs', 'callHeaderQueuedMonotonicNs')),
+            'Historical capture must precede the full association recheck, input and actual Start')
+    return True
+
+
 def attributed_warm_activation(record, client, admitted, owner, *, association_validator=None):
     require(type(record) is dict and not any(k in record for k in ('unavailable', 'captureUnavailable')),
             'Warm activation capture unavailable')
@@ -1218,11 +1269,14 @@ def attributed_warm_activation(record, client, admitted, owner, *, association_v
     historical_verified = (type(historical) is dict and (complete_proxy or exited_proxy)
         and type(historical['code']) is int
         and all(historical[k] is True for k in ('registeredGIError', 'initialCredentialsVerified', 'sameBusConnection'))
-        and sender.get('stable') is False and sender.get('connectionLive') is False and 'externalAssociation' in sender)
+        and sender.get('stable') is False and sender.get('connectionLive') is False and 'externalAssociation' in sender
+        and not any(k in sender for k in ('historicalPreinputBinding', 'connectionLiveness')))
+    preinput_verified = (type(sender) is dict and 'historicalPreinputBinding' in sender
+        and 'externalAssociation' in sender and historical_preinput_binding(record, value, sender))
     live_verified = (type(sender) is dict and sender.get('stable') is True
-        and 'historicalDisconnected' not in sender and 'connectionLive' not in sender)
+        and not any(k in sender for k in ('historicalDisconnected', 'connectionLive', 'historicalPreinputBinding', 'connectionLiveness')))
     require(type(sender) is dict and sender.get('qualified') is False and sender.get('inputPermitted') is False
-            and (live_verified or historical_verified)
+            and (live_verified or historical_verified or preinput_verified)
             and all(sender.get(k) is True for k in ('sealedBeforeInput', 'correlatesToOriginalPopen'))
             and not any(k in sender for k in ('unavailable', 'failureStage'))
             and sender.get('originalPopen') == proxy_process_snapshot(admitted)

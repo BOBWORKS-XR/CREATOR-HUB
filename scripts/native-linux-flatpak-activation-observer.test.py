@@ -2859,6 +2859,7 @@ class PreInputPeerDiagnosticTests(unittest.TestCase):
         value = state.observer.preinput_proxy_peers()
         self.assertTrue(value['complete']); self.assertEqual(value['pidQueries'], 64)
         self.assertEqual(value['matches'], []); self.assertEqual(value['peerQueries'], 0)
+        self.assertIsNone(state.observer._preinput_binding)
         self.assertFalse(any(name in json.dumps(value) for name in state.listed))
 
     def test_matching_peer_cap_bounds_full_credentials_without_granting_authority(self):
@@ -2939,6 +2940,175 @@ class PreInputPeerDiagnosticTests(unittest.TestCase):
             self.assertFalse(value['complete']); self.assertEqual(value['matches'], [])
             self.assertIsNone(observer.query_failure); self.assertFalse(observer.input_started)
             self.assert_no_authority(value)
+
+
+class HistoricalPreinputBindingTests(unittest.TestCase):
+    def setUp(self):
+        # Windows Python 3.11's monotonic clock can repeat within one timer tick; keep unit chronology deterministic.
+        clock = patch.object(M.time, 'monotonic_ns', side_effect=iter(range(1_000_000_000, 1_001_000_000)))
+        clock.start(); self.addCleanup(clock.stop)
+
+    def fixture(self, *, promote=True):
+        fixture = PreInputPeerDiagnosticTests()
+        state = fixture.fixture()
+        self.addCleanup(fixture.doCleanups)
+        observer = state.observer
+        state.pre = observer.preinput_proxy_peers()
+        self.assertTrue(state.pre['complete'])
+        if promote:
+            observer.begin_input()
+        return state
+
+    @staticmethod
+    def queue(observer, name=':1.40'):
+        observer.filter(None, GioAdapterTests.wire(message(sender=name)), True, None)
+        observer.filter(None, GioAdapterTests.wire(message(2, destination=name)), True, None)
+
+    def run_worker(self, observer):
+        # End only this synchronous mock worker after its already queued pair; no added production wait.
+        observer.settled = SimpleNamespace(set=observer.stop.set)
+        observer.run()
+        return observer.sender
+
+    def test_captured_binding_promotes_only_after_full_association_and_consumes_once_without_peer_rpc(self):
+        state = self.fixture(promote=False); observer = state.observer
+        candidate = observer._preinput_binding
+        self.assertIs(type(candidate), M._PreinputBinding); self.assertEqual(candidate.promoted, 0)
+        self.assertFalse(state.pre['associationRechecked'])
+        with self.assertRaises(AttributeError): candidate.promoted = 1
+        observer.begin_input()
+        self.assertEqual(state.snapshots.call_count, 2)
+        self.assertGreater(observer._preinput_binding.association_verified, candidate.finished)
+        self.assertGreaterEqual(observer._preinput_binding.promoted, observer._preinput_binding.association_verified)
+        prior = dict(method='original-test-failure'); observer.query_failure = prior
+        state.calls.clear(); observer.baseline.read = Mock(side_effect=AssertionError('No post-input process read'))
+        observer.baseline.system.snapshot = Mock(side_effect=AssertionError('No current system image claim'))
+        for held in observer.baseline.held.values(): held.snapshot = Mock(side_effect=AssertionError('No current image claim'))
+        with patch.object(observer.baseline, 'observe', side_effect=AssertionError('Do not consume live observation')), \
+                patch.object(observer, 'peer', side_effect=AssertionError('Do not query departed peer')):
+            self.queue(observer)
+            value = self.run_worker(observer)
+        self.assertEqual(state.calls, [('GetId', None)])
+        self.assertIs(observer.query_failure, prior)
+        self.assertTrue(observer.baseline.used)
+        self.assertFalse(value['stable']); self.assertEqual(value['connectionLiveness'], 'unknown')
+        self.assertNotIn('historicalDisconnected', value); self.assertNotIn('connectionLive', value)
+        self.assertFalse(value['inputPermitted']); self.assertFalse(value['qualified'])
+        self.assertTrue(value['sealedBeforeInput']); self.assertTrue(value['correlatesToOriginalPopen'])
+        self.assertTrue(value['historicalPreinputBinding']['associationRecheckedBeforeInput'])
+        self.assertFalse(value['historicalPreinputBinding']['currentImageVerified'])
+        self.assertFalse(value['historicalPreinputBinding']['currentProcessVerified'])
+        before = len(state.calls)
+        again = observer.observe_preinput_binding(':1.40')
+        self.assertIn('unavailable', again); self.assertEqual(len(state.calls), before)
+        self.assertFalse(observer.baseline.observe(':1.40', Mock(), budget=lambda: None)['correlatesToOriginalPopen'])
+
+    def test_returned_json_cannot_replace_or_change_private_credential_seal(self):
+        state = self.fixture(promote=False); observer = state.observer
+        state.pre['matches'][0].update(name=':1.999', pid=999, uid=999)
+        state.pre['complete'] = False
+        self.assertEqual(observer._preinput_binding.peers, ((':1.40', 12, 1001),))
+        observer.begin_input(); self.queue(observer)
+        self.assertEqual(self.run_worker(observer)['peer'], dict(name=':1.40', pid=12, uid=1001))
+        for forged in (state.pre, {}, SimpleNamespace(promoted=1, peers=((':1.40', 12, 1001),))):
+            state = self.fixture(promote=False); state.observer._preinput_binding = forged
+            with self.assertRaises(ValueError): state.observer.begin_input()
+            self.assertFalse(state.observer.input_started)
+
+    def test_no_preinput_observation_and_no_second_capture_or_second_input(self):
+        state = self.fixture(promote=False); observer = state.observer
+        value = observer.observe_preinput_binding(':1.40')
+        self.assertFalse(value['correlatesToOriginalPopen']); self.assertFalse(observer.baseline.used)
+        before = len(state.calls)
+        with self.assertRaises(ValueError): observer.preinput_proxy_peers()
+        self.assertEqual(len(state.calls), before)
+        observer.begin_input()
+        with self.assertRaises(ValueError): observer.begin_input()
+
+    def test_partial_or_unmatched_capture_cannot_supply_historical_branch_but_live_path_stays_valid(self):
+        for complete in (False, True):
+            for live in (False, True):
+                fixture = PreInputPeerDiagnosticTests(); state = fixture.fixture(); self.addCleanup(fixture.doCleanups)
+                observer = state.observer
+                if not complete: state.overrides[('GetConnectionUnixProcessID', ':1.90')] = PermissionError('foreign vanished')
+                pre = observer.preinput_proxy_peers()
+                self.assertEqual(pre['complete'], complete)
+                if not complete:
+                    self.assertEqual(pre['matches'], [dict(name=':1.40', pid=12, uid=1001)])
+                    self.assertIsNone(observer._preinput_binding)
+                name = ':1.999' if complete else ':1.40'
+                observer.begin_input(); self.queue(observer, name)
+                observer.peer = Mock(return_value=dict(name=name, pid=12, uid=1001))
+                if not live: observer.peer.side_effect = ProcessLookupError('new/unbound peer gone')
+                with patch.object(observer, 'observe_preinput_binding', side_effect=AssertionError('Unbound historical fallback')):
+                    value = self.run_worker(observer)
+                self.assertNotIn('historicalPreinputBinding', value)
+                self.assertEqual(value['stable'], live)
+                self.assertTrue(observer.baseline.used)
+
+    def test_before_input_row_image_instance_association_and_bus_drift_block_promotion(self):
+        for failure in ('row', 'image', 'system-image', 'association', 'instance', 'bus', 'control', 'monitor',
+                        'cancel', 'expire', 'header', 'sealed-row', 'pidfd', 'held-fd', 'held-object', 'system-object', 'instance-object'):
+            state = self.fixture(promote=False); observer = state.observer; original = observer._preinput_binding
+            if failure == 'row': state.rows[12]['startTime'] = '999'
+            if failure == 'image': observer.baseline.held[12].snapshot = lambda: ({}, 'bad')
+            if failure == 'system-image': state.system.snapshot = lambda: ({}, 'bad')
+            if failure == 'association': state.data['pipes'][0]['inode'] += 1
+            if failure == 'instance': state.private['pidIdentity'][-1] += 1
+            if failure == 'bus': state.overrides[('GetId', None)] = 'b' * 32
+            if failure == 'control': observer.control = Mock()
+            if failure == 'monitor': observer.monitor.get_unique_name.return_value = ':1.99'
+            if failure == 'cancel': observer.cancellable.is_cancelled.return_value = True
+            if failure == 'expire': observer.transcript.deadline = 0
+            if failure == 'header': self.queue(observer)
+            if failure == 'sealed-row': observer.baseline.original['startTime'] = '999'
+            if failure == 'pidfd': state.pidfds.ready = lambda fd: True
+            if failure == 'held-fd': observer.baseline.fds[12] = 1234
+            if failure == 'held-object': observer.baseline.held[12] = copy.copy(observer.baseline.held[12])
+            if failure == 'system-object': observer.baseline.system = copy.copy(observer.baseline.system)
+            if failure == 'instance-object': observer.baseline.instance = copy.copy(observer.baseline.instance)
+            with self.subTest(failure=failure), self.assertRaises((ValueError, FileNotFoundError)):
+                observer.begin_input()
+            self.assertFalse(observer.input_started)
+            self.assertIs(observer._preinput_binding, original)
+            self.assertFalse(observer.baseline.used)
+
+    def test_postinput_bus_cancel_clock_or_sealed_state_failure_never_falls_back_or_claims_live_identity(self):
+        for failure in ('bus', 'control', 'monitor', 'cancel', 'expire', 'lineage', 'closed', 'clock', 'wrong-name'):
+            state = self.fixture(); observer = state.observer; self.queue(observer)
+            if failure == 'bus': state.overrides[('GetId', None)] = 'b' * 32
+            if failure == 'control': observer.control = Mock()
+            if failure == 'monitor': observer.monitor.is_closed.return_value = True
+            if failure == 'cancel': observer.cancellable.is_cancelled.return_value = True
+            if failure == 'expire': observer.transcript.deadline = 0
+            if failure == 'lineage': observer.baseline.association['pipes'][0]['inode'] += 1
+            if failure == 'closed': observer.closed = True
+            if failure == 'clock': observer.timing['callHeaderQueuedMonotonicNs'] = observer._preinput_binding.finished
+            prior = {'existing': True}; observer.query_failure = prior
+            value = observer.observe_preinput_binding(':1.99' if failure == 'wrong-name' else ':1.40')
+            with self.subTest(failure=failure):
+                self.assertTrue(observer.baseline.used); self.assertFalse(value['correlatesToOriginalPopen'])
+                self.assertNotIn('historicalPreinputBinding', value); self.assertFalse(value['stable'])
+                self.assertIs(observer.query_failure, prior)
+            if failure == 'bus':
+                state.overrides[('GetId', None)] = 'a' * 32
+                before = len(state.calls)
+                again = observer.observe_preinput_binding(':1.40')
+                self.assertFalse(again['correlatesToOriginalPopen']); self.assertEqual(len(state.calls), before)
+                peer = Mock(return_value=dict(name=':1.40', pid=12, uid=1001))
+                live = observer.baseline.observe(':1.40', peer, budget=lambda: None)
+                self.assertFalse(live['correlatesToOriginalPopen']); peer.assert_not_called()
+
+    def test_matching_sender_branch_failure_cannot_retry_via_live_observation(self):
+        state = self.fixture(); observer = state.observer
+        state.overrides[('GetId', None)] = 'b' * 32
+        self.queue(observer)
+        with patch.object(observer.baseline, 'observe', side_effect=AssertionError('No fallback')), \
+                patch.object(observer, 'peer', side_effect=AssertionError('No credential retry')):
+            value = self.run_worker(observer)
+        self.assertTrue(observer.baseline.used); self.assertFalse(value['correlatesToOriginalPopen'])
+        self.assertNotIn('historicalPreinputBinding', value)
+        self.assertEqual(value['failureStage'], 'historical-preinput-bus')
 
 
 class QueryDiagnosticTests(unittest.TestCase):
@@ -3401,6 +3571,7 @@ class RealGioQueryTests(unittest.TestCase):
             self.skipTest('Registered GI/private-bus tooling unavailable')
         code = r'''
 import importlib.util,json,os,signal,subprocess,sys,threading
+from types import SimpleNamespace
 from unittest.mock import patch
 from gi.repository import Gio,GLib
 signal.alarm(10)
@@ -3438,7 +3609,10 @@ try:
     baseline=object.__new__(m.AssociatedProxyLineage)
     baseline.lock=threading.RLock();baseline.started=baseline.closed=baseline.used=False
     baseline.chains={child.pid:[child.pid]}
-    baseline.rows={child.pid:dict(executable='/usr/bin/xdg-dbus-proxy',uids=[os.getuid()]*4)}
+    row=dict(pid=child.pid,executable='/usr/bin/xdg-dbus-proxy',uids=[os.getuid()]*4)
+    baseline.rows={child.pid:row};baseline.original=baseline.client=row;baseline.client_chain=[child.pid]
+    baseline.association=dict(proxy=row,tree=[row],mockedAssociation=True);baseline.redact=lambda value:dict(value)
+    baseline.system=object();baseline.instance=object();baseline.fds={child.pid:object()};baseline.held={child.pid:object()}
     observer.baseline=baseline
     with patch.object(m.OwnedLineage,'verify_live') as held:
         value=observer.preinput_proxy_peers()
@@ -3449,9 +3623,31 @@ try:
     assert value['controlName']==control.get_unique_name()
     assert not any(value[k] for k in ('inputPermitted','authorityGranted','qualified','releaseReady'))
     assert not observer.input_started and not baseline.used and not baseline.started and observer.query_failure is None
-    print(json.dumps(dict(realPrivateBusCredentials=True,monitorMode=True,mockedHeldLineage=True,nativeInput=False,releaseReady=False)))
+    # Transport credentials/disconnect are real. Native process/image/association proof and Start delivery are not.
+    with patch.object(m.AssociatedProxyLineage,'verify_live') as association:
+        observer.begin_input();assert association.call_count==1
+    child.stdin.close();assert child.wait(timeout=3)==0
+    owner=control.call_sync('org.freedesktop.DBus','/org/freedesktop/DBus','org.freedesktop.DBus','NameHasOwner',
+        GLib.Variant('(s)',(name,)),GLib.VariantType.new('(b)'),Gio.DBusCallFlags.NONE,500,None).unpack()[0]
+    assert owner is False
+    call=Gio.DBusMessage.new_method_call(':1.999999',m.PATH,m.INTERFACE,'Start')
+    call.set_sender(name);call.set_serial(19);call.set_body(GLib.Variant('()',()))
+    reply=Gio.DBusMessage.new_method_reply(call);reply.set_sender(':1.999999');reply.set_serial(20)
+    observer.filter(None,call,True,None);observer.filter(None,reply,True,None)
+    observer.settled=SimpleNamespace(set=observer.stop.set)
+    with patch.object(observer,'peer',side_effect=AssertionError('No post-disconnect peer RPC')):
+        observer.run()
+    result=observer.sender
+    assert result['correlatesToOriginalPopen'] and result['historicalPreinputBinding']['sameBusConnections'],result
+    assert result['peer']==value['matches'][0] and result['connectionLiveness']=='unknown'
+    assert result['stable'] is False and result['inputPermitted'] is False and result['qualified'] is False
+    assert not result['historicalPreinputBinding']['currentProcessVerified'] and not result['historicalPreinputBinding']['currentImageVerified']
+    assert 'historicalDisconnected' not in result and 'connectionLive' not in result and observer.query_failure is None
+    assert baseline.used and observer.transcript.snapshot()['callReplyMatched']
+    print(json.dumps(dict(realPrivateBusCredentials=True,monitorMode=True,mockedHeldLineage=True,mockedAssociation=True,
+        historicalAfterRealDisconnect=True,syntheticStart=True,nativeInput=False,releaseReady=False)))
 finally:
-    child.stdin.close()
+    if not child.stdin.closed: child.stdin.close()
     try: child.wait(timeout=3)
     except subprocess.TimeoutExpired: child.terminate();child.wait(timeout=3)
     for connection in reversed(connections):
@@ -3469,7 +3665,8 @@ finally:
         self.assertEqual(result.returncode, 0, result.stderr[-4096:].decode('utf8', errors='replace'))
         self.assertLessEqual(len(result.stdout), 4096); self.assertLessEqual(len(result.stderr), 4096)
         self.assertEqual(json.loads(result.stdout), dict(realPrivateBusCredentials=True, monitorMode=True,
-            mockedHeldLineage=True, nativeInput=False, releaseReady=False))
+            mockedHeldLineage=True, mockedAssociation=True, historicalAfterRealDisconnect=True,
+            syntheticStart=True, nativeInput=False, releaseReady=False))
 
     @unittest.skipUnless(sys.platform == 'linux', 'Linux held pidfd and disposable private bus')
     def test_real_child_exit_and_private_bus_disconnect_feed_only_the_late_historical_branch(self):
