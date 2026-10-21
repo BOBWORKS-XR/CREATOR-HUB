@@ -3,6 +3,7 @@ import ast
 import copy
 import importlib.util
 import io
+import json
 import os
 from pathlib import Path
 import stat
@@ -2858,6 +2859,104 @@ class QueryDiagnosticTests(unittest.TestCase):
             gate.set(); observer.close()
             observer.worker.join(timeout=2)
             self.assertFalse(observer.worker.is_alive())
+
+
+class ProxyRecheckDiagnosticTests(unittest.TestCase):
+    CHECKS = ('pidfd-before', 'process-before', 'held-image', 'system-image', 'process-after', 'pidfd-after')
+
+    def fixture(self, fail=None, raises=False):
+        state = PreInputLineageTests().fixture()
+        baseline = state.build(); baseline.begin_input()
+        self.addCleanup(baseline.close)
+        calls = []
+        row = copy.deepcopy(state.rows[12])
+
+        def observation(name, result):
+            calls.append(name)
+            if name == fail:
+                if raises:
+                    raise PermissionError('PRIVATE failure detail')
+                if name.startswith('pidfd-'):
+                    return True
+                if type(result) is dict:
+                    result['image']['st_ino'] = '999'
+                    result['PRIVATE'] = 'PRIVATE value'
+                else:
+                    result = (result[0], 'b' * 64)
+            return result
+
+        pidfd_calls, read_calls = [0], [0]
+        def ready(fd):
+            pidfd_calls[0] += 1
+            if pidfd_calls[0] > 2:
+                return False
+            return observation('pidfd-before' if pidfd_calls[0] == 1 else 'pidfd-after', False)
+        def read(pid, full):
+            self.assertEqual((pid, full), (12, True))
+            read_calls[0] += 1
+            return observation('process-before' if read_calls[0] == 1 else 'process-after', copy.deepcopy(row))
+        baseline.pidfds.ready = ready
+        baseline.read = read
+        baseline.held[12].snapshot = lambda: observation('held-image', (copy.deepcopy(row['image']), row['kernelImageSha256']))
+        baseline.system.snapshot = lambda: observation('system-image', (copy.deepcopy(row['image']), row['kernelImageSha256']))
+        peer = Mock(side_effect=lambda name: dict(name=name, pid=12, uid=1001))
+        return baseline, calls, peer
+
+    def test_each_failed_operand_reports_only_fixed_fields_without_repeating_reads_or_accepting(self):
+        for index, check in enumerate(self.CHECKS):
+            with self.subTest(check=check):
+                baseline, calls, peer = self.fixture(check)
+                value = baseline.observe(':1.40', peer, budget=lambda: None)
+                self.assertEqual(calls, list(self.CHECKS[:index + 1]))
+                self.assertEqual(peer.call_count, 1)
+                self.assertEqual(value['failureStage'], 'live-prebound-proxy')
+                self.assertEqual(value['proxyRecheck']['check'], check)
+                expected = ['image.st_ino', 'shape'] if check.startswith('process-') else ['kernelImageSha256']
+                if check.startswith('pidfd-'):
+                    self.assertNotIn('changedFields', value['proxyRecheck'])
+                else:
+                    self.assertEqual(value['proxyRecheck']['changedFields'], expected)
+                for field in ('stable', 'qualified', 'inputPermitted', 'correlatesToOriginalPopen'):
+                    self.assertIs(value[field], False)
+                self.assertNotIn('historicalDisconnected', value)
+                self.assertNotIn('PRIVATE', json.dumps(value))
+
+    def test_os_exceptions_keep_exact_check_and_do_not_read_again_or_expose_exception_body(self):
+        for index, check in enumerate(self.CHECKS):
+            with self.subTest(check=check):
+                baseline, calls, peer = self.fixture(check, raises=True)
+                value = baseline.observe(':1.40', peer, budget=lambda: None)
+                self.assertEqual(calls, list(self.CHECKS[:index + 1]))
+                self.assertEqual(value['unavailable'], 'PermissionError')
+                self.assertEqual(value['proxyRecheck']['check'], check)
+                self.assertNotIn('changedFields', value['proxyRecheck'])
+                self.assertNotIn('PRIVATE', json.dumps(value))
+                self.assertEqual(peer.call_count, 1)
+
+    def test_success_retains_operation_order_and_peer_recheck_without_failure_diagnostic(self):
+        baseline, calls, peer = self.fixture()
+        value = baseline.observe(':1.40', peer, budget=lambda: None)
+        self.assertEqual(calls, list(self.CHECKS))
+        self.assertEqual(peer.call_count, 2)
+        self.assertTrue(value['stable']); self.assertTrue(value['correlatesToOriginalPopen'])
+        self.assertNotIn('proxyRecheck', value)
+        self.assertFalse(value['qualified']); self.assertFalse(value['inputPermitted'])
+
+    def test_diagnostic_failure_cannot_mask_the_original_refusal(self):
+        baseline, calls, peer = self.fixture('process-before')
+        with patch.object(M, 'proxy_changed_fields', side_effect=RuntimeError('PRIVATE')):
+            value = baseline.observe(':1.40', peer, budget=lambda: None)
+        self.assertEqual(value['failureStage'], 'live-prebound-proxy')
+        self.assertTrue(value['proxyRecheck']['captureUnavailable'])
+        self.assertFalse(value['correlatesToOriginalPopen'])
+        self.assertEqual(calls, list(self.CHECKS[:2])); self.assertEqual(peer.call_count, 1)
+        self.assertNotIn('PRIVATE', json.dumps(value))
+
+    def test_changed_field_summary_handles_shape_mismatches_without_returning_unknown_keys(self):
+        self.assertEqual(M.proxy_changed_fields([], {}), ['shape'])
+        self.assertEqual(M.proxy_changed_fields(({},), ({}, 'a')), ['shape'])
+        self.assertEqual(M.proxy_changed_fields({'image': {'PRIVATE': 'value'}}, {'image': {}}), ['image.shape'])
+        self.assertEqual(M.proxy_changed_fields({'image': []}, {'image': {}}), ['image.shape'])
 
 
 class HistoricalDisconnectTests(unittest.TestCase):

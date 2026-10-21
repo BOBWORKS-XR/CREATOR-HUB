@@ -2011,6 +2011,8 @@ class OwnedLineage:
         with self.lock:
             value = dict(qualified=False, inputPermitted=False, stable=False, correlatesToOriginalPopen=False)
             stage = 'sealed-baseline'
+            proxy_check = None
+            proxy_actual = proxy_expected = None
             try:
                 require(not self.closed and self.started and not self.used)
                 self.used = True
@@ -2029,10 +2031,27 @@ class OwnedLineage:
                     clientAncestors=[self.redact(self.rows[p]) for p in self.client_chain])
                 stage = 'live-prebound-proxy'
                 budget()
-                require(not self.pidfds.ready(self.fds[pid]) and self.read(pid, True) == row
-                        and self.held[pid].snapshot() == (row['image'], row['kernelImageSha256'])
-                        and self.system.snapshot() == (row['image'], row['kernelImageSha256'])
-                        and self.read(pid, True) == row and not self.pidfds.ready(self.fds[pid]))
+                proxy_check = 'pidfd-before'
+                require(not self.pidfds.ready(self.fds[pid]))
+                proxy_check = 'process-before'
+                proxy_actual, proxy_expected = None, row
+                proxy_actual = self.read(pid, True)
+                require(proxy_actual == proxy_expected)
+                proxy_check = 'held-image'
+                proxy_actual, proxy_expected = None, (row['image'], row['kernelImageSha256'])
+                proxy_actual = self.held[pid].snapshot()
+                require(proxy_actual == proxy_expected)
+                proxy_check = 'system-image'
+                proxy_actual = None
+                proxy_actual = self.system.snapshot()
+                require(proxy_actual == proxy_expected)
+                proxy_check = 'process-after'
+                proxy_actual, proxy_expected = None, row
+                proxy_actual = self.read(pid, True)
+                require(proxy_actual == proxy_expected)
+                proxy_check = 'pidfd-after'
+                proxy_actual = proxy_expected = None
+                require(not self.pidfds.ready(self.fds[pid]))
                 stage = 'sender-credentials-recheck'
                 budget()
                 second = (peer if recheck_peer is None else recheck_peer)(name)
@@ -2051,6 +2070,14 @@ class OwnedLineage:
             except Exception as error:
                 value.update(failureStage=stage, unavailable=type(error).__name__ if type(error) in (
                     ValueError, KeyError, RuntimeError, PermissionError, FileNotFoundError, ProcessLookupError, OSError) else 'OtherError')
+                if stage == 'live-prebound-proxy' and proxy_check is not None:
+                    detail = dict(check=proxy_check, readOnly=True, inputPermitted=False, authorityGranted=False)
+                    if proxy_actual is not None:
+                        try:
+                            detail['changedFields'] = proxy_changed_fields(proxy_actual, proxy_expected)
+                        except Exception:
+                            detail['captureUnavailable'] = True
+                    value['proxyRecheck'] = detail
             return bounded(value, 24576)
 
     def close(self):
@@ -2067,6 +2094,30 @@ class OwnedLineage:
                         self.pidfds.close(fd)
                 finally:
                     self.system.close()
+
+
+def proxy_changed_fields(actual, expected):
+    """Report fixed field names only; never retry a failed OS observation."""
+    if type(expected) is tuple:
+        if type(actual) is not tuple or len(actual) != 2:
+            return ['shape']
+        actual = dict(image=actual[0], kernelImageSha256=actual[1])
+        expected = dict(image=expected[0], kernelImageSha256=expected[1])
+    if type(actual) is not dict or type(expected) is not dict:
+        return ['shape']
+    fields = [name for name in ('pid', 'parentPid', 'startTime', 'uids', 'executable', 'kernelImageSha256')
+              if actual.get(name) != expected.get(name)]
+    if type(actual.get('image')) is dict and type(expected.get('image')) is dict:
+        fields.extend('image.' + name for name in ('st_dev', 'st_ino', 'st_size', 'st_mode', 'st_uid', 'st_gid',
+                                                   'st_mtime_ns', 'st_ctime_ns')
+                      if actual['image'].get(name) != expected['image'].get(name))
+        if set(actual['image']) != set(expected['image']):
+            fields.append('image.shape')
+    elif actual.get('image') != expected.get('image'):
+        fields.append('image.shape')
+    if set(actual) != set(expected):
+        fields.append('shape')
+    return fields
 
 
 class AssociatedProxyLineage(OwnedLineage):
