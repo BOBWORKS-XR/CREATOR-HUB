@@ -889,9 +889,113 @@ class WarmConsumedTerminalTests(unittest.TestCase):
             self.assertEqual(state.code, 0); self.assertFalse(session.launcher_keys[0]['outcomeVerified'])
 
 
+class ClosedObserverControllerTests(unittest.TestCase):
+    names = ('flatpak-016', 'portable-update-016')
+
+    def test_controller_names_and_uids_agree_with_independently_loaded_observer(self):
+        for name in self.names:
+            state = RootProxySnapshotTests().fixture(name)
+            self.assertEqual(M.observer_uid(name), state.adapter.context.uid)
+            self.assertIs(state.module.named_context(name), state.adapter.context)
+        for bad in (None, True, 1001, 21314, '21314', '/tmp/runtime', 'flatpak-016 '):
+            with self.assertRaises(RuntimeError): M.observer_uid(bad)
+
+    def test_headless_probe_both_fixed_contexts_retains_eight_source_admission(self):
+        for name in self.names:
+            context = RootProxySnapshotTests().fixture(name).adapter.context
+            with RootInventoryPreflightTests().fixture(context_name=name) as state:
+                M.root_inventory_preflight(context.runtime.parent, context_name=name)
+                self.assertEqual(state.bounded.call_count, 8); self.assertEqual(state.worker.call_count, 1)
+                proof = state.reports[0][1]
+                self.assertTrue(proof['inventoryProbed']); self.assertEqual(proof['inventory']['uid'], context.uid)
+                self.assertEqual(proof['inventory']['operation'], context.probe_operation)
+                self.assertFalse(proof['inputPermitted']); self.assertFalse(proof['authorityGranted'])
+            with RootInventoryPreflightTests().fixture(context_name=name) as state:
+                with self.assertRaisesRegex(RuntimeError, 'runtime/context'):
+                    M.root_inventory_preflight(Path('/unowned/runtime-parent'), context_name=name)
+                state.worker.assert_not_called()
+
+    def test_snapshot_context_reaches_caller_validation_request_worker_and_reply_validation(self):
+        for name in self.names:
+            state = RootProxySnapshotTests().fixture(name); context = state.adapter.context
+            with patch.object(M, 'root_exchange', side_effect=state.run) as worker:
+                state.adapter([{'pid': 14}])
+            tool, operation, raw, deadline = worker.call_args.args
+            request = M.parse(raw)
+            self.assertEqual(operation, context.snapshot_command)
+            self.assertEqual(request['operation'], context.snapshot_operation)
+            self.assertEqual(request['caller']['uids'], [context.uid] * 4)
+            for called in (state.module.root_process, state.module.root_request, state.module.validate_association):
+                self.assertIs(called.call_args.kwargs['context'], context)
+            self.assertEqual(state.adapter.sequence, 2); self.assertFalse(state.adapter.blocked)
+
+    def test_mismatched_uid_euid_runtime_or_name_cannot_dispatch(self):
+        for name in self.names:
+            state = RootProxySnapshotTests().fixture(name); context = state.adapter.context
+            other_name = next(n for n in self.names if n != name)
+            other = state.module.named_context(other_name)
+            for uid, euid, root, selected in ((other.uid, other.uid, context.runtime.parent, name),
+                    (context.uid, 0, context.runtime.parent, name), (context.uid, context.uid, other.runtime.parent, name),
+                    (context.uid, context.uid, context.runtime.parent, other_name),
+                    (context.uid, context.uid, context.runtime.parent, 'arbitrary')):
+                with patch.object(M.os, 'getuid', return_value=uid, create=True), \
+                        patch.object(M.os, 'geteuid', return_value=euid, create=True), patch.object(M, 'root_exchange') as worker:
+                    with self.assertRaises((RuntimeError, ValueError)):
+                        M.RootProxySnapshot(state.module, root, 'a' * 40, 'b' * 64, {}, {}, state.capture,
+                            dict(appCommit='c' * 64, runtimeCommit='d' * 64), context_name=selected)
+                    worker.assert_not_called()
+
+    def test_both_contexts_reject_replayed_cross_operation_malformed_and_expired_responses_once(self):
+        for name in self.names:
+            for field in ('nonce', 'sequence', 'harnessSource', 'codeSha256', 'operation', 'caller', 'stderr', 'expiry', 'malformed'):
+                state = RootProxySnapshotTests().fixture(name)
+                clock = [1_000_000_000]; state.capture.transcript.deadline = 15
+                def exchange(*args):
+                    result = state.run(*args)
+                    if field == 'stderr': result.stderr = b'fixed error'; return result
+                    if field == 'malformed': result.stdout = b'{'; return result
+                    value = M.parse(result.stdout)
+                    if field == 'expiry': clock[0] = value['request']['expiresNs']
+                    elif field == 'caller': value['request']['caller']['uids'] = [0] * 4
+                    else: value['request'][field] = 99 if field == 'sequence' else 'wrong'
+                    result.stdout = M.json_bytes(value); return result
+                with patch.object(M.time, 'monotonic_ns', side_effect=lambda: clock[0]), \
+                        patch.object(M, 'root_exchange', side_effect=exchange) as worker:
+                    with self.assertRaises((RuntimeError, ValueError)): state.adapter([])
+                    with self.assertRaisesRegex(RuntimeError, 'cannot be retried'): state.adapter([])
+                    self.assertEqual(worker.call_count, 1)
+
+    def test_no_authorization_is_added_when_protected_worker_access_is_denied(self):
+        for name in self.names:
+            state = RootProxySnapshotTests().fixture(name)
+            with patch.object(M, 'root_exchange', side_effect=PermissionError('Synthetic authorization refusal')) as worker:
+                with self.assertRaises(PermissionError): state.adapter([])
+                with self.assertRaisesRegex(RuntimeError, 'cannot be retried'): state.adapter([])
+                self.assertEqual(worker.call_count, 1)
+
+    def test_mount_namespace_guard_remains_mandatory_for_either_fixture(self):
+        # Pure controller guard test: no native launch, namespace entry or GUI input.
+        for name in self.names:
+            context = RootProxySnapshotTests().fixture(name).adapter.context
+            session = object.__new__(M.Session); session.root = context.runtime.parent
+            session.review = dict(portable=dict(root=dict(sha256='a' * 64)), generation='b' * 64)
+            executable = session.root / 'home/data/creator-hub-portable/generations' / ('b' * 64) / 'AppDir/usr/bin/creator-hub'
+            process = dict(pid=40, executable=str(executable), uids=[context.uid] * 4)
+            session.host_owner = lambda: dict(name=':1.42', pid=40)
+            session.windows = lambda: [200]; session.owned_window = Mock(return_value=200)
+            session.stable = Mock(); session.process = Mock(return_value=process)
+            session.wait = lambda check: self.assertTrue(check())
+            with patch.object(M.os, 'readlink', return_value='mnt:[10]'):
+                self.assertEqual(session.launcher_outcome('Open Creator Hub', 'cold', False), 'signed-native-root-activated')
+            with patch.object(M.os, 'readlink', side_effect=['mnt:[11]', 'mnt:[10]']):
+                with self.assertRaisesRegex(RuntimeError, 'signed native generation'):
+                    session.launcher_outcome('Open Creator Hub', 'cold', False)
+
+
 class RootInventoryPreflightTests(unittest.TestCase):
     @contextmanager
-    def fixture(self, change=None, failure=None):
+    def fixture(self, change=None, failure=None, context_name='flatpak-016'):
+        uid = M.observer_uid(context_name)
         names = ('scripts/native-linux-production-016-flatpak.py', 'scripts/native-linux-production-016-flatpak.test.py',
                  'scripts/native-linux-flatpak-activation-observer.py', 'scripts/native-linux-flatpak-activation-observer.test.py',
                  'scripts/native-linux-flatpak-dialog-input.py', 'scripts/native-linux-flatpak-dialog-input.test.py',
@@ -904,22 +1008,23 @@ class RootInventoryPreflightTests(unittest.TestCase):
         def execute(code, namespace):
             builtins.exec(code, namespace)
             state.module = SimpleNamespace(**namespace)
+            state.context = namespace['named_context'](context_name)
             namespace['Path'] = lambda path: SimpleNamespace(resolve=lambda **options: '/usr/bin/python3.10')
             namespace['protected_tool'] = Mock(side_effect=lambda digest: state.events.append('protected'))
             namespace['root_process'] = Mock(return_value=dict(pid=19, parentPid=18, startTime='19',
-                uids=[1001] * 4, executable='/usr/bin/python3.10'))
+                uids=[uid] * 4, executable='/usr/bin/python3.10'))
         def read_bound(file, expected, maximum):
             state.events.append('bound'); raw = sources[file.relative_to(HERE.parent).as_posix()]
             self.assertEqual(expected, pin(raw)); return raw
         def exchange(tool, operation, raw, deadline):
             state.events.append('root-worker')
-            self.assertEqual(operation, 'root-inventory-probe')
+            self.assertEqual(operation, state.context.probe_command)
             request = M.parse(raw)
-            data = dict(operation='flatpak-uid-inventory-probe-1001', complete=True, uid=1001, candidateCount=0,
+            data = dict(operation=state.context.probe_operation, complete=True, uid=uid, candidateCount=0,
                         scopedProcessCount=2, caller=request['caller'],
                         invocation=[dict(pid=21, parentPid=20, startTime='21', state='R', uids=[0] * 4,
                                          executableKind='python', imageSha256='a' * 64),
-                                    dict(pid=20, parentPid=19, startTime='20', state='S', uids=[1001, 0, 0, 0],
+                                    dict(pid=20, parentPid=19, startTime='20', state='S', uids=[uid, 0, 0, 0],
                                          executableKind='sudo', imageSha256='b' * 64)],
                         readOnly=True, inputPermitted=False, authorityGranted=False, releaseReady=False)
             if failure == 'timeout':
@@ -929,7 +1034,7 @@ class RootInventoryPreflightTests(unittest.TestCase):
             if failure == 'authority': data['authorityGranted'] = True
             if failure == 'replay': request['nonce'] = 'd' * 64
             return SimpleNamespace(returncode=0, stdout=M.json_bytes(dict(request=request, ok=True, snapshot=data)), stderr=b'')
-        with patch.object(M.os, 'getuid', return_value=1001, create=True), patch.object(M.os, 'geteuid', return_value=1001, create=True), \
+        with patch.object(M.os, 'getuid', return_value=uid, create=True), patch.object(M.os, 'geteuid', return_value=uid, create=True), \
                 patch.dict(M.os.environ, {**ENV, 'EXECUTION_REQUEST': M.REQUEST}, clear=True), \
                 patch.object(M.Path, 'exists', return_value=False), patch.object(M, 'regular', return_value=M.json_bytes(proof)), \
                 patch.object(M, 'bound', side_effect=read_bound) as bounded, \
@@ -940,7 +1045,7 @@ class RootInventoryPreflightTests(unittest.TestCase):
 
     def test_actual_preflight_operation_verifies_all_eight_sources_then_protected_worker_and_zero_proxy_receipt(self):
         with self.fixture() as state:
-            root = Path('/fixed')
+            root = Path('/home/runner/work/_temp/native-linux-production-016-flatpak')
             M.root_inventory_preflight(root)
             self.assertEqual(state.events, ['bound'] * 8 + ['protected', 'root-worker', 'protected'])
             path, report = state.reports[0]
@@ -961,9 +1066,9 @@ class RootInventoryPreflightTests(unittest.TestCase):
                     return result
                 state.worker.side_effect = exchange
                 if accepted:
-                    M.root_inventory_preflight(Path('/fixed'))
+                    M.root_inventory_preflight(Path('/home/runner/work/_temp/native-linux-production-016-flatpak'))
                 else:
-                    with self.assertRaises(ValueError): M.root_inventory_preflight(Path('/fixed'))
+                    with self.assertRaises(ValueError): M.root_inventory_preflight(Path('/home/runner/work/_temp/native-linux-production-016-flatpak'))
                 report = state.reports[0][1]
                 self.assertIs(report['inventoryProbed'], accepted)
                 self.assertEqual(state.worker.call_count, 1)
@@ -980,7 +1085,7 @@ class RootInventoryPreflightTests(unittest.TestCase):
                 result.stdout = M.json_bytes(answer)
                 return result
             state.worker.side_effect = exchange
-            M.root_inventory_preflight(Path('/fixed'))
+            M.root_inventory_preflight(Path('/home/runner/work/_temp/native-linux-production-016-flatpak'))
             report = state.reports[0][1]
             self.assertTrue(report['inventoryProbed']); self.assertEqual(len(report['inventory']['invocation']), 1)
             for name in (*M.GATES, 'inputPermitted', 'authorityGranted'): self.assertIs(report[name], False)
@@ -990,13 +1095,13 @@ class RootInventoryPreflightTests(unittest.TestCase):
                        lambda p: p.update(harnessSource='b' * 40), lambda p: p.update(releaseReady=True),
                        lambda p: p.update(extra=True)):
             with self.fixture(change) as state:
-                with self.assertRaises(RuntimeError): M.root_inventory_preflight(Path('/fixed'))
+                with self.assertRaises(RuntimeError): M.root_inventory_preflight(Path('/home/runner/work/_temp/native-linux-production-016-flatpak'))
                 state.worker.assert_not_called(); state.bounded.assert_not_called()
 
     def test_expired_replayed_authorizing_or_unconfirmed_cleanup_probe_cannot_pass(self):
         for failure in ('replay', 'authority', 'timeout'):
             with self.subTest(failure=failure), self.fixture(failure=failure) as state:
-                with self.assertRaises((RuntimeError, ValueError, TimeoutError)): M.root_inventory_preflight(Path('/fixed'))
+                with self.assertRaises((RuntimeError, ValueError, TimeoutError)): M.root_inventory_preflight(Path('/home/runner/work/_temp/native-linux-production-016-flatpak'))
                 report = state.reports[0][1]
                 self.assertFalse(report['inventoryProbed']); self.assertFalse(report['releaseReady'])
                 if failure == 'timeout': self.assertTrue(report['workerCleanup']['cleanupUnconfirmed'])
@@ -1008,21 +1113,21 @@ class RootInventoryPreflightTests(unittest.TestCase):
                 with patch.dict(M.os.environ, {'EXECUTION_REQUEST': 'inspect-only'} if field == 'request' else {}), \
                         patch.object(M.Path, 'exists', return_value=field == 'root'), \
                         patch.object(M.os, 'getuid', return_value=21314 if field == 'uid' else 1001, create=True):
-                    with self.assertRaises(RuntimeError): M.root_inventory_preflight(Path('/fixed'))
+                    with self.assertRaises(RuntimeError): M.root_inventory_preflight(Path('/home/runner/work/_temp/native-linux-production-016-flatpak'))
                 state.worker.assert_not_called(); state.bounded.assert_not_called()
 
     def test_main_routes_preflight_before_any_artifact_root_stat(self):
         with patch.dict(M.os.environ, ENV, clear=True), patch.object(M.sys, 'platform', 'linux'), \
                 patch.object(M.platform, 'machine', return_value='x86_64'), \
                 patch.object(M.os, 'getuid', return_value=1001, create=True), patch.object(M.os, 'geteuid', return_value=1001, create=True), \
-                patch.object(M.sys, 'argv', ['controller.py', 'root-preflight']), patch.object(M, 'locations', return_value=Path('/fixed')), \
+                patch.object(M.sys, 'argv', ['controller.py', 'root-preflight']), patch.object(M, 'locations', return_value=Path('/home/runner/work/_temp/native-linux-production-016-flatpak')), \
                 patch.object(M.Path, 'lstat', side_effect=AssertionError('Premature artifact-root access')), \
                 patch.object(M, 'root_inventory_preflight') as probe:
-            M.main(); probe.assert_called_once_with(Path('/fixed'))
+            M.main(); probe.assert_called_once_with(Path('/home/runner/work/_temp/native-linux-production-016-flatpak'))
 
     def test_probe_failure_receipt_error_does_not_mask_original_and_no_runtime_is_created(self):
         with self.fixture(failure='timeout'), patch.object(M, 'output', side_effect=OSError('fixed synthetic refusal')):
-            with self.assertRaises(TimeoutError) as raised: M.root_inventory_preflight(Path('/fixed'))
+            with self.assertRaises(TimeoutError) as raised: M.root_inventory_preflight(Path('/home/runner/work/_temp/native-linux-production-016-flatpak'))
             self.assertEqual(raised.exception.root_preflight_receipt_error, 'OSError')
         source = Path(M.__file__).read_text()
         node = next(n for n in ast.parse(source).body if isinstance(n, ast.FunctionDef) and n.name == 'root_inventory_preflight')
@@ -1038,7 +1143,7 @@ class RootInventoryPreflightTests(unittest.TestCase):
             result = SimpleNamespace(returncode=1, stderr=b'', stdout=M.json_bytes(
                 dict(ok=False, unavailable='PermissionError', stage='complete-uid-inventory', pid=925)))
             with patch.object(M, 'root_exchange', return_value=result):
-                with self.assertRaises(RuntimeError): M.root_inventory_preflight(Path('/fixed'))
+                with self.assertRaises(RuntimeError): M.root_inventory_preflight(Path('/home/runner/work/_temp/native-linux-production-016-flatpak'))
             self.assertEqual(state.reports[0][1]['workerCleanup'], dict(readOnly=True, inputPermitted=False,
                 authorityGranted=False, releaseReady=False, type='PermissionError', stage='complete-uid-inventory', pid=925))
 
@@ -1049,7 +1154,7 @@ class RootInventoryPreflightTests(unittest.TestCase):
             state.worker.side_effect = None
             state.worker.return_value = SimpleNamespace(returncode=1, stderr=b'', stdout=M.json_bytes(
                 dict(ok=False, unavailable='ValueError', stage='probe-caller-chain', probeCaller=detail)))
-            with self.assertRaisesRegex(RuntimeError, 'no input'): M.root_inventory_preflight(Path('/fixed'))
+            with self.assertRaisesRegex(RuntimeError, 'no input'): M.root_inventory_preflight(Path('/home/runner/work/_temp/native-linux-production-016-flatpak'))
             self.assertEqual(state.worker.call_count, 1)
             report = state.reports[0][1]
             self.assertFalse(report['inventoryProbed']); self.assertNotIn('inventory', report)
@@ -1094,7 +1199,7 @@ class RootInventoryPreflightTests(unittest.TestCase):
             state.worker.side_effect = None
             state.worker.return_value = SimpleNamespace(returncode=1, stderr=b'', stdout=M.json_bytes(
                 dict(ok=False, unavailable='ValueError', stage='complete-uid-inventory', inventoryFailure=detail)))
-            with self.assertRaisesRegex(RuntimeError, 'no input'): M.root_inventory_preflight(Path('/fixed'))
+            with self.assertRaisesRegex(RuntimeError, 'no input'): M.root_inventory_preflight(Path('/home/runner/work/_temp/native-linux-production-016-flatpak'))
             state.worker.assert_called_once()
             report = state.reports[0][1]
             self.assertFalse(report['inventoryProbed']); self.assertNotIn('inventory', report)
@@ -1162,7 +1267,7 @@ class RootInventoryPreflightTests(unittest.TestCase):
             state.worker.side_effect = None
             state.worker.return_value = SimpleNamespace(returncode=1, stderr=b'', stdout=M.json_bytes(dict(ok=False,
                 unavailable='ValueError', stage='complete-uid-inventory', inventoryFailure=self.inventory_failure(), mixedFailure=detail)))
-            with self.assertRaisesRegex(RuntimeError, 'no input'): M.root_inventory_preflight(Path('/fixed'))
+            with self.assertRaisesRegex(RuntimeError, 'no input'): M.root_inventory_preflight(Path('/home/runner/work/_temp/native-linux-production-016-flatpak'))
             state.worker.assert_called_once()
             report = state.reports[0][1]
             self.assertFalse(report['inventoryProbed']); self.assertNotIn('inventory', report)
@@ -1173,7 +1278,7 @@ class RootInventoryPreflightTests(unittest.TestCase):
 
     def test_mixed_schema_privacy_types_bounds_and_classification_are_closed_in_both_validators(self):
         with self.fixture() as state:
-            M.root_inventory_preflight(Path('/fixed'))
+            M.root_inventory_preflight(Path('/home/runner/work/_temp/native-linux-production-016-flatpak'))
             validators = (M.mixed_worker_diagnostic, state.module.mixed_diagnostic)
             mutations = (
                 lambda v: v.update(argv='PRIVATE'), lambda v: v.update(subjectPid=True),
@@ -1234,7 +1339,7 @@ class RootInventoryPreflightTests(unittest.TestCase):
             state.worker.side_effect = None
             state.worker.return_value = SimpleNamespace(returncode=1, stderr=b'', stdout=M.json_bytes(dict(ok=False,
                 unavailable='ValueError', stage='complete-uid-inventory', inventoryFailure=self.inventory_failure(), foreignFailure=detail)))
-            with self.assertRaisesRegex(RuntimeError, 'no input'): M.root_inventory_preflight(Path('/fixed'))
+            with self.assertRaisesRegex(RuntimeError, 'no input'): M.root_inventory_preflight(Path('/home/runner/work/_temp/native-linux-production-016-flatpak'))
             state.worker.assert_called_once()
             report = state.reports[0][1]
             self.assertFalse(report['inventoryProbed']); self.assertNotIn('inventory', report)
@@ -1243,7 +1348,7 @@ class RootInventoryPreflightTests(unittest.TestCase):
 
     def test_foreign_diagnostic_closed_schema_matches_worker_and_refuses_sensitive_or_illtyped_operands(self):
         with self.fixture() as state:
-            M.root_inventory_preflight(Path('/fixed'))
+            M.root_inventory_preflight(Path('/home/runner/work/_temp/native-linux-production-016-flatpak'))
             validators = (M.foreign_worker_diagnostic, state.module.foreign_diagnostic)
             changes = (
                 lambda d: d.update(argv='PRIVATE'), lambda d: d.update(function='PRIVATE'), lambda d: d.update(stage='PRIVATE'),
@@ -1300,10 +1405,10 @@ class RootInventoryPreflightTests(unittest.TestCase):
                 M.exec.side_effect = load
                 with patch.object(M.time, 'monotonic_ns', side_effect=lambda: clock[0]):
                     if delta == -1:
-                        M.root_inventory_preflight(Path('/fixed'))
+                        M.root_inventory_preflight(Path('/home/runner/work/_temp/native-linux-production-016-flatpak'))
                         self.assertTrue(state.reports[0][1]['inventoryProbed'])
                     else:
-                        with self.assertRaisesRegex(RuntimeError, 'probe expired'): M.root_inventory_preflight(Path('/fixed'))
+                        with self.assertRaisesRegex(RuntimeError, 'probe expired'): M.root_inventory_preflight(Path('/home/runner/work/_temp/native-linux-production-016-flatpak'))
                         self.assertFalse(state.reports[0][1]['inventoryProbed'])
                 self.assertEqual(state.worker.call_count, 1)
 
@@ -1420,15 +1525,19 @@ class RootWorkerExchangeTests(unittest.TestCase):
 
 
 class RootProxySnapshotTests(unittest.TestCase):
-    def fixture(self):
-        module = SimpleNamespace(PROXY_RUNTIME=Path('/fixed/runtime'), PROXY_TOOL=Path('/protected/observer.py'),
+    def fixture(self, context_name='flatpak-016'):
+        spec = importlib.util.spec_from_file_location('snapshot_context_test', HERE / 'native-linux-flatpak-activation-observer.py')
+        observer = importlib.util.module_from_spec(spec); spec.loader.exec_module(observer)
+        context = observer.named_context(context_name)
+        module = SimpleNamespace(PROXY_RUNTIME=context.runtime, PROXY_TOOL=Path('/protected/observer.py'),
             protected_tool=Mock(), root_request=Mock(), validate_association=Mock(),
-            root_process=Mock(return_value=dict(pid=19, parentPid=18, startTime='19', uids=[1001] * 4, executable='/usr/bin/python3.10')))
+            root_process=Mock(return_value=dict(pid=19, parentPid=18, startTime='19', uids=[context.uid] * 4, executable='/usr/bin/python3.10')))
+        module.named_context = observer.named_context
         capture = SimpleNamespace(budget=Mock(), transcript=SimpleNamespace(deadline=M.time.monotonic() + 10))
         original, client = {'pid': 10}, {'pid': 14}
-        with patch.object(M.os, 'getuid', return_value=1001, create=True), patch.object(M.os, 'geteuid', return_value=1001, create=True):
-            adapter = M.RootProxySnapshot(module, Path('/fixed'), 'a' * 40, 'b' * 64, original, client, capture,
-                                         dict(appCommit='c' * 64, runtimeCommit='d' * 64))
+        with patch.object(M.os, 'getuid', return_value=context.uid, create=True), patch.object(M.os, 'geteuid', return_value=context.uid, create=True):
+            adapter = M.RootProxySnapshot(module, context.runtime.parent, 'a' * 40, 'b' * 64, original, client, capture,
+                                         dict(appCommit='c' * 64, runtimeCommit='d' * 64), context_name=context_name)
         data = dict(complete=True, flatpakInfo=dict(fields=dict(appCommit='c' * 64, runtimeCommit='d' * 64)))
         def run(tool, operation, raw, deadline):
             request = M.parse(raw)
@@ -1443,7 +1552,7 @@ class RootProxySnapshotTests(unittest.TestCase):
         self.assertEqual((tool, operation), (state.module.PROXY_TOOL, 'root-proxy-snapshot'))
         request = M.parse(raw)
         self.assertEqual(request['caller'], state.module.root_process.return_value)
-        state.module.root_process.assert_called_once_with(M.os.getpid())
+        state.module.root_process.assert_called_once_with(M.os.getpid(), context=state.adapter.context)
         self.assertLessEqual(request['expiresNs'] - M.time.monotonic_ns(), 4 * 10**9)
         self.assertEqual(deadline, request['expiresNs'] / 10**9)
         state.module.protected_tool.assert_has_calls([unittest.mock.call('b' * 64), unittest.mock.call('b' * 64)])
@@ -1489,8 +1598,8 @@ class RootProxySnapshotTests(unittest.TestCase):
     def test_nonfinite_uid_and_runtime_never_start_a_root_child(self):
         state = self.fixture()
         with patch.object(M.os, 'getuid', return_value=21314, create=True), patch.object(M.os, 'geteuid', return_value=21314, create=True):
-            with self.assertRaisesRegex(RuntimeError, 'UID1001'):
-                M.RootProxySnapshot(state.module, Path('/fixed'), 'a' * 40, 'b' * 64, {}, {}, state.capture,
+            with self.assertRaisesRegex(RuntimeError, 'fixed fixture UID/runtime'):
+                M.RootProxySnapshot(state.module, Path('/home/runner/work/_temp/native-linux-production-016-flatpak'), 'a' * 40, 'b' * 64, {}, {}, state.capture,
                                     dict(appCommit='c' * 64, runtimeCommit='d' * 64))
 
     def test_association_response_expiry_recheck_blocks_boundary_and_expired_without_retry(self):
@@ -1888,13 +1997,16 @@ class WarmLineageWiringTests(unittest.TestCase):
             glib = SimpleNamespace(Variant=lambda *v: v, VariantType=SimpleNamespace(new=lambda v: v))
             worker = Mock(); worker.is_alive.return_value = False
             system = SimpleNamespace(snapshot=lambda: (copy.deepcopy(rows[12]['image']), rows[12]['kernelImageSha256']), close=Mock())
+            session.root = Path('/home/runner/work/_temp/native-linux-production-016-flatpak')
+            saved_outputs = {}
             with patch.dict(sys.modules, {'gi': SimpleNamespace(), 'gi.repository': SimpleNamespace(Gio=gio, GLib=glib)}), \
                     patch.object(M.sys, 'platform', 'linux'), patch.object(M.os, 'geteuid', return_value=1001, create=True), \
                     patch.dict(M.os.environ, {'GITHUB_SHA': 'a' * 40, 'DBUS_SESSION_BUS_ADDRESS': 'unix:path=/private-ci-bus'}), \
                     patch.object(M, 'regular', return_value=M.json_bytes(binding)), \
                     patch.object(M, 'bound', side_effect=lambda path, *_: source[path.relative_to(HERE.parent).as_posix()]), \
                     patch.object(M.P, 'subtree', return_value=tree), patch.object(M.K, 'HeldImage', side_effect=image), \
-                    patch.object(M, 'PortalImage', return_value=system), \
+                    patch.multiple(M, PortalImage=Mock(return_value=system),
+                        save=Mock(side_effect=lambda path, value: saved_outputs.update({path: copy.deepcopy(value)}))), \
                     patch.object(M.ObserverPidfds, 'open', side_effect=lambda pid: opened.append(pid) or pid), \
                     patch.object(M.ObserverPidfds, 'ready', return_value=False), \
                     patch.object(M.ObserverPidfds, 'close', side_effect=closed.append), \
@@ -1952,8 +2064,6 @@ class WarmLineageWiringTests(unittest.TestCase):
                     self.assertNotIn('externalProxyDiagnostic', refused['record'])
                 # A valid cached worker refusal can exceed the old warm-consumer 2 KiB bound.
                 original_root = session.root
-                session.root = original_root / 'worker-refusal'
-                session.root.mkdir(mode=0o700)
                 rows[13]['image'] = copy.deepcopy(rows[10]['image'])
                 rows[13]['kernelImageSha256'] = rows[10]['kernelImageSha256']
                 tree[13] = {key: value for key, value in rows[13].items() if key != 'kernelImageSha256'}
@@ -1969,7 +2079,6 @@ class WarmLineageWiringTests(unittest.TestCase):
                 self.assertLessEqual(len(M.json_bytes(expected)), 32768)
                 def captured_root_source(code, namespace):
                     builtins.exec(code, namespace)
-                    namespace['PROXY_RUNTIME'] = session.root / 'runtime'
                     namespace['protected_tool'] = Mock()
                     namespace['root_process'] = Mock(return_value=dict(pid=19, parentPid=18, startTime='19',
                         uids=[1001] * 4, executable='/usr/bin/python3.10'))
@@ -1984,7 +2093,7 @@ class WarmLineageWiringTests(unittest.TestCase):
                 self.assertEqual(refused['record']['unavailable'], 'RuntimeError')
                 self.assertEqual(refused['record']['rootProxySnapshotRefusal'], expected)
                 M.Session.finish_warm_activation_diagnostic(session, refused)
-                saved = M.parse((session.root / 'warm-activation-observer-gtk.json').read_bytes())
+                saved = saved_outputs[session.root / 'warm-activation-observer-gtk.json']
                 self.assertEqual(saved['rootProxySnapshotRefusal']['foreignFailure'], foreign)
                 self.assertFalse(saved['rootProxySnapshotRefusal']['foreignFailure']['cleanupConfirmed'])
                 self.assertFalse(saved['observation']['armed']); self.assertFalse(saved['observation']['inputStarted'])

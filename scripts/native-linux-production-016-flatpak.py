@@ -1230,7 +1230,14 @@ def historical_preinput_binding(record, value, sender):
     return True
 
 
-def attributed_warm_activation(record, client, admitted, owner, *, association_validator=None):
+def observer_uid(context_name):
+    require(type(context_name) is str and context_name in ('flatpak-016', 'portable-update-016'),
+            'Only the two fixed observer contexts are allowed')
+    return 1001 if context_name == 'flatpak-016' else 21314
+
+
+def attributed_warm_activation(record, client, admitted, owner, *, association_validator=None, context_name='flatpak-016'):
+    uid = observer_uid(context_name)
     require(type(record) is dict and not any(k in record for k in ('unavailable', 'captureUnavailable')),
             'Warm activation capture unavailable')
     value = record.get('observation')
@@ -1289,7 +1296,7 @@ def attributed_warm_activation(record, client, admitted, owner, *, association_v
     if 'externalAssociation' in sender:
         association = sender['externalAssociation']
         require(type(association) is dict and association.get('complete') is True
-                and association.get('uid') == peer['uid'] == 1001
+                and association.get('uid') == peer['uid'] == uid
                 and association.get('original') == admitted and association.get('client') == client
                 and proxy_process_snapshot(association['proxy']) == ancestry[0]
                 and association['proxy']['pid'] == peer['pid'] and len(ancestry) == 1
@@ -1482,7 +1489,8 @@ def root_worker_refusal(answer):
 
 def root_exchange(tool, operation, raw, deadline):
     """Bounded pipe exchange; never signal a privileged child or wait without a deadline."""
-    require(operation in ('root-proxy-snapshot', 'root-inventory-probe') and 0 < len(raw) <= 32768
+    require(operation in ('root-proxy-snapshot', 'root-inventory-probe',
+                          'root-proxy-snapshot-update016', 'root-inventory-probe-update016') and 0 < len(raw) <= 32768
             and time.monotonic() < deadline <= time.monotonic() + 6, 'Finite protected worker exchange required')
     child = subprocess.Popen(['/usr/bin/sudo', '-n', '--', '/usr/bin/python3', '-I', '-S', '-B',
                               str(tool), operation], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -1557,8 +1565,8 @@ def root_exchange(tool, operation, raw, deadline):
                 pass
 
 
-def root_inventory_preflight(root):
-    require(os.getuid() == os.geteuid() == 1001 and os.environ.get('EXECUTION_REQUEST') == REQUEST
+def root_inventory_preflight(root, *, context_name='flatpak-016'):
+    require(os.getuid() == os.geteuid() == observer_uid(context_name) and os.environ.get('EXECUTION_REQUEST') == REQUEST
             and not any(os.environ.get(k) for k in ('DISPLAY', 'WAYLAND_DISPLAY', 'FLATPAK_ID'))
             and not root.exists() and not root.is_symlink(), 'Native-only headless preflight before collection required')
     proof = parse(regular(root.parent / 'native-linux-flatpak-root-source.json', 32768, 0o600))
@@ -1576,24 +1584,27 @@ def root_inventory_preflight(root):
     module = importlib.util.module_from_spec(importlib.util.spec_from_loader('flatpak_root_preflight', loader=None))
     module.__file__ = str(HERE.parent / names[2])
     exec(compile(sources[names[2]], module.__file__, 'exec'), module.__dict__)
+    context = module.named_context(context_name)
+    require(context.uid == observer_uid(context_name) and root / 'runtime' == context.runtime,
+            'Fixed observer runtime/context mismatch')
     code = proof['harnessFiles'][names[2]]['sha256']
     report = dict(schemaVersion=1, profile=PROFILE, harnessSource=proof['harnessSource'], readOnly=True,
                   inputPermitted=False, authorityGranted=False, inventoryProbed=False, **GATES)
     failure = None
     try:
         module.protected_tool(code)
-        caller = module.root_process(os.getpid())
-        request = dict(schemaVersion=1, operation=module.PROBE_OPERATION, harnessSource=proof['harnessSource'],
+        caller = module.root_process(os.getpid(), context=context)
+        request = dict(schemaVersion=1, operation=context.probe_operation, harnessSource=proof['harnessSource'],
                        codeSha256=code, sequence=1, nonce=secrets.token_hex(32),
                        expiresNs=time.monotonic_ns() + 4 * 10**9, caller=caller)
-        module.probe_request(request, time.monotonic_ns())
-        result = root_exchange(module.PROXY_TOOL, 'root-inventory-probe', json_bytes(request), request['expiresNs'] / 10**9)
+        module.probe_request(request, time.monotonic_ns(), context=context)
+        result = root_exchange(module.PROXY_TOOL, context.probe_command, json_bytes(request), request['expiresNs'] / 10**9)
         answer = parse(result.stdout)
         if result.returncode != 0 or result.stderr:
             raise root_worker_refusal(answer)
         require(set(answer) == {'request', 'ok', 'snapshot'}
                 and answer['request'] == request and answer['ok'] is True, 'Complete root inventory probe required')
-        module.validate_probe(answer['snapshot'], request)
+        module.validate_probe(answer['snapshot'], request, context=context)
         module.protected_tool(code)
         require(time.monotonic_ns() < request['expiresNs'], 'Root inventory probe expired')
         report.update(inventoryProbed=True, inventory=answer['snapshot'])
@@ -1613,10 +1624,12 @@ def root_inventory_preflight(root):
 
 
 class RootProxySnapshot:
-    def __init__(self, module, root, harness, code_sha256, original, client, capture, commits):
-        require(os.getuid() == os.geteuid() == 1001 and root / 'runtime' == module.PROXY_RUNTIME
+    def __init__(self, module, root, harness, code_sha256, original, client, capture, commits, *, context_name='flatpak-016'):
+        self.context = module.named_context(context_name)
+        require(os.getuid() == os.geteuid() == self.context.uid == observer_uid(context_name)
+                and root / 'runtime' == self.context.runtime
                 and re.fullmatch(r'[a-f0-9]{40}', harness) and re.fullmatch(r'[a-f0-9]{64}', code_sha256),
-                'Only the fixed hosted UID1001 Flatpak fixture may request this read-only snapshot')
+                'Only the selected fixed fixture UID/runtime may request this read-only snapshot')
         require(type(commits) is dict and set(commits) == {'appCommit', 'runtimeCommit'}
                 and all(re.fullmatch(r'[a-f0-9]{64}', v) for v in commits.values()), 'Exact installed app/runtime commits required')
         self.module, self.harness, self.code, self.original, self.client = module, harness, code_sha256, original, client
@@ -1631,20 +1644,21 @@ class RootProxySnapshot:
         nonce = secrets.token_hex(32)
         require(nonce not in self.nonces and self.sequence <= 3, 'Fresh bounded root snapshot sequence required')
         self.nonces.add(nonce)
-        request = dict(schemaVersion=1, operation='flatpak-proxy-snapshot-uid1001', harnessSource=self.harness,
+        request = dict(schemaVersion=1, operation=self.context.snapshot_operation, harnessSource=self.harness,
                        codeSha256=self.code, sequence=self.sequence, nonce=nonce,
                        expiresNs=min(int(self.capture.transcript.deadline * 10**9), time.monotonic_ns() + 4 * 10**9),
-                       original=self.original, client=self.client, tree=tree, caller=self.module.root_process(os.getpid()))
-        self.module.root_request(request, time.monotonic_ns())
+                       original=self.original, client=self.client, tree=tree,
+                       caller=self.module.root_process(os.getpid(), context=self.context))
+        self.module.root_request(request, time.monotonic_ns(), context=self.context)
         raw = json_bytes(request); require(len(raw) <= 32768, 'Root snapshot request bound')
-        result = root_exchange(self.module.PROXY_TOOL, 'root-proxy-snapshot', raw, request['expiresNs'] / 10**9)
+        result = root_exchange(self.module.PROXY_TOOL, self.context.snapshot_command, raw, request['expiresNs'] / 10**9)
         require(0 < len(result.stdout) <= 32768, 'Complete protected root snapshot unavailable; no input')
         answer = parse(result.stdout)
         if result.returncode != 0 or result.stderr:
             raise root_worker_refusal(answer)
         require(set(answer) == {'request', 'ok', 'snapshot'} and answer['request'] == request and answer['ok'] is True,
                 'Root snapshot source/nonce/sequence reply differs')
-        self.module.validate_association(answer['snapshot'], self.original, self.client, tree)
+        self.module.validate_association(answer['snapshot'], self.original, self.client, tree, context=self.context)
         require(all(answer['snapshot']['flatpakInfo']['fields'][k] == v for k, v in self.commits.items()),
                 'Proxy instance must bind the independently installed app/runtime commits')
         self.capture.budget(); self.module.protected_tool(self.code)
@@ -1663,7 +1677,11 @@ class ObserverPidfds:
 
 
 class Session:
-    def __init__(self, root, review):
+    observer_context = 'flatpak-016'
+
+    def __init__(self, root, review, *, observer_context='flatpak-016'):
+        observer_uid(observer_context)
+        self.observer_context = observer_context
         self.root, self.review = root, review
         self.app_env = clean_environment(root)
         self.app_env.update({key: os.environ[key] for key in ("DISPLAY", "DBUS_SESSION_BUS_ADDRESS", "XAUTHORITY") if key in os.environ})
@@ -1915,7 +1933,11 @@ class Session:
             name = names[2]
             module.__file__ = str(HERE.parent / name)
             exec(compile(sources[name], module.__file__, 'exec'), module.__dict__)
-            state['associationValidator'] = module.validate_association
+            context = module.named_context(self.observer_context)
+            require(context.uid == observer_uid(self.observer_context) == os.getuid()
+                    and self.root / 'runtime' == context.runtime, 'Fixed observer runtime/context mismatch')
+            state['associationValidator'] = lambda data, original, client, tree: module.validate_association(
+                data, original, client, tree, context=context)
             stage = 'qualified-cold-root'
             cold, owner = self.report['coldRoot'], self.report['coldHost1Owner']
             require(self.report['coldActivationAccepted'] is True and owner['pid'] == cold['pid'], 'Qualified cold Root required')
@@ -1948,7 +1970,7 @@ class Session:
                         and installed['commit'] == self.review['flatpak']['commit'], 'Actual installed Flatpak commit binding required')
                 snapshot = RootProxySnapshot(module, self.root, binding['harnessSource'],
                     hashlib.sha256(sources[name]).hexdigest(), attempt.binding.launch, client, capture,
-                    dict(appCommit=installed['commit'], runtimeCommit=installed['runtimeCommit']))
+                    dict(appCommit=installed['commit'], runtimeCommit=installed['runtimeCommit']), context_name=self.observer_context)
             stage = 'protected-proxy-image-open'
             system = PortalImage('proxy')
             stage = 'pre-input-lineage-create'
@@ -1960,7 +1982,7 @@ class Session:
                     tree, capture.read, proxy_process_snapshot, **options)
             else:
                 capture.baseline = module.AssociatedProxyLineage(attempt.binding.launch, client,
-                    tree, capture.read, proxy_process_snapshot, snapshot=snapshot, **options)
+                    tree, capture.read, proxy_process_snapshot, snapshot=snapshot, context=context, **options)
             stage = 'observer-arm'
             capture.arm()
             try:
@@ -2370,7 +2392,7 @@ class Session:
                 require(action == 'Open Creator Hub' and not missing, 'Only warm disclosure Enter may qualify')
                 admitted = self.launcher_keys[-1]['keyboard']['launchProvenance']['admittedLaunch']
                 attributed_warm_activation(record, client, admitted, self.report['coldHost1Owner'],
-                    association_validator=pending.get('associationValidator'))
+                    association_validator=pending.get('associationValidator'), context_name=self.observer_context)
             candidate = self.launcher_keys[-1].get('deliveryClassification') == 'warm-consumed-terminal-candidate'
             proof = self.consumed_warm_outcome() if candidate else self.launcher_outcome(action, phase, missing)
             for diagnostic in self.launcher_keys:

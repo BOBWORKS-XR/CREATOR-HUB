@@ -46,10 +46,10 @@ def invocation_stat(inode, mode, size=64):
 
 
 @contextmanager
-def invocation_fixture():
-    caller = dict(pid=19, parentPid=18, startTime='19', uids=[1001] * 4, executable='/usr/bin/python3.10')
+def invocation_fixture(context=M.BASELINE_CONTEXT):
+    caller = dict(pid=19, parentPid=18, startTime='19', uids=[context.uid] * 4, executable='/usr/bin/python3.10')
     rows = {19: {**caller, 'state': 'S'},
-            20: dict(pid=20, parentPid=19, startTime='20', state='S', uids=[1001, 0, 0, 0], executable='/usr/bin/sudo'),
+            20: dict(pid=20, parentPid=19, startTime='20', state='S', uids=[context.uid, 0, 0, 0], executable='/usr/bin/sudo'),
             21: dict(pid=21, parentPid=20, startTime='21', state='R', uids=[0] * 4, executable='/usr/bin/python3.10')}
     state = SimpleNamespace(caller=caller, rows=rows, reads=[], links=[], events=[], exited=set(), replaced=set(), image_bad=False,
                             permission=None, close_error=False, images={})
@@ -109,7 +109,7 @@ class InvocationGuardTests(unittest.TestCase):
                 self.assertEqual(set(held.held), {19, 21}); self.assertEqual(set(state.images), {'python'})
                 M.validate_probe(dict(operation=M.PROBE_OPERATION, complete=True, uid=1001, candidateCount=0,
                     scopedProcessCount=1, caller=state.caller, invocation=rows, readOnly=True, inputPermitted=False,
-                    authorityGranted=False, releaseReady=False), {'caller': state.caller})
+                    authorityGranted=False, releaseReady=False), {'caller': state.caller, 'operation': M.PROBE_OPERATION})
                 @contextmanager
                 def scan(path):
                     yield [SimpleNamespace(name=str(pid), stat=lambda **opts: SimpleNamespace(st_mode=stat.S_IFDIR | 0o555))
@@ -165,7 +165,7 @@ class InvocationGuardTests(unittest.TestCase):
                     held.recheck()
                     M.validate_probe(dict(operation=M.PROBE_OPERATION, complete=True, uid=1001, candidateCount=0,
                         scopedProcessCount=4, caller=state.caller, invocation=rows, readOnly=True, inputPermitted=False,
-                        authorityGranted=False, releaseReady=False), {'caller': state.caller})
+                        authorityGranted=False, releaseReady=False), {'caller': state.caller, 'operation': M.PROBE_OPERATION})
                     for pid in (19, 20, 21, *([22] if len(variants) == 2 else [])):
                         self.assertIn(pid, state.links)
 
@@ -268,14 +268,14 @@ class InvocationGuardTests(unittest.TestCase):
         with invocation_fixture() as state, M.InvocationChain(state.caller) as held:
             value = dict(operation=M.PROBE_OPERATION, complete=True, uid=1001, candidateCount=0, scopedProcessCount=2,
                 caller=state.caller, invocation=held.receipt(), readOnly=True, inputPermitted=False, authorityGranted=False, releaseReady=False)
-            M.validate_probe(value, {'caller': state.caller})
+            M.validate_probe(value, {'caller': state.caller, 'operation': M.PROBE_OPERATION})
             for mutate in (lambda v: v['invocation'][1].update(uids=[1001, 0, 0, 1001]),
                            lambda v: v['invocation'][0].update(uids=[1001, 0, 0, 0]),
                            lambda v: v['invocation'][1].update(executableKind='python'),
                            lambda v: v['invocation'][1].update(imageSha256='unknown'),
                            lambda v: v['invocation'][1].update(parentPid=99)):
                 changed = copy.deepcopy(value); mutate(changed)
-                with self.assertRaises(ValueError): M.validate_probe(changed, {'caller': state.caller})
+                with self.assertRaises(ValueError): M.validate_probe(changed, {'caller': state.caller, 'operation': M.PROBE_OPERATION})
 
 
 class InventoryFailureTests(unittest.TestCase):
@@ -720,7 +720,8 @@ class MixedPostFailureTests(unittest.TestCase):
             def protected(*args):
                 self.assertFalse(M.ROOT_DIAGNOSTIC_ACTIVE); events.append('source')
                 if source_fails: raise PermissionError('PRIVATE_SOURCE')
-            def failed_probe(request):
+            def failed_probe(request, *, context):
+                self.assertIs(context, M.BASELINE_CONTEXT)
                 self.assertTrue(M.ROOT_DIAGNOSTIC_ACTIVE); events.append('probe'); raise error
             with self.subTest(source_fails=source_fails), ExitStack() as stack:
                 stack.enter_context(patch.object(M, 'ROOT_DIAGNOSTIC_ACTIVE', False))
@@ -757,9 +758,9 @@ class MixedPostFailureTests(unittest.TestCase):
 
 class ForeignSudoTests(unittest.TestCase):
     @contextmanager
-    def fixture(self, kind='sudo'):
-        caller = dict(pid=2490, parentPid=2484, startTime='4537', uids=[1001] * 4, executable='/usr/bin/python3.10')
-        record = dict(pid=1629, parentPid=1616, startTime='1515', uids=[1001, 0, 0, 0], executable='/usr/bin/' + kind, state='S')
+    def fixture(self, kind='sudo', context=M.BASELINE_CONTEXT):
+        caller = dict(pid=2490, parentPid=2484, startTime='4537', uids=[context.uid] * 4, executable='/usr/bin/python3.10')
+        record = dict(pid=1629, parentPid=1616, startTime='1515', uids=[context.uid, 0, 0, 0], executable='/usr/bin/' + kind, state='S')
         state = SimpleNamespace(rows={1629: record}, exited=set(), replaced=set(), proc_replaced=set(), missing=set(),
             reads=[], links=[], closes=[], scans=0, clock=99, image_bad=False, close_bad=False, on_scan=None,
             kernel_kinds={1629: kind}, fd_rows={})
@@ -776,11 +777,11 @@ class ForeignSudoTests(unittest.TestCase):
             images[image_kind] = SimpleNamespace(path='/usr/bin/' + image_kind, identity=M.ProxyAssociationProc.stamp(system),
                 digest=snapshot(), snapshot=Mock(side_effect=snapshot), close=Mock())
         owned = {2492: dict(pid=2492, parentPid=2491, startTime='4546', uids=[0] * 4, executable='/usr/bin/python3.10', state='R'),
-                 2491: dict(pid=2491, parentPid=2490, startTime='4545', uids=[1001, 0, 0, 0], executable='/usr/bin/sudo', state='S'),
+                 2491: dict(pid=2491, parentPid=2490, startTime='4545', uids=[context.uid, 0, 0, 0], executable='/usr/bin/sudo', state='S'),
                  2490: {**caller, 'state': 'S'}}
         chain_class = M.InvocationChain
         invocation = SimpleNamespace(held={pid: dict(row=row, kind='sudo' if pid == 2491 else 'python') for pid, row in owned.items()},
-                                     recheck=Mock(), process=chain_class.process)
+                                     recheck=Mock(), process=chain_class.process, context=context)
         invocation.mixed_process = Mock(side_effect=lambda pid, ids: chain_class.mixed_process(invocation, pid, ids))
         invocation.receipt = Mock(return_value=[{**{k: owned[pid][k] for k in ('pid', 'parentPid', 'startTime', 'uids', 'state')},
             'executableKind': kind, 'imageSha256': ('a' if kind == 'python' else 'b') * 64} for pid, kind in ((2492, 'python'), (2491, 'sudo'))])
@@ -836,7 +837,7 @@ class ForeignSudoTests(unittest.TestCase):
             stack.enter_context(patch.object(M.select, 'select', side_effect=lambda fds, *_: ([fd for fd in fds if fd - 30000 in state.exited], [], [])))
             stack.enter_context(patch.object(M.os, 'scandir', side_effect=scan))
             stack.enter_context(patch.object(M, 'root_uid_tuple', side_effect=lambda pid: owned[pid]['uids'] if pid in owned else state.rows[pid]['uids']))
-            stack.enter_context(patch.object(M, 'root_process', side_effect=lambda pid: copy.deepcopy(caller if pid == 2490 else {k: v for k, v in state.rows[pid].items() if k != 'state'})))
+            stack.enter_context(patch.object(M, 'root_process', side_effect=lambda pid, *, context: copy.deepcopy(caller if pid == 2490 else {k: v for k, v in state.rows[pid].items() if k != 'state'})))
             yield state
 
     def test_recorded_fusermount3_is_counted_but_never_invocation_proxy_or_input_authority(self):
@@ -858,6 +859,24 @@ class ForeignSudoTests(unittest.TestCase):
         state = RootAssociationTests().fixture()
         state.data['proxy']['executable'] = '/usr/bin/fusermount3'
         with self.assertRaises(ValueError): state.build_associated()
+
+    def test_both_contexts_keep_foreign_sudo_fuse_non_authorizing_and_reject_held_drift(self):
+        for context in (M.BASELINE_CONTEXT, M.UPDATER_CONTEXT):
+            for kind in ('sudo', 'fusermount3'):
+                for drift in ('uid', 'pidfd', 'proc', 'held-image'):
+                    with self.subTest(context=context.name, kind=kind, drift=drift), self.fixture(kind, context) as state:
+                        owned = copy.deepcopy(state.invocation.held)
+                        with M.ForeignSudoObservations(state.invocation, state.budget, context=context) as foreign:
+                            candidates, rows = M.complete_uid_inventory(state.budget, invocation=state.invocation,
+                                                                         foreign=foreign, context=context)
+                            self.assertEqual(candidates, []); self.assertIn(1629, rows)
+                            self.assertEqual(state.invocation.held, owned)
+                            if drift == 'uid': state.rows[1629]['uids'][0] = 21314 if context.uid == 1001 else 1001
+                            if drift == 'pidfd': state.exited.add(1629)
+                            if drift == 'proc': state.proc_replaced.add(1629)
+                            if drift == 'held-image': state.replaced.add(1629)
+                            with self.assertRaises(ValueError): foreign.recheck()
+                        state.image.close.assert_called_once()
 
     def test_sudo_and_fuse_share_the_same_cap_and_hold_distinct_protected_images(self):
         with self.fixture() as state:
@@ -1312,13 +1331,17 @@ class ForeignSudoTests(unittest.TestCase):
 
     def test_foreign_policy_preserves_shared_inventory_and_diagnostic_read_contracts(self):
         # Unchanged inventory/association ASTs remain bound to the retained 29515016 source.
-        # The fixed sudo/FUSE image policy is exercised separately, not falsely asserted unchanged.
-        expected = {'inventory_probe': '561d4966cb785c874b19291a1340a4c58b7d67560c3c35b10913b1f963b4e822',
-            'association_snapshot': '4077170e6a6c843f1b391fcfdc2a70fd52c76bd01229fa6b105f121708288780',
-            'association_snapshot_held': 'cc7be1fd9217d87afbc0d387b75f330968cb997e6bdf8688beaaaa35ed8d0231'}
-        expected_policy = {'ForeignSudoObservations': '8e7e6ab5649082fe6d346d4deed633a0892e059b5957b8e1307a07016fb94aff',
+        # Explicit closed-context expansion, not an assertion that these five ASTs are unchanged:
+        # inventory_probe passes one canonical context through caller/inventory and receipt;
+        # association_snapshot/held also bind its exact runtime, private instance and proxy UID;
+        # ForeignSudoObservations/InvocationChain use only that context's UID in the existing shapes.
+        # InvocationImage is unchanged. Never normalize away context arguments or UID/path guards.
+        expected = {'inventory_probe': 'c1036c4b136d1ebb5696f68c370adaabaad29388f8c5d2404458d31820b0eab1',
+            'association_snapshot': 'd95ce46838f0773eb22dcd7a8068d55fe461d3c0ba194c518a380f9ce1ff861b',
+            'association_snapshot_held': '4becd4aa845abe7394cab19fcc118a67dd3cf0c40b8e06a6985be22190a9228a'}
+        expected_policy = {'ForeignSudoObservations': '8a9ef213d0959af1db1208c36642e41204a440b56e6cfdc639b8e56b41833128',
             'InvocationImage': '0ea708e4bf5feb3f99092f4f8d9923054b4e00e83f60666938ecdea36682290a',
-            'InvocationChain': '35cf24dfaf4121d41da107abd6a0a8b014b9fa02794e0276c2816d566cee94f0'}
+            'InvocationChain': '0ea66b3b02fc4220a14ef3847d6c48245af6f5ff09c6428a05301fa00c6b108c'}
         class StripDiagnostic(ast.NodeTransformer):
             def generic_visit(self, node):
                 node = super().generic_visit(node)
@@ -1774,30 +1797,33 @@ class PreInputLineageTests(unittest.TestCase):
 
 
 class RootAssociationTests(unittest.TestCase):
-    def fixture(self):
+    def fixture(self, context=M.BASELINE_CONTEXT):
         state = ProxyAssociationTests().fixture()
+        state.context = context
+        for row in (*state.rows.values(), *state.tree.values()):
+            row['uids'] = [context.uid] * 4
         state.rows[13]['image'] = copy.deepcopy(state.rows[10]['image'])
         state.tree[13]['image'] = copy.deepcopy(state.rows[10]['image'])
         state.private = dict(instanceId='123', infoSha256='b' * 64, originalPid=10,
-            directories=[[1, n, stat.S_IFDIR | 0o700, 1001, 1001, 2] for n in (1, 2, 3)],
-            infoIdentity=[1, 2, stat.S_IFREG | 0o644, 1001, 1001, 1, 200, 5, 6],
-            pidIdentity=[1, 3, stat.S_IFREG | 0o644, 1001, 1001, 1, 2, 5, 6])
+            directories=[[1, n, stat.S_IFDIR | 0o700, context.uid, context.uid, 2] for n in (1, 2, 3)],
+            infoIdentity=[1, 2, stat.S_IFREG | 0o644, context.uid, context.uid, 1, 200, 5, 6],
+            pidIdentity=[1, 3, stat.S_IFREG | 0o644, context.uid, context.uid, 1, 2, 5, 6])
         state.tree_rows = [copy.deepcopy(state.rows[pid]) for pid in (14, 13, 10)]
-        state.data = dict(complete=True, uid=1001, candidateCount=1, scopedProcessCount=8,
+        state.data = dict(complete=True, uid=context.uid, candidateCount=1, scopedProcessCount=8,
             original=copy.deepcopy(state.rows[10]), client=copy.deepcopy(state.rows[14]), tree=copy.deepcopy(state.tree_rows),
             proxy=copy.deepcopy(state.rows[12]), flatpakInfo={k: state.info[k] for k in ('sha256', 'fields')},
             privateInstance=copy.deepcopy(state.private), pipes=[dict(appPid=13, appFd=7, proxyFd=8, inode=900)])
         state.instance = SimpleNamespace(snapshot=Mock(side_effect=lambda: copy.deepcopy(state.private)), close=Mock())
         state.snapshots = Mock(side_effect=lambda tree: copy.deepcopy(state.data))
-        state.request = dict(schemaVersion=1, operation='flatpak-proxy-snapshot-uid1001', harnessSource='a' * 40,
+        state.request = dict(schemaVersion=1, operation=context.snapshot_operation, harnessSource='a' * 40,
             codeSha256='e' * 64, sequence=1, nonce='f' * 64, expiresNs=2_000_000_000,
             original=state.rows[10], client=state.rows[14], tree=state.tree_rows,
-            caller=dict(pid=19, parentPid=18, startTime='19', uids=[1001] * 4, executable='/usr/bin/python3.10'))
+            caller=dict(pid=19, parentPid=18, startTime='19', uids=[context.uid] * 4, executable='/usr/bin/python3.10'))
         def build():
             with patch.object(M, 'PrivateInstance', return_value=state.instance):
                 return M.AssociatedProxyLineage(state.rows[10], state.rows[14], state.tree, state.reader, lambda r: copy.deepcopy(r),
                     snapshot=state.snapshots, image_open=state.image_open, system_image=state.system, pidfds=state.pidfds,
-                    guard=state.guard, budget=lambda: None)
+                    guard=state.guard, budget=lambda: None, context=context)
         state.build_associated = build
         return state
 
@@ -1861,7 +1887,7 @@ class RootAssociationTests(unittest.TestCase):
                 patch.object(M.select, 'select', return_value=([], [], [])), patch.object(M.os, 'close'), \
                 patch.object(M, 'PrivateInstance', return_value=state.instance), patch.object(M, 'InvocationChain'):
             return M.association_snapshot(state.request, proc=state.proc, read=state.reader,
-                inventory=inventory or Mock(return_value=([12], scoped)), clock=lambda: 1_000_000_000)
+                inventory=inventory or Mock(return_value=([12], scoped)), clock=lambda: 1_000_000_000, context=state.context)
 
     def test_root_snapshot_proves_both_endpoints_same_info_and_stable_rechecks(self):
         state = self.fixture(); value = self.run_snapshot(state)
@@ -2103,7 +2129,7 @@ class RootAssociationTests(unittest.TestCase):
                 patch.object(M, 'root_request', side_effect=AssertionError('No launcher request')), \
                 patch.object(M, 'association_snapshot', side_effect=AssertionError('No association')):
             M.root_snapshot_main()
-            validate.assert_called_once(); probe.assert_called_once_with(request)
+            validate.assert_called_once(); probe.assert_called_once_with(request, context=M.BASELINE_CONTEXT)
             self.assertEqual(code.call_count, 2)
             self.assertEqual(M.json.loads(out.getvalue())['snapshot'], {'candidateCount': 0})
 
@@ -2141,6 +2167,7 @@ class RootAssociationTests(unittest.TestCase):
         # operand contract without creating a host runtime or invoking root.
         state = self.fixture()
         obj = M.PrivateInstance.__new__(M.PrivateInstance)
+        obj.context = M.BASELINE_CONTEXT
         obj.original, obj.info = state.rows[10], state.info
         obj.paths, obj.fds = [], [9]
         obj.stamps = state.private['directories']
@@ -2157,7 +2184,7 @@ class RootAssociationTests(unittest.TestCase):
 
     @unittest.skipUnless(sys.platform == 'linux' and os.getuid() == os.getgid(), 'Real Linux private-directory FD semantics')
     def test_real_unix_private_instance_holds_exact_info_pid_and_refuses_same_byte_replacement(self):
-        with tempfile.TemporaryDirectory() as folder, patch.object(M, 'PROXY_UID', os.getuid()):
+        with tempfile.TemporaryDirectory() as folder:
             runtime = Path(folder).resolve() / 'runtime'; runtime.mkdir(mode=0o700)
             parent = runtime / '.flatpak'; parent.mkdir(mode=0o700)
             instance = parent / '123'; instance.mkdir(mode=0o700)
@@ -2167,7 +2194,11 @@ class RootAssociationTests(unittest.TestCase):
                     stream.write(body)
             create('info', raw); create('pid', b'10')
             info = dict(sha256=M.hashlib.sha256(raw).hexdigest(), fields=dict(instanceId='123'))
-            held = M.PrivateInstance(info, dict(pid=10), runtime)
+            # Only context admission is mocked for this own-user temporary FD test.
+            # Production fixed-context admission is covered separately below.
+            context = SimpleNamespace(uid=os.getuid(), runtime=runtime)
+            with patch.object(M, 'observer_context', return_value=context):
+                held = M.PrivateInstance(info, dict(pid=10), runtime, context=context)
             try:
                 before = held.snapshot()
                 (instance / 'pid').rename(instance / 'retained-original-pid')
@@ -2180,10 +2211,196 @@ class RootAssociationTests(unittest.TestCase):
 
     @unittest.skipUnless(sys.platform == 'linux', 'Real Linux own-proc metadata only')
     def test_real_unix_own_proc_identity_is_stable_without_command_or_environment_reads(self):
-        with patch.object(M, 'PROXY_UID', os.getuid()):
+        # Own-process read contract, not a claim of fixture UID admission.
+        with patch.object(M, 'observer_context', return_value=SimpleNamespace(uid=os.getuid())):
             first = M.root_process(os.getpid())
             self.assertEqual(first, M.root_process(os.getpid()))
         self.assertEqual(set(first), {'pid', 'parentPid', 'startTime', 'uids', 'executable'})
+
+
+class ClosedObserverContextTests(unittest.TestCase):
+    contexts = (M.BASELINE_CONTEXT, M.UPDATER_CONTEXT)
+
+    def test_only_two_canonical_immutable_contexts_and_closed_worker_arguments(self):
+        self.assertEqual([(c.name, c.uid, c.runtime.as_posix()) for c in self.contexts], [
+            ('flatpak-016', 1001, '/home/runner/work/_temp/native-linux-production-016-flatpak/runtime'),
+            ('portable-update-016', 21314, '/opt/creator-polkit-fixture/result/runtime')])
+        for context in self.contexts:
+            self.assertIs(M.observer_context(context), context)
+            self.assertIs(M.named_context(context.name), context)
+            with self.assertRaises(AttributeError): context.uid = 0
+            for command in (context.snapshot_command, context.probe_command):
+                self.assertIs(M.worker_context([command]), context)
+            for forged in (context._replace(), context._replace(uid=0), context._replace(runtime=Path('/tmp')),
+                           dict(context._asdict()), 1001, None, True):
+                with self.assertRaises(ValueError): M.observer_context(forged)
+        for name in (1001, None, True, '21314', 'portable-update', 'flatpak-016 '):
+            with self.assertRaises(ValueError): M.named_context(name)
+        for args in ([], ['root-proxy-snapshot', '--uid', '21314'], ['root-proxy-snapshot-uid21314'],
+                     ['root-inventory-probe-update016', '/tmp/runtime'], ['sh'], (self.contexts[0].probe_command,)):
+            with self.assertRaises(ValueError): M.worker_context(args)
+
+    def test_request_context_is_explicit_not_inferred_from_operation_or_caller(self):
+        for context in self.contexts:
+            state = RootAssociationTests().fixture(context)
+            M.root_request(state.request, 1_000_000_000, context=context)
+            other = next(c for c in self.contexts if c is not context)
+            with self.assertRaises(ValueError): M.root_request(state.request, 1_000_000_000, context=other)
+            for change in (lambda r: r.update(operation=other.snapshot_operation),
+                           lambda r: r['caller'].update(uids=[other.uid] * 4),
+                           lambda r: r['original'].update(uids=[other.uid] * 4),
+                           lambda r: r['client'].update(uids=[other.uid] * 4),
+                           lambda r: r.update(runtime=str(context.runtime)), lambda r: r.update(uid=context.uid),
+                           lambda r: r.update(context=context.name), lambda r: r.update(nonce='z' * 64),
+                           lambda r: r.update(nonce=True), lambda r: r.update(sequence=True),
+                           lambda r: r.update(expiresNs=True), lambda r: r.update(expiresNs=1_000_000_000),
+                           lambda r: r.update(expiresNs=6_000_000_001),
+                           lambda r: r['caller'].update(pid=True), lambda r: r['caller'].update(executable='/tmp/python3.10')):
+                request = copy.deepcopy(state.request); change(request)
+                with self.subTest(context=context.name, change=change), self.assertRaises((ValueError, TypeError)):
+                    M.root_request(request, 1_000_000_000, context=context)
+
+    def test_probe_request_and_receipt_cannot_cross_contexts(self):
+        for context in self.contexts:
+            state = RootAssociationTests().fixture(context)
+            request = {k: state.request[k] for k in ('schemaVersion', 'harnessSource', 'codeSha256', 'sequence', 'nonce', 'expiresNs', 'caller')}
+            request['operation'] = context.probe_operation
+            with patch.object(M.Path, 'resolve', return_value='/usr/bin/python3.10'):
+                M.probe_request(request, 1_000_000_000, context=context)
+                for other in self.contexts:
+                    if other is not context:
+                        with self.assertRaises(ValueError): M.probe_request(request, 1_000_000_000, context=other)
+            receipt = dict(operation=context.probe_operation, complete=True, uid=context.uid, candidateCount=0,
+                scopedProcessCount=2, caller=request['caller'], invocation=[dict(pid=21, parentPid=19, startTime='21', state='R',
+                uids=[0] * 4, executableKind='python', imageSha256='a' * 64)],
+                readOnly=True, inputPermitted=False, authorityGranted=False, releaseReady=False)
+            M.validate_probe(receipt, request, context=context)
+            for other in self.contexts:
+                if other is not context:
+                    with self.assertRaises(ValueError): M.validate_probe(receipt, request, context=other)
+            for field, value in (('uid', True), ('uid', 0), ('operation', 'other'), ('authorityGranted', True)):
+                changed = copy.deepcopy(receipt); changed[field] = value
+                with self.assertRaises(ValueError): M.validate_probe(changed, request, context=context)
+
+    def test_fixed_runtime_mismatch_rejects_before_files_processes_or_inventory(self):
+        for context in self.contexts:
+            request = RootAssociationTests().fixture(context).request
+            for runtime in (Path('/tmp/runtime'), next(c.runtime for c in self.contexts if c is not context), str(context.runtime)):
+                with patch.object(M.os, 'open', side_effect=AssertionError('No filesystem read')), \
+                        patch.object(M, 'InvocationChain', side_effect=AssertionError('No process read')):
+                    with self.assertRaises(ValueError): M.PrivateInstance({}, {}, runtime, context=context)
+                    with self.assertRaises(ValueError): M.association_snapshot(request, runtime=runtime, context=context)
+                    with self.assertRaises(ValueError): M.association_snapshot_held(request, proc=None, read=None,
+                        inventory=None, runtime=runtime, clock=lambda: 1_000_000_000, context=context)
+
+    def test_actual_caller_chain_and_proc_reader_keep_all_held_guards_for_both_contexts(self):
+        for context in self.contexts:
+            with invocation_fixture(context) as state:
+                self.assertEqual(M.root_process(19, context=context), state.caller)
+                other = next(c for c in self.contexts if c is not context)
+                with self.assertRaises(ValueError): M.root_process(19, context=other)
+                with M.InvocationChain(state.caller, context=context) as held:
+                    self.assertEqual(held.mixed_process(20, [context.uid, 0, 0, 0])['uids'], [context.uid, 0, 0, 0])
+                    with self.assertRaises(ValueError): held.mixed_process(20, [other.uid, 0, 0, 0])
+                with self.assertRaises(ValueError): M.InvocationChain(state.caller, context=other)
+            for failure in ('pidfd', 'image', 'proc', 'start', 'uid'):
+                with invocation_fixture(context) as state, M.InvocationChain(state.caller, context=context) as held:
+                    if failure == 'pidfd': state.exited.add(19)
+                    elif failure == 'image': state.image_bad = True
+                    elif failure == 'proc': state.replaced.add(19)
+                    elif failure == 'start': state.rows[19]['startTime'] = '999'
+                    else: state.rows[19]['uids'] = [0] * 4
+                    with self.subTest(context=context.name, failure=failure), self.assertRaises(ValueError): held.recheck()
+
+    def test_complete_association_and_input_recheck_are_context_bound(self):
+        for context in self.contexts:
+            state = RootAssociationTests().fixture(context)
+            result = RootAssociationTests().run_snapshot(state)
+            M.validate_association(result, state.rows[10], state.rows[14], state.tree_rows, context=context)
+            other = next(c for c in self.contexts if c is not context)
+            with self.assertRaises(ValueError): M.validate_association(result, state.rows[10], state.rows[14], state.tree_rows, context=other)
+            baseline = state.build_associated()
+            try:
+                baseline.begin_input()
+                self.assertTrue(baseline.started); self.assertEqual(state.snapshots.call_count, 2)
+                value = baseline.observe(':1.40', lambda name: dict(name=name, pid=12, uid=context.uid), budget=lambda: None)
+                self.assertTrue(value['stable']); self.assertFalse(value['inputPermitted'])
+            finally:
+                baseline.close()
+            for failure in ('instance', 'instance-fields', 'pipe', 'image', 'process', 'pidfd', 'other-context'):
+                state = RootAssociationTests().fixture(context); baseline = state.build_associated()
+                try:
+                    if failure == 'instance': state.private['pidIdentity'][-1] += 1
+                    elif failure == 'instance-fields': state.data['flatpakInfo']['fields']['instanceId'] = '456'
+                    elif failure == 'pipe': state.data['pipes'][0]['inode'] += 1
+                    elif failure == 'image': state.system.snapshot = lambda: ({}, '0' * 64)
+                    elif failure == 'process': state.rows[12]['startTime'] = '999'
+                    elif failure == 'pidfd': state.pidfds.ready.return_value = True
+                    else: state.data['uid'] = other.uid
+                    with self.subTest(context=context.name, failure=failure), self.assertRaises(ValueError): baseline.begin_input()
+                    self.assertFalse(baseline.started)
+                finally:
+                    baseline.close()
+
+    def test_context_root_dispatch_is_bound_to_sudo_uid_before_request_reads(self):
+        for context in self.contexts:
+            for command in (context.snapshot_command, context.probe_command):
+                other = next(c for c in self.contexts if c is not context)
+                with ExitStack() as stack:
+                    for name in ('SIGALRM', 'ITIMER_REAL'): stack.enter_context(patch.object(M.signal, name, 0, create=True))
+                    stack.enter_context(patch.object(M.signal, 'signal'))
+                    stack.enter_context(patch.object(M.signal, 'setitimer', create=True))
+                    stack.enter_context(patch.object(M.os, 'getuid', return_value=0, create=True))
+                    stack.enter_context(patch.object(M.os, 'geteuid', return_value=0, create=True))
+                    stack.enter_context(patch.dict(M.os.environ, {'SUDO_UID': str(other.uid)}))
+                    stack.enter_context(patch.object(M, 'PROXY_TOOL', Path(M.__file__)))
+                    stack.enter_context(patch.object(M.sys, 'argv', ['observer.py', command]))
+                    stdin = stack.enter_context(patch.object(M.sys, 'stdin'))
+                    stack.enter_context(patch.object(M.sys, 'stdout', io.StringIO()))
+                    with self.assertRaises(SystemExit): M.root_snapshot_main()
+                    stdin.buffer.read.assert_not_called()
+
+    def test_root_entry_routes_only_exact_context_operation_and_preserves_source_gate(self):
+        for context in self.contexts:
+            for probe in (False, True):
+                request = copy.deepcopy(RootAssociationTests().fixture(context).request)
+                if probe:
+                    for key in ('original', 'client', 'tree'): del request[key]
+                    request['operation'] = context.probe_operation
+                with ExitStack() as stack:
+                    for name in ('SIGALRM', 'ITIMER_REAL'): stack.enter_context(patch.object(M.signal, name, 0, create=True))
+                    stack.enter_context(patch.object(M.signal, 'signal'))
+                    stack.enter_context(patch.object(M.signal, 'setitimer', create=True))
+                    stack.enter_context(patch.object(M.os, 'getuid', return_value=0, create=True))
+                    stack.enter_context(patch.object(M.os, 'geteuid', return_value=0, create=True))
+                    stack.enter_context(patch.dict(M.os.environ, {'SUDO_UID': str(context.uid)}))
+                    stack.enter_context(patch.object(M, 'PROXY_TOOL', Path(M.__file__)))
+                    stack.enter_context(patch.object(M.sys, 'argv', ['observer.py', context.probe_command if probe else context.snapshot_command]))
+                    stack.enter_context(patch.object(M.sys, 'stdin', SimpleNamespace(buffer=io.BytesIO(json.dumps(request).encode()))))
+                    output = io.StringIO(); stack.enter_context(patch.object(M.sys, 'stdout', output))
+                    stack.enter_context(patch.object(M.time, 'monotonic_ns', return_value=1_000_000_000))
+                    stack.enter_context(patch.object(M.Path, 'resolve', return_value='/usr/bin/python3.10'))
+                    code = stack.enter_context(patch.object(M, 'protected_tool'))
+                    chosen = stack.enter_context(patch.object(M, 'inventory_probe' if probe else 'association_snapshot', return_value={'readOnly': True}))
+                    other = stack.enter_context(patch.object(M, 'association_snapshot' if probe else 'inventory_probe'))
+                    M.root_snapshot_main()
+                    chosen.assert_called_once_with(request, context=context); other.assert_not_called()
+                    self.assertEqual(code.call_count, 2); self.assertFalse(M.ROOT_DIAGNOSTIC_ACTIVE)
+                    self.assertEqual(json.loads(output.getvalue())['request'], request)
+
+    def test_complete_inventory_reads_only_selected_context_and_rechecks_caller(self):
+        for context in self.contexts:
+            with invocation_fixture(context) as state, M.InvocationChain(state.caller, context=context) as held:
+                entries = [SimpleNamespace(name=str(pid), stat=lambda **kwargs: invocation_stat(1, stat.S_IFDIR | 0o755))
+                           for pid in (19, 20, 21)]
+                @contextmanager
+                def scan(_): yield entries
+                with patch.object(M.os, 'scandir', side_effect=scan):
+                    proxies, rows = M.complete_uid_inventory(lambda: None, invocation=held, context=context)
+                    self.assertEqual(proxies, []); self.assertEqual(set(rows), {19, 20})
+                    self.assertEqual(rows[19]['uids'], [context.uid] * 4)
+                    state.rows[19]['startTime'] = '999'
+                    with self.assertRaises(ValueError): M.complete_uid_inventory(lambda: None, invocation=held, context=context)
 
 
 class ProxyAssociationTests(unittest.TestCase):
@@ -2762,9 +2979,11 @@ class GioAdapterTests(unittest.TestCase):
 
 
 class PreInputPeerDiagnosticTests(unittest.TestCase):
-    def fixture(self):
-        state = RootAssociationTests().fixture()
+    def fixture(self, context=M.BASELINE_CONTEXT):
+        state = RootAssociationTests().fixture(context)
         observer = GioAdapterTests().capture()
+        observer.uid = context.uid
+        observer.original, observer.client = copy.deepcopy(state.rows[10]), copy.deepcopy(state.rows[14])
         observer.baseline = state.build_associated()
         self.addCleanup(observer.baseline.close)
         observer.armed = observer.bus_identity_matched = True
@@ -2790,7 +3009,7 @@ class PreInputPeerDiagnosticTests(unittest.TestCase):
             elif method == 'ListNames': value = state.listed
             elif method == 'GetConnectionUnixProcessID': value = 99 if name == ':1.90' else 12
             elif method == 'GetNameOwner': value = name
-            elif method == 'GetConnectionUnixUser': value = 1001
+            elif method == 'GetConnectionUnixUser': value = context.uid
             else: self.fail(method)
             count = state.calls.count((method, name))
             override = state.overrides.get((method, name, count), state.overrides.get((method, name)))
@@ -2948,9 +3167,9 @@ class HistoricalPreinputBindingTests(unittest.TestCase):
         clock = patch.object(M.time, 'monotonic_ns', side_effect=iter(range(1_000_000_000, 1_001_000_000)))
         clock.start(); self.addCleanup(clock.stop)
 
-    def fixture(self, *, promote=True):
+    def fixture(self, *, promote=True, context=M.BASELINE_CONTEXT):
         fixture = PreInputPeerDiagnosticTests()
-        state = fixture.fixture()
+        state = fixture.fixture(context)
         self.addCleanup(fixture.doCleanups)
         observer = state.observer
         state.pre = observer.preinput_proxy_peers()
@@ -2969,6 +3188,67 @@ class HistoricalPreinputBindingTests(unittest.TestCase):
         observer.settled = SimpleNamespace(set=observer.stop.set)
         observer.run()
         return observer.sender
+
+    def test_both_contexts_keep_historical_proof_unknown_liveness_and_one_shot_refusals(self):
+        for context in (M.BASELINE_CONTEXT, M.UPDATER_CONTEXT):
+            state = self.fixture(promote=False, context=context); observer = state.observer
+            self.assertEqual(observer._preinput_binding.peers, ((':1.40', 12, context.uid),))
+            state.pre['matches'][0].update(uid=0, pid=999, name=':1.999')
+            observer.begin_input(); self.queue(observer)
+            with patch.object(observer, 'peer', side_effect=AssertionError('No late peer RPC')):
+                value = self.run_worker(observer)
+            self.assertEqual(value['peer'], dict(name=':1.40', pid=12, uid=context.uid))
+            self.assertEqual(value['externalAssociation']['uid'], context.uid)
+            self.assertEqual(value['connectionLiveness'], 'unknown')
+            self.assertFalse(value['stable']); self.assertFalse(value['inputPermitted'])
+            self.assertNotIn('historicalDisconnected', value)
+            self.assertIn('unavailable', observer.observe_preinput_binding(':1.40'))
+            state = self.fixture(promote=False, context=context)
+            state.data['uid'] = 1001 if context.uid == 21314 else 21314
+            with self.assertRaises(ValueError): state.observer.begin_input()
+            self.assertFalse(state.observer.input_started)
+
+    def test_context_identity_drift_before_promotion_or_observation_cannot_survive_the_private_seal(self):
+        for context in (M.BASELINE_CONTEXT, M.UPDATER_CONTEXT):
+            other = M.UPDATER_CONTEXT if context is M.BASELINE_CONTEXT else M.BASELINE_CONTEXT
+            for replacement in (other, context._replace(), None):
+                for promoted in (False, True):
+                    state = self.fixture(promote=promoted, context=context); observer = state.observer
+                    seal = observer._preinput_binding; self.assertIs(seal.context, context)
+                    observer.baseline.context = replacement
+                    if not promoted:
+                        with self.assertRaises(ValueError): observer.begin_input()
+                        self.assertFalse(observer.input_started); self.assertFalse(observer.baseline.started)
+                        self.assertFalse(observer.baseline.used); self.assertIs(observer._preinput_binding, seal)
+                    else:
+                        self.queue(observer)
+                        value = observer.observe_preinput_binding(':1.40')
+                        self.assertTrue(observer.baseline.used); self.assertFalse(value['correlatesToOriginalPopen'])
+                        self.assertNotIn('historicalPreinputBinding', value)
+                        observer.baseline.context = context
+                        self.assertIn('unavailable', observer.observe_preinput_binding(':1.40'))
+
+    def test_context_drift_during_enumeration_or_bus_recheck_refuses_without_fallback(self):
+        for context in (M.BASELINE_CONTEXT, M.UPDATER_CONTEXT):
+            other = M.UPDATER_CONTEXT if context is M.BASELINE_CONTEXT else M.BASELINE_CONTEXT
+            fixture = PreInputPeerDiagnosticTests(); state = fixture.fixture(context); self.addCleanup(fixture.doCleanups)
+            observer = state.observer; query = observer.control.call_sync.side_effect
+            def changed(*args):
+                reply = query(*args)
+                if args[3] == 'ListNames': observer.baseline.context = other
+                return reply
+            observer.control.call_sync.side_effect = changed
+            self.assertFalse(observer.preinput_proxy_peers()['complete']); self.assertIsNone(observer._preinput_binding)
+            state = self.fixture(context=context); observer = state.observer; self.queue(observer)
+            query = observer.control.call_sync.side_effect
+            def changed_id(*args):
+                reply = query(*args)
+                observer.baseline.context = other
+                return reply
+            observer.control.call_sync.side_effect = changed_id
+            value = observer.observe_preinput_binding(':1.40')
+            self.assertFalse(value['correlatesToOriginalPopen']); self.assertTrue(observer.baseline.used)
+            self.assertNotIn('historicalPreinputBinding', value)
 
     def test_captured_binding_promotes_only_after_full_association_and_consumes_once_without_peer_rpc(self):
         state = self.fixture(promote=False); observer = state.observer
@@ -3607,6 +3887,8 @@ try:
     observer.cancellable=Gio.Cancellable.new();observer.armed=observer.bus_identity_matched=True
     observer.bound_bus_connections=(control,monitor)
     baseline=object.__new__(m.AssociatedProxyLineage)
+    # Only the real private-bus transport is tested here; fixture admission/held lineage remain mocked.
+    baseline.context=m.BASELINE_CONTEXT
     baseline.lock=threading.RLock();baseline.started=baseline.closed=baseline.used=False
     baseline.chains={child.pid:[child.pid]}
     row=dict(pid=child.pid,executable='/usr/bin/xdg-dbus-proxy',uids=[os.getuid()]*4)

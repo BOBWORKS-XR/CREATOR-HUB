@@ -29,15 +29,43 @@ PROXY_RUNTIME = Path('/home/runner/work/_temp/native-linux-production-016-flatpa
 PROXY_UID = 1001
 ROOT_WORKER_SECONDS = 5
 PROBE_OPERATION = 'flatpak-uid-inventory-probe-1001'
+_ObserverContext = namedtuple('_ObserverContext', 'name uid runtime snapshot_operation probe_operation snapshot_command probe_command')
+BASELINE_CONTEXT = _ObserverContext('flatpak-016', PROXY_UID, PROXY_RUNTIME,
+    'flatpak-proxy-snapshot-uid1001', PROBE_OPERATION, 'root-proxy-snapshot', 'root-inventory-probe')
+UPDATER_CONTEXT = _ObserverContext('portable-update-016', 21314,
+    Path('/opt/creator-polkit-fixture/result/runtime'), 'flatpak-proxy-snapshot-uid21314',
+    'flatpak-uid-inventory-probe-21314', 'root-proxy-snapshot-update016', 'root-inventory-probe-update016')
 ROOT_DIAGNOSTIC_ACTIVE = False
 DISCONNECTED_PEER = object()
-_PreinputBinding = namedtuple('_PreinputBinding', 'baseline control monitor cancellable system instance held '
+_PreinputBinding = namedtuple('_PreinputBinding', 'baseline context control monitor cancellable system instance held '
     'bus_id control_name monitor_name peers lineage started finished association_verified promoted')
 
 
 def require(value):
     if not value:
         raise ValueError('Finite diagnostic contract refused')
+
+
+def observer_context(value=BASELINE_CONTEXT):
+    # Equal tuples, arbitrary UID/path pairs and request-supplied objects are not contexts.
+    require(value is BASELINE_CONTEXT or value is UPDATER_CONTEXT)
+    return value
+
+
+def named_context(name):
+    require(type(name) is str)
+    for context in (BASELINE_CONTEXT, UPDATER_CONTEXT):
+        if name == context.name:
+            return context
+    raise ValueError('Unknown fixed observer context')
+
+
+def worker_context(arguments):
+    require(type(arguments) is list and len(arguments) == 1 and type(arguments[0]) is str)
+    for context in (BASELINE_CONTEXT, UPDATER_CONTEXT):
+        if arguments[0] in (context.snapshot_command, context.probe_command):
+            return context
+    raise ValueError('Unknown fixed observer worker operation')
 
 
 def unique(value):
@@ -604,8 +632,10 @@ def proxy_association_diagnostic(original, client, tree, read, *, image_open, sy
 
 class PrivateInstance:
     """Hold only the fixed CI runtime's instance directories and public identity files."""
-    def __init__(self, info, original, runtime=PROXY_RUNTIME):
-        require(type(runtime) is Path or isinstance(runtime, Path))
+    def __init__(self, info, original, runtime=None, *, context=BASELINE_CONTEXT):
+        self.context = observer_context(context)
+        require(runtime is None or runtime == context.runtime)
+        runtime = context.runtime
         self.fds, self.stamps, self.runtime = [], [], runtime
         try:
             instance = info['fields']['instanceId']
@@ -614,7 +644,7 @@ class PrivateInstance:
             for path in paths:
                 before = path.lstat()
                 require(path.resolve(strict=True) == path and stat.S_ISDIR(before.st_mode)
-                        and before.st_uid == before.st_gid == PROXY_UID and not before.st_mode & 0o7022)
+                        and before.st_uid == before.st_gid == self.context.uid and not before.st_mode & 0o7022)
                 require(path != runtime or stat.S_IMODE(before.st_mode) == 0o700)
                 fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
                 self.fds.append(fd); self.stamps.append(ProxyAssociationProc.stamp(before))
@@ -633,7 +663,7 @@ class PrivateInstance:
         raw, info_stamp = ProxyAssociationProc.read_at(self.fds[-1], 'info', 65536, sized=True)
         pid, pid_stamp = ProxyAssociationProc.read_at(self.fds[-1], 'pid', 32, sized=True)
         for stamp in (info_stamp, pid_stamp):
-            require(stamp[3] == stamp[4] == PROXY_UID and stamp[5] == 1 and not stamp[2] & 0o7022)
+            require(stamp[3] == stamp[4] == self.context.uid and stamp[5] == 1 and not stamp[2] & 0o7022)
         require(pid == str(self.original['pid']).encode() and hashlib.sha256(raw).hexdigest() == self.info['sha256'])
         value = dict(instanceId=self.info['fields']['instanceId'], infoSha256=self.info['sha256'],
                      originalPid=self.original['pid'], directories=[list(s[:6]) for s in self.stamps],
@@ -648,24 +678,25 @@ class PrivateInstance:
         self.fds = []
 
 
-def root_request(value, now):
+def root_request(value, now, *, context=BASELINE_CONTEXT):
+    context = observer_context(context)
     require(type(value) is dict and set(value) == {'schemaVersion', 'operation', 'harnessSource', 'codeSha256',
             'sequence', 'nonce', 'expiresNs', 'original', 'client', 'tree', 'caller'}
             and type(value['schemaVersion']) is int and value['schemaVersion'] == 1
-            and value['operation'] == 'flatpak-proxy-snapshot-uid1001'
+            and value['operation'] == context.snapshot_operation
             and type(value['sequence']) is int and 1 <= value['sequence'] <= 3
             and type(value['expiresNs']) is int and now < value['expiresNs'] <= now + ROOT_WORKER_SECONDS * 10**9
             and re.fullmatch(r'[a-f0-9]{40}', value['harnessSource'])
             and all(type(value[k]) is str and re.fullmatch(r'[a-f0-9]{64}', value[k]) for k in ('nonce', 'codeSha256')))
-    validate_caller(value['caller'])
+    validate_caller(value['caller'], context=context)
     for row in (value['original'], value['client']):
-        OwnedLineage.validate(row); require(row['uids'] == [PROXY_UID] * 4)
+        OwnedLineage.validate(row); require(row['uids'] == [context.uid] * 4)
     require(value['original']['executable'] == '/usr/bin/bwrap'
             and value['client']['executable'] == '/app/bin/creator-hub-flatpak-activate'
             and type(value['tree']) is list and 1 < len(value['tree']) <= MAX_ANCESTORS
             and len({r['pid'] for r in value['tree']}) == len(value['tree']))
     for row in value['tree']:
-        OwnedLineage.validate(row); require(row['uids'] == [PROXY_UID] * 4)
+        OwnedLineage.validate(row); require(row['uids'] == [context.uid] * 4)
     require(value['tree'][0] == value['client'] and value['tree'][-1] == value['original'])
     for child, parent in zip(value['tree'], value['tree'][1:]):
         require(child['parentPid'] == parent['pid'] and parent['executable'] == '/usr/bin/bwrap'
@@ -1066,8 +1097,9 @@ def capture_mixed_failure(error, chain, pid, ids, membership, kind):
         pass
 
 
-def root_process(pid, full=False, *, probe_diagnostic=None):
+def root_process(pid, full=False, *, probe_diagnostic=None, context=BASELINE_CONTEXT):
     """Read kernel proc identity only; no cmdline, environment or candidate imports."""
+    context = observer_context(context)
     require(type(pid) is int and 1 < pid < 2**31)
     directory = os.open(f'/proc/{pid}', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
     try:
@@ -1083,8 +1115,8 @@ def root_process(pid, full=False, *, probe_diagnostic=None):
             _inventory_predicate = 'process-shape'
             require(text.startswith(str(pid) + ' (') and len(tail) >= 20 and tail[0] not in ('Z', 'X'))
             _inventory_predicate = 'process-uids'
-            require(len(ids) == 1 and [int(x) for x in ids[0]] == [PROXY_UID] * 4)
-            return dict(pid=pid, parentPid=int(tail[1]), startTime=tail[19], uids=[PROXY_UID] * 4)
+            require(len(ids) == 1 and [int(x) for x in ids[0]] == [context.uid] * 4)
+            return dict(pid=pid, parentPid=int(tail[1]), startTime=tail[19], uids=[context.uid] * 4)
         before = identity()
         _inventory_predicate = 'executable-read'
         executable = os.readlink('exe', dir_fd=directory)
@@ -1132,7 +1164,8 @@ def root_uid_tuple(pid):
         os.close(directory)
 
 
-def complete_uid_inventory(budget, *, invocation=None, foreign=None):
+def complete_uid_inventory(budget, *, invocation=None, foreign=None, context=BASELINE_CONTEXT):
+    context = observer_context(context)
     def scan(number):
         _inventory_predicate = 'invocation-recheck'
         if invocation is not None:
@@ -1155,10 +1188,10 @@ def complete_uid_inventory(budget, *, invocation=None, foreign=None):
                     # proc_pid(5): non-dumpable processes' proc entries can be root-owned.
                     _inventory_predicate = 'uid-read'
                     ids = root_uid_tuple(int(entry.name)); entry_uids = ids
-                    if PROXY_UID in ids:
-                        if ids == [PROXY_UID] * 4:
+                    if context.uid in ids:
+                        if ids == [context.uid] * 4:
                             _inventory_predicate = 'process-read'
-                            rows[int(entry.name)] = root_process(int(entry.name))
+                            rows[int(entry.name)] = root_process(int(entry.name), context=context)
                         else:
                             _inventory_predicate = 'mixed-invocation'
                             require(invocation is not None)
@@ -1187,31 +1220,34 @@ def complete_uid_inventory(budget, *, invocation=None, foreign=None):
     return proxies, first
 
 
-def complete_proxy_inventory(budget, *, invocation=None, foreign=None):
-    proxies, rows = complete_uid_inventory(budget, invocation=invocation, foreign=foreign)
+def complete_proxy_inventory(budget, *, invocation=None, foreign=None, context=BASELINE_CONTEXT):
+    context = observer_context(context)
+    proxies, rows = complete_uid_inventory(budget, invocation=invocation, foreign=foreign, context=context)
     require(0 < len(proxies) <= 4)
     return proxies, rows
 
 
-def validate_caller(row):
+def validate_caller(row, *, context=BASELINE_CONTEXT):
+    context = observer_context(context)
     require(type(row) is dict and set(row) == {'pid', 'parentPid', 'startTime', 'uids', 'executable'}
             and type(row['pid']) is int and 1 < row['pid'] < 2**31
             and type(row['parentPid']) is int and 0 < row['parentPid'] < 2**31
             and type(row['startTime']) is str and re.fullmatch(r'[1-9][0-9]{0,19}', row['startTime'])
             and type(row['uids']) is list and len(row['uids']) == 4
-            and all(type(uid) is int and uid == PROXY_UID for uid in row['uids'])
+            and all(type(uid) is int and uid == context.uid for uid in row['uids'])
             and type(row['executable']) is str and re.fullmatch(r'/usr/bin/python3\.[0-9]{1,2}', row['executable']))
 
 
-def probe_request(value, now):
+def probe_request(value, now, *, context=BASELINE_CONTEXT):
+    context = observer_context(context)
     require(type(value) is dict and set(value) == {'schemaVersion', 'operation', 'harnessSource', 'codeSha256',
             'sequence', 'nonce', 'expiresNs', 'caller'}
             and type(value['schemaVersion']) is int and value['schemaVersion'] == 1
-            and value['operation'] == PROBE_OPERATION and type(value['sequence']) is int and value['sequence'] == 1
+            and value['operation'] == context.probe_operation and type(value['sequence']) is int and value['sequence'] == 1
             and type(value['expiresNs']) is int and now < value['expiresNs'] <= now + ROOT_WORKER_SECONDS * 10**9
             and type(value['harnessSource']) is str and re.fullmatch(r'[a-f0-9]{40}', value['harnessSource'])
             and all(type(value[k]) is str and re.fullmatch(r'[a-f0-9]{64}', value[k]) for k in ('nonce', 'codeSha256')))
-    validate_caller(value['caller'])
+    validate_caller(value['caller'], context=context)
     require(value['caller']['executable'] == str(Path('/usr/bin/python3').resolve(strict=True)))
 
 
@@ -1300,11 +1336,12 @@ class InvocationImage:
 
 class InvocationChain:
     """This worker -> optional protected sudo ancestors -> the exact unprivileged caller."""
-    def __init__(self, caller, budget=lambda: None):
+    def __init__(self, caller, budget=lambda: None, *, context=BASELINE_CONTEXT):
+        self.context = observer_context(context)
         self.caller, self.budget, self.images, self.held, self.rows = copy.deepcopy(caller), budget, {}, {}, []
         self.detail = dict(predicate='chain-limit', hops=[])
         try:
-            validate_caller(caller)
+            validate_caller(caller, context=self.context)
             pid = os.getpid()
             for _ in range(5):
                 kind = 'python' if not self.rows or pid == caller['pid'] else 'sudo'
@@ -1372,8 +1409,8 @@ class InvocationChain:
         self.detail['predicate'] = 'hop-credentials'
         # Preserve all-root sudo as well as the observed supervisor real UID, under identical image/proc guards.
         # https://raw.githubusercontent.com/sudo-project/sudo/SUDO_1_9_9/src/exec_nopty.c
-        expected_uids = (([PROXY_UID] * 4,) if caller else ([0] * 4,) if kind == 'python'
-                         else ([0] * 4, [PROXY_UID, 0, 0, 0]))
+        expected_uids = (([self.context.uid] * 4,) if caller else ([0] * 4,) if kind == 'python'
+                         else ([0] * 4, [self.context.uid, 0, 0, 0]))
         require(row['uids'] in expected_uids)
         held['row'] = row
         return row
@@ -1399,7 +1436,7 @@ class InvocationChain:
         held_membership, held_kind = None, None
         try:
             require(type(pid) is int and (held_membership := pid in self.held) and (held_kind := self.held[pid]['kind']) == 'sudo'
-                    and type(ids) is list and all(type(uid) is int for uid in ids) and ids == [PROXY_UID, 0, 0, 0])
+                    and type(ids) is list and all(type(uid) is int for uid in ids) and ids == [self.context.uid, 0, 0, 0])
         except Exception as error:
             capture_mixed_failure(error, self, pid, ids, held_membership, held_kind)
             raise
@@ -1440,7 +1477,8 @@ class ForeignSudoObservations:
     """Fixed sudo/FUSE inventory rows only: never invocation members, proxy candidates or input authority."""
     MAX_ROWS = 4
 
-    def __init__(self, invocation, budget):
+    def __init__(self, invocation, budget, *, context=BASELINE_CONTEXT):
+        self.context = observer_context(context)
         self.invocation, self.budget = invocation, budget
         self.held, self.images, self.image, self.closed = {}, {}, None, False
 
@@ -1465,7 +1503,7 @@ class ForeignSudoObservations:
         _foreign_stage = 'process-shape'
         require((_f_pid_prefix := text.startswith(str(pid) + ' (')) and (_f_tail := len(tail) >= 20)
                 and (_f_parent := row['parentPid'] is not None) and (_f_start := row['startTime'] is not None)
-                and (_f_uids := row['uids'] == [PROXY_UID, 0, 0, 0])
+                and (_f_uids := row['uids'] == [self.context.uid, 0, 0, 0])
                 and (_f_state := row['state'] in ('R', 'S', 'D', 'I', 'T', 't', 'K', 'W', 'P')))
         _foreign_stage = 'kernel-identity'
         require((_f_executable_match := (_f_executable := os.readlink('exe', dir_fd=directory)) == str(self.image.path))
@@ -1487,7 +1525,7 @@ class ForeignSudoObservations:
                 and (_f_unheld_invocation := pid not in self.invocation.held)
                 and (_f_uid_type := type(ids) is list) and (_f_uid_count := len(ids) == 4)
                 and (_f_uid_integers := all(type(uid) is int for uid in ids))
-                and (_f_uid_tuple := ids == [PROXY_UID, 0, 0, 0]))
+                and (_f_uid_tuple := ids == [self.context.uid, 0, 0, 0]))
         if (_f_new := pid not in self.held):
             _foreign_stage = 'cap'
             require((_f_count := len(self.held)) < self.MAX_ROWS)
@@ -1572,19 +1610,22 @@ class ForeignSudoObservations:
             finish_foreign_cleanup(value)
 
 
-def probe_caller_chain(caller):
-    with InvocationChain(caller) as invocation:
+def probe_caller_chain(caller, *, context=BASELINE_CONTEXT):
+    context = observer_context(context)
+    with InvocationChain(caller, context=context) as invocation:
         return invocation.receipt()
 
 
-def inventory_probe(request, *, clock=time.monotonic_ns):
-    probe_request(request, clock())
+def inventory_probe(request, *, clock=time.monotonic_ns, context=BASELINE_CONTEXT):
+    context = observer_context(context)
+    probe_request(request, clock(), context=context)
     def budget():
         require((_inventory_now := clock()) < request['expiresNs'])
     fd = os.pidfd_open(request['caller']['pid'])
     stage = 'probe-caller-chain'
     try:
-        with InvocationChain(request['caller'], budget) as invocation, ForeignSudoObservations(invocation, budget) as foreign:
+        with InvocationChain(request['caller'], budget, context=context) as invocation, \
+                ForeignSudoObservations(invocation, budget, context=context) as foreign:
             try:
                 require(not select.select([fd], [], [], 0)[0])
             except Exception as error:
@@ -1593,14 +1634,14 @@ def inventory_probe(request, *, clock=time.monotonic_ns):
                 error.proxy_caller_diagnostic = dict(predicate='caller-pidfd-live', hops=[hop])
                 raise
             stage = 'complete-uid-inventory'
-            proxies, rows = complete_uid_inventory(budget, invocation=invocation, foreign=foreign)
+            proxies, rows = complete_uid_inventory(budget, invocation=invocation, foreign=foreign, context=context)
             require(rows.get(request['caller']['pid']) == request['caller'])
             stage = 'probe-recheck'
             invocation.recheck()
             foreign.recheck()
             require(not select.select([fd], [], [], 0)[0])
             budget()
-            return dict(operation=PROBE_OPERATION, complete=True, uid=PROXY_UID, candidateCount=len(proxies),
+            return dict(operation=context.probe_operation, complete=True, uid=context.uid, candidateCount=len(proxies),
                         scopedProcessCount=len(rows), caller=request['caller'], invocation=invocation.receipt(),
                         readOnly=True, inputPermitted=False, authorityGranted=False, releaseReady=False)
     except Exception as error:
@@ -1610,11 +1651,14 @@ def inventory_probe(request, *, clock=time.monotonic_ns):
         os.close(fd)
 
 
-def validate_probe(value, request):
+def validate_probe(value, request, *, context=BASELINE_CONTEXT):
+    context = observer_context(context)
+    validate_caller(request['caller'], context=context)
     require(type(value) is dict and set(value) == {'operation', 'complete', 'uid', 'candidateCount', 'scopedProcessCount',
             'caller', 'invocation', 'readOnly', 'inputPermitted', 'authorityGranted', 'releaseReady'}
-            and value['operation'] == PROBE_OPERATION and value['complete'] is True
-            and type(value['uid']) is int and value['uid'] == PROXY_UID
+            and value['operation'] == context.probe_operation and request['operation'] == context.probe_operation
+            and value['complete'] is True
+            and type(value['uid']) is int and value['uid'] == context.uid
             and type(value['candidateCount']) is int and 0 <= value['candidateCount'] <= 4
             and type(value['scopedProcessCount']) is int and 0 < value['scopedProcessCount'] <= ProxyAssociationProc.MAX_PIDS
             and value['candidateCount'] <= value['scopedProcessCount'] and value['caller'] == request['caller']
@@ -1627,7 +1671,7 @@ def validate_probe(value, request):
                 and all(type(row[k]) is int and 1 < row[k] < 2**31 for k in ('pid', 'parentPid'))
                 and type(row['startTime']) is str and re.fullmatch(r'[1-9][0-9]{0,19}', row['startTime'])
                 and type(row['uids']) is list and all(type(uid) is int for uid in row['uids'])
-                and row['uids'] in (([0] * 4,) if index == 0 else ([0] * 4, [PROXY_UID, 0, 0, 0]))
+                and row['uids'] in (([0] * 4,) if index == 0 else ([0] * 4, [context.uid, 0, 0, 0]))
                 and row['executableKind'] == ('python' if index == 0 else 'sudo')
                 and type(row['imageSha256']) is str and re.fullmatch(r'[a-f0-9]{64}', row['imageSha256'])
                 and type(row['state']) is str and row['state'] in ('R', 'S', 'D', 'I', 'T', 't', 'P'))
@@ -1635,26 +1679,36 @@ def validate_probe(value, request):
             and all(a['parentPid'] == b['pid'] for a, b in zip(rows, rows[1:])))
 
 
-def association_snapshot(request, *, proc=None, read=root_process, inventory=complete_proxy_inventory,
-                         runtime=PROXY_RUNTIME, clock=time.monotonic_ns):
-    root_request(request, clock())
+def association_snapshot(request, *, proc=None, read=None, inventory=None,
+                         runtime=None, clock=time.monotonic_ns, context=BASELINE_CONTEXT):
+    context = observer_context(context)
+    require(runtime is None or runtime == context.runtime)
+    runtime = context.runtime
+    root_request(request, clock(), context=context)
+    if read is None:
+        read = lambda pid, full=False: root_process(pid, full, context=context)
     def budget():
         require((_inventory_now := clock()) < request['expiresNs'])
-    with InvocationChain(request['caller'], budget) as invocation, ForeignSudoObservations(invocation, budget) as foreign:
+    with InvocationChain(request['caller'], budget, context=context) as invocation, \
+            ForeignSudoObservations(invocation, budget, context=context) as foreign:
         def current(budget):
             invocation.recheck()
             foreign.recheck()
-            result = inventory(budget, invocation=invocation, foreign=foreign) if inventory is complete_proxy_inventory else inventory(budget)
+            result = (complete_proxy_inventory(budget, invocation=invocation, foreign=foreign, context=context)
+                      if inventory is None else inventory(budget))
             invocation.recheck()
             foreign.recheck()
             return result
-        result = association_snapshot_held(request, proc=proc, read=read, inventory=current, runtime=runtime, clock=clock)
+        result = association_snapshot_held(request, proc=proc, read=read, inventory=current,
+                                           runtime=runtime, clock=clock, context=context)
         invocation.recheck(); foreign.recheck(); budget()
         return result
 
 
-def association_snapshot_held(request, *, proc, read, inventory, runtime, clock):
-    root_request(request, clock())
+def association_snapshot_held(request, *, proc, read, inventory, runtime, clock, context=BASELINE_CONTEXT):
+    context = observer_context(context)
+    require(runtime == context.runtime)
+    root_request(request, clock(), context=context)
     proc = ProxyAssociationProc() if proc is None else proc
     def budget():
         require((_inventory_now := clock()) < request['expiresNs'])
@@ -1673,7 +1727,7 @@ def association_snapshot_held(request, *, proc, read, inventory, runtime, clock)
         require(all(rows[r['pid']] == r for r in request['tree']))
         stage = 'private-instance-and-pipes'
         info = proc.info(request['client']['pid'])
-        instance = PrivateInstance(info, request['original'], runtime)
+        instance = PrivateInstance(info, request['original'], runtime, context=context)
         private = instance.snapshot()
         bwraps = [r['pid'] for r in request['tree'] if r['executable'] == '/usr/bin/bwrap']
         pipes = {pid: proc.pipes(pid) for pid in (*bwraps, *candidates)}
@@ -1681,7 +1735,7 @@ def association_snapshot_held(request, *, proc, read, inventory, runtime, clock)
         matches = []
         for pid in candidates:
             row = rows[pid]; mode = int(row['image']['st_mode'])
-            require(row['uids'] == [PROXY_UID] * 4 and row['executable'] == '/usr/bin/xdg-dbus-proxy'
+            require(row['uids'] == [context.uid] * 4 and row['executable'] == '/usr/bin/xdg-dbus-proxy'
                     and int(row['image']['st_uid']) == int(row['image']['st_gid']) == 0
                     and stat.S_ISREG(mode) and not mode & 0o7022)
             if infos[pid]['sha256'] != info['sha256'] or infos[pid]['fields'] != info['fields']:
@@ -1704,7 +1758,7 @@ def association_snapshot_held(request, *, proc, read, inventory, runtime, clock)
                 and all(not select.select([fd], [], [], 0)[0] for fd in fds))
         budget()
         pid, links = matches[0]
-        return bounded(dict(complete=True, uid=PROXY_UID, candidateCount=len(candidates), scopedProcessCount=len(scoped),
+        return bounded(dict(complete=True, uid=context.uid, candidateCount=len(candidates), scopedProcessCount=len(scoped),
             original=request['original'], client=request['client'], tree=request['tree'], proxy=rows[pid],
             flatpakInfo=dict(sha256=info['sha256'], fields=info['fields']), privateInstance=private,
             pipes=links), 24576)
@@ -1776,8 +1830,9 @@ def root_snapshot_main():
     signal.signal(signal.SIGALRM, lambda *_: os._exit(124))
     signal.setitimer(signal.ITIMER_REAL, ROOT_WORKER_SECONDS)
     try:
-        require(os.getuid() == os.geteuid() == 0 and os.environ.get('SUDO_UID') == str(PROXY_UID)
-                and Path(__file__) == PROXY_TOOL and sys.argv[1:] in (['root-proxy-snapshot'], ['root-inventory-probe']))
+        context = worker_context(sys.argv[1:])
+        require(os.getuid() == os.geteuid() == 0 and os.environ.get('SUDO_UID') == str(context.uid)
+                and Path(__file__) == PROXY_TOOL)
         raw = sys.stdin.buffer.read(32769); require(len(raw) <= 32768)
         def pairs(items):
             result = {}
@@ -1785,12 +1840,12 @@ def root_snapshot_main():
                 require(key not in result); result[key] = value
             return result
         request = json.loads(raw, object_pairs_hook=pairs)
-        probe = sys.argv[1:] == ['root-inventory-probe']
-        (probe_request if probe else root_request)(request, time.monotonic_ns())
+        probe = sys.argv[1:] == [context.probe_command]
+        (probe_request if probe else root_request)(request, time.monotonic_ns(), context=context)
         protected_tool(request['codeSha256'])
         ROOT_DIAGNOSTIC_ACTIVE = True
         try:
-            data = inventory_probe(request) if probe else association_snapshot(request)
+            data = inventory_probe(request, context=context) if probe else association_snapshot(request, context=context)
         finally:
             ROOT_DIAGNOSTIC_ACTIVE = False
         protected_tool(request['codeSha256'])
@@ -2140,7 +2195,8 @@ def proxy_changed_fields(actual, expected):
 class AssociatedProxyLineage(OwnedLineage):
     """Seal an external proxy by a complete root snapshot, never invented ancestry."""
     def __init__(self, original, client, tree, read, redact, *, snapshot, image_open, system_image, pidfds,
-                 guard, budget, diagnostic=None, diagnostic_state=None):
+                 guard, budget, diagnostic=None, diagnostic_state=None, context=BASELINE_CONTEXT):
+        self.context = observer_context(context)
         self.original, self.client, self.tree = copy.deepcopy(original), copy.deepcopy(client), copy.deepcopy(tree)
         self.read, self.redact, self.pidfds, self.guard, self.budget = read, redact, pidfds, guard, budget
         self.system, self.rows, self.held, self.fds, self.chains = system_image, {}, {}, {}, {}
@@ -2151,12 +2207,12 @@ class AssociatedProxyLineage(OwnedLineage):
         self.snapshot_source, self.association, self.instance = snapshot, None, None
         try:
             self.validate(original); self.validate(client)
-            require(original['uids'] == client['uids'] == [PROXY_UID] * 4)
+            require(original['uids'] == client['uids'] == [self.context.uid] * 4)
             self.client_chain = self.walk(client['pid'], image_open)
             request_tree = [self.rows[pid] for pid in self.client_chain]
             self.checkpoint('association-root-snapshot')
             data = snapshot(request_tree)
-            validate_association(data, original, client, request_tree)
+            validate_association(data, original, client, request_tree, context=self.context)
             self.association = copy.deepcopy(data)
             pid, row = data['proxy']['pid'], data['proxy']
             self.fds[pid] = pidfds.open(pid)
@@ -2165,7 +2221,8 @@ class AssociatedProxyLineage(OwnedLineage):
                     and system_image.snapshot() == (row['image'], row['kernelImageSha256'])
                     and not pidfds.ready(self.fds[pid]))
             self.rows[pid], self.chains[pid] = copy.deepcopy(row), [pid]
-            self.instance = PrivateInstance(dict(sha256=data['flatpakInfo']['sha256'], fields=data['flatpakInfo']['fields']), original)
+            self.instance = PrivateInstance(dict(sha256=data['flatpakInfo']['sha256'], fields=data['flatpakInfo']['fields']),
+                                            original, context=self.context)
             require(self.instance.snapshot() == data['privateInstance'])
             OwnedLineage.verify_live(self)
         except Exception as error:
@@ -2175,7 +2232,7 @@ class AssociatedProxyLineage(OwnedLineage):
         OwnedLineage.verify_live(self)
         self.checkpoint('association-complete-root-recheck')
         current = self.snapshot_source([self.rows[pid] for pid in self.client_chain])
-        validate_association(current, self.original, self.client, [self.rows[pid] for pid in self.client_chain])
+        validate_association(current, self.original, self.client, [self.rows[pid] for pid in self.client_chain], context=self.context)
         require(current == self.association and self.instance.snapshot() == current['privateInstance'])
         OwnedLineage.verify_live(self)
 
@@ -2193,24 +2250,25 @@ class AssociatedProxyLineage(OwnedLineage):
             super().close()
 
 
-def validate_association(data, original, client, tree):
+def validate_association(data, original, client, tree, *, context=BASELINE_CONTEXT):
+    context = observer_context(context)
     require(type(data) is dict and set(data) == {'complete', 'uid', 'candidateCount', 'scopedProcessCount', 'original',
             'client', 'tree', 'proxy', 'flatpakInfo', 'privateInstance', 'pipes'}
-            and data['complete'] is True and type(data['uid']) is int and data['uid'] == PROXY_UID
+            and data['complete'] is True and type(data['uid']) is int and data['uid'] == context.uid
             and type(data['candidateCount']) is int and 1 <= data['candidateCount'] <= 4
             and type(data['scopedProcessCount']) is int and data['candidateCount'] <= data['scopedProcessCount'] <= 4096
             and data['original'] == original and data['client'] == client and data['tree'] == tree)
     require(type(tree) is list and 1 < len(tree) <= MAX_ANCESTORS and tree[0] == client and tree[-1] == original
             and len({r['pid'] for r in tree}) == len(tree))
     for row in tree:
-        OwnedLineage.validate(row); require(row['uids'] == [PROXY_UID] * 4)
+        OwnedLineage.validate(row); require(row['uids'] == [context.uid] * 4)
     for child, parent in zip(tree, tree[1:]):
         require(child['parentPid'] == parent['pid'] and parent['executable'] == '/usr/bin/bwrap'
                 and int(parent['startTime']) <= int(child['startTime'])
                 and parent['image'] == original['image'] and parent['kernelImageSha256'] == original['kernelImageSha256'])
     OwnedLineage.validate(data['proxy'])
     row = data['proxy']; image = row['image']
-    require(row['executable'] == '/usr/bin/xdg-dbus-proxy' and row['uids'] == [PROXY_UID] * 4
+    require(row['executable'] == '/usr/bin/xdg-dbus-proxy' and row['uids'] == [context.uid] * 4
             and int(image['st_uid']) == int(image['st_gid']) == 0 and stat.S_ISREG(int(image['st_mode']))
             and not int(image['st_mode']) & 0o7022 and row['pid'] not in {r['pid'] for r in tree})
     info, private = data['flatpakInfo'], data['privateInstance']
@@ -2257,6 +2315,8 @@ class PassiveCapture:
         with self.baseline.lock:
             binding = self._preinput_binding
             require(binding is None or type(binding) is _PreinputBinding and binding.promoted == 0)
+            if binding is not None:
+                require(self.baseline.context is observer_context(binding.context))
             self.baseline.begin_input()
             association_verified = self._binding_stamp() if binding is not None else None
             if binding is not None:
@@ -2280,13 +2340,14 @@ class PassiveCapture:
     def _preinput_lineage(self):
         baseline = self.baseline
         require(type(baseline) is AssociatedProxyLineage)
-        value = dict(original=baseline.original, client=baseline.client, rows=baseline.rows,
+        value = dict(context=observer_context(baseline.context).name, original=baseline.original, client=baseline.client, rows=baseline.rows,
             chains=baseline.chains, clientChain=baseline.client_chain, association=baseline.association)
         return json.dumps(bounded(value, 24576), sort_keys=True, allow_nan=False)
 
     def _check_preinput_binding(self, binding, *, before_input):
         require(type(binding) is _PreinputBinding and type(self.baseline) is AssociatedProxyLineage
                 and self.baseline is binding.baseline and not self.baseline.closed
+                and self.baseline.context is observer_context(binding.context)
                 and self.baseline.started and self._preinput_binding is binding
                 and self._preinput_lineage() == binding.lineage
                 and self.baseline.system is binding.system and self.baseline.instance is binding.instance
@@ -2296,6 +2357,7 @@ class PassiveCapture:
         def guard():
             with self.lock:
                 require(self.armed and self.bus_identity_matched and not self.closed
+                        and self.baseline.context is observer_context(binding.context)
                         and self.input_started is not before_input
                         and (not before_input or not self.headers and not self.pending)
                         and self.control is binding.control and self.monitor is binding.monitor
@@ -2440,7 +2502,7 @@ class PassiveCapture:
                       listedCount=0, uniqueCount=0, pidQueries=0, matchedPidCount=0, peerQueries=0,
                       matches=[], errorCounts={})
         stage = 'preconditions'
-        control, monitor = self.control, self.monitor
+        control, monitor, context = self.control, self.monitor, baseline.context
 
         def stamp():
             value = time.monotonic_ns()
@@ -2460,6 +2522,7 @@ class PassiveCapture:
         def locked_state():
             require(self.armed and self.bus_identity_matched and not self.closed and not self.input_started
                     and not self.headers and not self.pending and self.baseline is baseline
+                    and baseline.context is observer_context(context)
                     and self.bound_bus_connections == (control, monitor)
                     and self.control is control and self.monitor is monitor)
 
@@ -2564,7 +2627,7 @@ class PassiveCapture:
                 with baseline.lock:
                     guard()
                     require(not baseline.started and not baseline.closed and not baseline.used)
-                    binding = _PreinputBinding(baseline, control, monitor, self.cancellable, baseline.system, baseline.instance,
+                    binding = _PreinputBinding(baseline, context, control, monitor, self.cancellable, baseline.system, baseline.instance,
                         tuple((pid, baseline.fds[pid], baseline.held[pid]) for pid in sorted(baseline.rows)),
                         result['busId'], result['controlName'], result['monitorName'],
                         tuple((peer['name'], peer['pid'], peer['uid']) for peer in matches), self._preinput_lineage(),
@@ -2769,7 +2832,8 @@ class PassiveCapture:
 
 
 if __name__ == '__main__':
-    if sys.argv[1:] in (['root-proxy-snapshot'], ['root-inventory-probe']):
+    if sys.argv[1:] in ([c.snapshot_command] for c in (BASELINE_CONTEXT, UPDATER_CONTEXT)) or \
+            sys.argv[1:] in ([c.probe_command] for c in (BASELINE_CONTEXT, UPDATER_CONTEXT)):
         root_snapshot_main()
     else:
         raise SystemExit('Import-only passive CI diagnostics; no standalone bus or input interface')
