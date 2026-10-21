@@ -1,13 +1,13 @@
 name: Private portable016 opaque byte carrier (not qualification)
 
 on:
-  # Registration only; both jobs refuse push execution.
+  # Registration only; every job refuses push execution.
   push:
     branches: [validation/private-portable-016-carrier]
   workflow_dispatch:
     inputs:
       transport_input:
-        description: Canonical JSON {schemaVersion:1,assetId,zip:{size,sha256},files:{exact thirteen external size/SHA pins},planSha256}. Fixed private draft and asset name; no defaults or policy overrides.
+        description: Canonical transport JSON, at most 32768 bytes. Unchanged v1 complete carrier, or v2 fixed-producer reconstruction with inline six-file ZIP and explicit deliverToDraft. No policy overrides.
         required: true
         type: string
 
@@ -19,7 +19,8 @@ jobs:
   stage-input:
     if: >-
       github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.repository_id == '1364807512' &&
-      github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/validation/private-portable-016-carrier'
+      github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/validation/private-portable-016-carrier' &&
+      fromJSON(inputs.transport_input).schemaVersion == 1
     runs-on: ubuntu-22.04
     timeout-minutes: 15
     # Draft access only. No checkout, archive decoding or candidate/tool execution with this token.
@@ -68,7 +69,8 @@ jobs:
     needs: stage-input
     if: >-
       github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.repository_id == '1364807512' &&
-      github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/validation/private-portable-016-carrier'
+      github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/validation/private-portable-016-carrier' &&
+      fromJSON(inputs.transport_input).schemaVersion == 1
     runs-on: ubuntu-22.04
     timeout-minutes: 15
     permissions:
@@ -134,3 +136,118 @@ jobs:
           path: |
             ${{ runner.temp }}/private-portable016-staged/transport-receipt.json
             ${{ runner.temp }}/private-portable016-staged/transport-refusal.json
+  fetch-v2:
+    if: >-
+      github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.repository_id == '1364807512' &&
+      github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/validation/private-portable-016-carrier' &&
+      fromJSON(inputs.transport_input).schemaVersion == 2
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Fetch the fixed original artifact; retain the inline metadata ZIP without decoding
+        uses: actions/github-script@v8
+        env:
+          TRANSPORT_INPUT: ${{ inputs.transport_input }}
+        with:
+          retries: 0
+          script: |
+            const c=require(process.env.GITHUB_WORKSPACE+'/scripts/private-portable-016-carrier.cjs');
+            c.admission(process.env);
+            await c.fetchV2(github,context,process.env);
+      - uses: actions/upload-artifact@v4
+        with:
+          name: private-portable-016-v2-download-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: error
+          compression-level: 0
+          path: ${{ runner.temp }}/private-portable016-v2-download/*
+  reconstruct-v2:
+    needs: fetch-v2
+    if: >-
+      github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.repository_id == '1364807512' &&
+      github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/validation/private-portable-016-carrier' &&
+      fromJSON(inputs.transport_input).schemaVersion == 2
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24.17.0
+      - uses: actions/download-artifact@v4
+        with:
+          name: private-portable-016-v2-download-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/private-portable016-v2-download
+      - name: Reconstruct the exact reviewed ZIP without executing any member
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/private-portable-016-carrier.cjs reconstruct-v2 \
+            "$RUNNER_TEMP/private-portable016-v2-download" "$RUNNER_TEMP/private-portable016-v2-reconstructed"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: private-portable-016-v2-output-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: error
+          compression-level: 0
+          path: ${{ runner.temp }}/private-portable016-v2-reconstructed/signed-private-portable016-carrier-39648084197.zip
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: private-portable-016-v2-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/private-portable016-v2-reconstructed/transport-receipt.json
+            ${{ runner.temp }}/private-portable016-v2-reconstructed/transport-refusal.json
+  deliver-v2:
+    needs: reconstruct-v2
+    if: >-
+      github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.repository_id == '1364807512' &&
+      github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/validation/private-portable-016-carrier' &&
+      fromJSON(inputs.transport_input).schemaVersion == 2 && fromJSON(inputs.transport_input).deliverToDraft == true
+    runs-on: ubuntu-22.04
+    timeout-minutes: 25
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      # Only this clean checkout supplies code. Downloaded bytes are never sourced or executed.
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: private-portable-016-v2-output-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/private-portable016-v2-delivery
+      - name: Hash the opaque canonical ZIP and make at most one guarded draft asset POST
+        uses: actions/github-script@v8
+        env:
+          TRANSPORT_INPUT: ${{ inputs.transport_input }}
+        with:
+          retries: 0
+          script: |
+            const c=require(process.env.GITHUB_WORKSPACE+'/scripts/private-portable-016-carrier.cjs');
+            c.admission(process.env);
+            await c.deliverV2(github,context,process.env);
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: private-portable-016-v2-delivery-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: ${{ runner.temp }}/private-portable016-v2-delivery-evidence/*
