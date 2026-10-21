@@ -13,6 +13,17 @@ use std::{
 
 const MARKER: &[u8] = b"creator-hub-linux-portable-deployment-v1\n";
 const RECORD_LIMIT: u64 = 16384;
+macro_rules! pending_recovery_command {
+    () => {
+        "\"${XDG_DATA_HOME:-$HOME/.local/share}/creator-hub-portable/activation-v1/creator-hub-portable-selector\" recover-pending"
+    };
+}
+pub(crate) const PENDING_RECOVERY_COMMAND: &str = pending_recovery_command!();
+pub(crate) const PENDING_RECOVERY_MESSAGE: &str = concat!(
+    "Portable deployment recovery is required. Run ",
+    pending_recovery_command!(),
+    " for a read-only review and exact acknowledgement command. Nothing was retried."
+);
 
 #[path = "bootstrap.rs"]
 pub(crate) mod bootstrap;
@@ -260,11 +271,11 @@ impl Store {
         let _lock = disk::lock(&self.root.join("transaction.lock"))?;
         require(
             optional_record(&self.root.join("pending.json"))?.is_none(),
-            "Pending transaction requires explicit recovery review",
+            PENDING_RECOVERY_MESSAGE,
         )
         .map_err(|_| Error {
             kind: ErrorKind::RecoveryRequired,
-            message: "Pending transaction requires explicit recovery review",
+            message: PENDING_RECOVERY_MESSAGE,
         })?;
         let before = self.snapshot_with(verifier)?;
         require(
@@ -439,6 +450,10 @@ impl Store {
     fn acknowledge_with(&self, reviewed: &Recovery, verifier: &Verifier) -> Result<()> {
         self.checked()?;
         let _lock = disk::lock(&self.root.join("transaction.lock"))?;
+        self.acknowledge_unlocked(reviewed, verifier)
+    }
+
+    fn acknowledge_unlocked(&self, reviewed: &Recovery, verifier: &Verifier) -> Result<()> {
         let actual = self
             .recovery_unlocked(verifier)?
             .ok_or_else(|| refused("Pending transaction disappeared"))?;

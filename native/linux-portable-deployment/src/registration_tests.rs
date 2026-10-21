@@ -222,6 +222,83 @@ fn decline_does_not_admit_or_touch_any_files_even_after_review_becomes_stale() {
     assert!(!root.exists());
 }
 
+#[test]
+fn pending_decline_is_read_only_even_with_missing_store_and_invalid_session() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap().join("not-created");
+    let session = HostSession::from_values([(
+        std::ffi::OsString::from("HOME"),
+        temp.path().as_os_str().to_owned(),
+    )])
+    .unwrap();
+    let review = PendingDeploymentReview {
+        root: root.clone(),
+        id: "a".repeat(64),
+        recovery: Recovery {
+            state: RecoveryState::PreparedOldSelectionRetained,
+            current: None,
+            previous: None,
+            target_generation: "b".repeat(64),
+            pending: vec![],
+        },
+    };
+    assert_eq!(
+        Store { root: root.clone() }
+            .recover_pending_deployment(&session, &review, PendingRecoveryChoice::KeepPending)
+            .unwrap(),
+        PendingRecoveryOutcome::Kept
+    );
+    assert!(!root.exists());
+}
+
+#[test]
+fn pending_error_exposes_the_fixed_recovery_command_without_disabling_activation_guards() {
+    assert!(super::super::PENDING_RECOVERY_MESSAGE
+        .contains("activation-v1/creator-hub-portable-selector\" recover-pending"));
+    assert!(super::super::PENDING_RECOVERY_MESSAGE.contains(super::super::PENDING_RECOVERY_COMMAND));
+    let source = include_str!("registration.rs");
+    let admission = source
+        .split("fn registered_selector_image_unlocked(")
+        .nth(1)
+        .unwrap()
+        .split("fn registration_paths(")
+        .next()
+        .unwrap();
+    assert!(admission.contains("self.no_registration_recovery()?"));
+    assert!(include_str!("host.rs").contains("no_recovery(self)?"));
+}
+
+#[test]
+fn pending_ack_command_never_interpolates_native_path_metacharacters() {
+    let expected = format!(
+        "\"${{XDG_DATA_HOME:-$HOME/.local/share}}/creator-hub-portable/activation-v1/creator-hub-portable-selector\" recover-pending --acknowledge {}",
+        "a".repeat(64)
+    );
+    for home in [
+        "/home/has spaces",
+        "/home/$(PRIVATE_SENTINEL)",
+        "/home/`PRIVATE_SENTINEL`",
+        "/home/\"PRIVATE_SENTINEL\"",
+        "/home/'PRIVATE_SENTINEL'",
+    ] {
+        let reviewed = PendingDeploymentReview {
+            root: Path::new(home).join(".local/share/creator-hub-portable"),
+            id: "a".repeat(64),
+            recovery: Recovery {
+                state: RecoveryState::PreparedOldSelectionRetained,
+                current: None,
+                previous: None,
+                target_generation: "b".repeat(64),
+                pending: vec![],
+            },
+        };
+        assert_eq!(reviewed.acknowledgement_command(), expected);
+        assert!(!reviewed
+            .acknowledgement_command()
+            .contains("PRIVATE_SENTINEL"));
+    }
+}
+
 // Real filesystem success cases require Unix path/mode semantics; Windows pure
 // checks above are not Linux registration, process or service acceptance.
 #[cfg(unix)]
@@ -297,6 +374,408 @@ mod unix {
                 Ok(())
             }
         }
+    }
+
+    fn pending_context(site: &'static str) -> (Context, PathBuf, fs::File) {
+        let cx = Context::new();
+        let registration = cx.registered();
+        let before = cx.store.snapshot_with(&test_verify).unwrap().unwrap();
+        let next = package("0.1.17", 2);
+        let generation = cx
+            .store
+            .stage_with(&next, &|| false, &|_| Ok(()), &test_verify)
+            .unwrap();
+        cx.store
+            .activate_with(
+                &generation,
+                &Expected::linux_x86_64("0.1.17").unwrap(),
+                Some(&before),
+                &|| false,
+                &interrupt(site),
+                &test_verify,
+            )
+            .unwrap_err();
+        let tool = registration.selector_path();
+        let actual = disk::hold_regular(&tool, TOOL_LIMIT, true).unwrap().0;
+        (cx, tool, actual)
+    }
+
+    #[test]
+    fn pending_review_is_read_only_and_acknowledges_old_or_committed_selection_without_launch() {
+        for site in ["journal-synced", "selection-committed"] {
+            let (cx, tool, actual) = pending_context(site);
+            let current = fs::read(cx.store.root.join("current.json")).unwrap();
+            let pending = fs::read(cx.store.root.join("pending.json")).unwrap();
+            let service = cx.store.registration_paths(&cx.session).unwrap();
+            let images = cx.store.registration_images(&service).unwrap();
+            let reviewed = cx
+                .store
+                .review_pending_with(&cx.session, &tool, &actual, &test_verify)
+                .unwrap();
+            assert_eq!(
+                reviewed.retained_selection().version,
+                if site == "journal-synced" {
+                    "0.1.16"
+                } else {
+                    "0.1.17"
+                }
+            );
+            assert_eq!(
+                reviewed.state(),
+                if site == "journal-synced" {
+                    RecoveryState::PreparedOldSelectionRetained
+                } else {
+                    RecoveryState::SelectionCommitted
+                }
+            );
+            assert!(hex(reviewed.review_id(), 64));
+            assert_eq!(
+                reviewed.acknowledgement_command(),
+                format!(
+                    "{} --acknowledge {}",
+                    super::super::super::PENDING_RECOVERY_COMMAND,
+                    reviewed.review_id()
+                )
+            );
+            assert_eq!(
+                fs::read(cx.store.root.join("pending.json")).unwrap(),
+                pending
+            );
+            assert_eq!(cx.store.registration_images(&service).unwrap(), images);
+            assert!(cx
+                .store
+                .selected_activation_with(&cx.session, &test_verify)
+                .is_err());
+            assert_eq!(
+                cx.store
+                    .recover_pending_with(
+                        &cx.session,
+                        &reviewed,
+                        &tool,
+                        &actual,
+                        &|_| Ok(()),
+                        &test_verify
+                    )
+                    .unwrap(),
+                PendingRecoveryOutcome::Acknowledged
+            );
+            assert!(!cx.store.root.join("pending.json").exists());
+            assert_eq!(
+                fs::read(cx.store.root.join("current.json")).unwrap(),
+                current
+            );
+            assert_eq!(cx.store.registration_images(&service).unwrap(), images);
+            assert_eq!(
+                disk::read_regular(
+                    &cx.store
+                        .root
+                        .join("history")
+                        .join(format!("transaction-{}.json", digest(&pending))),
+                    RECORD_LIMIT,
+                    true
+                )
+                .unwrap(),
+                pending
+            );
+            drop(
+                cx.store
+                    .selected_activation_with(&cx.session, &test_verify)
+                    .unwrap(),
+            );
+            assert!(cx
+                .store
+                .recover_pending_with(
+                    &cx.session,
+                    &reviewed,
+                    &tool,
+                    &actual,
+                    &|_| Ok(()),
+                    &test_verify
+                )
+                .is_err());
+        }
+    }
+
+    #[test]
+    fn pending_review_rejects_no_journal_other_session_or_unsigned_generations() {
+        let (cx, tool, actual) = pending_context("journal-synced");
+        assert!(cx
+            .store
+            .review_pending_with(&cx.session, &tool, &actual, &production_verify)
+            .is_err());
+        let other = Context::new();
+        assert!(cx
+            .store
+            .review_pending_with(&other.session, &tool, &actual, &test_verify)
+            .is_err());
+        fs::remove_file(cx.store.root.join("pending.json")).unwrap();
+        assert!(cx
+            .store
+            .review_pending_with(&cx.session, &tool, &actual, &test_verify)
+            .is_err());
+    }
+
+    #[test]
+    fn pending_review_rejects_foreign_running_image_or_invocation_path() {
+        let (cx, tool, actual) = pending_context("journal-synced");
+        assert!(cx
+            .store
+            .review_pending_with(
+                &cx.session,
+                &tool.with_file_name("other"),
+                &actual,
+                &test_verify
+            )
+            .is_err());
+        let foreign = cx.store.root.join("foreign-image");
+        disk::write_new(&foreign, b"foreign", 0o555).unwrap();
+        let wrong = fs::File::open(&foreign).unwrap();
+        assert!(cx
+            .store
+            .review_pending_with(&cx.session, &tool, &wrong, &test_verify)
+            .is_err());
+    }
+
+    #[test]
+    fn pending_review_refuses_initial_install_or_unmatched_selection() {
+        for initial in [false, true] {
+            let (cx, tool, actual) = pending_context("selection-committed");
+            let journal = cx.store.root.join("pending.json");
+            if initial {
+                let mut transition: crate::store::Transition =
+                    serde_json::from_slice(&fs::read(&journal).unwrap()).unwrap();
+                transition.before = None;
+                fs::write(&journal, encode(&transition).unwrap()).unwrap();
+            } else {
+                let current = cx.store.root.join("current.json");
+                let mut selection: Selection =
+                    serde_json::from_slice(&fs::read(&current).unwrap()).unwrap();
+                selection.previous_generation = None;
+                fs::write(current, encode(&selection).unwrap()).unwrap();
+            }
+            let pending = fs::read(&journal).unwrap();
+            assert!(cx
+                .store
+                .review_pending_with(&cx.session, &tool, &actual, &test_verify)
+                .is_err());
+            assert_eq!(fs::read(journal).unwrap(), pending);
+        }
+    }
+
+    #[test]
+    fn pending_review_refuses_links_and_changed_modes_without_normalization() {
+        for mode in ["link", "hardlink", "mode"] {
+            let (cx, tool, actual) = pending_context("journal-synced");
+            if mode == "mode" {
+                disk::set_mode(&tool, 0o755).unwrap();
+            } else {
+                let retained = tool.with_file_name("retained-selector");
+                fs::rename(&tool, &retained).unwrap();
+                if mode == "link" {
+                    std::os::unix::fs::symlink(&retained, &tool).unwrap();
+                } else {
+                    fs::hard_link(&retained, &tool).unwrap();
+                }
+            }
+            assert!(cx
+                .store
+                .review_pending_with(&cx.session, &tool, &actual, &test_verify)
+                .is_err());
+            assert!(cx.store.root.join("pending.json").exists());
+        }
+    }
+
+    #[test]
+    fn pending_registration_or_unknown_registration_images_are_never_bypassed() {
+        for mode in ["journal", "service", "owner", "tool"] {
+            let (cx, tool, actual) = pending_context("journal-synced");
+            let service = cx.store.registration_paths(&cx.session).unwrap();
+            let file = match mode {
+                "journal" => cx.store.root.join(DIRECTORY).join(PENDING),
+                "service" => service,
+                "owner" => cx.store.root.join(DIRECTORY).join(OWNER),
+                _ => tool.clone(),
+            };
+            if file.exists() {
+                disk::set_mode(&file, 0o600).unwrap();
+            }
+            fs::write(&file, b"unknown").unwrap();
+            assert!(cx
+                .store
+                .review_pending_with(&cx.session, &tool, &actual, &test_verify)
+                .is_err());
+            assert_eq!(fs::read(file).unwrap(), b"unknown");
+            assert!(cx.store.root.join("pending.json").exists());
+        }
+    }
+
+    #[test]
+    fn pending_review_and_ack_fail_busy_without_waiting_or_repair() {
+        let (cx, tool, actual) = pending_context("journal-synced");
+        let reviewed = cx
+            .store
+            .review_pending_with(&cx.session, &tool, &actual, &test_verify)
+            .unwrap();
+        let lock = disk::lock(&cx.store.root.join("transaction.lock")).unwrap();
+        assert!(cx
+            .store
+            .review_pending_with(&cx.session, &tool, &actual, &test_verify)
+            .is_err());
+        assert!(cx
+            .store
+            .recover_pending_with(
+                &cx.session,
+                &reviewed,
+                &tool,
+                &actual,
+                &|_| Ok(()),
+                &test_verify
+            )
+            .is_err());
+        drop(lock);
+        assert!(cx.store.root.join("pending.json").exists());
+    }
+
+    #[test]
+    fn stale_pending_registration_and_identical_replacement_identity_refuse_ack() {
+        for mode in ["pending", "owner", "same-bytes", "selection"] {
+            let (cx, tool, actual) = pending_context("journal-synced");
+            let reviewed = cx
+                .store
+                .review_pending_with(&cx.session, &tool, &actual, &test_verify)
+                .unwrap();
+            let path = cx.store.root.join(if mode == "selection" {
+                "current.json"
+            } else if mode == "owner" {
+                "activation-v1/owner.json"
+            } else {
+                "pending.json"
+            });
+            let original = fs::read(&path).unwrap();
+            if mode == "same-bytes" {
+                fs::rename(&path, path.with_extension("retained")).unwrap();
+                disk::write_new(&path, &original, 0o600).unwrap();
+            } else {
+                fs::write(&path, b"unknown").unwrap();
+            }
+            let after = fs::read(&path).unwrap();
+            assert!(cx
+                .store
+                .recover_pending_with(
+                    &cx.session,
+                    &reviewed,
+                    &tool,
+                    &actual,
+                    &|_| Ok(()),
+                    &test_verify
+                )
+                .is_err());
+            assert_eq!(fs::read(path).unwrap(), after);
+            assert!(cx.store.root.join("pending.json").exists());
+        }
+    }
+
+    #[test]
+    fn pending_ack_rechecks_after_the_lock_boundary_and_keeps_unknown_outcomes() {
+        let (cx, tool, actual) = pending_context("journal-synced");
+        let reviewed = cx
+            .store
+            .review_pending_with(&cx.session, &tool, &actual, &test_verify)
+            .unwrap();
+        assert!(cx
+            .store
+            .recover_pending_with(
+                &cx.session,
+                &reviewed,
+                &tool,
+                &actual,
+                &|site| {
+                    if site == "pending-recovery-before-recheck" {
+                        fs::write(cx.store.root.join("pending.json"), b"changed").unwrap();
+                    }
+                    Ok(())
+                },
+                &test_verify
+            )
+            .is_err());
+        assert_eq!(
+            fs::read(cx.store.root.join("pending.json")).unwrap(),
+            b"changed"
+        );
+    }
+
+    #[test]
+    fn pending_ack_failure_never_discards_the_pending_record_or_selects_a_generation() {
+        let (cx, tool, actual) = pending_context("journal-synced");
+        let reviewed = cx
+            .store
+            .review_pending_with(&cx.session, &tool, &actual, &test_verify)
+            .unwrap();
+        let before = fs::read(cx.store.root.join("current.json")).unwrap();
+        let pending = fs::read(cx.store.root.join("pending.json")).unwrap();
+        let history = cx
+            .store
+            .root
+            .join("history")
+            .join(format!("transaction-{}.json", digest(&pending)));
+        fs::write(&history, b"unknown-history").unwrap();
+        let error = cx
+            .store
+            .recover_pending_with(
+                &cx.session,
+                &reviewed,
+                &tool,
+                &actual,
+                &|_| Ok(()),
+                &test_verify,
+            )
+            .unwrap_err();
+        assert_eq!(error.kind, ErrorKind::OutcomeUnknown);
+        assert_eq!(fs::read(history).unwrap(), b"unknown-history");
+        assert_eq!(
+            fs::read(cx.store.root.join("pending.json")).unwrap(),
+            pending
+        );
+        assert_eq!(
+            fs::read(cx.store.root.join("current.json")).unwrap(),
+            before
+        );
+    }
+
+    #[test]
+    fn interrupted_ack_after_marker_removal_is_unknown_and_never_replays() {
+        let (cx, tool, actual) = pending_context("selection-committed");
+        let reviewed = cx
+            .store
+            .review_pending_with(&cx.session, &tool, &actual, &test_verify)
+            .unwrap();
+        let current = fs::read(cx.store.root.join("current.json")).unwrap();
+        let error = cx
+            .store
+            .recover_pending_with(
+                &cx.session,
+                &reviewed,
+                &tool,
+                &actual,
+                &interrupt("pending-recovery-acknowledged"),
+                &test_verify,
+            )
+            .unwrap_err();
+        assert_eq!(error.kind, ErrorKind::OutcomeUnknown);
+        assert!(!cx.store.root.join("pending.json").exists());
+        assert_eq!(
+            fs::read(cx.store.root.join("current.json")).unwrap(),
+            current
+        );
+        assert!(cx
+            .store
+            .review_pending_with(&cx.session, &tool, &actual, &test_verify)
+            .is_err());
+        drop(
+            cx.store
+                .selected_activation_with(&cx.session, &test_verify)
+                .unwrap(),
+        );
     }
 
     #[test]
