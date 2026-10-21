@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 use std::{
     fs::{self, File, OpenOptions},
     io::{Read, Write},
-    os::unix::fs::{MetadataExt, OpenOptionsExt},
+    os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     sync::atomic::Ordering,
 };
@@ -391,6 +391,7 @@ fn fetch_download(
     }
     let temporary = tempfile::Builder::new()
         .prefix("portable-download-")
+        .permissions(fs::Permissions::from_mode(0o700))
         .tempdir_in(&root)
         .map_err(|_| "Cannot prepare private portable download cache.")?;
     write_new(&temporary.path().join("manifest.json"), &manifest)?;
