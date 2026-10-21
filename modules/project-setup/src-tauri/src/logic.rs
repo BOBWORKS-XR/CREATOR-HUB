@@ -596,11 +596,37 @@ fn update_project_name(project: &Path, project_name: &str) -> Result<(), String>
 }
 
 pub(crate) fn validation_script() -> String {
-    include_str!("ProjectSetupValidator.cs")
+    render_validation_script(ValidationPair::Recipe)
+}
+
+enum ValidationPair {
+    Recipe,
+    #[cfg(test)]
+    Sdk4022Vs1912,
+}
+
+fn render_validation_script(pair: ValidationPair) -> String {
+    let (sdk, vs, prefix) = match pair {
+        ValidationPair::Recipe => (CREATOR_SDK_VERSION, "1.9.1", ""),
+        #[cfg(test)]
+        ValidationPair::Sdk4022Vs1912 => (
+            "4.0.22",
+            "1.9.12",
+            "#define CREATOR_SETUP_SDK4022_VS1912_CANDIDATE\n",
+        ),
+    };
+    let script = include_str!("ProjectSetupValidator.cs")
         .replace("@@EDITOR_VERSION@@", EDITOR_VERSION)
-        .replace("@@CREATOR_SDK_VERSION@@", CREATOR_SDK_VERSION)
+        .replace("@@CREATOR_SDK_VERSION@@", sdk)
+        .replace("@@VISUAL_SCRIPTING_VERSION@@", vs)
         .replace("@@URP_VERSION@@", URP_VERSION)
-        .replace("@@INPUT_SYSTEM_VERSION@@", INPUT_SYSTEM_VERSION)
+        .replace("@@INPUT_SYSTEM_VERSION@@", INPUT_SYSTEM_VERSION);
+    format!("{prefix}{script}")
+}
+
+#[cfg(test)]
+pub(crate) fn candidate_validation_script() -> String {
+    render_validation_script(ValidationPair::Sdk4022Vs1912)
 }
 
 fn log_tail(log: &Path, limit: u64) -> Option<String> {

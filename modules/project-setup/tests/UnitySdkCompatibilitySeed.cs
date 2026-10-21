@@ -7,6 +7,7 @@ using BS.SDKEditor;
 using BS.SDKEditor.Setup;
 using CreatorWorks;
 using Unity.VisualScripting;
+using Unity.VisualScripting.Dependencies.Sqlite;
 using UnityEditor;
 using UnityEngine;
 
@@ -62,6 +63,7 @@ public static class UnitySdkCompatibilitySeed
         public string nodesBuiltForVersion;
         public bool nodeDatabaseExists;
         public bool markerUnchanged;
+        public bool malformedNodePayloadRejected;
         public PreferencePin[] editorPreferences;
         public bool releaseAcceptance;
         public string error;
@@ -122,6 +124,7 @@ public static class UnitySdkCompatibilitySeed
             nodesBuiltForVersion = VsNodeGeneration.NodesBuiltForVersion,
             nodeDatabaseExists = VsNodeGeneration.NodeDatabaseExists,
             markerUnchanged = MarkerUnchanged(),
+            malformedNodePayloadRejected = malformedNodePayloadRejected,
             editorPreferences = PreferenceKeys.Select(key => new PreferencePin {
                 key = key, present = EditorPrefs.HasKey(key), sha256 = Hash(EditorPrefs.GetString(key))
             }).ToArray(), releaseAcceptance = false
@@ -153,10 +156,86 @@ public static class UnitySdkCompatibilitySeed
     public static void Validate()
     {
         try {
-            // This is a fresh Unity process. Do not repair or write a stamp before observing it.
+            RequireFixture();
+            Application.logMessageReceivedThreaded += ReloadLog;
+            System.Runtime.CompilerServices.RuntimeHelpers.RunClassConstructor(typeof(UnitBase).TypeHandle);
+            reloadClock = System.Diagnostics.Stopwatch.StartNew();
+            BackgroundWorker.Schedule(() => System.Threading.Interlocked.Exchange(ref reloadReady, 1));
+            EditorApplication.update += WaitForReload;
+        } catch (Exception error) { Fail(error); }
+    }
+
+    private static int reloadReady, reloadErrors;
+    private static bool malformedNodePayloadRejected;
+    private static System.Diagnostics.Stopwatch reloadClock;
+
+    private static void ReloadLog(string message, string stack, LogType type)
+    {
+        if (type == LogType.Error || type == LogType.Exception || type == LogType.Assert)
+            System.Threading.Interlocked.Increment(ref reloadErrors);
+    }
+
+    private static void RequireReloadReady(bool markerRequired)
+    {
+        if (reloadClock.Elapsed.TotalSeconds >= 30 || System.Threading.Volatile.Read(ref reloadErrors) != 0
+            || (markerRequired && System.Threading.Volatile.Read(ref reloadReady) != 1))
+            throw new InvalidOperationException("The qualification reload loader failed or exceeded its deadline.");
+    }
+
+    private static void WaitForReload()
+    {
+        try {
+            RequireReloadReady(false);
+            UnityAPI.ProcessDelegates();
+            RequireReloadReady(false);
+            if (System.Threading.Volatile.Read(ref reloadReady) != 1) return;
+            EditorApplication.update -= WaitForReload;
+            // Observe BackgroundWorker's earlier delayCall exception reports first.
+            EditorApplication.delayCall += FinishReloadQualification;
+        } catch (Exception error) { Fail(error); }
+    }
+
+    private static void FinishReloadQualification()
+    {
+        try {
+            RequireReloadReady(true);
+            using (NativeUtility.Module("sqlite3.dll"))
+            using (var database = new SQLiteConnection(BoltFlow.Paths.unitOptions, SQLiteOpenFlags.ReadOnly)) {
+                var row = database.Table<UnitOptionRow>().ToList().First(item => item.unitType != null
+                    && item.unitType.StartsWith("BS.", StringComparison.Ordinal));
+                AssertMalformedNodePayloadRejected(row);
+            }
+            RequireReloadReady(true);
+            malformedNodePayloadRejected = true;
+            // This is the existing fresh reload process, not another Unity launch.
             Capture("reloaded");
             ProjectSetupValidator.Validate();
         } catch (Exception error) { Fail(error); }
+        finally { Application.logMessageReceivedThreaded -= ReloadLog; }
+    }
+
+    // The qualification reload exercises a copied row only. No DB writes.
+    public static void AssertMalformedNodePayloadRejected(UnitOptionRow original)
+    {
+        RequireFixture();
+        ProjectSetupValidator.VerifyCandidateNodeRow(original);
+        var originalPayload = original.unit;
+        var malformed = new UnitOptionRow();
+        foreach (var property in typeof(UnitOptionRow).GetProperties()) {
+            if (!property.CanRead || !property.CanWrite
+                || (property.PropertyType != typeof(string) && property.PropertyType != typeof(int)))
+                throw new InvalidOperationException("Unreviewed node row field in the deferred payload regression.");
+            property.SetValue(malformed, property.GetValue(original));
+        }
+        malformed.unit = "{";
+        var metadata = malformed.ToOption();
+        if (metadata == null || metadata.unitType == null)
+            throw new InvalidOperationException("Malformed payload control did not retain valid option metadata.");
+        var refused = false;
+        try { ProjectSetupValidator.VerifyCandidateNodeRow(malformed); }
+        catch (System.Runtime.Serialization.SerializationException error) when (error.InnerException != null) { refused = true; }
+        if (!refused || original.unit != originalPayload)
+            throw new InvalidOperationException("The malformed node payload was not rejected without changing the source row.");
     }
 
     private static string Hash(string value)
@@ -176,6 +255,9 @@ public static class UnitySdkCompatibilitySeed
 
     private static void Fail(Exception error)
     {
+        EditorApplication.update -= WaitForReload;
+        EditorApplication.delayCall -= FinishReloadQualification;
+        Application.logMessageReceivedThreaded -= ReloadLog;
         Debug.LogException(error);
         WriteNew("sdk-compatibility-error.json", JsonUtility.ToJson(new Audit { error = error.ToString() }, true));
         EditorApplication.Exit(2);

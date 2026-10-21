@@ -71,6 +71,29 @@ through every phase. The prior scripts and status are not reused in the target.
 The existing audit test name and final result fields remain unchanged. A fresh
 SDK readiness result of `Done` is still required; no stamp is fabricated.
 
+## Candidate Implementation
+
+The shared validator template now has a test-only branch for the exact requested
+pair. It calls the SDK's public setup API, retains current and backed-up custom
+selections, and only restores the SDK-authored node stamp after checking the
+saved selections and rebuilt database. An exclusive before-image records only
+that project-local stamp, including whether its API value was null. This is
+recovery evidence, not an atomic transaction or automatic rollback.
+
+The candidate waits for the package's background loader through its FIFO work
+queue, without changing automatic-update preferences. Reopened validation checks
+the resolved Visual Scripting version and the SDK's own readiness. Database
+validation must deserialize node payloads: `UnitOptionRow.ToOption()` alone only
+resolves metadata and is insufficient. A disposable, in-memory malformed-payload
+case must prove rejection without editing the database or authored assets.
+
+Both template branches compile against retained package assemblies. Unit and
+guard tests pass, but actual candidate repair, malformed-payload rejection and
+fresh-process validation remain pending. No newer package admission is enabled.
+Before production adoption, use an operation-scoped stamp backup path so retries
+retain previous evidence, and update pair admission, validator selection and
+repairable-readiness detection together. Keep the old new-project recipe.
+
 ## Acceptance
 
 1. Inspect the exact package archives and their startup side effects. Do not

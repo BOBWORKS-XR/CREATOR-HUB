@@ -56,14 +56,7 @@ fn gate(values: &BTreeMap<String, String>) -> Result<(), String> {
 }
 
 fn validator() -> String {
-    let original = validation_script();
-    let expected = format!("result.creatorSdkVersion == \"{CREATOR_SDK_VERSION}\"");
-    assert_eq!(original.matches(&expected).count(), 1);
-    original.replacen(
-        &expected,
-        &format!("result.creatorSdkVersion == \"{SDK}\""),
-        1,
-    )
+    candidate_validation_script()
 }
 
 fn seed() -> String {
@@ -377,8 +370,10 @@ fn qualify(hub: &Value, sdk: &Value) -> Result<(), String> {
     for (key, expected) in [
         ("unityVersion", EDITOR_VERSION),
         ("creatorSdkVersion", SDK),
+        ("visualScriptingVersion", VS),
         ("urpVersion", URP_VERSION),
         ("inputSystemVersion", INPUT_SYSTEM_VERSION),
+        ("sdkReadinessState", "Done"),
     ] {
         if hub[key] != expected {
             return Err(format!("Unexpected resolved production value: {key}"));
@@ -404,12 +399,16 @@ fn qualify(hub: &Value, sdk: &Value) -> Result<(), String> {
         "customTypePreserved",
         "customAssemblyPreserved",
         "markerUnchanged",
+        "malformedNodePayloadRejected",
     ] {
         if sdk[key] != true {
             return Err(format!("SDK qualification remains incomplete: {key}"));
         }
     }
-    if hub["preservedVisualScriptingSelections"] != true
+    if hub["sdkReadyDone"] != true
+        || hub["nodesBuiltForThisVersion"] != true
+        || hub["nodeDatabaseVerified"] != true
+        || hub["preservedVisualScriptingSelections"] != true
         || hub["nodeCount"].as_u64().unwrap_or(0) == 0
         || hub["creatorNodeCount"].as_u64().unwrap_or(0) == 0
     {
@@ -421,13 +420,15 @@ fn qualify(hub: &Value, sdk: &Value) -> Result<(), String> {
 fn qualified_receipts() -> (Value, Value) {
     (
         json!({"success":true,"unityVersion":EDITOR_VERSION,"creatorSdkVersion":SDK,
+        "visualScriptingVersion":VS,"sdkReadinessState":"Done","sdkReadyDone":true,
+        "nodesBuiltForThisVersion":true,"nodeDatabaseVerified":true,
         "urpVersion":URP_VERSION,"inputSystemVersion":INPUT_SYSTEM_VERSION,
         "preservedVisualScriptingSelections":true,"nodeCount":10,"creatorNodeCount":3}),
         json!({"phase":"reloaded","unityVersion":EDITOR_VERSION,"creatorSdkVersion":SDK,
         "creatorSdkSource":"Registry","visualScriptingSource":"Registry",
         "visualScriptingVersion":VS,"sdkReadinessState":"Done","sdkReadyDone":true,
         "nodesBuiltForThisVersion":true,"nodeDatabaseExists":true,"customTypePreserved":true,
-        "customAssemblyPreserved":true,"markerUnchanged":true}),
+        "customAssemblyPreserved":true,"markerUnchanged":true,"malformedNodePayloadRejected":true}),
     )
 }
 
@@ -468,13 +469,14 @@ fn qualification_refuses_missing_wrong_or_lost_evidence() {
 }
 
 #[test]
-fn test_validator_only_substitutes_the_sdk_expectation() {
+fn test_validator_uses_the_same_closed_pair_template_without_enabling_policy() {
     assert_eq!(CREATOR_SDK_VERSION, "4.0.14");
     assert_eq!(
-        validator().replace(
-            "result.creatorSdkVersion == \"4.0.22\"",
-            "result.creatorSdkVersion == \"4.0.14\""
-        ),
+        validator()
+            .strip_prefix("#define CREATOR_SETUP_SDK4022_VS1912_CANDIDATE\n")
+            .unwrap()
+            .replace("\"4.0.22\"", "\"4.0.14\"")
+            .replace("\"1.9.12\"", "\"1.9.1\""),
         validation_script()
     );
     assert!(!validation_script().contains("4.0.22"));
@@ -527,6 +529,298 @@ fn test_validator_only_substitutes_the_sdk_expectation() {
         );
         assert!(keys.contains(&format!("VisualScripting.{prefix}.editorSetupCompleted").as_str()));
     }
+}
+
+#[test]
+fn candidate_clears_only_genuine_stamp_before_second_build_and_checks_swallowed_errors() {
+    let script = validator();
+    let start = script
+        .find("private static void ConfigureCandidateAfterLoader()")
+        .unwrap();
+    let finish = script
+        .find("private static void FinishCandidateConfiguration()")
+        .unwrap();
+    let setup = &script[start..finish];
+    let sdk = setup
+        .find("VsNodeGeneration.SetVSTypesAndAssemblies()")
+        .unwrap();
+    let stamp = setup
+        .find("candidateSdkStamp = EditorUserSettings.GetConfigValue(CandidateStampKey)")
+        .unwrap();
+    let clear = setup.find("ClearCandidateStamp();").unwrap();
+    let restore = setup
+        .find("foreach (var assembly in candidateAssemblies)")
+        .unwrap();
+    let save = setup
+        .find("config.SaveProjectSettingsAsset(true);")
+        .unwrap();
+    let delay = setup
+        .find("EditorApplication.delayCall += FinishCandidateConfiguration;")
+        .unwrap();
+    assert!(sdk < stamp && stamp < clear && clear < restore && restore < save && save < delay);
+    let finish = &script[finish..script.find("private static void FailCandidate(").unwrap()];
+    let rebuild = finish.find("UnitBase.Rebuild();").unwrap();
+    let database = finish.find("ReadCandidateNodeDatabase();").unwrap();
+    let errors = finish.find("RequireNoCandidateErrors();").unwrap();
+    let restore = finish
+        .find("EditorUserSettings.SetConfigValue(CandidateStampKey, candidateSdkStamp);")
+        .unwrap();
+    assert!(rebuild < database && database < errors && errors < restore);
+    assert!(script.contains("Application.logMessageReceivedThreaded += CandidateLog;"));
+    assert!(script.contains("LogType.Error || type == LogType.Exception || type == LogType.Assert"));
+    assert!(script.contains("database.ExecuteScalar<string>(\"PRAGMA quick_check\") != \"ok\""));
+    assert!(script.contains("var option = row.ToOption();"));
+    assert!(script.contains("option == null || option.unitType == null"));
+    assert!(script.contains("var unit = option.unit;"));
+    assert!(script.contains("unit == null || unit.GetType() != option.unitType"));
+    assert!(!script.contains("OptionsHash("));
+    assert!(!script.contains("EditorPrefs.Set"));
+}
+
+#[test]
+fn candidate_payload_regression_is_guarded_in_memory_and_required_on_existing_reload() {
+    let script = validator();
+    assert!(script.contains("foreach (var row in rows) VerifyCandidateNodeRow(row);"));
+    let body = &script[script
+        .find("internal static void VerifyCandidateNodeRow(")
+        .unwrap()
+        ..script
+            .find("private static void FinishCandidateConfiguration()")
+            .unwrap()];
+    assert!(body.find("row.ToOption()").unwrap() < body.find("option.unit;").unwrap());
+    assert!(body.contains("unit.GetType() != option.unitType"));
+    assert_eq!(
+        SEED.matches("AssertMalformedNodePayloadRejected(").count(),
+        2,
+    );
+    let helper = &SEED[SEED
+        .find("public static void AssertMalformedNodePayloadRejected(")
+        .unwrap()..SEED.find("private static string Hash(").unwrap()];
+    for required in [
+        "RequireFixture();",
+        "VerifyCandidateNodeRow(original);",
+        "new UnitOptionRow()",
+        "property.SetValue(malformed, property.GetValue(original))",
+        "malformed.unit = \"{\";",
+        "malformed.ToOption()",
+        "VerifyCandidateNodeRow(malformed)",
+        "System.Runtime.Serialization.SerializationException",
+        "original.unit != originalPayload",
+    ] {
+        assert!(helper.contains(required), "{required}");
+    }
+    for forbidden in [
+        "SQLiteConnection",
+        "File.Write",
+        "SetConfigValue",
+        "Rebuild(",
+    ] {
+        assert!(!helper.contains(forbidden), "{forbidden}");
+    }
+    let reload = &SEED[SEED
+        .find("private static void FinishReloadQualification()")
+        .unwrap()
+        ..SEED
+            .find("public static void AssertMalformedNodePayloadRejected(")
+            .unwrap()];
+    let negative = reload
+        .find("AssertMalformedNodePayloadRejected(row);")
+        .unwrap();
+    let evidence = reload.find("malformedNodePayloadRejected = true;").unwrap();
+    let capture = reload.find("Capture(\"reloaded\");").unwrap();
+    let validate = reload.find("ProjectSetupValidator.Validate();").unwrap();
+    assert!(negative < evidence && evidence < capture && capture < validate);
+    assert!(reload.contains("SQLiteOpenFlags.ReadOnly"));
+    assert!(SEED.contains("EditorApplication.delayCall += FinishReloadQualification;"));
+    let start = &SEED[SEED.find("public static void Validate()").unwrap()
+        ..SEED
+            .find("private static void FinishReloadQualification()")
+            .unwrap()];
+    assert!(
+        start
+            .find("logMessageReceivedThreaded += ReloadLog")
+            .unwrap()
+            < start
+                .find("RunClassConstructor(typeof(UnitBase).TypeHandle)")
+                .unwrap()
+    );
+    assert!(start.contains("UnityAPI.ProcessDelegates();"));
+    assert!(start.contains("reloadClock.Elapsed.TotalSeconds >= 30"));
+    assert!(SEED.contains("malformedNodePayloadRejected = malformedNodePayloadRejected"));
+}
+
+#[test]
+fn missing_or_false_malformed_decoder_evidence_cannot_qualify() {
+    let (hub, sdk) = qualified_receipts();
+    assert!(qualify(&hub, &sdk).is_ok());
+    let mut missing = sdk.clone();
+    missing
+        .as_object_mut()
+        .unwrap()
+        .remove("malformedNodePayloadRejected");
+    assert!(qualify(&hub, &missing).is_err());
+    let mut rejected = sdk;
+    rejected["malformedNodePayloadRejected"] = json!(false);
+    assert!(qualify(&hub, &rejected).is_err());
+}
+
+#[test]
+fn candidate_waits_for_fifo_loader_without_toggling_automatic_updates() {
+    let script = validator();
+    let initialize = script
+        .find("RunClassConstructor(typeof(UnitBase).TypeHandle)")
+        .unwrap();
+    let barrier = script.find("BackgroundWorker.Schedule(").unwrap();
+    let wait = script
+        .find("private static void WaitForCandidateLoader()")
+        .unwrap();
+    assert!(initialize < barrier && barrier < wait);
+    let body = &script[wait..script
+        .find("private static void ConfigureCandidateAfterLoader()")
+        .unwrap()];
+    assert!(body.contains("UnityAPI.ProcessDelegates();"));
+    assert!(body.contains("candidateLoaderClock.Elapsed.TotalSeconds >= 30"));
+    assert!(
+        body.find("Volatile.Read(ref candidateLoaderDone)").unwrap()
+            < body
+                .find("EditorApplication.delayCall += candidateAfterLoader;")
+                .unwrap()
+    );
+    assert!(!script.contains("updateNodesAutomatically ="));
+    assert!(!body.contains("UnitBase.Rebuild"));
+    assert!(script.contains("EditorApplication.update -= WaitForCandidateLoader;"));
+}
+
+#[test]
+fn candidate_reopen_and_configuration_observe_delayed_loader_errors() {
+    let script = validator();
+    let begin = &script[script
+        .find("private static void Configure(bool preserve)")
+        .unwrap()
+        ..script
+            .find("private static void FinishConfiguration()")
+            .unwrap()];
+    assert!(
+        begin.find("BeginCandidateErrorWatch();").unwrap()
+            < begin
+                .find("VSUsageUtility.isVisualScriptingUsed = true;")
+                .unwrap()
+    );
+    let entry = &script[script.find("public static void Validate()").unwrap()
+        ..script
+            .find("private static void ValidateReloaded()")
+            .unwrap()];
+    assert!(
+        entry.find("BeginCandidateErrorWatch();").unwrap()
+            < entry
+                .find("QueueAfterCandidateLoader(ValidateReloaded);")
+                .unwrap()
+    );
+    let continuation = &script[script
+        .find("private static void ConfigureCandidateAfterLoader()")
+        .unwrap()
+        ..script
+            .find("private static void CheckCandidateSelectionsSaved()")
+            .unwrap()];
+    assert!(
+        continuation.find("RequireNoCandidateErrors();").unwrap()
+            < continuation
+                .find("VsNodeGeneration.SetVSTypesAndAssemblies()")
+                .unwrap()
+    );
+    let reloaded = &script[script
+        .find("private static void ValidateReloaded()")
+        .unwrap()..];
+    assert!(
+        reloaded.find("RequireNoCandidateErrors();").unwrap()
+            < reloaded.find("ReadCandidateNodeDatabase();").unwrap()
+    );
+    assert!(script.contains("EditorApplication.delayCall -= candidateAfterLoader;"));
+    assert!(script
+        .contains("QueueAfterCandidateLoader(EditorApplication.CallbackFunction continuation)"));
+}
+
+#[test]
+fn candidate_preserves_only_exact_nullable_project_stamp_before_mutation() {
+    let script = validator();
+    let configure = &script[script
+        .find("private static void Configure(bool preserve)")
+        .unwrap()
+        ..script
+            .find("private static void FinishConfiguration()")
+            .unwrap()];
+    assert!(
+        configure.find("WriteCandidateStampBeforeImage();").unwrap()
+            < configure
+                .find("VSUsageUtility.isVisualScriptingUsed = true;")
+                .unwrap()
+    );
+    let receipt = &script[script
+        .find("private static void WriteCandidateStampBeforeImage()")
+        .unwrap()
+        ..script
+            .find("private static void RequireCandidatePair()")
+            .unwrap()];
+    for required in [
+        "sdk4022-node-stamp-before.json",
+        "FileMode.CreateNew",
+        "file.Flush(true);",
+        "File.ReadAllBytes(path).SequenceEqual(bytes)",
+        "apiValueWasNull = candidateStampBeforeValue == null",
+        "value = candidateStampBeforeValue ?? \"\"",
+        "restorationPerformed = false",
+    ] {
+        assert!(receipt.contains(required), "{required}");
+    }
+    assert!(!receipt.contains("SetConfigValue"));
+    assert!(!script.contains("EditorUserSettings.asset"));
+    assert!(script.contains(
+        "EditorUserSettings.GetConfigValue(CandidateStampKey) != candidateStampBeforeValue"
+    ));
+    let loader = &script[script
+        .find("private static void RequireCandidateLoaderReady()")
+        .unwrap()
+        ..script
+            .find("private static void ConfigureCandidateAfterLoader()")
+            .unwrap()];
+    assert!(loader.contains("candidateLoaderClock.Elapsed.TotalSeconds >= 30"));
+}
+
+#[test]
+fn newer_sdk_members_are_excluded_from_legacy_compilation() {
+    let script = validation_script();
+    let mut active = true;
+    let mut compiled = String::new();
+    for line in script.lines() {
+        match line.trim() {
+            "#if CREATOR_SETUP_SDK4022_VS1912_CANDIDATE" => {
+                assert!(active);
+                active = false;
+            }
+            "#else" => active = !active,
+            "#endif" => active = true,
+            _ if active => {
+                compiled.push_str(line);
+                compiled.push('\n');
+            }
+            _ => {}
+        }
+    }
+    assert!(active);
+    for newer in [
+        "BS.SDKEditor.Setup",
+        "NodesBuiltForThisVersion",
+        "CandidateStampKey",
+        "BackgroundWorker.Schedule",
+        "ReadCandidateNodeDatabase",
+    ] {
+        assert!(
+            !compiled.contains(newer),
+            "Legacy compilation contains {newer}"
+        );
+    }
+    assert!(compiled.contains("if (preserveSelections) UnitBase.Rebuild();"));
+    assert!(compiled.contains("result.creatorSdkVersion == \"4.0.14\""));
 }
 
 #[test]
