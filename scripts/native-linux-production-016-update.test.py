@@ -1915,8 +1915,74 @@ process.stdout.write(JSON.stringify({error,calls,phases,signals,abortEvents,
         self.assertTrue(all(receipt[key] is False for key in M.FALSE))
         self.assertNotEqual(receipt, M.delivery_receipt(p, {**env, "GITHUB_SHA": "c" * 40}))
 
+    def test_workflow_pure_preflight_is_read_only_and_blocks_candidate_downloads(self):
+        jobs = self.workflow["jobs"]
+        self.assertEqual(set(jobs), {"preflight", "stage-input", "update"})
+        preflight = jobs["preflight"]
+        self.assertEqual(set(preflight), {"runs-on", "timeout-minutes", "permissions", "steps"})
+        self.assertEqual(preflight["runs-on"], "ubuntu-22.04")
+        self.assertEqual(preflight["timeout-minutes"], 10)
+        self.assertEqual(preflight["permissions"], {"contents": "read"})
+        self.assertEqual(jobs["stage-input"]["needs"], "preflight")
+        self.assertEqual(jobs["update"]["needs"], "stage-input")
+        self.assertEqual(len(preflight["steps"]), 5)
+        self.assertEqual(preflight["steps"][:4], [
+            {"uses": "actions/checkout@v6", "with": {"persist-credentials": False}},
+            {"uses": "actions/setup-node@v6", "with": {"node-version": "24.17.0"}},
+            {"uses": "actions/setup-python@v6", "id": "preflight_python",
+             "with": {"python-version": "3.11.17", "update-environment": False}},
+            {"run": "npm ci --ignore-scripts --no-audit --no-fund"},
+        ])
+        self.assertEqual(set(preflight["steps"][4]), {"name", "env", "run"})
+
+    def test_workflow_migration_preflight_python_is_separate_from_system_checks(self):
+        jobs = self.workflow["jobs"]
+        pure = jobs["preflight"]["steps"][4]
+        self.assertEqual(pure["env"], {"PREFLIGHT_PYTHON": "${{ steps.preflight_python.outputs.python-path }}"})
+        # A closed command list excludes native packages, privilege and candidate actions.
+        self.assertEqual(pure["run"].splitlines(), [
+            "set -euo pipefail",
+            "/usr/bin/python3 -I -S -c 'import sys; assert sys.version_info[:2] == (3, 10)'",
+            "/usr/bin/python3 -I -S -B scripts/native-linux-production-016-update.py preflight-import",
+            "/usr/bin/python3 -I -S -B scripts/native-linux-production-016-update.test.py",
+            "/usr/bin/python3 -I -S -B scripts/native-linux-update-mcp.test.py",
+            "/usr/bin/python3 -I -S -B scripts/native-linux-update-flatpak.test.py",
+            "\"$PREFLIGHT_PYTHON\" -I -c 'import sys, tomllib; assert sys.version_info[:3] == (3, 11, 17)'",
+            '"$PREFLIGHT_PYTHON" -B scripts/native-linux-production-016-migration.test.py',
+            "node --test scripts/native-linux-production-016-flatpak.test.cjs scripts/flatpak-native-production-016.test.cjs",
+        ])
+        native = jobs["update"]
+        self.assertEqual(native["env"], {
+            "UPDATE_EXECUTE": "${{ inputs.execute_update }}",
+            "UPDATE_SCENARIO": "${{ inputs.scenario }}",
+            "UPDATE_PROFILE_SHA256": "${{ inputs.profile_sha256 }}",
+        })
+        self.assertFalse(any("setup-python" in step.get("uses", "") for step in native["steps"]))
+        commands = "\n".join(step.get("run", "") for step in native["steps"])
+        self.assertNotIn("PREFLIGHT_PYTHON", commands)
+        self.assertNotIn("migration.test.py", commands)
+        clean = next(step for step in native["steps"] if "preflight-import" in step.get("run", ""))
+        self.assertEqual(set(clean), {"name", "run"})
+        self.assertEqual(clean["run"].splitlines()[:3], [
+            "set -euo pipefail",
+            "/usr/bin/python3 -I -S -c 'import sys; assert sys.version_info[:2] == (3, 10)'",
+            "/usr/bin/python3 -I -S -B scripts/native-linux-production-016-update.py preflight-import",
+        ])
+        self.assertIn("/usr/bin/python3 -I -B scripts/native-linux-production-016-update.test.py GenuineGiBinding", commands)
+        self.assertIn("'/usr/bin/python3', '-B', str(source), 'broker'", commands)
+
+    def test_workflow_declares_native_toml_without_changing_isolated_import(self):
+        steps = self.workflow["jobs"]["update"]["steps"]
+        dependencies = next(index for index, step in enumerate(steps)
+                            if step.get("name") == "Install only declared disposable native qualification tools")
+        self.assertIn("python3-gi python3-toml ", steps[dependencies]["run"])
+        clean = next(index for index, step in enumerate(steps) if "preflight-import" in step.get("run", ""))
+        genuine = next(index for index, step in enumerate(steps) if " GenuineGiBinding" in step.get("run", ""))
+        self.assertLess(clean, dependencies)
+        self.assertLess(dependencies, genuine)
+
     def test_workflow_write_token_never_checks_out_extracts_or_executes_candidate(self):
-        self.assertEqual(set(self.workflow["jobs"]), {"stage-input", "update"})
+        self.assertEqual(set(self.workflow["jobs"]), {"preflight", "stage-input", "update"})
         data, native = self.workflow["jobs"]["stage-input"], self.workflow["jobs"]["update"]
         self.assertEqual(data["permissions"], {"contents": "write", "actions": "read"})
         self.assertEqual(native["permissions"], {"contents": "read", "actions": "read"})
@@ -1929,8 +1995,13 @@ process.stdout.write(JSON.stringify({error,calls,phases,signals,abortEvents,
         self.assertIn("release_id:411494394", script)
         self.assertIn("658078066", script)
         self.assertEqual(self.workflow["on"]["push"]["branches"], ["validation/native-linux-production-016-update"])
-        for job in self.workflow["jobs"].values():
-            self.assertIn("inputs.execute_update == true", job["if"])
+        guard = ("github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.repository_id == '1364807512' && "
+                 "github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/validation/native-linux-production-016-update' && "
+                 "github.workflow_ref == 'BOBWORKS-XR/CREATOR-HUB/.github/workflows/native-linux-production-016-update.yml@refs/heads/validation/native-linux-production-016-update' && "
+                 "inputs.execute_update == true")
+        for job in (data, native):
+            self.assertEqual(job["if"].strip(), guard)
+            self.assertNotIn("continue-on-error", job)
             self.assertNotIn("runner.", json.dumps(job.get("env", {})))
 
     def test_every_workflow_shell_and_python_heredoc_parses(self):
@@ -1986,7 +2057,7 @@ process.stdout.write(JSON.stringify({error,calls,phases,signals,abortEvents,
         verifier = next(i for i, step in enumerate(steps) if step.get("run", "").endswith("update.py verifier"))
         self.assertLess(provision, selected[0]); self.assertLess(selected[0], verifier)
         self.assertEqual(set(steps[selected[0]]), {"name", "run"})
-        pure = next(step["run"] for step in steps if step.get("name", "").startswith("Pure tests,"))
+        pure = self.workflow["jobs"]["preflight"]["steps"][4]["run"]
         self.assertIn("/usr/bin/python3 -I -S -B scripts/native-linux-production-016-update.test.py", pure)
         self.assertNotIn("GenuineGiBinding", pure)
 

@@ -35,7 +35,39 @@ permissions:
   actions: read
 
 jobs:
+  preflight:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24.17.0
+      - uses: actions/setup-python@v6
+        id: preflight_python
+        with:
+          python-version: '3.11.17'
+          update-environment: false
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Pure tests and workflow parsing before candidate downloads or privilege
+        env:
+          PREFLIGHT_PYTHON: ${{ steps.preflight_python.outputs.python-path }}
+        run: |
+          set -euo pipefail
+          /usr/bin/python3 -I -S -c 'import sys; assert sys.version_info[:2] == (3, 10)'
+          /usr/bin/python3 -I -S -B scripts/native-linux-production-016-update.py preflight-import
+          /usr/bin/python3 -I -S -B scripts/native-linux-production-016-update.test.py
+          /usr/bin/python3 -I -S -B scripts/native-linux-update-mcp.test.py
+          /usr/bin/python3 -I -S -B scripts/native-linux-update-flatpak.test.py
+          "$PREFLIGHT_PYTHON" -I -c 'import sys, tomllib; assert sys.version_info[:3] == (3, 11, 17)'
+          "$PREFLIGHT_PYTHON" -B scripts/native-linux-production-016-migration.test.py
+          node --test scripts/native-linux-production-016-flatpak.test.cjs scripts/flatpak-native-production-016.test.cjs
   stage-input:
+    needs: preflight
     if: >-
       github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.repository_id == '1364807512' &&
       github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/validation/native-linux-production-016-update' &&
@@ -124,16 +156,11 @@ jobs:
         with:
           node-version: 24.17.0
       - run: npm ci --ignore-scripts --no-audit --no-fund
-      - name: Pure tests, workflow parsing and clean system Python parity before downloads
+      - name: Clean system Python parity on the native runner before downloads
         run: |
           set -euo pipefail
           /usr/bin/python3 -I -S -c 'import sys; assert sys.version_info[:2] == (3, 10)'
           /usr/bin/python3 -I -S -B scripts/native-linux-production-016-update.py preflight-import
-          /usr/bin/python3 -I -S -B scripts/native-linux-production-016-update.test.py
-          /usr/bin/python3 -I -S -B scripts/native-linux-update-mcp.test.py
-          /usr/bin/python3 -I -S -B scripts/native-linux-update-flatpak.test.py
-          /usr/bin/python3 -I -S -B scripts/native-linux-production-016-migration.test.py
-          node --test scripts/native-linux-production-016-flatpak.test.cjs scripts/flatpak-native-production-016.test.cjs
           printf 'CONTROLLER_NODE=%s\n' "$(realpath "$(command -v node)")" >> "$GITHUB_ENV"
       - name: Stage the migration fixture's locked MCP SDK without lifecycle hooks
         run: npm ci --prefix modules/mcp --ignore-scripts --no-audit --no-fund
@@ -282,7 +309,7 @@ jobs:
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-0 webkit2gtk-driver libayatana-appindicator3-1 libgtk-3-0 libxdo3 libxres1 librsvg2-2 \
-            python3-gi gir1.2-gtk-3.0 gir1.2-atspi-2.0 gir1.2-gdkpixbuf-2.0 at-spi2-core dbus-x11 xvfb xauth openbox fonts-dejavu-core \
+            python3-gi python3-toml gir1.2-gtk-3.0 gir1.2-atspi-2.0 gir1.2-gdkpixbuf-2.0 at-spi2-core dbus-x11 xvfb xauth openbox fonts-dejavu-core \
             libpam-systemd openssl ca-certificates policykit-1-gnome=0.105-7ubuntu3 pkexec=0.105-33ubuntu0.2 \
             polkitd=0.105-33ubuntu0.2 coreutils=8.32-4.1ubuntu1.4 passwd=1:4.8.1-2ubuntu2.2
           sudo systemctl start systemd-logind.service polkit.service
