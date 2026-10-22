@@ -24,12 +24,13 @@ export function mount(root, api) {
         <section aria-label="Unity connection">
           <div class="feature-input-row"><label>Unity project<input data-field="project" type="text" autocomplete="off" spellcheck="false"></label><button data-field="browse" class="text-button" type="button"><span class="icon icon-folder" aria-hidden="true"></span> Browse</button></div>
           <label>Recent Unity projects<select data-field="discovered"><option value="">Choose a project</option></select></label>
+          <p data-field="selection" class="feature-note" role="status"></p>
           <div data-field="clients"></div>
           <details><summary>Optional Unity CLI</summary><p data-field="cli-status" class="feature-note"></p><label class="feature-check"><input data-field="cli" type="checkbox" disabled><span>Also connect Unity CLI to the selected AI clients</span></label><p class="feature-note">Off by default. Experimental in Creator Hub and Unity. Requires Unity 6 and the Unity Pipeline package; this option does not install that package.</p><button data-field="cli-docs" class="text-button" type="button">Unity CLI requirements <span class="icon icon-external" aria-hidden="true"></span></button></details>
           <button data-field="setup" class="primary-button" type="button" disabled>Set up Creator Works MCP</button>
           <div data-field="setup-result" class="feature-output" role="status"></div>
         </section>
-        <section class="feature-section" aria-label="Connection status"><h3>Connection status</h3><div data-field="checks"></div><p class="feature-note">Saved settings are not proof of a live AI connection. Fully quit and reopen changed AI clients, then ask your AI to call get_bridge_status.</p></section>
+        <section class="feature-section" aria-label="Connection status"><h3>Connection status</h3><p data-field="checked-project" class="feature-note"></p><div data-field="checks"></div><p class="feature-note">Saved settings are not proof of a live AI connection. Fully quit and reopen changed AI clients, then ask your AI to call get_bridge_status.</p></section>
       </div>
       <section class="feature-section" aria-label="Saved Unity projects"><div class="feature-heading"><h3>Unity projects</h3><div class="feature-actions"><button data-field="add" class="text-button" type="button"><span class="icon icon-folder" aria-hidden="true"></span> Add project</button><button data-field="bridges" class="text-button" type="button">Update bridges</button></div></div><div data-field="projects"></div></section>
       <section class="feature-section" aria-label="Local project feedback"><div class="feature-heading"><h3>Local project feedback</h3><button data-field="feedback-check" class="icon-button" type="button" title="Check project feedback preferences" aria-label="Check project feedback preferences" disabled><span class="icon icon-refresh" aria-hidden="true"></span></button></div>
@@ -63,6 +64,8 @@ export function mount(root, api) {
   let productReviewed = false;
   let feedbackProject = null;
   let feedbackRequest = 0;
+  let connectionRequest = 0;
+  const optionBaseline = new Map();
   const projectChecks = new Map();
   const clientUi = new Map();
   const active = () => config?.channels?.find(channel => channel.id === config.active_channel_id);
@@ -72,6 +75,15 @@ export function mount(root, api) {
   }
   const selectedClients = () => clients.filter(([id]) => clientUi.get(id).checkbox.checked);
   const run = async (action, label) => { const result = await page.run(action, label); controls(); return result; };
+  function requireReload(reason) {
+    invalidateConnection(); page.lock(true); $('retry').hidden = false;
+    throw new Error(`${text(reason)} Earlier steps may remain. Check connection again to reload saved settings before another change.`);
+  }
+  async function saveConfig(next) {
+    try { await page.call('save_config', { config: next }); }
+    catch (reason) { requireReload(reason); }
+    config = next;
+  }
   function productVisibility() {
     const required = productReport && (['legacy-only', 'conflict'].includes(productReport.status)
       || productReport.recovery.some(item => !item.historical_completed));
@@ -110,13 +122,16 @@ export function mount(root, api) {
   }
   function controls() {
     const ready = onboarding?.runtime?.ready && onboarding?.project?.valid;
+    const selected = active();
+    $('selection').textContent = selected ? `Selected for MCP: ${selected.name} (${selected.unity_project_path}).` : 'No saved project selected for MCP.';
+    if ($('project').value && $('project').value !== selected?.unity_project_path) $('selection').textContent += ` Setup draft: ${$('project').value} (not selected for MCP).`;
     $('setup').disabled = !ready || !selectedClients().length;
     $('add').disabled = !$('project').value.trim();
     $('bridge').disabled = !onboarding?.project?.valid;
     for (const [id, ui] of clientUi) {
       const state = onboarding?.clients?.find(client => client.id === id);
       ui.checkbox.disabled = state?.supported === false;
-      ui.apply.disabled = !active() || state?.supported === false || active().unity_project_path !== $('project').value;
+      ui.apply.disabled = !onboarding || !active() || state?.supported === false || active().unity_project_path !== $('project').value;
       ui.disconnect.disabled = !state?.configured || state?.supported === false;
     }
     $('cli').disabled = !onboarding?.unityCli?.canEnable && !onboarding?.unityCli?.enabled;
@@ -128,13 +143,15 @@ export function mount(root, api) {
     $('feedback-check').disabled = !onboarding?.project?.valid;
   }
   function renderStatus(value) {
-    if (!value?.runtime || !Array.isArray(value.clients)) throw new Error('Connection status is incomplete. Check again.');
+    const projectKnown = typeof value?.project?.valid === 'boolean' || (value?.project === null && !$('project').value.trim());
+    if (typeof value?.runtime?.ready !== 'boolean' || !projectKnown || !Array.isArray(value.clients)) throw new Error('Connection status is incomplete. Check again.');
     onboarding = value;
+    $('checked-project').textContent = `Checked project: ${$('project').value || 'None'}`;
     const p = value.project;
     const rows = [['Private runtime', value.runtime.ready ? 'Ready' : 'Unavailable', value.runtime.ready],
       ['Unity project', p?.valid ? 'Valid' : $('project').value ? 'Invalid' : 'Not selected', p?.valid],
       ['SDK profile', p?.sdkProfile?.label || 'Not selected', p?.sdkProfile?.profile && !['none', 'unknown'].includes(p.sdkProfile.profile)],
-      ['Unity bridge', p?.bridgeCurrent ? p.stateStatus === 'fresh' ? 'Connected' : 'Installed; open Unity and check again' : p?.bridgeInstalled ? 'Update available' : 'Not installed', p?.bridgeCurrent && p.stateStatus === 'fresh']];
+      ['Unity bridge', !p?.valid ? 'Not checked' : p.bridgeCurrent ? p.stateStatus === 'fresh' ? 'Connected' : 'Installed; open Unity and check again' : p.bridgeInstalled ? 'Update available' : 'Not installed', p?.valid && p.bridgeCurrent && p.stateStatus === 'fresh']];
     $('checks').replaceChildren(...rows.map(([name, value, ready]) => { const row = node('div', null, 'feature-row'); row.append(node('span', name), node('span', value, ready ? 'feature-good' : 'feature-warn')); return row; }));
     for (const [id, ui] of clientUi) {
       const state = value.clients.find(client => client.id === id);
@@ -186,12 +203,22 @@ export function mount(root, api) {
       return false;
     }
   }
+  function invalidateConnection() {
+    ++connectionRequest; onboarding = null;
+    $('checked-project').textContent = `Not checked: ${$('project').value || 'No project selected'}`;
+    $('checks').replaceChildren();
+    for (const ui of clientUi.values()) ui.status.textContent = 'Not checked';
+    $('cli-status').textContent = 'Check the project connection before changing Unity CLI.';
+    $('guide-steps').replaceChildren(node('li', 'Check the selected project connection again. Previous connection status is no longer current.'));
+    clearFeedback('Check the Unity connection before changing local feedback.');
+  }
   async function check() {
     const project = $('project').value;
     syncProjectPicker();
-    clearFeedback('Check the Unity connection before changing local feedback.');
+    invalidateConnection();
+    const request = connectionRequest;
     const result = await page.call('get_onboarding_status', { unityProjectPath: project || null });
-    if (project !== $('project').value) return;
+    if (request !== connectionRequest || project !== $('project').value) return;
     renderStatus(result); await readFeedback(project);
   }
   async function followActive(channel) {
@@ -226,14 +253,14 @@ export function mount(root, api) {
       meta.append(badge);
       page.on(select, 'click', () => run(async () => {
         const next = { ...config, active_channel_id: channel.id };
-        await page.call('save_config', { config: next }); config = next; $('project').value = channel.unity_project_path; await check(); await followActive(channel); renderProjects();
+        await saveConfig(next); $('project').value = channel.unity_project_path; renderProjects(); await check(); await followActive(channel);
       }, 'Selecting project'));
       const remove = node('button', null, 'icon-button'); remove.type = 'button'; remove.title = 'Remove from saved projects'; remove.setAttribute('aria-label', `Remove ${channel.name} from saved projects`); remove.textContent = '×';
       page.on(remove, 'click', () => run(async () => {
         if (!await confirm(page, { title: 'Remove saved project?', detail: `Remove ${channel.name} from this list? Project files and AI client settings are not deleted.`, accept: 'Remove from list' })) return;
         const remaining = config.channels.filter(item => item.id !== channel.id);
         const next = { ...config, channels: remaining, active_channel_id: config.active_channel_id === channel.id ? remaining[0]?.id || null : config.active_channel_id };
-        await page.call('save_config', { config: next }); config = next; $('project').value = active()?.unity_project_path || ''; await check(); renderProjects();
+        await saveConfig(next); $('project').value = active()?.unity_project_path || ''; renderProjects(); await check();
       }, 'Updating saved projects'));
       row.append(select, meta, remove); return row;
     }));
@@ -257,6 +284,15 @@ export function mount(root, api) {
     }
   }
   async function reload() {
+    try { await loadSettings(); $('retry').hidden = true; }
+    catch (reason) { $('retry').hidden = false; throw reason; }
+  }
+  function loadOption(name, value, property = 'value') {
+    const input = $(name);
+    if (!optionBaseline.has(name) || input[property] === optionBaseline.get(name)) input[property] = value;
+    optionBaseline.set(name, value);
+  }
+  async function loadSettings() {
     page.lock(true);
     try {
       config = await page.call('load_config');
@@ -271,11 +307,11 @@ export function mount(root, api) {
       if (!known.has(item.path)) known.set(item.path, item);
     }
     $('discovered').replaceChildren(placeholder, ...[...known.values()].map(item => { const option = node('option', item.name); option.value = item.path; return option; }));
-    $('server').value = config.mcp_server_path || '';
+    loadOption('server', config.mcp_server_path || '');
     const groups = config.tool_groups || 'core';
     if (![...$('groups').options].some(option => option.value === groups)) { const option = node('option', `Current: ${groups}`); option.value = groups; $('groups').append(option); }
-    $('groups').value = groups; $('follow').checked = config.auto_start === true;
-    $('scripts').checked = config.enable_custom_scripts === true; $('tests').checked = config.allow_all_tests !== false;
+    loadOption('groups', groups); loadOption('follow', config.auto_start === true, 'checked');
+    loadOption('scripts', config.enable_custom_scripts === true, 'checked'); loadOption('tests', config.allow_all_tests !== false, 'checked');
     renderProjects(); await check(); await checkProjectBadges(); productIssue = false; productVisibility(); page.lock(false);
   }
   for (const [id, label, commandId] of clients) {
@@ -292,7 +328,7 @@ export function mount(root, api) {
     page.on(checkbox, 'change', controls);
     page.on(apply, 'click', () => run(async () => {
       const channel = active();
-      if (!channel || channel.unity_project_path !== $('project').value) throw new Error('Use this saved project or run reviewed setup first.');
+      if (!onboarding || !channel || channel.unity_project_path !== $('project').value) throw new Error('Check this saved project or run reviewed setup first.');
       await page.call(`update_${commandId}_mcp_config`, { channel, mcpServerPath: config.mcp_server_path, toolGroups: config.tool_groups || 'core' });
       await check(); $('setup-result').textContent = `${label} settings saved. Fully quit and reopen ${label}, then check the connection.`;
     }, `Configuring ${label}`));
@@ -301,7 +337,7 @@ export function mount(root, api) {
       await page.call(`remove_${commandId}_mcp_config`); await check();
     }, `Disconnecting ${label}`));
   }
-  page.on($('project'), 'input', () => { syncProjectPicker(); onboarding = null; clearFeedback('Project changed. Check the Unity connection to load its local feedback preferences.'); });
+  page.on($('project'), 'input', () => { syncProjectPicker(); invalidateConnection(); });
   page.on($('feedback-enabled'), 'change', () => { if (!$('feedback-enabled').checked) $('feedback-usage').checked = false; controls(); });
   page.on($('feedback-check'), 'click', () => run(() => readFeedback(), 'Checking project feedback'));
   page.on($('feedback-save'), 'click', async () => {
@@ -324,7 +360,7 @@ export function mount(root, api) {
     }, 'Saving project feedback');
     if (saved && feedbackProject === project) $('feedback-status').textContent += ' Preferences saved and checked.';
   });
-  page.on($('check'), 'click', () => run(check, 'Checking connection'));
+  page.on($('check'), 'click', () => run(async () => { await check(); await checkProjectBadges(); }, 'Checking connection'));
   page.on($('retry'), 'click', () => { if (!page.busy()) void api.retry('mcp'); });
   page.on($('product-check'), 'click', () => run(inspectProductSettings, 'Inspecting saved settings'));
   async function reviewProductSettings() {
@@ -370,7 +406,7 @@ export function mount(root, api) {
     if (typeof channel?.unity_project_path !== 'string' || !channel.unity_project_path.trim()) throw new Error('No confirmed project path was returned. Check the project before retrying.');
     const existing = config.channels.find(item => item.unity_project_path === channel.unity_project_path);
     const next = { ...config, channels: existing ? config.channels : [...config.channels, channel], active_channel_id: existing?.id || channel.id };
-    await page.call('save_config', { config: next }); config = next; $('project').value = channel.unity_project_path; renderProjects(); await check(); await checkProjectBadges();
+    await saveConfig(next); $('project').value = channel.unity_project_path; renderProjects(); await check(); await checkProjectBadges();
   }, 'Adding project'));
   page.on($('cli'), 'change', async () => {
     cliTouched = true;
@@ -386,18 +422,19 @@ export function mount(root, api) {
     if (!onboarding?.project?.valid || !onboarding.runtime.ready || !selectedClients().length) throw new Error('Select a valid Unity project and an AI client, then check the connection.');
     if ($('cli').checked && cliConsent !== cliPolicy) throw new Error('Accept experimental Unity CLI consent before enabling it.');
     if (!await confirm(page, { title: 'Review connection setup', detail: `Project: ${$('project').value}\nClients: ${selectedClients().map(([, name]) => name).join(', ')}\nCapabilities: ${config.tool_groups || 'core'}\nCustom scripts: ${config.enable_custom_scripts === true ? 'on' : 'off'}\nAll project tests: ${config.allow_all_tests !== false ? 'allowed' : 'restricted'}\nUnity CLI: ${$('cli').checked ? 'experimental' : 'off for selected clients'}`, accept: 'Apply setup' })) return;
-    const result = await page.call('one_click_setup', {
+    let result;
+    try { result = await page.call('one_click_setup', {
       unityProjectPath: $('project').value,
       configureCodex: clientUi.get('codex').checkbox.checked, configureClaude: clientUi.get('claude').checkbox.checked,
       configureClaudeDesktop: clientUi.get('claudeDesktop').checkbox.checked, configureAntigravity: clientUi.get('antigravity').checkbox.checked,
       configureOpencode: clientUi.get('opencode').checkbox.checked, toolGroups: config.tool_groups || 'core', enableCustomScripts: config.enable_custom_scripts === true,
       configureUnityCli: cliTouched || config.unity_cli_enabled === true ? $('cli').checked : null,
       unityCliConsent: $('cli').checked ? cliConsent : null,
-    });
-    if (typeof result?.channel?.unity_project_path !== 'string' || !result.channel.unity_project_path.trim()) throw new Error('Setup returned no confirmed project path. Check the connection before retrying; earlier completed steps may remain.');
+    }); } catch (reason) { requireReload(reason); }
+    if (typeof result?.channel?.unity_project_path !== 'string' || !result.channel.unity_project_path.trim()) requireReload('Setup returned no confirmed project path.');
     $('project').value = result.channel.unity_project_path;
     cliTouched = false; await reload();
-    const next = { ...config, connection_guide_version: 1 }; await page.call('save_config', { config: next }); config = next;
+    const next = { ...config, connection_guide_version: 1 }; await saveConfig(next);
     $('setup-result').textContent = 'Settings saved. Open Unity and resolve Console errors. Fully quit and reopen changed AI clients, then check again. Earlier completed steps may remain if a later check fails.';
   }, 'Setting up MCP'));
   page.on($('bridges'), 'click', () => run(async () => {
@@ -409,7 +446,7 @@ export function mount(root, api) {
   page.on($('bridge'), 'click', () => run(async () => { await page.call('install_unity_extension', { unityProjectPath: $('project').value }); await check(); await checkProjectBadges(); }, 'Installing Unity bridge'));
   page.on($('save'), 'click', () => run(async () => {
     const next = { ...config, mcp_server_path: $('server').value.trim(), tool_groups: $('groups').value, auto_start: $('follow').checked, enable_custom_scripts: $('scripts').checked, allow_all_tests: $('tests').checked };
-    await page.call('save_config', { config: next }); config = next;
+    await saveConfig(next);
     const channel = active();
     if (channel) {
       await page.call('set_unity_custom_scripts', { unityProjectPath: channel.unity_project_path, enabled: next.enable_custom_scripts });
@@ -432,17 +469,42 @@ export function mount(root, api) {
     await reload();
   }, 'Reviewing connections'));
   async function readRecovery() {
-    recovery = await page.call('pending_client_recovery');
-    if (!Array.isArray(recovery) || recovery.length > 768) throw new Error('Recovery response is invalid. No recovery was requested.');
-    lines($('recovery'), recovery.map(item => `${item.clientName}: ${item.message}`)); controls();
+    recovery = []; controls();
+    try {
+      const records = await page.call('pending_client_recovery');
+      if (!Array.isArray(records) || records.length > 768 || records.some(item => !item
+        || typeof item.canResume !== 'boolean' || typeof item.central !== 'boolean'
+        || typeof item.clientName !== 'string' || typeof item.message !== 'string'
+        || typeof item.operation !== 'string' || !/^[a-f0-9]{64}$/.test(item.operation)
+        || !Array.isArray(item.clients) || !item.clients.length || item.clients.length > clients.length
+        || (!item.central && item.clients.length !== 1) || new Set(item.clients).size !== item.clients.length
+        || item.clients.some(id => !clients.some(([client]) => client === id)))) throw new Error('Recovery response is invalid. No recovery was requested.');
+      recovery = records;
+      lines($('recovery'), records.length ? records.map(item => `${item.clientName}: ${item.message}`) : ['No interrupted client changes found.']);
+    } catch (reason) {
+      lines($('recovery'), [`Could not inspect interrupted changes. Check again before resuming. ${text(reason)}`]);
+      throw reason;
+    } finally { controls(); }
   }
   page.on($('recovery-check'), 'click', () => run(readRecovery, 'Checking interrupted changes'));
   page.on($('recover'), 'click', () => run(async () => {
-    for (const record of recovery.filter(item => item.canResume)) {
-      const result = await page.call('recover_client_connection', { clients: record.clients, operation: record.operation, central: record.central });
-      if (!result?.completed) throw new Error('Recovery was declined or needs manual inspection. Current files were kept.');
+    const records = recovery.filter(item => item.canResume);
+    if (!records.length) return;
+    recovery = []; controls();
+    let failure;
+    try {
+      for (const record of records) {
+        const result = await page.call('recover_client_connection', { clients: record.clients, operation: record.operation, central: record.central });
+        if (result?.completed !== true) throw new Error('Recovery was declined or needs manual inspection. Current files were kept.');
+      }
+    } catch (reason) { failure = reason; }
+    try { await readRecovery(); }
+    catch (reason) {
+      if (failure) throw new Error(`${text(failure)} Recovery recheck also failed: ${text(reason)}`);
+      throw reason;
     }
-    await readRecovery(); await reload();
+    if (failure) throw failure;
+    await reload();
   }, 'Reviewing recovery'));
   page.on($('guide'), 'click', () => { if (!page.busy()) $('guide-dialog').showModal(); });
   page.on($('guide-start'), 'click', () => { $('guide-dialog').close(); $('project').focus(); });

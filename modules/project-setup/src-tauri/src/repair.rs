@@ -1,5 +1,6 @@
 use crate::hub::unique_id;
 use crate::logic::{self, SetupProgress};
+use crate::community_project::EditorLockState;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -129,7 +130,7 @@ fn checked_path(root: &Path, relative: &str) -> Result<PathBuf, String> {
     Ok(path)
 }
 
-fn editor_open(root: &Path) -> Result<bool, String> {
+fn editor_lock_state(root: &Path) -> Result<EditorLockState, String> {
     let path = checked_path(root, "Temp/UnityLockfile")?;
     match fs::symlink_metadata(&path) {
         Ok(info) if !info.is_file() => {
@@ -138,17 +139,17 @@ fn editor_open(root: &Path) -> Result<bool, String> {
             );
         }
         Ok(_) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(EditorLockState::NotHeld),
         Err(error) => return Err(format!("Cannot inspect Unity lock marker: {error}")),
     }
     #[cfg(windows)]
     {
-        crate::community_project::editor_open(root)
+        crate::community_project::editor_lock_state(&path)
     }
     #[cfg(not(windows))]
     {
         // Unity's Unix locking primitive is not established by the synthetic fs2 tests.
-        Ok(true)
+        Ok(EditorLockState::Unverified("This platform cannot verify whether Unity still owns the lock marker.".into()))
     }
 }
 
@@ -373,7 +374,7 @@ pub fn inspect(path: &Path) -> Result<Inspection, String> {
             },
         ),
     );
-    let locked = editor_open(&root)?;
+    let locked = editor_lock_state(&root)?.blocks();
     if locked {
         findings.push(finding(
             "blocked",
@@ -589,8 +590,18 @@ fn held_bytes(file: &mut File) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
+fn require_editor_lock_clear(state: EditorLockState) -> Result<(), String> {
+    match state {
+        EditorLockState::NotHeld => Ok(()),
+        #[cfg(any(windows, test))]
+        EditorLockState::Held => Err("Unity lock marker is in use. Its owner has not been verified. Inspect again; later edits were kept.".into()),
+        EditorLockState::Unverified(reason) => Err(format!("Cannot verify the Unity lock marker: {reason}. Inspect again; later edits were kept.")),
+    }
+}
+
 fn review_unchanged(root: &Path, inspection: &Inspection) -> Result<(), String> {
-    if editor_open(root)? || fingerprint(root)? != inspection.fingerprint {
+    require_editor_lock_clear(editor_lock_state(root)?)?;
+    if fingerprint(root)? != inspection.fingerprint {
         return Err(
             "Project opened or changed after backup. Inspect again; later edits were kept.".into(),
         );
@@ -738,6 +749,21 @@ impl Drop for OperationLock {
     }
 }
 
+fn acquire_operation_lock(path: &Path) -> Result<OperationLock, String> {
+    File::options()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::AlreadyExists {
+                "Another operation already owns this project.".into()
+            } else {
+                format!("Cannot create project operation lock {}: {error}", display_path(path))
+            }
+        })?;
+    Ok(OperationLock(path.to_owned()))
+}
+
 pub fn run(
     request: ExistingRequest,
     progress: impl Fn(SetupProgress),
@@ -761,13 +787,7 @@ pub fn run(
     let root = fs::canonicalize(&inspection.project_path).map_err(|e| e.to_string())?;
     let folder = checked_path(&root, ".creator-project-setup")?;
     fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
-    let lock_path = folder.join("operation.lock");
-    File::options()
-        .write(true)
-        .create_new(true)
-        .open(&lock_path)
-        .map_err(|_| "Another operation already owns this project.")?;
-    let _lock = OperationLock(lock_path);
+    let _lock = acquire_operation_lock(&folder.join("operation.lock"))?;
     let backups = checked_path(&root, ".creator-project-setup/backups")?;
     fs::create_dir_all(&backups).map_err(|e| e.to_string())?;
     let backup = backups.join(unique_id());
@@ -790,12 +810,9 @@ pub fn run(
         }
     }
     write_json(&backup.join("review.json"), &inspection)?;
-    if editor_open(&root)? || fingerprint(&root)? != inspection.fingerprint {
-        return Err(format!(
-            "Project opened or changed during backup. Nothing was repaired. Backup: {}",
-            display_path(&backup)
-        ));
-    }
+    review_unchanged(&root, &inspection).map_err(|error| {
+        format!("{error} Nothing was repaired. Backup: {}", display_path(&backup))
+    })?;
     let report_path = backup.join("result.json");
     let mut owned_temporary = Vec::new();
     let mut fresh_validation = false;
@@ -922,6 +939,57 @@ pub fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn diagnostic_operation_lock_preserves_existing_owner_and_releases_owned_marker() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("operation.lock");
+        fs::write(&path, b"existing owner").unwrap();
+        let error = acquire_operation_lock(&path).err().unwrap();
+        assert_eq!(error, "Another operation already owns this project.");
+        assert_eq!(fs::read(&path).unwrap(), b"existing owner");
+        let owned_path = temp.path().join("owned.lock");
+        let owned = acquire_operation_lock(&owned_path).unwrap();
+        assert!(owned_path.is_file());
+        assert!(acquire_operation_lock(&owned_path).is_err());
+        drop(owned);
+        assert!(!owned_path.exists());
+        assert_eq!(fs::read(&path).unwrap(), b"existing owner");
+    }
+
+    #[test]
+    fn diagnostic_operation_lock_io_failure_is_not_reported_as_an_owner() {
+        let temp = tempfile::tempdir().unwrap();
+        let parent = temp.path().join("not-a-directory");
+        fs::write(&parent, b"keep parent").unwrap();
+        for path in [parent.join("operation.lock"), temp.path().join("missing/operation.lock")] {
+            let native = File::options().write(true).create_new(true).open(&path).unwrap_err();
+            assert_ne!(native.kind(), std::io::ErrorKind::AlreadyExists);
+            let error = acquire_operation_lock(&path).err().unwrap();
+            assert!(error.contains("Cannot create project operation lock"), "{error}");
+            assert!(error.contains(&display_path(&path)), "{error}");
+            assert!(error.contains(&native.to_string()), "{error}");
+            assert!(!error.contains("Another operation"));
+        }
+        assert_eq!(fs::read(parent).unwrap(), b"keep parent");
+        assert!(!temp.path().join("missing").exists());
+    }
+
+    #[test]
+    fn diagnostic_backup_lock_refusal_preserves_uncertainty() {
+        let error = require_editor_lock_clear(EditorLockState::Unverified("fixture access denied".into())).unwrap_err();
+        assert!(error.contains("Cannot verify the Unity lock marker"), "{error}");
+        assert!(error.contains("fixture access denied"));
+        assert!(!error.contains("Project opened or changed"));
+        assert!(require_editor_lock_clear(EditorLockState::NotHeld).is_ok());
+    }
+
+    #[test]
+    fn diagnostic_backup_lock_contention_does_not_claim_unity_ownership() {
+        let error = require_editor_lock_clear(EditorLockState::Held).unwrap_err();
+        assert!(error.contains("Unity lock marker is in use"), "{error}");
+        assert!(!error.contains("Project opened or changed"));
+    }
     fn manifest() -> Value {
         let mut dependencies = serde_json::Map::new();
         for module in logic::REQUIRED_BUILTIN_MODULES {

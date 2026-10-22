@@ -2,6 +2,14 @@
 
 ## Unified Product Work
 
+- User priority 2026-10-22: finish proper first-party Hub integration and the
+  reported MCP, migration, project-list and Setup bugs first. Prove settings
+  preservation and the complete install/update/restart flow before returning
+  to Flatpak. Do not run further Flatpak packaging/device loops in the meantime.
+  Leave installed and published Windows apps untouched; no Mac work. Run focused
+  regression checks before expensive builds, keep dependency/build caches, and
+  reuse verified product artifacts for test-only or documentation changes.
+
 - User clarification 2026-10-18: unification means MCP and Project Setup are
   first-party Hub pages/functions, not separate app documents inside iframes.
   The current private-backend/iframe design is packaged consolidation only.

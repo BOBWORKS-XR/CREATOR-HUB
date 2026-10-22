@@ -22,6 +22,19 @@ decision is not a claim of Flathub eligibility or completed Flatpak support.
 
 ## Verified Current State
 
+2026-10-22 priority: complete the direct pages and reported product bugs before
+returning to Flatpak. Keep published and installed Windows apps unchanged; no
+Mac work. This is source/test work, not a new release or native acceptance.
+
+For a product change, run `npm run test:integration:ui` before a native build.
+Then run `npm run test:integration:native` for host-native regression tests,
+using the existing Cargo target cache and locked dependency graph. These commands
+do not package, sign, install or publish an app. Browser tests use fixture APIs;
+host-native tests are not proof of another platform's behavior. Native Linux
+install/update/restart acceptance still uses its reviewed platform feature set
+and disposable settings. Test-only changes reuse verified product artifacts;
+product changes require a newly bound candidate after the focused tests pass.
+
 - **Legacy design, retained for existing builds:** `src/hosted.js` creates an iframe and reconstructs each
   module's full document; `src-tauri/src/hosted.rs` starts its private executable.
   `scripts/build-unified.cjs` packages both launcher executables. This consolidates
