@@ -161,6 +161,7 @@ jobs:
           workspaces: |
             native/unix-transfer
             src-tauri -> ../artifacts/unix-verifier-target
+            ${{ runner.os == 'Linux' && 'src-tauri -> ../artifacts/linux-root-target' || '' }}
           cache-on-failure: true
       - name: Install native Linux prerequisites only on the disposable runner
         if: runner.os == 'Linux'
@@ -216,6 +217,7 @@ jobs:
             exit 64
           fi
           extra=()
+          if [[ "$RUNNER_OS" == Linux ]]; then extra+=(--linux-root-cache); fi
           if [[ "$CREATOR_LINUX_RETIREMENT_TEST_CANDIDATE" == 1 ]]; then extra+=(--linux-retirement-test-candidate); fi
           if [[ "$CREATOR_LINUX_INTEGRATED_CANDIDATE" == 1 ]]; then extra+=(--linux-integrated-candidate --integrated-features); fi
           if [[ "${CREATOR_LINUX_PRODUCTION_MIGRATION_016:-0}" == 1 ]]; then extra+=(--linux-production-migration-016 --integrated-features); fi

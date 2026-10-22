@@ -13,7 +13,9 @@ for (const name of ['linux-portable-deployment.yml', 'linux-integrated-features.
     const workflow = yaml.parse(source, { uniqueKeys: true });
     assert.deepEqual(workflow.permissions, { contents: 'read' });
     const commands = [];
-    for (const job of Object.values(workflow.jobs)) {
+    const jobs = name === 'linux-portable-deployment.yml'
+      ? [workflow.jobs.primitives] : Object.values(workflow.jobs);
+    for (const job of jobs) {
       assert.equal(job['runs-on'], 'ubuntu-22.04');
       assert.match(job.if, /github.repository_id == '1364807512'/);
       assert.match(job.if, /refs\/heads\/validation\//);
@@ -37,6 +39,21 @@ for (const name of ['linux-portable-deployment.yml', 'linux-integrated-features.
         assert.ok(rootCommands.some(line => line.includes('experimental-linux-portable-update --')));
       }
     }
-    assert.doesNotMatch(commands.join('\n'), /--ignored|tauri build|gh release|publish-hub|signer sign|flatpak install|dpkg --install|macos/);
+    const explicitPermissionTests = name === 'linux-integrated-features.yml'
+      ? ['umask_002', 'default_acl'].map(suffix => `cargo test --locked --manifest-path src-tauri/Cargo.toml --features integrated-features,experimental-flatpak-host,linux-production-migration,experimental-linux-portable-update projects::tests::live_linux_helper_preparation_${suffix} -- --exact --ignored --test-threads=1 --nocapture`)
+      : [];
+    assert.deepEqual(commands.filter(line => line.includes('--ignored')), explicitPermissionTests);
+    assert.doesNotMatch(commands.join('\n'), /tauri build|gh release|publish-hub|signer sign|flatpak install|dpkg --install|macos/);
   });
 }
+
+test('Linux integration validates structured workflow contracts early and keeps compilation cache on failure', () => {
+  const workflow = yaml.parse(fs.readFileSync(path.join(root, '.github/workflows/linux-integrated-features.yml'), 'utf8'));
+  const steps = workflow.jobs['native-libraries'].steps;
+  assert.equal(steps.find(step => step.uses === 'Swatinem/rust-cache@v2').with['cache-on-failure'], true);
+  const preflight = steps.findIndex(step => step.run?.includes('scripts/linux-portable-signed-controls.test.cjs'));
+  assert.ok(preflight >= 0);
+  assert.ok(steps[preflight].run.includes('scripts/linux-portable-restart-ci.test.cjs'));
+  const compile = steps.findIndex(step => step.run?.includes('cargo clippy'));
+  assert.ok(preflight < compile);
+});

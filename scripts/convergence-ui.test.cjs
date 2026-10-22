@@ -19,19 +19,21 @@ function fixture(handler = () => report(), capability = true, storage = new Map(
     dispatch(type) { const event = { prevented: false, preventDefault() { this.prevented = true; } };
       for (const listener of [...(this.listeners.get(type) || [])]) listener(event); return event; }
     replaceChildren(...children) { this.children = children; }
+    get childElementCount() { return this.children.length; }
     setAttribute(key, value) { this.attributes[key] = value; }
     showModal() { this.open = true; this.shown++; }
     close() { this.open = false; this.closed++; }
     focus() { document.activeElement = this; }
   }
-  const elements = Object.fromEntries(['dialog', 'title', 'summary', 'details', 'error', 'prepare', 'connections', 'retire', 'refresh', 'later', 'reopen'].map(id => [id, new Element()]));
+  const elements = Object.fromEntries(['dialog', 'title', 'summary', 'details', 'error', 'prepare', 'connections', 'retire', 'refresh', 'later', 'reopen',
+    'move', 'progress', 'explanation', 'backups', 'recovery', 'recovery-text', 'copy-recovery', 'copy-status'].map(id => [id, new Element()]));
   const main = new Element(), alreadyLocked = new Element(), focus = new Element(); alreadyLocked.inert = true;
   const calls = []; let lookups = 0;
   const document = { body: { children: [main, elements.dialog, alreadyLocked] }, activeElement: focus,
     querySelector(selector) { lookups++; return elements[selector.replace('#convergence-', '')] || null; },
     createElement(name) { assert.equal(name, 'li'); return new Element(); } };
   const native = { invoke(command, ...args) {
-    assert.ok(['convergence_status', 'refresh_convergence', 'prepare_convergence', 'migrate_convergence_connections', 'retire_convergence_apps'].includes(command), 'Only bounded native migration phases');
+    assert.ok(['convergence_status', 'refresh_convergence', 'prepare_convergence', 'migrate_convergence_connections', 'retire_convergence_apps', 'move_to_hub', 'inspect_convergence_outcome'].includes(command), 'Only bounded native migration phases');
     assert.deepEqual(args, [], 'No renderer paths, reports or client selections are native arguments');
     calls.push(command); return handler(command);
   } };
@@ -287,4 +289,70 @@ test('failed refresh keeps previous native phase but does not advance it', async
   const done = f.window.CreatorConvergence.run(); await tick(); f.click('refresh'); await tick();
   assert.match(f.elements.error.textContent, /recovery/); assert.equal(f.elements.connections.hidden, false);
   assert.equal(f.elements.retire.hidden, true); f.click('later'); await done;
+});
+
+test('streamlined migration uses one action and does not call legacy mutation phases', async () => {
+  const f = fixture(command => command === 'convergence_status' ? report({ streamlined: true })
+    : { outcome: 'complete', phase: 'cleanup', message: 'Verified complete.',
+      report: report({ streamlined: true, stage: 'complete', required: false, legacyApps: [], backups: ['exact-original.bak'] }) });
+  const done = f.window.CreatorConvergence.run(); await tick();
+  assert.equal(f.elements.prepare.hidden, true);
+  assert.equal(f.elements.connections.hidden, true);
+  assert.equal(f.elements.retire.hidden, true);
+  assert.equal(f.elements.move.hidden, false);
+  f.click('move'); await tick();
+  assert.equal(f.elements.title.textContent, 'Move complete');
+  assert.equal(f.elements.move.hidden, true);
+  assert.equal(f.elements.later.textContent, 'Continue in Hub');
+  f.click('later'); await done;
+  assert.deepEqual(f.calls, ['convergence_status', 'move_to_hub']);
+});
+
+for (const [phase, stage] of [['backup', 'review'], ['connections', 'backed-up'], ['cleanup', 'connections-reviewed']]) {
+  test(`streamlined uncertain ${phase} keeps recovery, permits Not now and never replays on inspection or reopen`, async () => {
+    let current = report({ streamlined: true });
+    const f = fixture(command => {
+      if (command === 'move_to_hub') {
+        current = report({ streamlined: true, stage, moveAvailable: false, backups: ['exact-original.bak'],
+          recoveryHelp: `Review retained ${phase} record; do not replay the operation.` });
+        return { outcome: 'stopped', phase, message: `Uncertain ${phase}; settings retained.`, report: current };
+      }
+      return current;
+    });
+    let done = f.window.CreatorConvergence.run(); await tick();
+    f.click('move'); await tick();
+    assert.match(f.elements.error.textContent, /Uncertain/);
+    assert.equal(f.elements.move.hidden, true);
+    assert.equal(f.elements.recovery.hidden, false);
+    assert.equal(f.elements.later.textContent, 'Not now');
+    assert.equal(f.elements.later.disabled, false);
+    f.click('refresh'); await tick();
+    assert.equal(f.elements.move.hidden, true);
+    assert.equal(f.elements['recovery-text'].value, current.recoveryHelp);
+    f.click('later'); await done;
+    done = f.window.CreatorConvergence.run(true); await tick();
+    assert.equal(f.elements.move.hidden, true);
+    assert.equal(f.elements.recovery.hidden, false);
+    f.click('later'); await done;
+    assert.deepEqual(f.calls, ['convergence_status', 'move_to_hub', 'inspect_convergence_outcome', 'convergence_status']);
+  });
+}
+
+for (const stage of ['review', 'complete']) test(`rejected streamlined ${stage} inspection preserves retained recovery state`, async () => {
+  const retained = report({ streamlined: true, moveAvailable: false,
+    recoveryHelp: 'Keep the retained phase record; migration remains incomplete.', backups: ['exact-original.bak'] });
+  const rejected = report({ streamlined: false, stage, required: stage !== 'complete', legacyApps: [] });
+  const f = fixture(command => command === 'convergence_status' ? retained : rejected);
+  const done = f.window.CreatorConvergence.run(); await tick();
+  assert.equal(f.elements.move.hidden, true);
+  f.click('refresh'); await tick();
+  assert.match(f.elements.error.textContent, /Native migration support changed/);
+  assert.equal(f.elements.move.hidden, true, 'A rejected inspection must not restore mutation controls');
+  assert.equal(f.elements.title.textContent, 'Migration needs review', 'A rejected inspection must not imply completion');
+  assert.equal(f.elements.recovery.hidden, false);
+  assert.equal(f.elements['recovery-text'].value, retained.recoveryHelp);
+  assert.ok(f.elements.details.children.some(item => item.textContent === 'Backup: exact-original.bak'));
+  assert.equal(f.elements.later.disabled, false);
+  f.click('later'); await done;
+  assert.deepEqual(f.calls, ['convergence_status', 'inspect_convergence_outcome']);
 });

@@ -439,7 +439,7 @@ function workflowBash(t, script, retirement, integrated, overrides = {}) {
   if (!fs.existsSync(bash)) { t.skip('Native Bash is unavailable; do not substitute a WSL/native product run'); return null; }
   return spawnSync(bash, ['--noprofile', '--norc', '-c', script], {
     cwd: repo, windowsHide: true, encoding: 'utf8', timeout: 15000,
-    env: { ...process.env, BASH_ENV: '', GITHUB_REF: 'refs/heads/validation/unix-assembly-014',
+    env: { ...process.env, BASH_ENV: '', RUNNER_OS: 'Linux', GITHUB_REF: 'refs/heads/validation/unix-assembly-014',
       GITHUB_REPOSITORY: 'BOBWORKS-XR/CREATOR-HUB', GITHUB_REPOSITORY_ID: '1364807512',
       GITHUB_EVENT_NAME: 'workflow_dispatch', SIGNED_INPUTS: '',
       CREATOR_LINUX_RETIREMENT_TEST_CANDIDATE: retirement,
@@ -545,7 +545,7 @@ test('actual assembly Bash selects exactly one profile and the integrated builde
     const args = result.stdout.trimEnd().split(/\r?\n/);
     assert.deepEqual(args.slice(0, 4), ['run', 'build:unified', '--', 'ci-signed-unix-hub']);
     const options = parseBuildOptions(args.slice(4));
-    assert.deepEqual(options, { installer: true, managed: true, experimentalUnix: true, experimentalWritable: true,
+    assert.deepEqual(options, { installer: true, managed: true, experimentalUnix: true, experimentalWritable: true, linuxRootCache: true,
       signedUnixInput: '/reviewed-runner/signed-unix-input', ...selected });
     if (integrated === '1') {
       assert.deepEqual(require('./build-unified.cjs').integrationArguments('linux', 'x86_64', options.integratedFeatures, true),
@@ -555,6 +555,18 @@ test('actual assembly Bash selects exactly one profile and the integrated builde
   const refused = workflowBash(t, stubs + step.run, '1', '1'); if (!refused) return;
   assert.equal(refused.status, 64, refused.stderr || refused.error?.message);
   assert.equal(refused.stdout, '', 'No builder invocation when both profiles are selected');
+});
+
+test('assembly Bash opts only Linux into the dependency cache without running build tools', t => {
+  const workflow = assemblyYaml(t); if (!workflow) return;
+  const step = workflow.jobs.assembly.steps.find(item => item.id === 'package');
+  const stubs = "python3() { printf '%s\\n' '/reviewed-runner'; }\nnpm() { printf '%s\\n' \"$@\"; }\n";
+  for (const runner of ['Linux', 'macOS', 'Windows']) {
+    const result = workflowBash(t, stubs + step.run, '0', '0', { RUNNER_OS: runner }); if (!result) return;
+    assert.equal(result.status, 0, result.stderr);
+    const options = parseBuildOptions(result.stdout.trimEnd().split(/\r?\n/).slice(4));
+    assert.equal(options.linuxRootCache, runner === 'Linux' ? true : undefined);
+  }
 });
 
 test('pre-package tests keep optional MCP libraries off until the builder verifies and extracts signed payloads', t => {

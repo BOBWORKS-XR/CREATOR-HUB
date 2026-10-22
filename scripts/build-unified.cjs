@@ -292,16 +292,63 @@ function verifyStage(directory, manifest) {
     }
   }
 }
+function linuxRootCacheTarget(root, output, signedUnixInput) {
+  const target = path.join(root, 'artifacts', 'linux-root-target');
+  const overlaps = (a, b) => {
+    const inside = (file, parent) => {
+      const relative = path.relative(parent, file);
+      return !relative || !path.isAbsolute(relative) && relative !== '..' && !relative.startsWith(`..${path.sep}`);
+    };
+    return inside(a, b) || inside(b, a);
+  };
+  if (!path.isAbsolute(root) || path.resolve(root) !== root || overlaps(target, output) || overlaps(target, signedUnixInput)) {
+    throw Error('Linux Root cache must be separate from signed inputs and immutable output.');
+  }
+  const stat = file => {
+    try { return fs.lstatSync(file); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+  };
+  for (let directory = target;; directory = path.dirname(directory)) {
+    const info = stat(directory);
+    if (info && (!info.isDirectory() || info.isSymbolicLink() || fs.realpathSync(directory) !== directory)) {
+      throw Error('Linux Root cache ancestor is redirected or not a directory.');
+    }
+    if (path.dirname(directory) === directory) break;
+  }
+  // CI restores dependencies, never a previous Hub or bundle. Refuse leftovers
+  // instead of deleting evidence or allowing Tauri to package an older output.
+  for (const profile of ['release', 'x86_64-unknown-linux-gnu/release']) {
+    for (const name of ['bundle', 'creator-hub']) {
+      if (stat(path.join(target, profile, name))) {
+        throw Error('Linux Root cache contains a previous Hub or bundle. Preserve it and use a fresh cache or omit --linux-root-cache.');
+      }
+    }
+  }
+  const inspect = directory => {
+    for (const name of fs.readdirSync(directory)) {
+      const file = path.join(directory, name), info = fs.lstatSync(file);
+      if (info.isSymbolicLink() || !info.isDirectory() && (!info.isFile() || info.nlink !== 1)) {
+        throw Error('Linux Root cache contains a redirected, linked or nonregular entry. Preserve it and omit --linux-root-cache.');
+      }
+      if (info.isDirectory()) inspect(file);
+    }
+  };
+  if (stat(target)) inspect(target);
+  return target;
+}
 function build(label, { installer = false, managed = false, experimentalUnix = false, experimentalWritable = false,
   prepareManagedUnix = false, signedUnixInput = null, linuxRetirementCandidate = false,
   linuxIntegratedCandidate = false, integratedFeatures = false, linuxPortableHostCandidate = false, linuxProductionMigration = false,
-  linuxPrivateUpdateFixture = false } = {}, context = {}) {
+  linuxPrivateUpdateFixture = false, linuxRootCache = false } = {}, context = {}) {
   if (!/^[a-zA-Z0-9][a-zA-Z0-9-]{0,63}$/.test(label || '')) throw Error('Provide a unique, simple build name.');
   const root = context.root || repositoryRoot;
   const execute = context.execute || execFileSync;
   const environment = context.env || process.env;
   const platform = context.platform || { win32: 'windows', darwin: 'macos', linux: 'linux' }[process.platform];
   const arch = context.arch || { x64: 'x86_64', arm64: 'aarch64' }[process.arch];
+  if (typeof linuxRootCache !== 'boolean' || linuxRootCache && !(platform === 'linux' && arch === 'x86_64'
+    && managed && experimentalUnix && experimentalWritable && signedUnixInput && !prepareManagedUnix && !linuxPrivateUpdateFixture)) {
+    throw Error('--linux-root-cache requires signed Linux x86_64 Root assembly, not preparation or a private fixture.');
+  }
   if (linuxPrivateUpdateFixture !== false) {
     const private017 = require('./private-linux-update-fixture-017.cjs');
     candidateProfile({ linuxRetirementCandidate, linuxIntegratedCandidate, integratedFeatures, linuxProductionMigration,
@@ -330,7 +377,7 @@ function build(label, { installer = false, managed = false, experimentalUnix = f
   const payload = require('./unix-managed-payload.cjs');
   payload.checkSplitOptions({ platform, installer, managed, experimentalUnix, experimentalWritable, prepareManagedUnix, signedUnixInput });
   if (signedUnixInput) return buildSignedUnix(label, { installer, signedUnixInput, linuxRetirementCandidate,
-    linuxIntegratedCandidate, integratedFeatures, linuxPortableHostCandidate, linuxProductionMigration }, context);
+    linuxIntegratedCandidate, integratedFeatures, linuxPortableHostCandidate, linuxProductionMigration, linuxRootCache }, context);
   const unix = require('./unix-package-payload.cjs');
   const plan = unix.nativePlan(platform, arch, { installer, experimentalUnix, experimentalWritable, managed });
   const nativeTargetArgs = plan.rustTarget ? ['--target', plan.rustTarget] : [];
@@ -504,7 +551,8 @@ function signedAssemblyReceipt(result, platform, arch, commit, featureArgs, port
     nativeGuiAccepted: false, releaseReady: false };
 }
 function buildSignedUnix(label, { installer, signedUnixInput, linuxRetirementCandidate = false,
-  linuxIntegratedCandidate = false, integratedFeatures = false, linuxPortableHostCandidate = false, linuxProductionMigration = false }, context = {}) {
+  linuxIntegratedCandidate = false, integratedFeatures = false, linuxPortableHostCandidate = false, linuxProductionMigration = false,
+  linuxRootCache = false }, context = {}) {
   const root = context.root || repositoryRoot;
   const execute = context.execute || execFileSync;
   const environment = context.env || process.env;
@@ -514,6 +562,7 @@ function buildSignedUnix(label, { installer, signedUnixInput, linuxRetirementCan
   const retirementCandidate = linuxRetirementCandidate || linuxIntegratedCandidate || linuxProductionMigration;
   const featureArgs = integrationArguments(platform, arch, integratedFeatures, retirementCandidate, linuxPortableHostCandidate, linuxProductionMigration);
   const output = path.join(root, 'artifacts', 'unified', label);
+  const rootTarget = linuxRootCache ? linuxRootCacheTarget(root, output, signedUnixInput) : path.join(output, 'hub-target');
   if (linuxProductionMigration) admitProductionSource(root, execute, linuxPortableHostCandidate);
   if (linuxPortableHostCandidate) admitPortableSource(root, execute);
   const result = require('./assemble-unix-payload.cjs').assemble(signedUnixInput, output, platform, arch,
@@ -525,7 +574,7 @@ function buildSignedUnix(label, { installer, signedUnixInput, linuxRetirementCan
   const plan = unix.nativePlan(platform, arch, { installer, managed: true, experimentalUnix: true, experimentalWritable: true });
   const env = { ...integrationEnvironment(unix.packageEnvironment(environment, platform, 'writable'), output, integratedFeatures),
     CREATOR_BUILTIN_MANIFEST: path.join(output, 'builtin-manifest.json'),
-    CARGO_TARGET_DIR: path.join(output, 'hub-target') };
+    CARGO_TARGET_DIR: rootTarget };
   const npm = environment.npm_execpath;
   if (!npm || !fs.existsSync(npm)) throw Error('Run this builder through npm run build:unified. Verified inputs are retained.');
   const resources = Object.fromEntries(Object.keys(result.manifest.modules.mcp.files)
@@ -553,6 +602,7 @@ function buildSignedUnix(label, { installer, signedUnixInput, linuxRetirementCan
   if (integratedFeatures) stageIntegrationService(output, overlay);
   const bundles = retirement ? ['deb'] : plan.bundles;
   const cli = path.join(root, 'node_modules/@tauri-apps/cli/tauri.js');
+  if (linuxRootCache) linuxRootCacheTarget(root, output, signedUnixInput);
   execute(process.execPath, [cli, 'build', ...featureArgs, '--target', plan.rustTarget,
     ...(installer ? ['--bundles', bundles.join(',')] : ['--no-bundle']), '--config', overlay, '--', '--locked'],
     { cwd: root, env, stdio: 'inherit', windowsHide: true });
@@ -580,12 +630,13 @@ function writeAssemblyManifests(output, signedManifest, finalManifest) {
 }
 function parseBuildOptions(args) {
   const options = {};
-  const usage = 'Provide one build name and optional --installer, --managed, --experimental-unix and --experimental-unix-writable; preparation also requires --prepare-managed-unix. --integrated-features is Windows/Linux candidate-only; --linux-integrated-candidate, --linux-production-migration-016, --linux-portable-host-candidate and --linux-private-update-fixture-017 are Linux-only.';
+  const usage = 'Provide one build name and optional --installer, --managed, --experimental-unix and --experimental-unix-writable; preparation also requires --prepare-managed-unix. --integrated-features is Windows/Linux candidate-only; --linux-integrated-candidate, --linux-production-migration-016, --linux-portable-host-candidate, --linux-private-update-fixture-017 and --linux-root-cache are Linux-only.';
   const flags = { '--installer': 'installer', '--managed': 'managed', '--experimental-unix': 'experimentalUnix',
     '--experimental-unix-writable': 'experimentalWritable', '--prepare-managed-unix': 'prepareManagedUnix',
     '--linux-retirement-test-candidate': 'linuxRetirementCandidate', '--integrated-features': 'integratedFeatures',
     '--linux-integrated-candidate': 'linuxIntegratedCandidate', '--linux-portable-host-candidate': 'linuxPortableHostCandidate',
-    '--linux-production-migration-016': 'linuxProductionMigration', '--linux-private-update-fixture-017': 'linuxPrivateUpdateFixture' };
+    '--linux-production-migration-016': 'linuxProductionMigration', '--linux-private-update-fixture-017': 'linuxPrivateUpdateFixture',
+    '--linux-root-cache': 'linuxRootCache' };
   const seen = new Set();
   for (let index = 0; index < args.length; index++) {
     const flag = args[index];
@@ -601,7 +652,7 @@ function parseBuildOptions(args) {
   return options;
 }
 module.exports = { relativeFile, moduleFiles, verifyStage, stageFileMode, integrationArguments, integrationEnvironment, stageIntegratedMcpResources, candidateProfile, stageIntegrationService, stageWindowsIntegration, build, parseBuildOptions, writeAssemblyManifests, signedAssemblyReceipt, checkPortableHostOptions, validatePortableBuildProof, portableBuildProof, admitPortableSource, PORTABLE_HOST_FEATURES, PORTABLE_ROOT_WITNESSES, PORTABLE_SOURCE_PATHS,
-  checkProductionOptions, admitProductionSource, validateProductionBuildProof, productionBuildProof,
+  checkProductionOptions, admitProductionSource, validateProductionBuildProof, productionBuildProof, linuxRootCacheTarget,
   PRODUCTION_FEATURES, PRODUCTION_PORTABLE_FEATURE, PRODUCTION_PORTABLE_FEATURES, PRODUCTION_SOURCE_PATHS };
 if (require.main === module) {
   try {

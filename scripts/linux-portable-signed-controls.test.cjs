@@ -55,6 +55,32 @@ function mockTransfer({ extraEnv = {}, release = {}, mutateAsset = () => {}, bod
     run: () => download(github, { repo: { owner: 'BOBWORKS-XR', repo: 'CREATOR-HUB' }, sha: values.GITHUB_SHA, runId: 123 }, requireMock, { env: values }) };
 }
 
+function assertPrimitiveTempScope(value) {
+  const job = value.jobs.primitives;
+  assert.doesNotMatch(JSON.stringify(value.env || {}), /runner\s*\.\s*temp/);
+  assert.doesNotMatch(JSON.stringify(job.env || {}), /runner\s*\.\s*temp/);
+  const steps = job.steps.filter(step => /cargo (?:fmt|clippy|test) /.test(step.run || ''));
+  assert.equal(steps.length, 2);
+  for (const step of steps) {
+    assert.equal(step.env?.CARGO_TARGET_DIR, '${{ runner.temp }}/linux-portable-deployment-target');
+    assert.match(step.run, /^set -euo pipefail\n/);
+  }
+}
+
+test('primitive Cargo temp scope remains exact despite unrelated signed-control job environments', () => {
+  assertPrimitiveTempScope(workflow);
+  const unrelated = structuredClone(workflow);
+  unrelated.jobs['signed-controls'].env = { SIGNED_CONTROLS_EXECUTE: '${{ inputs.run_signed_controls }}' };
+  assertPrimitiveTempScope(unrelated);
+  for (const scope of ['workflow', 'job', 'step']) {
+    const changed = structuredClone(workflow);
+    if (scope === 'workflow') changed.env = { CARGO_TARGET_DIR: '${{ runner.temp }}/unexpected' };
+    if (scope === 'job') changed.jobs.primitives.env = { CARGO_TARGET_DIR: '${{ runner.temp }}/unexpected' };
+    if (scope === 'step') delete changed.jobs.primitives.steps.find(step => step.env?.CARGO_TARGET_DIR).env;
+    assert.throws(() => assertPrimitiveTempScope(changed), undefined, scope);
+  }
+});
+
 test('push and ordinary manual lane retain their original commands and permissions', () => {
   assert.deepEqual(workflow.on.push, { branches: ['validation/linux-portable-deployment'], paths: ['native/linux-portable-deployment/**', c.WORKFLOW] });
   assert.deepEqual(workflow.permissions, { contents: 'read' });

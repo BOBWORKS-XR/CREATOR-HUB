@@ -253,8 +253,9 @@
         }
         busy = true; error.hidden = true; error.textContent = ''; render();
         try {
-          current = report(await native.invoke(streamlined ? 'inspect_convergence_outcome' : 'refresh_convergence'));
-          if (streamlined && !current.streamlined) throw new Error('Native migration support changed. Keep retained files.');
+          const next = report(await native.invoke(streamlined ? 'inspect_convergence_outcome' : 'refresh_convergence'));
+          if (streamlined && !next.streamlined) throw new Error('Native migration support changed. Keep retained files.');
+          current = next;
           stopped = false; result = streamlined ? current.message : ''; phase = '';
         }
         catch (reason) { showError(reason); }

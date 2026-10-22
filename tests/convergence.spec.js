@@ -41,6 +41,7 @@ async function load(page, { required = true, failPrepare = false, holdPrepare = 
           return { outcome: 'complete', phase: 'cleanup', report: window.report, message: 'Move complete. Settings and backups kept; standalone cleanup verified.' };
         }
         if (command === 'inspect_convergence_outcome') {
+          if (window.inspectionOverride) return window.inspectionOverride;
           window.report = { ...window.report, stage: 'review', moveAvailable: !uncertain,
             message: uncertain ? 'Retained state inspected. Partial or uncertain native outcome needs recovery review; no transaction retried.' : 'Retained state inspected. No cleanup was started; fresh native review is available.' };
           return window.report;
@@ -263,6 +264,29 @@ test('partial retirement can be inspected but is never automatically retried or 
   await page.locator('#convergence-reopen').click();
   await expect(page.locator('#convergence-move')).not.toBeVisible();
   expect(await page.evaluate(() => window.calls.filter(call => call.command === 'move_to_hub').length)).toBe(1);
+});
+
+for (const stage of ['review', 'complete']) test(`rejected ${stage} inspection preserves recovery without enabling migration`, async ({ page }) => {
+  const recovery = 'Retained phase record: C:/fixture-only/move-v1.json\nMigration remains incomplete.';
+  await load(page, { streamlined: true, initialRecovery: recovery });
+  await expect(page.locator('#convergence-title')).toHaveText('Migration needs review');
+  await page.evaluate(stage => {
+    window.inspectionOverride = { ...window.report, streamlined: false, stage, required: stage !== 'complete',
+      moveAvailable: true, legacyApps: [], recoveryHelp: null, backups: [], message: 'Rejected response' };
+  }, stage);
+  await page.locator('#convergence-refresh').click();
+  await expect(page.locator('#convergence-error')).toContainText('Native migration support changed');
+  await expect(page.locator('#convergence-title')).toHaveText('Migration needs review');
+  await expect(page.locator('#convergence-move')).not.toBeVisible();
+  await expect(page.locator('#convergence-recovery-text')).toHaveValue(recovery);
+  await expect(page.locator('#convergence-later')).toHaveText('Not now');
+  await page.locator('#convergence-later').click();
+  await expect(page.locator('#convergence-dialog')).not.toBeVisible();
+  await page.locator('#convergence-reopen').click();
+  await expect(page.locator('#convergence-recovery-text')).toHaveValue(recovery);
+  await expect(page.locator('#convergence-move')).not.toBeVisible();
+  expect(await page.evaluate(() => window.calls.filter(call => /move_to_hub|retire_convergence|prepare_convergence|migrate_convergence/.test(call.command)))).toEqual([]);
+  expect(await page.evaluate(() => window.calls.filter(call => call.command === 'inspect_convergence_outcome').length)).toBe(1);
 });
 
 for (const clipboardAvailable of [true, false]) test(`uncertain migration has a non-writing recovery handoff with clipboard ${clipboardAvailable}`, async ({ page }) => {
