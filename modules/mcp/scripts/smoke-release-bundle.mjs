@@ -98,7 +98,10 @@ try {
     method: "notifications/initialized",
   })}\n`);
   const tools = await request({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} });
-  assert.equal(tools.result?.tools?.length, 53);
+  assert.equal(tools.result?.tools?.length, 54);
+  const liveDocsTool = tools.result.tools.find((tool) => tool.name === "lookup_creator_docs");
+  assert.ok(liveDocsTool);
+  assert.equal(liveDocsTool.annotations?.readOnlyHint, true);
   assert.ok(tools.result.tools.some((tool) => tool.name === "validate_vs_graph_in_unity"));
   assert.ok(tools.result.tools.some((tool) => tool.name === "validate_banter_visual_scripting"));
   assert.ok(tools.result.tools.some((tool) => tool.name === "search_sidequest_vs_nodes"));
@@ -125,6 +128,15 @@ try {
   assert.equal(creatorExcerpt.returned, 1);
   assert.match(creatorExcerpt.entries[0].sourceUrl, /410de076ffc022d8f61832b968a133f46e9ec15d\/Docs\//);
   assert.ok(Buffer.byteLength(creatorText) <= 16384);
+  const rejectedLookup = await request({ jsonrpc: "2.0", id: 6, method: "tools/call", params: {
+    name: "lookup_creator_docs", arguments: { path: "https://example.invalid/docs" },
+  } });
+  const rejectedText = rejectedLookup.result?.content?.[0]?.text;
+  assert.ok(rejectedText, JSON.stringify(rejectedLookup));
+  const rejected = JSON.parse(rejectedText);
+  assert.equal(rejected.success, false);
+  assert.match(rejected.error, /indexed relative \.md path/);
+  assert.equal(rejected.networkRequests, undefined, "Invalid source refused before networking");
   const prompt = await request({ jsonrpc: "2.0", id: 4, method: "prompts/get", params: { name: "create_vs_graph", arguments: {} } });
   assert.match(JSON.stringify(prompt.result), /get_mcp_reference/);
 

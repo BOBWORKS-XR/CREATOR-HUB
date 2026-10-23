@@ -518,13 +518,23 @@ fn require_builtin() -> Result<(), String> {
     if !builtin::enabled() {
         return Err("Convergence is only available in a verified built-in Hub.".into());
     }
-    if crate::hosted::preview_mode(AppId::Mcp) != Some("writable") {
+    require_mcp_migration_mode(crate::hosted::preview_mode(AppId::Mcp))?;
+    if !crate::usage_terms::usage_terms_status()? {
+        return Err("Review Hub's terms before migrating existing apps.".into());
+    }
+    Ok(())
+}
+
+fn require_mcp_migration_mode(hosted_mode: Option<&str>) -> Result<(), String> {
+    // The internal service owns write admission; the legacy flag only gates hosted apps.
+    let integrated_service = cfg!(all(
+        feature = "integrated-features",
+        any(windows, target_os = "linux")
+    ));
+    if !integrated_service && hosted_mode != Some("writable") {
         return Err(
             "This Hub cannot take over writable MCP settings yet. Old apps were kept.".into(),
         );
-    }
-    if !crate::usage_terms::usage_terms_status()? {
-        return Err("Review Hub's terms before migrating existing apps.".into());
     }
     Ok(())
 }
@@ -2093,6 +2103,21 @@ pub async fn retire_convergence_apps(handle: tauri::AppHandle) -> Result<Report,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn migration_write_admission_matches_the_current_presentation() {
+        assert!(require_mcp_migration_mode(Some("writable")).is_ok());
+        for mode in [None, Some("read-only"), Some("unknown")] {
+            assert_eq!(
+                require_mcp_migration_mode(mode).is_ok(),
+                cfg!(all(
+                    feature = "integrated-features",
+                    any(windows, target_os = "linux")
+                )),
+                "Native service admission must not depend on the legacy hosted flag; legacy presentation must keep its write restriction"
+            );
+        }
+    }
 
     #[test]
     fn uncertain_migration_handoff_names_the_retained_record_without_replaying() {

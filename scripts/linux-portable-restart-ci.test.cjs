@@ -57,3 +57,19 @@ test('Linux integration validates structured workflow contracts early and keeps 
   const compile = steps.findIndex(step => step.run?.includes('cargo clippy'));
   assert.ok(preflight < compile);
 });
+
+test('Linux integration runs MCP server tests before bundling and native compilation', () => {
+  const workflow = yaml.parse(fs.readFileSync(path.join(root, '.github/workflows/linux-integrated-features.yml'), 'utf8'));
+  const steps = workflow.jobs['native-libraries'].steps;
+  const commands = steps.flatMap(step => String(step.run || '').split(/\r?\n/).map(line => line.trim()));
+  const install = commands.indexOf('npm ci --prefix modules/mcp');
+  const test = commands.indexOf('npm --prefix modules/mcp test');
+  const bundle = commands.indexOf('npm --prefix modules/mcp run release:launcher');
+  const compile = commands.findIndex(command => command.startsWith('cargo clippy'));
+  assert.ok(install >= 0 && test > install, 'Run the actual MCP suite after installing its locked dependencies');
+  assert.ok(bundle > test && compile > bundle, 'Fail MCP tests before bundling or native compilation');
+  const step = steps.find(step => String(step.run || '').split(/\r?\n/).includes('npm --prefix modules/mcp test'));
+  assert.match(step.run, /^set -euo pipefail\n/);
+  assert.equal(step['continue-on-error'], undefined);
+  assert.equal(step.if, undefined);
+});

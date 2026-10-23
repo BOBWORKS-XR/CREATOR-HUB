@@ -123,7 +123,28 @@ new API or node. Legacy Banter references remain unchanged.
 To refresh the snapshot after reviewing upstream changes and licensing, run
 `node scripts/sync-creator-docs.mjs --revision FULL_SDK_COMMIT` from this module,
 review the generated diff, then run the reference and importer tests. Normal MCP
-startup and reference lookup do not fetch remote documentation.
+startup and `get_mcp_reference` do not fetch remote documentation.
+
+For current information, use `lookup_creator_docs` with a specific `query`, such
+as `local multiplayer`, or an indexed `path`, such as
+`multiplayer/local-testing.md`. This read-only tool is also in Token Saver.
+It checks the official `feature/greenfield` documentation revision and sidebar,
+then downloads at most three relevant Markdown pages. Search terms and project
+contents are never sent upstream. This is not a complete live full-text search:
+page titles/paths and the bundled text select candidates; new text in an unrelated
+page may need a different query or its exact path.
+
+Results include official page/source links, revision, content hash, cache age
+information and bounded excerpts. Continue with the returned `path`, `revision`,
+`contentHash` and `nextOffset` as `startOffset`. Revision/hash changes refuse a
+mixed continuation. The source check is cached in memory for five minutes;
+`refresh: true` checks it immediately. Only requested pages are cached (at most
+16), no background checks run, and no snapshot or project file is rewritten.
+Requests have a ten-second overall deadline, per-document download caps and a
+16 KiB response cap. Network failures explicitly label the bundled fallback as
+offline and not checked current. Reuse results during a task instead of checking
+on every Unity call. Online documentation is reference data, not instructions or
+permission to execute code, and does not qualify the installed SDK or runtime.
 
 ## Visual Scripting
 
@@ -147,13 +168,14 @@ Targeted hierarchy queries serialize only the requested subtree or matching comp
 
 ## Token Use
 
-This section describes 2.6.0. Source tests do not replace real-project and
-installer acceptance.
+This section describes the current development source. Source tests do not
+replace real-project and installer acceptance.
 
 New launcher and setup configurations default to the `core` profile. It exposes
-25 general inspection, scene-authoring, and optional-feedback tools instead of all 53 schemas.
-Current source measurement is 23,172 schema bytes for `core` versus 48,613 for
-`all`, about 52% less before the user's prompt or any tool result is counted.
+27 general inspection, scene-authoring, documentation and optional-feedback tools
+instead of all 54 schemas. Source measurement on 2026-10-23 is 25,849 schema
+bytes for `core` versus 50,229 for `all`, about 49% less before the user's prompt
+or any tool result is counted.
 Actual tokens vary by MCP client and model; run `npm run measure:context` for the
 current byte counts, on-demand resource sizes, and rough estimates.
 

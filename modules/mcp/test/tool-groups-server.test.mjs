@@ -99,7 +99,9 @@ test("stdio token-saver profile exposes only the compact general surface", async
     const response = await server.request({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} });
     const names = new Set(response.result.tools.map((tool) => tool.name));
 
-    assert.equal(names.size, 25);
+    assert.equal(names.size, 27);
+    assert.ok(names.has("lookup_creator_docs"));
+    assert.ok(names.has("get_mcp_reference"));
     assert.ok(names.has("query_project_state"));
     assert.ok(names.has("create_gameobject"));
     assert.ok(!names.has("search_sidequest_vs_nodes"));

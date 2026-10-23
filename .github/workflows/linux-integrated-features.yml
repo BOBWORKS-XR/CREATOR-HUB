@@ -50,6 +50,7 @@ jobs:
         run: |
           set -euo pipefail
           npm ci --prefix modules/mcp
+          npm --prefix modules/mcp test
           npm --prefix modules/mcp run release:launcher
       - name: Compile the in-process Hub APIs and reject warnings
         run: |
