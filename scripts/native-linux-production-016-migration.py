@@ -2016,6 +2016,185 @@ def observe_request(value, context, binding, helper, native, polkit):
     return matches[0]
 
 
+HELPER_DIAGNOSTIC_PHASES = ("mcp-dismissed", "setup-window-wait-failed")
+HELPER_DIAGNOSTIC_FLAGS = {"diagnosticOnly": True, "authorityGranted": False, "inputPermitted": False, "releaseReady": False}
+
+
+def helper_diagnostic_stage(record, stage):
+    if record is not None:
+        record["stage"] = stage
+
+
+def helper_diagnostic_request(value, phase, harness, scenario, index):
+    keys(value, ("phase", "harnessSource", "scenario", "inputIndex", "mcpDismissedNs", "setupWaitStartedNs", "observedNs"))
+    require(phase in HELPER_DIAGNOSTIC_PHASES and value["phase"] == phase
+            and value["harnessSource"] == harness and scenario in SCENARIOS[2:] and value["scenario"] == scenario
+            and type(value["inputIndex"]) is int and value["inputIndex"] == index and 1 <= index <= 48,
+            "Diagnostic event is not bound to the recorded MCP input")
+    for key in ("mcpDismissedNs", "observedNs"):
+        require(type(value[key]) is int and 0 < value[key] < 2**63, "Invalid diagnostic clock")
+    if phase == HELPER_DIAGNOSTIC_PHASES[0]:
+        require(value["setupWaitStartedNs"] is None and value["observedNs"] == value["mcpDismissedNs"], "Invalid dismissal clock")
+    else:
+        start = value["setupWaitStartedNs"]
+        require(type(start) is int and value["mcpDismissedNs"] <= start <= value["observedNs"], "Invalid wait clock")
+
+
+def helper_diagnostic_read(directory, leaf, limit):
+    require(leaf in ("stat", "wchan", "io", "children") and type(limit) is int and 0 < limit <= 4096,
+            "Fixed diagnostic proc leaf required")
+    before = os.stat(leaf, dir_fd=directory, follow_symlinks=False)
+    require(stat.S_ISREG(before.st_mode) and before.st_nlink == 1 and 0 <= before.st_size <= limit,
+            "Nonordinary diagnostic proc leaf")
+    with os.fdopen(os.open(leaf, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK, dir_fd=directory), "rb") as stream:
+        require(metadata_stamp(os.fstat(stream.fileno())) == metadata_stamp(before), "Diagnostic proc FD changed")
+        raw = stream.read(limit + 1)
+        require(len(raw) <= limit and metadata_stamp(os.fstat(stream.fileno())) == metadata_stamp(before), "Diagnostic proc read changed/oversized")
+    require(metadata_stamp(os.stat(leaf, dir_fd=directory, follow_symlinks=False)) == metadata_stamp(before), "Diagnostic proc path changed")
+    return raw
+
+
+def helper_diagnostic_sample(pid, expected, native, helper, diagnostic=None):
+    helper_diagnostic_stage(diagnostic, "proc-directory")
+    require(type(pid) is int and 1 < pid < 2**22, "Bounded diagnostic PID required")
+    path = Path(f"/proc/{pid}")
+    directory = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        before = os.fstat(directory)
+        require(stat.S_ISDIR(before.st_mode) and before.st_uid in (0, UID)
+                and metadata_stamp(before) == metadata_stamp(path.lstat()), "Diagnostic process directory changed")
+        identity = native.native_process(pid, helper, False)
+        require(identity == {k: v for k, v in expected.items() if k != "kernelImageSha256"}, "Diagnostic process identity changed")
+        helper_diagnostic_stage(diagnostic, "proc-stat")
+        raw = helper_diagnostic_read(directory, "stat", 4096).decode("ascii")
+        fields = raw[raw.rfind(")") + 2:].split()
+        require(helper.parse_start(raw, pid) == identity["startTime"] and len(fields) >= 20
+                and fields[0] in tuple("RSDTtKWPI") and fields[1] == str(identity["parentPid"])
+                and all(re.fullmatch(r"[0-9]{1,20}", fields[i]) for i in (11, 12)), "Diagnostic stat identity/counters differ")
+        helper_diagnostic_stage(diagnostic, "proc-wchan")
+        wchan = helper_diagnostic_read(directory, "wchan", 128).decode("ascii").strip()
+        require(re.fullmatch(r"[A-Za-z0-9_]{1,127}", wchan), "Invalid diagnostic wait channel")
+        helper_diagnostic_stage(diagnostic, "proc-io")
+        io_values = {}
+        for line in helper_diagnostic_read(directory, "io", 4096).splitlines():
+            match = re.fullmatch(rb"(rchar|wchar|syscr|syscw|read_bytes|write_bytes|cancelled_write_bytes): ([0-9]{1,20})", line)
+            require(match is not None and match[1].decode() not in io_values, "Invalid diagnostic I/O counters")
+            io_values[match[1].decode()] = int(match[2])
+        require(len(io_values) == 7, "Incomplete diagnostic I/O counters")
+        helper_diagnostic_stage(diagnostic, "proc-children")
+        children = set()
+        tasks = os.open("task", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=directory)
+        try:
+            with os.scandir(tasks) as entries:
+                for count, entry in enumerate(entries):
+                    require(count < 64 and re.fullmatch(r"[1-9][0-9]{0,6}", entry.name), "Diagnostic thread bound exceeded")
+                    task = os.open(entry.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=tasks)
+                    try:
+                        body = helper_diagnostic_read(task, "children", 4096)
+                        require(re.fullmatch(rb"[0-9 ]*", body), "Invalid diagnostic children")
+                        children.update(map(int, body.split()))
+                        require(len(children) <= 8 and all(1 < child < 2**22 and child != pid for child in children), "Diagnostic child bound exceeded")
+                    finally:
+                        os.close(task)
+        finally:
+            os.close(tasks)
+        helper_diagnostic_stage(diagnostic, "proc-continuity")
+        require(native.native_process(pid, helper, False) == identity
+                and metadata_stamp(os.fstat(directory)) == metadata_stamp(before) == metadata_stamp(path.lstat()),
+                "Diagnostic process changed during sample")
+        return {"identity": expected, "state": fields[0], "wchan": wchan, "cpuTicks": {"user": int(fields[11]), "system": int(fields[12])},
+                "io": io_values, "observedNs": time.monotonic_ns()}, sorted(children)
+    finally:
+        os.close(directory)
+
+
+def helper_diagnostic_processes(proof, binding, native, helper, diagnostic=None):
+    helper_diagnostic_stage(diagnostic, "process-binding")
+    root, authorized = proof["root"], proof["pkexec"]
+    require(proof["target"] == "mcp" and authorized["parentPid"] == root["pid"], "Recorded MCP ancestry required")
+    def recheck_root():
+        helper_diagnostic_stage(diagnostic, "hub-identity")
+        require(native.native_process(root["pid"], helper, False) == {k: v for k, v in root.items() if k != "kernelImageSha256"},
+                "Recorded Hub changed before diagnostic")
+    recheck_root()
+    rows, pending, seen = [], [(authorized["pid"], None)], set()
+    while pending:
+        pid, parent = pending.pop(0)
+        helper_diagnostic_stage(diagnostic, "descendant-bound")
+        require(type(pid) is int and 1 < pid < 2**22 and pid not in seen and len(seen) < 8, "Diagnostic descendant bound/cycle")
+        seen.add(pid)
+        helper_diagnostic_stage(diagnostic, "process-identity")
+        identity = native.native_process(pid, helper, False)
+        image = identity["image"]
+        helper_diagnostic_stage(diagnostic, "image-bound")
+        require(0 < int(image["st_size"]) <= 16 * 1024 * 1024 and int(image["st_uid"]) == int(image["st_gid"]) == 0
+                and not int(image["st_mode"]) & 0o022, "Diagnostic image is not bounded/protected")
+        if parent is None:
+            helper_diagnostic_stage(diagnostic, "authorized-identity")
+            require(identity["startTime"] == authorized["startTime"] and identity["parentPid"] == root["pid"]
+                    and ((identity["executable"] == HELPER and identity["uids"] == [0] * 4)
+                         or (identity["executable"] == "/usr/bin/pkexec" and identity["uids"] == authorized["uids"])),
+                    "Recorded authorized process changed or is foreign")
+        else:
+            helper_diagnostic_stage(diagnostic, "descendant-identity")
+            require(identity["parentPid"] == parent["pid"] and int(identity["startTime"]) >= int(parent["startTime"])
+                    and identity["uids"] == [0] * 4, "Foreign diagnostic descendant")
+        helper_diagnostic_stage(diagnostic, "image-hash")
+        full = native.native_process(pid, helper)
+        require({k: v for k, v in full.items() if k != "kernelImageSha256"} == identity, "Diagnostic image changed while hashing")
+        if parent is None:
+            helper_diagnostic_stage(diagnostic, "authorized-image-pin")
+            expected_hash = binding["profile"]["pins"]["helper"]["sha256"] if identity["executable"] == HELPER else authorized["kernelImageSha256"]
+            require(full["kernelImageSha256"] == expected_hash, "Authorized diagnostic image differs")
+        row, children = helper_diagnostic_sample(pid, full, native, helper, diagnostic)
+        rows.append(row)
+        helper_diagnostic_stage(diagnostic, "descendant-bound")
+        require(len(seen) + len(pending) + len(children) <= 8, "Diagnostic descendant bound exceeded")
+        pending.extend((child, identity) for child in children)
+    recheck_root()
+    helper_diagnostic_stage(diagnostic, "final-identity")
+    for row in rows:
+        require(native.native_process(row["identity"]["pid"], helper, False)
+                == {k: v for k, v in row["identity"].items() if k != "kernelImageSha256"}, "Diagnostic ancestry changed after collection")
+    return rows
+
+
+def collect_helper_diagnostics(context, record, env, binding, native, helper):
+    # Separate, non-authoritative mailbox: never replies to or advances input RPC.
+    for number, phase in enumerate(HELPER_DIAGNOSTIC_PHASES, 1):
+        path = BASE / f"result/helper-diagnostic-{number}.json"
+        rows = record.setdefault("helperDiagnostics", {})
+        if phase in rows or not os.path.lexists(path):
+            continue
+        row = rows[phase] = {**HELPER_DIAGNOSTIC_FLAGS, "status": "unavailable", "stage": "channel", "brokerObservedNs": time.monotonic_ns()}
+        try:
+            require(os.getuid() == os.geteuid() == 0, "Root-only diagnostic observer")
+            inventory_channel()
+            row["stage"] = "request-read"
+            request = P.parse(read_file(path, 1024, uid=UID, mode=0o600))
+            row["stage"] = "request-binding"
+            index, proof = context["mcpDiagnosticProof"]
+            helper_diagnostic_request(request, phase, env["GITHUB_SHA"], record["scenario"], index)
+            if number == 2:
+                require(request["mcpDismissedNs"] == rows[HELPER_DIAGNOSTIC_PHASES[0]]["request"]["mcpDismissedNs"], "Diagnostic dismissal event changed")
+            row["request"] = request
+            row["binding"] = {"root": proof["root"], "authorizedMcp": proof["pkexec"]}
+            row["stage"] = "process-binding"
+            processes = helper_diagnostic_processes(proof, binding, native, helper, row)
+            row["stage"] = "receipt-bound"
+            require(len(json.dumps(processes, allow_nan=False).encode()) <= 32768, "Diagnostic receipt exceeds bound")
+            row.update(status="captured", stage="complete", processes=processes)
+        except Exception as error:
+            row["errorType"] = type(error).__name__[:100]
+
+
+def serve_helper_diagnostics(context, record, env, binding, native, helper):
+    try:
+        collect_helper_diagnostics(context, record, env, binding, native, helper)
+    except Exception as error:
+        record.setdefault("helperDiagnosticChannelRefusal", {**HELPER_DIAGNOSTIC_FLAGS, "stage": "channel", "errorType": type(error).__name__[:100]})
+
+
 class Authorization:
     def __init__(self, session, agent, identity, parent, endpoint, system, atspi, glib, question, counter, sdk, session_identity):
         self.s, self.agent, self.identity, self.parent = session, agent, identity, parent
@@ -2023,6 +2202,24 @@ class Authorization:
         self.session_identity = copy.deepcopy(session_identity)
         self.question, self.counter, self.sdk = question, counter, sdk
         self.records = []
+        self.mcp_dismissed_ns = None
+
+    def helper_diagnostic(self, phase, wait_started=None):
+        rows = self.s.evidence.setdefault("helperDiagnostics", {})
+        if phase in rows:
+            return
+        row = rows[phase] = {**HELPER_DIAGNOSTIC_FLAGS, "status": "unavailable"}
+        try:
+            number = HELPER_DIAGNOSTIC_PHASES.index(phase) + 1
+            observed = self.mcp_dismissed_ns if number == 1 else time.monotonic_ns()
+            request = {"phase": phase, "harnessSource": os.environ["GITHUB_SHA"], "scenario": os.environ["CREATOR_MIGRATION_016_SCENARIO"],
+                       "inputIndex": self.counter[0], "mcpDismissedNs": self.mcp_dismissed_ns,
+                       "setupWaitStartedNs": wait_started, "observedNs": observed}
+            helper_diagnostic_request(request, phase, request["harnessSource"], request["scenario"], self.counter[0])
+            publish(BASE / f"result/helper-diagnostic-{number}.json", request)
+            row.update(status="queued", request=request)
+        except Exception as error:
+            row["errorType"] = type(error).__name__[:100]
 
     def recheck_input_context(self):
         s, p = self.s, self.s.polkit
@@ -2053,7 +2250,13 @@ class Authorization:
     def act(self, target, authenticate, secret):
         s, p = self.s, self.s.polkit
         s.dialogs = {(self.identity["pid"], "Authenticate")}
-        s.pages.wait(lambda: bool(p.windows(self.identity["pid"], s.helper, s.x11)), 30)
+        wait_started = time.monotonic_ns()
+        try:
+            s.pages.wait(lambda: bool(p.windows(self.identity["pid"], s.helper, s.x11)), 30)
+        except Exception:
+            if target == "setup" and self.mcp_dismissed_ns is not None:
+                self.helper_diagnostic(HELPER_DIAGNOSTIC_PHASES[1], wait_started)
+            raise
         windows = p.windows(self.identity["pid"], s.helper, s.x11)
         require(len(windows) == 1, "One owned authentication window required")
         refs, bus = s.native.native_ax_references()
@@ -2097,6 +2300,9 @@ class Authorization:
             dismissal = {}
             s.pages.wait(lambda: s.native_target_absent(windows[0]["window"], dismissal), 30)
             record["nativeDismissal"] = dismissal
+            if target == "mcp" and authenticate:
+                self.mcp_dismissed_ns = time.monotonic_ns()
+                self.helper_diagnostic(HELPER_DIAGNOSTIC_PHASES[0])
         finally:
             bus.close_sync(None)
         s.dialogs.clear()
@@ -2843,10 +3049,13 @@ def broker(env):
                 proof_request(value, scenario)
                 require(value["index"] == index, "Input proof sequence changed")
                 proof = observe_request(value, context, binding, helper, native, polkit)
+                if value["target"] == "mcp":
+                    context["mcpDiagnosticProof"] = (index, copy.deepcopy(proof))
                 publish(BASE / f"input-{index}.json", {"request": value, "ok": True, "proof": proof})
                 os.chmod(BASE / f"input-{index}.json", 0o644)
                 index += 1
                 record["inputProofs"] += 1
+            serve_helper_diagnostics(context, record, env, binding, native, helper)
             time.sleep(0.05)
         capture_wrapper(record, child, logs, wrapper_started, deadline)
         require(child.poll() == 0, "Synthetic session failed/unknown; no signal or retry requested")
@@ -2868,6 +3077,7 @@ def broker(env):
     finally:
         wipe(secret); wipe(payload)
         unit_diagnostics.capture("terminal", child)
+        serve_helper_diagnostics(context, record, env, binding, native, helper)
         if logs is not None:
             try:
                 logs.pump()
