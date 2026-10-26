@@ -1,6 +1,6 @@
+use crate::community_project::EditorLockState;
 use crate::hub::unique_id;
 use crate::logic::{self, SetupProgress};
-use crate::community_project::EditorLockState;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -15,6 +15,16 @@ const VS_SETTINGS: &str = "ProjectSettings/VisualScriptingSettings.asset";
 const VS_GENERATED: &str = "Assets/Unity.VisualScripting.Generated";
 const VS_DATABASE: &str =
     "Assets/Unity.VisualScripting.Generated/VisualScripting.Flow/UnitOptions.db";
+const EDITOR_USER_SETTINGS: &str = "UserSettings/EditorUserSettings.asset";
+const BACKUP_PATHS: &[&str] = &[
+    "Packages/manifest.json",
+    "Packages/packages-lock.json",
+    "ProjectSettings",
+    EDITOR_USER_SETTINGS,
+    VS_GENERATED,
+    "Assets/Unity.VisualScripting.Generated.meta",
+    ".creator-project-setup/unity-validation.json",
+];
 const REGISTRY_SCOPES: &[&str] = &[
     "com.sidequest.creator-sdk",
     "com.basis.bundlemanagement",
@@ -32,6 +42,7 @@ const REVIEW_FILES: &[&str] = &[
     "ProjectSettings/ProjectSettings.asset",
     VS_SETTINGS,
     VS_DATABASE,
+    EDITOR_USER_SETTINGS,
 ];
 
 #[derive(Debug, Clone, Serialize)]
@@ -139,7 +150,9 @@ fn editor_lock_state(root: &Path) -> Result<EditorLockState, String> {
             );
         }
         Ok(_) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(EditorLockState::NotHeld),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(EditorLockState::NotHeld)
+        }
         Err(error) => return Err(format!("Cannot inspect Unity lock marker: {error}")),
     }
     #[cfg(windows)]
@@ -149,7 +162,9 @@ fn editor_lock_state(root: &Path) -> Result<EditorLockState, String> {
     #[cfg(not(windows))]
     {
         // Unity's Unix locking primitive is not established by the synthetic fs2 tests.
-        Ok(EditorLockState::Unverified("This platform cannot verify whether Unity still owns the lock marker.".into()))
+        Ok(EditorLockState::Unverified(
+            "This platform cannot verify whether Unity still owns the lock marker.".into(),
+        ))
     }
 }
 
@@ -197,6 +212,7 @@ fn fingerprint(root: &Path) -> Result<String, String> {
 }
 
 fn package_plan(manifest: &Value) -> Result<(Value, Vec<String>, Vec<Finding>), String> {
+    let (sdk_version, vs_version) = logic::existing_package_versions(manifest);
     let mut updated = manifest.clone();
     let dependencies = updated
         .get_mut("dependencies")
@@ -214,11 +230,7 @@ fn package_plan(manifest: &Value) -> Result<(Value, Vec<String>, Vec<Finding>), 
         }
     }
     for (name, version, title) in [
-        (
-            "com.sidequest.creator-sdk",
-            logic::CREATOR_SDK_VERSION,
-            "Creator SDK",
-        ),
+        ("com.sidequest.creator-sdk", sdk_version, "Creator SDK"),
         (
             "com.unity.render-pipelines.universal",
             logic::URP_VERSION,
@@ -231,12 +243,12 @@ fn package_plan(manifest: &Value) -> Result<(Value, Vec<String>, Vec<Finding>), 
         ),
         (
             "com.unity.visualscripting",
-            "1.9.1",
+            vs_version,
             "Visual Scripting package",
         ),
     ] {
         match dependencies.get(name).and_then(Value::as_str) {
-            Some(actual) if actual == version => findings.push(finding("pass", title, format!("Pinned version {version}"))),
+            Some(actual) if actual == version => findings.push(finding("pass", title, format!("Tested version {version}; existing package kept."))),
             None if !dependencies.contains_key(name) => {
                 dependencies.insert(name.into(), json!(version));
                 changes.push(format!("Add {name} {version}."));
@@ -332,6 +344,23 @@ fn package_plan(manifest: &Value) -> Result<(Value, Vec<String>, Vec<Finding>), 
     Ok((updated, changes, findings))
 }
 
+fn known_visual_scripting_failure(previous: Option<&Value>, fingerprint: &str) -> bool {
+    previous.is_some_and(|report| {
+        report["fingerprint"].as_str() == Some(fingerprint)
+            && report["validation"]["error"] == ""
+            && ([
+                "creatorVisualScriptingConfigured",
+                "visualScriptingInitialized",
+                "sdkReadyDone",
+                "nodesBuiltForThisVersion",
+                "nodeDatabaseVerified",
+            ]
+            .iter()
+            .any(|key| report["validation"][key] == false)
+                || report["validation"]["creatorNodeCount"] == 0)
+    })
+}
+
 pub fn inspect(path: &Path) -> Result<Inspection, String> {
     let root = fs::canonicalize(path).map_err(|_| "Choose an existing Unity project folder.")?;
     if !checked_path(&root, "Assets")?.is_dir() {
@@ -405,13 +434,7 @@ pub fn inspect(path: &Path) -> Result<Inspection, String> {
     let current_fingerprint = fingerprint(&root)?;
     let previous: Option<Value> = read(&root, ".creator-project-setup/last-validation.json")?
         .and_then(|bytes| serde_json::from_slice(&bytes).ok());
-    let known_vs_failure = previous.as_ref().is_some_and(|report| {
-        report["fingerprint"].as_str() == Some(current_fingerprint.as_str())
-            && report["validation"]["error"] == ""
-            && (report["validation"]["creatorVisualScriptingConfigured"] == false
-                || report["validation"]["visualScriptingInitialized"] == false
-                || report["validation"]["creatorNodeCount"] == 0)
-    });
+    let known_vs_failure = known_visual_scripting_failure(previous.as_ref(), &current_fingerprint);
     let configure_vs = sdk_added || settings_missing || database_missing || known_vs_failure;
     if configure_vs {
         changes.push("Initialize Creator Visual Scripting and rebuild its node database; retain existing type selections.".into());
@@ -758,7 +781,10 @@ fn acquire_operation_lock(path: &Path) -> Result<OperationLock, String> {
             if error.kind() == std::io::ErrorKind::AlreadyExists {
                 "Another operation already owns this project.".into()
             } else {
-                format!("Cannot create project operation lock {}: {error}", display_path(path))
+                format!(
+                    "Cannot create project operation lock {}: {error}",
+                    display_path(path)
+                )
             }
         })?;
     Ok(OperationLock(path.to_owned()))
@@ -796,14 +822,7 @@ pub fn run(
         1,
         "Backing up package manifests, project settings and generated Visual Scripting data.",
     ));
-    for relative in [
-        "Packages/manifest.json",
-        "Packages/packages-lock.json",
-        "ProjectSettings",
-        VS_GENERATED,
-        "Assets/Unity.VisualScripting.Generated.meta",
-        ".creator-project-setup/unity-validation.json",
-    ] {
+    for relative in BACKUP_PATHS {
         let source = checked_path(&root, relative)?;
         if source.exists() {
             copy_tree(&source, &backup.join(relative))?;
@@ -811,7 +830,10 @@ pub fn run(
     }
     write_json(&backup.join("review.json"), &inspection)?;
     review_unchanged(&root, &inspection).map_err(|error| {
-        format!("{error} Nothing was repaired. Backup: {}", display_path(&backup))
+        format!(
+            "{error} Nothing was repaired. Backup: {}",
+            display_path(&backup)
+        )
     })?;
     let report_path = backup.join("result.json");
     let mut owned_temporary = Vec::new();
@@ -827,7 +849,10 @@ pub fn run(
         temporary_paths_absent(&root)?;
         for (relative, bytes) in [
             (VALIDATOR_META, validator_metadata()?),
-            (VALIDATOR, logic::validation_script().into_bytes()),
+            (
+                VALIDATOR,
+                logic::existing_validation_script(&inspection.manifest)?.into_bytes(),
+            ),
             (
                 EXISTING_REQUEST,
                 serde_json::to_vec(&json!({"backupPath": display_path(&backup)}))
@@ -962,11 +987,21 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let parent = temp.path().join("not-a-directory");
         fs::write(&parent, b"keep parent").unwrap();
-        for path in [parent.join("operation.lock"), temp.path().join("missing/operation.lock")] {
-            let native = File::options().write(true).create_new(true).open(&path).unwrap_err();
+        for path in [
+            parent.join("operation.lock"),
+            temp.path().join("missing/operation.lock"),
+        ] {
+            let native = File::options()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+                .unwrap_err();
             assert_ne!(native.kind(), std::io::ErrorKind::AlreadyExists);
             let error = acquire_operation_lock(&path).err().unwrap();
-            assert!(error.contains("Cannot create project operation lock"), "{error}");
+            assert!(
+                error.contains("Cannot create project operation lock"),
+                "{error}"
+            );
             assert!(error.contains(&display_path(&path)), "{error}");
             assert!(error.contains(&native.to_string()), "{error}");
             assert!(!error.contains("Another operation"));
@@ -977,8 +1012,13 @@ mod tests {
 
     #[test]
     fn diagnostic_backup_lock_refusal_preserves_uncertainty() {
-        let error = require_editor_lock_clear(EditorLockState::Unverified("fixture access denied".into())).unwrap_err();
-        assert!(error.contains("Cannot verify the Unity lock marker"), "{error}");
+        let error =
+            require_editor_lock_clear(EditorLockState::Unverified("fixture access denied".into()))
+                .unwrap_err();
+        assert!(
+            error.contains("Cannot verify the Unity lock marker"),
+            "{error}"
+        );
         assert!(error.contains("fixture access denied"));
         assert!(!error.contains("Project opened or changed"));
         assert!(require_editor_lock_clear(EditorLockState::NotHeld).is_ok());
@@ -1017,6 +1057,116 @@ mod tests {
         assert_eq!(source, updated);
         assert!(changes.is_empty());
         assert!(!findings.iter().any(|f| f.status == "blocked"));
+    }
+
+    #[test]
+    fn tested_sdk4022_pair_is_preserved_without_downgrade() {
+        let mut source = manifest();
+        source["dependencies"]["com.sidequest.creator-sdk"] = json!("4.0.22");
+        source["dependencies"]["com.unity.visualscripting"] = json!("1.9.12");
+        source["dependencies"]["org.example.authored"] = json!("file:../authored");
+        source["authored"] = json!({"keep": true});
+        let (updated, changes, findings) = package_plan(&source).unwrap();
+        assert_eq!(updated, source);
+        assert!(changes.is_empty());
+        assert!(
+            !findings.iter().any(|f| f.status == "blocked"),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn tested_sdk4022_pair_adds_only_the_missing_partner() {
+        for missing in ["com.sidequest.creator-sdk", "com.unity.visualscripting"] {
+            let mut complete = manifest();
+            complete["dependencies"]["com.sidequest.creator-sdk"] = json!("4.0.22");
+            complete["dependencies"]["com.unity.visualscripting"] = json!("1.9.12");
+            let mut source = complete.clone();
+            source["dependencies"]
+                .as_object_mut()
+                .unwrap()
+                .remove(missing);
+            let (updated, changes, findings) = package_plan(&source).unwrap();
+            assert_eq!(updated, complete);
+            assert_eq!(changes.len(), 1);
+            assert!(
+                !findings.iter().any(|f| f.status == "blocked"),
+                "{findings:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn tested_sdk_pairs_never_replace_mixed_unknown_or_non_registry_references() {
+        for (sdk, vs) in [
+            (json!("4.0.22"), json!("1.9.1")),
+            (json!("4.0.14"), json!("1.9.12")),
+            (json!("4.0.23"), json!("1.9.12")),
+            (json!("4.0.22"), json!("1.9.13")),
+            (json!("file:../sdk"), json!("1.9.12")),
+            (json!("4.0.22"), json!("https://example.invalid/vs.git")),
+            (Value::Null, json!("1.9.12")),
+            (json!("4.0.22"), json!({"version": "1.9.12"})),
+        ] {
+            let mut source = manifest();
+            source["dependencies"]["com.sidequest.creator-sdk"] = sdk;
+            source["dependencies"]["com.unity.visualscripting"] = vs;
+            let (updated, changes, findings) = package_plan(&source).unwrap();
+            assert_eq!(updated, source);
+            assert!(changes.is_empty());
+            assert!(
+                findings.iter().any(|f| f.status == "blocked"),
+                "{findings:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn newer_sdk_readiness_failure_requires_a_current_successful_validation_report() {
+        for key in [
+            "creatorVisualScriptingConfigured",
+            "visualScriptingInitialized",
+            "sdkReadyDone",
+            "nodesBuiltForThisVersion",
+            "nodeDatabaseVerified",
+        ] {
+            let mut previous = json!({"fingerprint": "review", "validation": {"error": ""}});
+            previous["validation"][key] = json!(false);
+            assert!(
+                known_visual_scripting_failure(Some(&previous), "review"),
+                "{key}"
+            );
+            assert!(!known_visual_scripting_failure(Some(&previous), "changed"));
+            previous["validation"]["error"] = json!("Compile error needs review");
+            assert!(!known_visual_scripting_failure(Some(&previous), "review"));
+            previous["validation"]["error"] = json!("");
+            previous["validation"][key] = json!(true);
+            assert!(!known_visual_scripting_failure(Some(&previous), "review"));
+        }
+        assert!(!known_visual_scripting_failure(None, "review"));
+        assert!(!known_visual_scripting_failure(
+            Some(&json!({"fingerprint":"review", "validation":{"error":""}})),
+            "review"
+        ));
+    }
+
+    #[test]
+    fn project_local_sdk_stamp_storage_is_reviewed_and_backed_up_exactly() {
+        let temp = tempfile::tempdir().unwrap();
+        let backup = tempfile::tempdir().unwrap();
+        let before = fingerprint(temp.path()).unwrap();
+        let path = temp.path().join(EDITOR_USER_SETTINGS);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let bytes = b"Opaque existing project-local settings; keep all fields\x00";
+        fs::write(&path, bytes).unwrap();
+        assert_ne!(before, fingerprint(temp.path()).unwrap());
+        assert!(BACKUP_PATHS.contains(&EDITOR_USER_SETTINGS));
+        copy_tree(&path, &backup.path().join(EDITOR_USER_SETTINGS)).unwrap();
+        assert_eq!(
+            fs::read(backup.path().join(EDITOR_USER_SETTINGS)).unwrap(),
+            bytes
+        );
+        assert_eq!(fs::read(path).unwrap(), bytes);
     }
     #[test]
     fn repairs_preserve_unrelated_packages_and_registries() {
@@ -1747,13 +1897,13 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn editor_lock_release_keeps_reported_sdk_and_visual_scripting_mismatches_blocked() {
+    fn editor_lock_release_keeps_unqualified_sdk_and_visual_scripting_mismatches_blocked() {
         use std::os::windows::fs::OpenOptionsExt;
         let temp = fixture();
         let manifest_path = temp.path().join("Packages/manifest.json");
         let mut packages = manifest();
-        packages["dependencies"]["com.sidequest.creator-sdk"] = json!("4.0.22");
-        packages["dependencies"]["com.unity.visualscripting"] = json!("1.9.12");
+        packages["dependencies"]["com.sidequest.creator-sdk"] = json!("4.0.23");
+        packages["dependencies"]["com.unity.visualscripting"] = json!("1.9.13");
         write_json(&manifest_path, &packages).unwrap();
         let before = fs::read(&manifest_path).unwrap();
         fs::create_dir(temp.path().join("Temp")).unwrap();
@@ -1764,8 +1914,8 @@ mod tests {
             assert_eq!(report.locked, locked);
             assert!(!report.can_repair && !report.can_validate);
             for (title, actual, tested) in [
-                ("Creator SDK", "4.0.22", "4.0.14"),
-                ("Visual Scripting package", "1.9.12", "1.9.1"),
+                ("Creator SDK", "4.0.23", "4.0.14"),
+                ("Visual Scripting package", "1.9.13", "1.9.1"),
             ] {
                 assert!(report.findings.iter().any(|finding| finding.title == title
                     && finding.status == "blocked"

@@ -601,14 +601,44 @@ pub(crate) fn validation_script() -> String {
 
 enum ValidationPair {
     Recipe,
-    #[cfg(test)]
     Sdk4022Vs1912,
+}
+
+fn existing_validation_pair(manifest: &Value) -> ValidationPair {
+    let dependencies = &manifest["dependencies"];
+    if dependencies["com.sidequest.creator-sdk"] == "4.0.22"
+        || dependencies["com.unity.visualscripting"] == "1.9.12"
+    {
+        ValidationPair::Sdk4022Vs1912
+    } else {
+        ValidationPair::Recipe
+    }
+}
+
+pub(crate) fn existing_package_versions(manifest: &Value) -> (&'static str, &'static str) {
+    match existing_validation_pair(manifest) {
+        ValidationPair::Recipe => (CREATOR_SDK_VERSION, "1.9.1"),
+        ValidationPair::Sdk4022Vs1912 => ("4.0.22", "1.9.12"),
+    }
+}
+
+pub(crate) fn existing_validation_script(manifest: &Value) -> Result<String, String> {
+    let (sdk, vs) = existing_package_versions(manifest);
+    let dependencies = &manifest["dependencies"];
+    if dependencies["com.sidequest.creator-sdk"] != sdk
+        || dependencies["com.unity.visualscripting"] != vs
+    {
+        return Err(
+            "The reviewed SDK and Visual Scripting pair is not supported. No package was replaced."
+                .into(),
+        );
+    }
+    Ok(render_validation_script(existing_validation_pair(manifest)))
 }
 
 fn render_validation_script(pair: ValidationPair) -> String {
     let (sdk, vs, prefix) = match pair {
         ValidationPair::Recipe => (CREATOR_SDK_VERSION, "1.9.1", ""),
-        #[cfg(test)]
         ValidationPair::Sdk4022Vs1912 => (
             "4.0.22",
             "1.9.12",
@@ -1273,6 +1303,39 @@ mod tests {
         assert_eq!(value.urp_version, "17.3.0");
         assert_eq!(value.input_system_version, "1.20.0");
         assert_eq!(value.sdk_declared_urp_version, "17.4.0");
+    }
+
+    #[test]
+    fn existing_validator_uses_only_the_exact_reviewed_pair() {
+        let legacy = json!({"dependencies": {
+            "com.sidequest.creator-sdk": "4.0.14", "com.unity.visualscripting": "1.9.1"
+        }});
+        assert_eq!(
+            existing_validation_script(&legacy).unwrap(),
+            validation_script()
+        );
+        let current = json!({"dependencies": {
+            "com.sidequest.creator-sdk": "4.0.22", "com.unity.visualscripting": "1.9.12"
+        }});
+        assert_eq!(
+            existing_validation_script(&current).unwrap(),
+            candidate_validation_script()
+        );
+        for (sdk, vs) in [
+            (json!("4.0.22"), json!("1.9.1")),
+            (json!("4.0.14"), json!("1.9.12")),
+            (json!("4.0.23"), json!("1.9.12")),
+            (json!("4.0.22"), json!("1.9.13")),
+            (json!("file:../sdk"), json!("1.9.12")),
+            (json!("4.0.22"), Value::Null),
+        ] {
+            assert!(existing_validation_script(&json!({"dependencies": {
+                "com.sidequest.creator-sdk": sdk, "com.unity.visualscripting": vs
+            }}))
+            .is_err());
+        }
+        assert!(existing_validation_script(&json!({})).is_err());
+        assert!(!validation_script().starts_with("#define"));
     }
 
     #[test]

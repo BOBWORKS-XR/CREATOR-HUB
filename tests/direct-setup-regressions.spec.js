@@ -228,17 +228,61 @@ test('direct Setup exposes approved missing-SDK repair for a URP project, withou
   expect((await calls(page, 'run_existing_project'))[0].args.args).toEqual({ request: { projectPath: '/projects/URP without SDK', fingerprint: 'reviewed-fingerprint', repair: true, approved: true } });
 });
 
+test('direct Setup shows supported SDK 4.0.22 / VS 1.9.12 findings and uses ordinary reviewed repair', async ({ page }) => {
+  await openSetup(page, { inspection: {
+    canRepair: true, canValidate: true,
+    findings: [
+      { title: 'Creator SDK', status: 'pass', detail: 'Tested version 4.0.22; existing package kept.' },
+      { title: 'Visual Scripting package', status: 'pass', detail: 'Tested version 1.9.12; existing package kept.' },
+      { title: 'Visual Scripting setup', status: 'repair', detail: 'The latest Unity validation found invalid Creator node configuration.' },
+    ],
+    proposedChanges: ['Initialize Creator Visual Scripting and rebuild its node database; retain existing type selections.'],
+  } });
+  await expect(field(page, 'recipe')).toContainText('Creator SDK 4.0.14');
+  await existing(page, '/projects/Qualified pair');
+  await expect(field(page, 'findings').locator('strong')).toHaveText([
+    'Creator SDK: Ready', 'Visual Scripting package: Ready', 'Visual Scripting setup: Repair available',
+  ]);
+  await expect(field(page, 'findings')).toContainText('Tested version 4.0.22; existing package kept.');
+  await expect(field(page, 'findings')).toContainText('Tested version 1.9.12; existing package kept.');
+  await expect(field(page, 'changes').locator('li')).toHaveText([
+    'Initialize Creator Visual Scripting and rebuild its node database; retain existing type selections.',
+  ]);
+  await expect(field(page, 'review-hub')).toBeHidden();
+  await expect(field(page, 'approval')).not.toBeChecked();
+  for (const name of ['repair', 'validate']) {
+    await expect(field(page, name)).toBeVisible(); await expect(field(page, name)).toBeDisabled();
+    await field(page, name).dispatchEvent('click');
+  }
+  expect(await calls(page, 'run_existing_project')).toEqual([]);
+  await field(page, 'approval').check();
+  await expect(field(page, 'repair')).toBeEnabled(); await expect(field(page, 'validate')).toBeEnabled();
+  await field(page, 'repair').click();
+  await expect(field(page, 'existing-result')).toContainText('Validation passed');
+  await expect(field(page, 'existing-result')).toContainText('Backup: /retained/backup');
+  await expect(field(page, 'existing-result')).toContainText('Report: /retained/report.json');
+  await expect(field(page, 'error')).toBeHidden();
+  await expect(field(page, 'inspection-summary')).toContainText('Inspect again before another repair or validation');
+  await expect(field(page, 'approval')).not.toBeChecked();
+  await expect(field(page, 'repair')).toBeDisabled(); await expect(field(page, 'validate')).toBeDisabled();
+  await navigateBack(page);
+  const operations = await calls(page, 'run_existing_project');
+  expect(operations).toHaveLength(1);
+  expect(operations[0].args.args).toEqual({ request: { projectPath: '/projects/Qualified pair', fingerprint: 'reviewed-fingerprint', repair: true, approved: true } });
+  expect(await calls(page, 'inspect_project')).toHaveLength(1);
+});
+
 test('direct Setup preserves independent unqualified-version blockers and retries failed inspection without a repair', async ({ page }) => {
   await openSetup(page, { inspection: {
     canRepair: false, canValidate: false, proposedChanges: [], findings: [
-      { title: 'Creator SDK', status: 'blocked', detail: 'Installed reference 4.0.22 differs from tested 4.0.14. No automatic version replacement.' },
-      { title: 'Visual Scripting package', status: 'blocked', detail: 'Installed reference 1.9.12 differs from tested 1.9.1. No automatic version replacement.' },
+      { title: 'Creator SDK', status: 'blocked', detail: 'Installed reference 4.0.23 differs from tested 4.0.14. No automatic version replacement.' },
+      { title: 'Visual Scripting package', status: 'blocked', detail: 'Installed reference 1.9.13 differs from tested 1.9.1. No automatic version replacement.' },
     ],
   } });
   await field(page, 'existing-tab').click(); await field(page, 'existing-path').fill('/projects/Newer packages'); await field(page, 'inspect').click();
   await expect(field(page, 'status')).toHaveText('Review findings');
   await expect(field(page, 'inspection-summary')).toContainText('2 blockers');
-  await expect(field(page, 'findings')).toContainText('4.0.22'); await expect(field(page, 'findings')).toContainText('1.9.12');
+  await expect(field(page, 'findings')).toContainText('4.0.23'); await expect(field(page, 'findings')).toContainText('1.9.13');
   await expect(field(page, 'approval').locator('..')).toBeHidden();
   await expect(field(page, 'repair')).toBeDisabled(); await expect(field(page, 'validate')).toBeDisabled();
   await page.evaluate(() => { setupFixture.failNext = 'inspect_project'; });
