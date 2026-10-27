@@ -604,7 +604,7 @@ function assertUpdateRunner(mode, env = process.env, platform = process.platform
     assert.equal(env.CREATOR_MIGRATED_UPDATE_EXECUTE, 'true');
     assert.equal(env.CREATOR_NATIVE_LINUX_PRODUCTION_016, '1');
     assert.equal(env.CREATOR_MIGRATION_016_EXECUTE, 'true'); assert.equal(env.CREATOR_MIGRATION_016_SCENARIO, 'migration-approve');
-    assert.equal(env.UPDATE_PROFILE_SHA256, '808f83a6cdc14a2d49000a2c9cd340397a748e166dfdb29720fe4af07ff91e66');
+    assert.equal(env.UPDATE_PROFILE_SHA256, '02aeb5653fcd0dde0576907b7f480b895ea8c3e509cf2954ad2944ee8ef78fcb');
   }
   updateFiles(mode); assert.equal(platform, 'linux'); assert.equal(arch, 'x64');
   assert.ok(Number.isInteger(uid) && uid > 0 && uid === euid);

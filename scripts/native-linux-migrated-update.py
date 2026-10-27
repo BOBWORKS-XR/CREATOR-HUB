@@ -1,7 +1,7 @@
 """One same-runner migrated-HOME DEB update, never a fresh fixture or retry.
 
 The original migration finishes and relocks its account before this controller
-may adopt anything. Private source75 is lifecycle evidence, not fix retention.
+may adopt anything. Unbound successor inputs confer no execution authority.
 Inputs are independently pinned original ZIPs; this module never downloads them.
 """
 import ctypes
@@ -24,11 +24,15 @@ HERE = Path(__file__).resolve().parent
 BASE = Path("/opt/creator-polkit-fixture")
 CONTROL, OUTPUT, HOME = BASE / "migrated-update", BASE / "result/migrated-update", BASE / "result/home"
 INTENT = Path("/var/lib/creator-migrated-update-intent.json")
-PRODUCT = "a89ed2b90278b33bebd0b4ba29d87904d2fe683b"
-OUTGOING_SOURCE = "75e76397d3b44c8eba497ea6e2774cff04fd9a31"
-PROFILE_SHA = "808f83a6cdc14a2d49000a2c9cd340397a748e166dfdb29720fe4af07ff91e66"
-MIGRATION_PROFILE_SHA = "102825acce9f2297f0c969541df085bf99a6d128ce76b71ccefdb27ad722ffd0"
-SUCCESSOR_GENERATION = "ff2d5007fd5c4f7f6cf10b60fef8ae94506dc8338335221321da6c5b1e508a0f"
+PRODUCT = "085131ba6f3050a795fd513139a34975658ba321"
+PRODUCT_TREE = "feccbd2ca251f75f95bca1730e458605f1b3558c"
+BASELINE_RUN = 40541756470
+TARGET = "dce183ec0a0f23210d83b064c04ecc8b6af999fe"
+TARGET_TREE = "6d881eade5b3178913012d3a6c6632bd41b0e849"
+OUTGOING_SOURCE = "1ab093b6a46ad862bb3d22d982ed292793386353"
+PROFILE_SHA = "02aeb5653fcd0dde0576907b7f480b895ea8c3e509cf2954ad2944ee8ef78fcb"
+MIGRATION_PROFILE_SHA = "054116bc3f24876edf9bcc57c401d88faeb00482bced3d4fd8e7d91f72fc57b4"
+SUCCESSOR_GENERATION = "782895334a70092d5c8f456a7be1eb76fcdd72b40e502877bd52988bd84daca7"
 GENERATION_PARENT = "data/creator-hub/runtime-generations/linux-x86_64/"
 EXTRA_ENV = ("CREATOR_NATIVE_LINUX_PRODUCTION_016", "CREATOR_MIGRATION_016_EXECUTE",
              "CREATOR_MIGRATION_016_SCENARIO", "CREATOR_MIGRATED_UPDATE_EXECUTE")
@@ -52,7 +56,16 @@ M = load("native-linux-production-016-migration")
 require = U.require
 
 
+def require_bound_continuation():
+    require(all(type(value) is str and re.fullmatch(pattern, value) for value, pattern in (
+        (OUTGOING_SOURCE, r"[a-f0-9]{40}"), (PROFILE_SHA, r"[a-f0-9]{64}"), (SUCCESSOR_GENERATION, r"[a-f0-9]{64}"))),
+        "Continuation producer/delivery binding is unbound; no migration or update may start")
+    require(U.FIXED["17"]["source"] == TARGET and U.FIXED["17"]["tree"] == TARGET_TREE,
+            "Outgoing target source/tree is not bound to the exact successor")
+
+
 def admission(env):
+    require_bound_continuation()
     require(M.admission(env) == "migration-approve", "Only actual complete migration approval may continue")
     require(env.get("CREATOR_MIGRATED_UPDATE_EXECUTE") == "true" and env.get("UPDATE_EXECUTE") == "true"
             and env.get("UPDATE_SCENARIO") == "deb-approve" and env.get("UPDATE_PROFILE_SHA256") == PROFILE_SHA,
@@ -80,7 +93,8 @@ def boot_id():
 def context(env, boot):
     return {"source": env["GITHUB_SHA"], "run": env["GITHUB_RUN_ID"], "attempt": env["GITHUB_RUN_ATTEMPT"],
             "workflow": env["GITHUB_WORKFLOW_REF"], "boot": boot, "product": PRODUCT,
-            "migrationProfile": MIGRATION_PROFILE_SHA, "outgoingProfile": PROFILE_SHA, "outgoingHarness": OUTGOING_SOURCE}
+            "migrationProfile": MIGRATION_PROFILE_SHA, "outgoingProfile": PROFILE_SHA, "outgoingHarness": OUTGOING_SOURCE,
+            "targetSource": TARGET}
 
 
 def sources():
@@ -156,6 +170,14 @@ def compare_tree(before, after, *, journal=None, generation=None, require_genera
         require(not name.endswith(".bak") and "backup" not in name.lower(), "Unexpected backup creation during update")
 
 
+def retained_generation(before, expected):
+    """085 and dce share this generation; never reconstruct or partially adopt it."""
+    prefix = GENERATION_PARENT + SUCCESSOR_GENERATION
+    require({name for name in before if name == prefix or name.startswith(prefix + "/")} == set(expected),
+            "Complete exact existing runtime generation required")
+    compare_tree(before, before, generation=expected, require_generation=True)
+
+
 def migration_gate(broker, report, batch):
     require(broker.get("scope") == "production-016-disposable-migration"
             and broker.get("scenario") == report.get("scenario") == "migration-approve"
@@ -183,9 +205,11 @@ def journal_step(previous, current):
 
 
 def profile(raw):
+    require_bound_continuation()
     require(U.pin(raw)["sha256"] == PROFILE_SHA, "Only the independently approved outgoing profile is admitted")
     value = U.validate_profile(U.parse(raw), "deb-approve")
-    require(value["baseline"]["source"] == PRODUCT and value["baseline"]["run"] == 40403377032,
+    require(value["baseline"]["source"] == PRODUCT and value["baseline"]["tree"] == PRODUCT_TREE
+            and value["baseline"]["run"] == BASELINE_RUN,
             "Only the exact current product/assembly may continue")
     return value
 
@@ -483,7 +507,8 @@ def native_session(env):
               "harnessSource": env["GITHUB_SHA"], "fromSource": PRODUCT, "toSource": U.FIXED["17"]["source"],
               "privateTargetQualification": U.private_target_qualification(), "beforeMigrationConnectionContinued": False,
               "nativeActions": [], "systemActions": [], "initialPageActionAttempts": [], "successorPageActionAttempts": [],
-              "automaticSuccessor": None, "oldRetirementHelperRestored": False, "scenarioPassed": False, **U.FALSE}
+              "automaticSuccessor": None, "oldRetirementHelperRestored": False, "targetRetirementHelperVerified": False,
+              "scenarioPassed": False, **U.FALSE}
     html = replacement_html = surface = replacement = None
     root_output = None
     failure = None
@@ -529,6 +554,7 @@ def native_session(env):
         old_bus = U.verify_bus(old, bus, polkit, GLib, portable=False)
         inventory = M.InventoryClient(env["GITHUB_SHA"], "deb-approve", cohort="update", channel="migrated-update")
         surface = U.Surface(old, x11, helper, native, Atspi, inventory=inventory)
+        U.bind_source_menu(surface, value["baseline"]["source"], value["baseline"]["hub"])
         html = U.HtmlPages(surface, initial, pages, original["driver"], port, app_env, report.setdefault("htmlWebDriver", {}), migrated=True)
         html.start(); projects(html, HOME, report, "initialProjects")
         require(M.journal(HOME) == sealed["journal"], "Projects startup changed migrated journal")
@@ -554,6 +580,7 @@ def native_session(env):
         report["automaticSuccessor"], report["nonliveRejected"] = successor, rejected
         U.verify_bus(successor, bus, polkit, GLib, portable=False, previous=old_bus)
         replacement = U.Surface(successor, x11, helper, native, Atspi, inventory=inventory)
+        U.bind_source_menu(replacement, U.FIXED["17"]["source"], U.FIXED["17"]["hub"])
         html.finish_tools()
         replacement_html = U.HtmlPages(replacement, initial, pages, original["driver"], port, app_env,
             report.setdefault("successorHtmlWebDriver", {}), previous=html, migrated=True)
@@ -566,7 +593,8 @@ def native_session(env):
         report["fresh17UiVersion"] = True
         report["successorBitmap"] = U.phase_bitmap(replacement, "migrated-update/successor-bitmap")
         report["installed17"] = U.verify_installed(reviewed, "17")
-        report["oldRetirementHelperRestored"] = report["installed17Verified"] = report["automaticRestartObserved"] = True
+        report["oldRetirementHelperRestored"] = reviewed["privateTargetQualification"]["privateDebApprovalRestoresOldRetirementHelper"]
+        report["targetRetirementHelperVerified"] = report["installed17Verified"] = report["automaticRestartObserved"] = True
         replacement_html.detach(); report["mcpChecks"].append(connection.check("after-update"))
         replacement.close(); replacement_html.finish_tools()
         require(initial.returncode == 0, "Original Root exit was not normal")
@@ -649,7 +677,7 @@ def broker(env):
         U.bound(Path(env["CONTROLLER_NODE"]), original["node"], 128 * 1024**2, mode=0o755)
         value, review = verify_inputs(env, original)
         sealed["successorGeneration"] = review["successorGeneration"]
-        require(not set(sealed["home"]).intersection(sealed["successorGeneration"]), "Successor generation existed before this update")
+        retained_generation(sealed["home"], sealed["successorGeneration"])
         U.save(CONTROL / "state.json", sealed, 0o644)
         U.save(CONTROL / "review.json", review, 0o644)
         U.verify_installed(review, "16")

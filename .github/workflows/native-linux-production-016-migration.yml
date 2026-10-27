@@ -23,24 +23,184 @@ on:
         required: true
         default: false
         type: boolean
+      continue_after_migration:
+        description: Separate same-HOME signed DEB approval using the exact reviewed current profile
+        required: false
+        default: false
+        type: boolean
+      outgoing_profile:
+        description: Exact independently frozen outgoing profile; never a baseline or delivery fallback
+        required: false
+        type: string
+      outgoing_profile_sha256:
+        description: Exact outgoing profile text SHA256; must match the source-bound continuation
+        required: false
+        type: string
 
 permissions:
   contents: read
   actions: read
 
 jobs:
-  migration:
+  continuation_preflight:
     if: >-
       github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.repository_id == '1364807512' &&
       github.ref == 'refs/heads/validation/native-linux-production-016' && github.event_name == 'workflow_dispatch' &&
       github.workflow_ref == 'BOBWORKS-XR/CREATOR-HUB/.github/workflows/native-linux-production-016-migration.yml@refs/heads/validation/native-linux-production-016' &&
-      inputs.execute_migration == true
+      inputs.execute_migration == true && inputs.continue_after_migration == true && inputs.scenario == 'migration-approve'
     runs-on: ubuntu-22.04
-    timeout-minutes: 25
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24.17.0
+      - uses: actions/setup-python@v6
+        id: preflight_python
+        with:
+          python-version: '3.11.17'
+          update-environment: false
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Pure continuation tests before any outgoing download or privilege
+        env:
+          PREFLIGHT_PYTHON: ${{ steps.preflight_python.outputs.python-path }}
+        run: |
+          "$PREFLIGHT_PYTHON" -I -S -B scripts/native-linux-production-016-update.test.py
+          "$PREFLIGHT_PYTHON" -I -S -B scripts/native-linux-migrated-update.test.py
+          node --test scripts/linux-update-lab-feed.test.cjs
+          node --test scripts/native-linux-production-016-migration-workflow.test.cjs
+      - name: Refuse unbound source or profiles before any outgoing acquisition
+        env:
+          MIGRATION_PROFILE: ${{ inputs.profile }}
+          OUTGOING_PROFILE: ${{ inputs.outgoing_profile }}
+          OUTGOING_PROFILE_SHA256: ${{ inputs.outgoing_profile_sha256 }}
+          PREFLIGHT_PYTHON: ${{ steps.preflight_python.outputs.python-path }}
+        run: |
+          "$PREFLIGHT_PYTHON" -I -S -B - <<'PY'
+          import hashlib, importlib.util, os, sys
+          from pathlib import Path
+          spec = importlib.util.spec_from_file_location('continuation', Path('scripts/native-linux-migrated-update.py').resolve())
+          m = importlib.util.module_from_spec(spec); sys.modules[spec.name] = m; spec.loader.exec_module(m)
+          m.require_bound_continuation()
+          assert hashlib.sha256(os.environ['MIGRATION_PROFILE'].encode()).hexdigest() == m.MIGRATION_PROFILE_SHA
+          assert os.environ['OUTGOING_PROFILE_SHA256'] == m.PROFILE_SHA
+          m.profile(os.environ['OUTGOING_PROFILE'].encode())
+          PY
+  continuation_input:
+    needs: continuation_preflight
+    if: >-
+      github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.repository_id == '1364807512' &&
+      github.ref == 'refs/heads/validation/native-linux-production-016' && github.event_name == 'workflow_dispatch' &&
+      github.workflow_ref == 'BOBWORKS-XR/CREATOR-HUB/.github/workflows/native-linux-production-016-migration.yml@refs/heads/validation/native-linux-production-016' &&
+      inputs.execute_migration == true && inputs.continue_after_migration == true && inputs.scenario == 'migration-approve'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      actions: read
+    outputs:
+      artifact: ${{ steps.upload.outputs.artifact-id }}
+    steps:
+      - name: Exact original ZIP acquisition only; no checkout, extraction, candidate execution or native state
+        uses: actions/github-script@v8
+        env:
+          INPUT_PROFILE: ${{ inputs.outgoing_profile }}
+          INPUT_PROFILE_SHA256: ${{ inputs.outgoing_profile_sha256 }}
+        with:
+          retries: 0
+          script: |
+            const assert = require('node:assert/strict'), fs = require('node:fs'), path = require('node:path'), crypto = require('node:crypto');
+            const BOUND_PROFILE_SHA256 = '02aeb5653fcd0dde0576907b7f480b895ea8c3e509cf2954ad2944ee8ef78fcb';
+            assert.ok(typeof BOUND_PROFILE_SHA256 === 'string' && /^[a-f0-9]{64}$/.test(BOUND_PROFILE_SHA256), 'Unbound outgoing profile; no acquisition');
+            assert.equal(process.env.INPUT_PROFILE_SHA256, BOUND_PROFILE_SHA256);
+            const raw = Buffer.from(process.env.INPUT_PROFILE), sha = b => crypto.createHash('sha256').update(b).digest('hex');
+            assert.ok(raw.length > 0 && raw.length <= 65536); assert.equal(sha(raw), BOUND_PROFILE_SHA256);
+            const p = JSON.parse(raw);
+            assert.equal(p.schemaVersion, 1); assert.equal(p.profile, 'production016-private017-native-update');
+            assert.equal(p.fromVersion, '0.1.16'); assert.equal(p.toVersion, '0.1.17');
+            assert.equal(p.baseline.source, '085131ba6f3050a795fd513139a34975658ba321');
+            assert.equal(p.baseline.tree, 'feccbd2ca251f75f95bca1730e458605f1b3558c'); assert.equal(p.baseline.run, 40541756470);
+            assert.deepEqual(Object.keys(p.artifacts).sort(), ['assembly16','assembly17']);
+            assert.deepEqual(Object.keys(p.deliveries), ['signedDeb17']);
+            assert.equal(p.artifacts.assembly17.source, 'dce183ec0a0f23210d83b064c04ecc8b6af999fe');
+            assert.equal(p.artifacts.assembly17.tree, '6d881eade5b3178913012d3a6c6632bd41b0e849');
+            const dir = path.join(process.env.RUNNER_TEMP, 'migrated-continuation-data-only');
+            const proof = {};
+            const repo = {owner:'BOBWORKS-XR',repo:'CREATOR-HUB'};
+            for (const role of ['assembly16','assembly17']) {
+              const e = p.artifacts[role];
+              const run = (await github.rest.actions.getWorkflowRun({...repo,run_id:e.run})).data;
+              const job = (await github.rest.actions.getJobForWorkflowRun({...repo,job_id:e.job})).data;
+              const artifact = (await github.rest.actions.getArtifact({...repo,artifact_id:e.artifact})).data;
+              const commit = (await github.rest.git.getCommit({...repo,commit_sha:e.source})).data;
+              for (const [k,v] of Object.entries({id:e.run,run_attempt:1,head_sha:e.source,head_branch:e.branch,path:e.workflow,event:'workflow_dispatch',status:'completed',conclusion:'success'})) assert.equal(run[k],v);
+              for (const k of ['repository','head_repository']) { assert.equal(run[k].id,1364807512); assert.equal(run[k].full_name,'BOBWORKS-XR/CREATOR-HUB'); }
+              assert.equal(commit.sha,e.source); assert.equal(commit.tree.sha,e.tree);
+              for (const [k,v] of Object.entries({id:e.job,run_id:e.run,run_attempt:1,head_sha:e.source,status:'completed',conclusion:'success'})) assert.equal(job[k],v);
+              assert.ok(job.labels.includes('ubuntu-22.04'));
+              for (const [k,v] of Object.entries({id:e.artifact,name:e.name,expired:false,size_in_bytes:e.zip.size,digest:'sha256:'+e.zip.sha256})) assert.equal(artifact[k],v);
+              for (const [k,v] of Object.entries({id:e.run,head_sha:e.source,head_branch:e.branch})) assert.equal(artifact.workflow_run[k],v);
+              proof[role] = {run,job,artifact,commit};
+            }
+            const release = (await github.rest.repos.getRelease({...repo,release_id:411494394})).data;
+            assert.equal(release.id,411494394); assert.equal(release.tag_name,'v0.1.13-validation'); assert.equal(release.draft,true);
+            const listing = (await github.rest.repos.listReleaseAssets({...repo,release_id:411494394,per_page:100,page:1})).data;
+            assert.ok(Array.isArray(listing) && listing.length < 100, 'Complete bounded private asset inventory required');
+            const e = p.deliveries.signedDeb17;
+            assert.equal(listing.filter(a=>a.id === e.asset && a.name === e.name).length,1);
+            const a = (await github.rest.repos.getReleaseAsset({...repo,asset_id:e.asset})).data;
+            assert.equal(a.id,e.asset); assert.equal(a.name,e.name); assert.equal(a.size,e.zip.size); assert.equal(a.state,'uploaded'); assert.equal(a.digest,'sha256:'+e.zip.sha256);
+            fs.mkdirSync(dir, {mode: 0o700});
+            for (const role of ['assembly16','assembly17','signedDeb17']) {
+              const expected = role === 'signedDeb17' ? e : p.artifacts[role];
+              const response = role === 'signedDeb17'
+                ? await github.rest.repos.getReleaseAsset({...repo,asset_id:e.asset,headers:{accept:'application/octet-stream'}})
+                : await github.rest.actions.downloadArtifact({...repo,artifact_id:expected.artifact,archive_format:'zip'});
+              const bytes = Buffer.from(response.data); assert.equal(bytes.length,expected.zip.size); assert.equal(sha(bytes),expected.zip.sha256);
+              fs.writeFileSync(path.join(dir,role+'.zip'),bytes,{flag:'wx',mode:0o600});
+            }
+            fs.writeFileSync(path.join(dir,'profile.json'),raw,{flag:'wx',mode:0o600});
+            const receipt = {schemaVersion:1,source:context.sha,run:context.runId,attempt:Number(process.env.GITHUB_RUN_ATTEMPT),profileSha256:BOUND_PROFILE_SHA256,
+              proof,release,asset:a,dataOnly:true,publicDiscovery:false,flatpakAccepted:false,steamDeckAccepted:false,liveAiAccepted:false,unityAccepted:false,releaseReady:false};
+            fs.writeFileSync(path.join(process.env.RUNNER_TEMP,'migrated-continuation-acquisition.json'),JSON.stringify(receipt),{flag:'wx',mode:0o600});
+      - uses: actions/upload-artifact@v4
+        id: upload
+        with:
+          name: migrated-continuation-input-${{ github.run_id }}-${{ github.run_attempt }}
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
+          path: ${{ runner.temp }}/migrated-continuation-data-only/*
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: migrated-continuation-acquisition-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: ${{ runner.temp }}/migrated-continuation-acquisition.json
+  migration:
+    needs: continuation_input
+    if: >-
+      always() && !cancelled() &&
+      github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.repository_id == '1364807512' &&
+      github.ref == 'refs/heads/validation/native-linux-production-016' && github.event_name == 'workflow_dispatch' &&
+      github.workflow_ref == 'BOBWORKS-XR/CREATOR-HUB/.github/workflows/native-linux-production-016-migration.yml@refs/heads/validation/native-linux-production-016' &&
+      inputs.execute_migration == true &&
+      (inputs.continue_after_migration != true || (inputs.scenario == 'migration-approve' && needs.continuation_input.result == 'success'))
+    runs-on: ubuntu-22.04
+    timeout-minutes: ${{ inputs.continue_after_migration == true && 44 || 25 }}
     env:
       CREATOR_NATIVE_LINUX_PRODUCTION_016: '1'
       CREATOR_MIGRATION_016_EXECUTE: ${{ inputs.execute_migration }}
       CREATOR_MIGRATION_016_SCENARIO: ${{ inputs.scenario }}
+      CREATOR_MIGRATED_UPDATE_EXECUTE: ${{ inputs.continue_after_migration }}
+      UPDATE_EXECUTE: ${{ inputs.continue_after_migration }}
+      UPDATE_SCENARIO: deb-approve
+      UPDATE_PROFILE_SHA256: ${{ inputs.outgoing_profile_sha256 }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -65,6 +225,8 @@ jobs:
           node --test scripts/native-linux-production-016-input.test.cjs scripts/native-linux-production-016-migration-workflow.test.cjs
           "$PREFLIGHT_PYTHON" -B scripts/native-linux-production-016-stage.test.py
           "$PREFLIGHT_PYTHON" -B scripts/native-linux-production-016-migration.test.py
+          "$PREFLIGHT_PYTHON" -I -S -B scripts/native-linux-migrated-update.test.py
+          node --test scripts/linux-update-lab-feed.test.cjs
       - name: Use unchanged production API admission and bound downloads
         uses: actions/github-script@v8
         env:
@@ -77,6 +239,16 @@ jobs:
         run: python3 -B scripts/native-linux-production-016-stage.py
       - name: Bind separate one-scenario execution request before provisioning
         run: python3 -B scripts/native-linux-production-016-migration.py
+      - name: Download only this run's separately staged continuation originals
+        if: inputs.continue_after_migration == true
+        uses: actions/download-artifact@v5
+        with:
+          artifact-ids: ${{ needs.continuation_input.outputs.artifact }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/native-linux-migrated-update-input
+      - name: Bind exact controller Node path for continuation only
+        if: inputs.continue_after_migration == true
+        run: printf 'CONTROLLER_NODE=%s\n' "$(realpath "$(command -v node)")" >> "$GITHUB_ENV"
       - name: Install only declared disposable native test dependencies
         run: |
           sudo apt-get update
@@ -100,6 +272,18 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.99.0
       - name: Build pinned WebDriver tooling only, never rebuild product bytes
         run: cargo install tauri-driver --version 2.1.0 --locked --root "$RUNNER_TEMP/native-linux-production-016-driver"
+      - name: Build only the shared locked offline verifier, never product bytes or another controller's admission
+        if: inputs.continue_after_migration == true
+        run: |
+          /usr/bin/python3 -I -S -B - <<'PY'
+          import importlib.util, os, sys
+          from pathlib import Path
+          source = Path('scripts/native-linux-migrated-update.py').resolve()
+          spec = importlib.util.spec_from_file_location('continuation', source)
+          m = importlib.util.module_from_spec(spec); sys.modules[spec.name] = m; spec.loader.exec_module(m)
+          m.admission(os.environ)
+          m.U.build_offline_verifier(os.environ)
+          PY
       - name: Existing independently pinned stock policy leaf preflight
         run: |
           python3 -B - <<'PY'
@@ -109,6 +293,20 @@ jobs:
           m = importlib.util.module_from_spec(spec); sys.modules[spec.name] = m; spec.loader.exec_module(m)
           m.admission(os.environ)
           m.load('native-linux-polkit-probe').secure_stock_policy(Path(os.environ['RUNNER_TEMP']))
+          PY
+      - name: Prepare sealed continuation intent before the actual migration, never seed or install
+        if: inputs.continue_after_migration == true
+        run: |
+          python3 -B - <<'PY'
+          import importlib.util, os, subprocess, sys
+          from pathlib import Path
+          source = Path('scripts/native-linux-migrated-update.py').resolve()
+          spec = importlib.util.spec_from_file_location('continuation', source)
+          m = importlib.util.module_from_spec(spec); sys.modules[spec.name] = m; spec.loader.exec_module(m)
+          m.admission(os.environ)
+          values = [key + '=' + os.environ[key] for key in m.U.ENVIRONMENT + m.EXTRA_ENV]
+          subprocess.run(['/usr/bin/sudo', '-n', '/usr/bin/env', '-i', *values, 'PATH=/usr/bin:/bin', 'LANG=C', 'LC_ALL=C',
+                          '/usr/bin/python3', '-B', str(source), 'prepare'], stdin=subprocess.DEVNULL, check=True)
           PY
       - name: Fixed root broker, one synthetic session, no package restoration or retry
         run: |
@@ -122,6 +320,34 @@ jobs:
           values = [key + '=' + os.environ[key] for key in m.ENVIRONMENT]
           subprocess.run(['/usr/bin/sudo', '-n', '/usr/bin/env', '-i', *values, 'PATH=/usr/bin:/bin', 'LANG=C', 'LC_ALL=C',
                           '/usr/bin/python3', '-B', str(source), 'broker'], stdin=subprocess.DEVNULL, check=True)
+          PY
+      - name: Adopt only complete reopened and relocked migration, then signed DEB update in the same HOME
+        if: success() && inputs.continue_after_migration == true
+        run: |
+          python3 -B - <<'PY'
+          import importlib.util, os, subprocess, sys
+          from pathlib import Path
+          source = Path('scripts/native-linux-migrated-update.py').resolve()
+          spec = importlib.util.spec_from_file_location('continuation', source)
+          m = importlib.util.module_from_spec(spec); sys.modules[spec.name] = m; spec.loader.exec_module(m)
+          m.admission(os.environ)
+          values = [key + '=' + os.environ[key] for key in m.U.ENVIRONMENT + m.EXTRA_ENV]
+          subprocess.run(['/usr/bin/sudo', '-n', '/usr/bin/env', '-i', *values, 'PATH=/usr/bin:/bin', 'LANG=C', 'LC_ALL=C',
+                          '/usr/bin/python3', '-B', str(source), 'broker'], stdin=subprocess.DEVNULL, check=True)
+          PY
+      - name: Export bounded continuation failure or success receipts without modifying migration evidence
+        if: always() && inputs.continue_after_migration == true
+        run: |
+          python3 -B - <<'PY'
+          import importlib.util, os, subprocess, sys
+          from pathlib import Path
+          source = Path('scripts/native-linux-migrated-update.py').resolve()
+          spec = importlib.util.spec_from_file_location('continuation', source)
+          m = importlib.util.module_from_spec(spec); sys.modules[spec.name] = m; spec.loader.exec_module(m)
+          m.admission(os.environ)
+          values = [key + '=' + os.environ[key] for key in m.U.ENVIRONMENT + m.EXTRA_ENV]
+          subprocess.run(['/usr/bin/sudo', '-n', '/usr/bin/env', '-i', *values, 'PATH=/usr/bin:/bin', 'LANG=C', 'LC_ALL=C',
+                          '/usr/bin/python3', '-B', str(source), 'export'], stdin=subprocess.DEVNULL, check=True)
           PY
       - name: Export only bounded synthetic receipts and logs, never credentials or package inputs
         if: always()
@@ -165,6 +391,8 @@ jobs:
           retention-days: 7
           if-no-files-found: warn
           path: |
+            ${{ runner.temp }}/native-linux-migrated-update-evidence
+            ${{ runner.temp }}/native-linux-production-016-verifier/receipt.json
             ${{ runner.temp }}/native-linux-production-016-input/profile.json
             ${{ runner.temp }}/native-linux-production-016-input/api-binding.json
             ${{ runner.temp }}/native-linux-production-016-stage/binding.json

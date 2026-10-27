@@ -422,7 +422,7 @@ const migratedRunner = () => {
     GITHUB_WORKFLOW_REF: `BOBWORKS-XR/CREATOR-HUB/.github/workflows/native-linux-production-016-migration.yml@${branch}`,
     CREATOR_NATIVE_LINUX_PRODUCTION_016: '1', CREATOR_MIGRATION_016_EXECUTE: 'true', CREATOR_MIGRATION_016_SCENARIO: 'migration-approve',
     CREATOR_MIGRATED_UPDATE_EXECUTE: 'true', UPDATE_SCENARIO: 'deb-approve',
-    UPDATE_PROFILE_SHA256: '808f83a6cdc14a2d49000a2c9cd340397a748e166dfdb29720fe4af07ff91e66' };
+    UPDATE_PROFILE_SHA256: '02aeb5653fcd0dde0576907b7f480b895ea8c3e509cf2954ad2944ee8ef78fcb' };
 };
 
 test('migrated DEB transport admits actual migration context only with explicit separate approval', () => {
@@ -440,6 +440,8 @@ test('migrated DEB transport admits actual migration context only with explicit 
 test('migrated transport retains exact scenario, workflow, host and injection refusals', () => {
   for (const [key, value] of [['GITHUB_REF', lab.UPDATE_BRANCH], ['GITHUB_WORKFLOW_REF', updateRunner('deb').GITHUB_WORKFLOW_REF],
     ['GITHUB_EVENT_NAME', 'push'], ['UPDATE_SCENARIO', 'deb-auth-cancel'], ['CREATOR_MIGRATION_016_SCENARIO', 'migration-guide-cancel'],
+    ['UPDATE_PROFILE_SHA256', '808f83a6cdc14a2d49000a2c9cd340397a748e166dfdb29720fe4af07ff91e66'],
+    ['UPDATE_PROFILE_SHA256', '0'.repeat(64)],
     ...['HTTPS_PROXY', 'LD_PRELOAD', 'NODE_OPTIONS', 'PYTHONPATH', 'APPIMAGE', 'SSL_CERT_FILE'].map(k => [k, ''])]) {
     assert.throws(() => lab.assertUpdateRunner('deb', { ...migratedRunner(), [key]: value }, 'linux', 'x64', 21314, 21314, true), undefined, key);
   }

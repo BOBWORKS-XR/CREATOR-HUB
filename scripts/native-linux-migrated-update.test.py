@@ -108,7 +108,122 @@ def temp_home():
         yield home, uid
 
 
+class SourceBindingTests(unittest.TestCase):
+    def bound(self):
+        stack = ExitStack()
+        for key, value in (("OUTGOING_SOURCE", "f" * 40), ("PROFILE_SHA", "f" * 64)):
+            stack.enter_context(patch.object(C, key, value))
+        stack.enter_context(patch.dict(U.FIXED["17"], source=C.TARGET, tree=C.TARGET_TREE))
+        return stack
+
+    def test_exact_current_baseline_target_generation_and_qualified_harness(self):
+        self.assertEqual(C.PRODUCT, "085131ba6f3050a795fd513139a34975658ba321")
+        self.assertEqual(C.PRODUCT_TREE, "feccbd2ca251f75f95bca1730e458605f1b3558c")
+        self.assertEqual(C.BASELINE_RUN, 40541756470)
+        self.assertEqual(C.MIGRATION_PROFILE_SHA, "054116bc3f24876edf9bcc57c401d88faeb00482bced3d4fd8e7d91f72fc57b4")
+        self.assertEqual(C.TARGET, "dce183ec0a0f23210d83b064c04ecc8b6af999fe")
+        self.assertEqual(C.TARGET_TREE, "6d881eade5b3178913012d3a6c6632bd41b0e849")
+        self.assertEqual(C.SUCCESSOR_GENERATION, "782895334a70092d5c8f456a7be1eb76fcdd72b40e502877bd52988bd84daca7")
+        self.assertEqual(C.OUTGOING_SOURCE, "1ab093b6a46ad862bb3d22d982ed292793386353")
+        self.assertEqual(C.PROFILE_SHA, "02aeb5653fcd0dde0576907b7f480b895ea8c3e509cf2954ad2944ee8ef78fcb")
+        self.assertNotIn(C.OUTGOING_SOURCE, (C.PRODUCT, C.TARGET))
+        C.require_bound_continuation()
+
+    def test_unbound_refuses_before_context_reads_or_privilege(self):
+        for action in (lambda: C.admission(environment()), lambda: C.profile(b"{}"),
+                       lambda: C.prepare(environment()), lambda: C.broker(environment())):
+            with self.subTest(action=action), patch.object(C, "OUTGOING_SOURCE", "UNBOUND"), \
+                    patch.object(M, "admission") as migration, patch.object(U, "read") as read, \
+                    patch.object(U, "save") as save, patch.object(C.subprocess, "run") as run:
+                with self.assertRaisesRegex(RuntimeError, "binding is unbound"):
+                    action()
+                for mock in (migration, read, save, run):
+                    mock.assert_not_called()
+
+    def test_each_binding_and_exact_target_source_tree_required(self):
+        with self.bound():
+            C.require_bound_continuation()
+            for key in ("OUTGOING_SOURCE", "PROFILE_SHA", "SUCCESSOR_GENERATION"):
+                for value in (None, "", "UNBOUND", "0", 1):
+                    with self.subTest(key=key, value=value), patch.object(C, key, value), self.assertRaises(RuntimeError):
+                        C.require_bound_continuation()
+            for key, value in (("source", "75a99ff4a267064aaa3ac9e30039bc91dc791d89"),
+                               ("tree", "5f62bf4bc1ba85eb293ca9a5a30330b06b6b4351")):
+                with self.subTest(key=key), patch.dict(U.FIXED["17"], {key: value}), self.assertRaises(RuntimeError):
+                    C.require_bound_continuation()
+
+    def test_profile_delegates_strict_validation_then_refuses_mixed_old_baseline(self):
+        raw = b"unit-only"
+        value = {"baseline": {"source": C.PRODUCT, "tree": C.PRODUCT_TREE, "run": C.BASELINE_RUN}}
+        with self.bound(), patch.object(C, "PROFILE_SHA", U.pin(raw)["sha256"]), \
+                patch.object(U, "parse", return_value={"unit": True}), patch.object(U, "validate_profile", return_value=value) as validate:
+            self.assertIs(C.profile(raw), value)
+            validate.assert_called_once_with({"unit": True}, "deb-approve")
+            for key, old in (("source", "a89ed2b90278b33bebd0b4ba29d87904d2fe683b"),
+                             ("tree", "0" * 40), ("run", 40403377032)):
+                with self.subTest(key=key), patch.dict(value["baseline"], {key: old}), self.assertRaises(RuntimeError):
+                    C.profile(raw)
+            validate.side_effect = RuntimeError("shared signature/member/profile refusal")
+            with self.assertRaisesRegex(RuntimeError, "shared signature/member/profile refusal"):
+                C.profile(raw)
+
+
+class SourceMenuTests(unittest.TestCase):
+    def test_verified_phase_call_sites_bind_exact_source_and_image_before_html(self):
+        tree = ast.parse(Path(C.__file__).read_text())
+        session = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "native_session")
+        text = ast.unparse(session)
+        calls = [n for n in ast.walk(session) if isinstance(n, ast.Call) and ast.unparse(n.func) == "U.bind_source_menu"]
+        self.assertEqual([ast.unparse(n) for n in calls], [
+            "U.bind_source_menu(surface, value['baseline']['source'], value['baseline']['hub'])",
+            "U.bind_source_menu(replacement, U.FIXED['17']['source'], U.FIXED['17']['hub'])"])
+        self.assertLess(text.index("old = U.phase_identity("), text.index("U.bind_source_menu(surface,"))
+        self.assertLess(text.index("U.bind_source_menu(surface,"), text.index("html = U.HtmlPages("))
+        self.assertLess(text.index("U.observe_successor("), text.index("U.bind_source_menu(replacement,"))
+        self.assertLess(text.index("U.bind_source_menu(replacement,"), text.index("replacement_html = U.HtmlPages("))
+
+    def test_real_menu_helpers_keep_current_and_historical_source_families_exact(self):
+        fixtures = T.LiveSourceMenuWiring
+        current = {"hub": "Home Projects and updates", "mcp": "MCP AI bridge for Unity",
+                   "setup": "Setup / Repair Unity + Creator SDK project setup and repair"}
+        for source in (C.PRODUCT, C.TARGET, *U.HISTORICAL_MENU_SOURCES):
+            with self.subTest(source=source):
+                surface = fixtures.surface(source, bound=False)
+                U.bind_source_menu(surface, source, {"size": 11, "sha256": "a" * 64})
+                menu = U.bound_source_menu(surface)
+                self.assertEqual(menu["source"], source)
+                self.assertEqual(menu["ready"], current if source in (C.PRODUCT, C.TARGET) else fixtures.OLD_READY)
+                with patch.object(U, "phase_processes"), patch.object(U, "feature_ready", side_effect=fixtures.ready):
+                    self.assertTrue(U.direct_pages(surface, []))
+                    U.navigate_home(surface)
+                self.assertEqual(surface.presses, ["navigation-mcp", "navigation-setup", "navigation-home"])
+
+    def test_real_menu_helper_refuses_unknown_source_wrong_image_and_wrong_labels(self):
+        fixtures = T.LiveSourceMenuWiring
+        for source, pin in (("f" * 40, {"size": 11, "sha256": "a" * 64}),
+                            ("0.1.16", {"size": 11, "sha256": "a" * 64}),
+                            (C.PRODUCT, {"size": 12, "sha256": "a" * 64}),
+                            (C.TARGET, {"size": 11, "sha256": "b" * 64})):
+            surface = fixtures.surface(C.PRODUCT, bound=False)
+            with self.subTest(source=source, pin=pin), self.assertRaises(RuntimeError):
+                U.bind_source_menu(surface, source, pin)
+            self.assertFalse(hasattr(surface, "menu_binding"))
+            self.assertEqual(surface.inputs, [])
+        for source in (C.PRODUCT, C.TARGET):
+            surface = fixtures.surface(source, labels=fixtures.OLD_READY, bound=False)
+            U.bind_source_menu(surface, source, {"size": 11, "sha256": "a" * 64})
+            with self.subTest(source=source), self.assertRaisesRegex(RuntimeError, "One exact Home"):
+                U.navigate_home(surface)
+            self.assertEqual(surface.presses, [])
+
+
 class AdmissionTests(unittest.TestCase):
+    def setUp(self):
+        # Synthetic authority only inside these existing execution-context cases.
+        binding = SourceBindingTests().bound()
+        binding.__enter__()
+        self.addCleanup(binding.close)
+
     def admit(self, env):
         with patch.object(M.sys, "platform", "linux"), patch.object(M.os, "getuid", return_value=1001, create=True):
             C.admission(env)
@@ -331,12 +446,28 @@ class StagingTests(unittest.TestCase):
 
 
 class OutcomeTests(unittest.TestCase):
+    def test_installed_target_helper_disclosure_comes_from_the_review_not_old_source75(self):
+        tree = ast.parse(Path(C.__file__).read_text())
+        session = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "native_session")
+        assignment = next(n for n in ast.walk(session) if isinstance(n, ast.Assign)
+                          and any(ast.unparse(t) == "report['oldRetirementHelperRestored']" for t in n.targets))
+        for restored in (False, True):
+            report = {}
+            reviewed = {"privateTargetQualification": {"privateDebApprovalRestoresOldRetirementHelper": restored}}
+            exec(compile(ast.Module(body=[assignment], type_ignores=[]), "unit-helper-disclosure", "exec"),
+                 {"report": report, "reviewed": reviewed})
+            self.assertIs(report["oldRetirementHelperRestored"], restored)
+        text = ast.unparse(session)
+        self.assertLess(text.index("U.verify_installed(reviewed, '17')"), text.index(ast.unparse(assignment)))
+
     def test_native_scoped_success_requires_all_original_update_proofs(self):
         report = native_report(); self.assertTrue(C.continuation_outcome(report))
         for name in ("settingsPreserved", "runtimeSurvived", "normalFinalClose", "migrationEvidencePreserved", "homePreserved", "journalPrefixPreserved"):
             with self.subTest(name=name), self.assertRaises(RuntimeError): C.continuation_outcome({**report, name: False})
         for name, value in (("systemActions", ["Authenticate", "Authenticate"]), ("nativeActions", []), ("beforeMigrationConnectionContinued", True),
-                            ("releaseReady", True), ("mcpProtocol", {}), ("successorProjects", {})):
+                            ("releaseReady", True), ("mcpProtocol", {}), ("successorProjects", {}),
+                            ("targetRetirementHelperVerified", False),
+                            ("oldRetirementHelperRestored", not report["oldRetirementHelperRestored"])):
             with self.subTest(name=name), self.assertRaises(RuntimeError): C.continuation_outcome({**report, name: value})
 
     def test_broker_requires_complete_cleanup_without_masking_original_failure(self):
@@ -367,6 +498,48 @@ class SuccessorStateTests(unittest.TestCase):
                         "unpackedSize": sum(map(len, files.values()))}}
         generation = hashlib.sha256(json.dumps(entry, separators=(",", ":")).encode()).hexdigest()
         return manifest, files, generation
+
+    def test_complete_existing_generation_is_retained_with_original_inodes(self):
+        manifest, _, generation = self.manifest()
+        with patch.object(C, "SUCCESSOR_GENERATION", generation):
+            expected = C.generation_entries(manifest)
+            before = {".": {"dev": 1, "ino": 2}, "original-backup": {"sha256": "a" * 64},
+                      **{name: {**row, "dev": 1, "ino": i + 10, "uid": M.UID, "gid": M.UID}
+                         for i, (name, row) in enumerate(expected.items())}}
+            original = copy.deepcopy(before)
+            C.retained_generation(before, expected)
+            self.assertEqual(before, original)
+            changed = copy.deepcopy(before)
+            changed[next(name for name in expected if name.endswith("node"))]["ino"] += 100
+            with self.assertRaisesRegex(RuntimeError, "Original protected bytes/identity changed"):
+                C.compare_tree(before, changed, generation=expected, require_generation=True)
+
+    def test_retained_generation_refuses_absence_partial_extra_or_wrong_bytes_owner_mode(self):
+        manifest, _, generation = self.manifest()
+        with patch.object(C, "SUCCESSOR_GENERATION", generation):
+            expected = C.generation_entries(manifest)
+            before = {".": {"dev": 1, "ino": 2},
+                      **{name: {**row, "dev": 1, "ino": i + 10, "uid": M.UID, "gid": M.UID}
+                         for i, (name, row) in enumerate(expected.items())}}
+            prefix = C.GENERATION_PARENT + generation
+            for value in ({".": before["."]}, {k: v for k, v in before.items() if k != prefix},
+                          {**before, prefix + "/unreviewed": {}}):
+                with self.subTest(entries=list(value)), self.assertRaises(RuntimeError):
+                    C.retained_generation(value, expected)
+            for name in expected:
+                for key, bad in (("mode", 0o777), ("uid", 0), ("dev", 2), ("sha256", "0" * 64)):
+                    if key not in before[name]:
+                        continue
+                    value = copy.deepcopy(before)
+                    value[name][key] = bad
+                    with self.subTest(name=name, key=key), self.assertRaises(RuntimeError):
+                        C.retained_generation(value, expected)
+        session = ast.unparse(next(n for n in ast.parse(Path(C.__file__).read_text()).body
+                                  if isinstance(n, ast.FunctionDef) and n.name == "broker"))
+        call = "retained_generation(sealed['home'], sealed['successorGeneration'])"
+        self.assertEqual(session.count(call), 1)
+        self.assertLess(session.index(call), session.index("U.verify_installed("))
+        self.assertLess(session.index(call), session.index("U.prepare_tls("))
 
     def test_exact_successor_manifest_generation_and_contents_only(self):
         manifest, files, generation = self.manifest()
@@ -541,7 +714,10 @@ class BrokerTests(unittest.TestCase):
             original = {"context": {"source": "a" * 40}, "sources": {controller.name: U.pin(controller.read_bytes())},
                         "driver": U.pin(driver.read_bytes()), "node": U.pin(node.read_bytes()), "verifier": qualification}
             before = {"revision": 1, "records": []}; after = append_reads(append_reads(before, "b"), "c")
-            sealed = {"context": original["context"], "accountUid": M.UID, "home": {}, "journal": before}
+            prefix = C.GENERATION_PARENT + C.SUCCESSOR_GENERATION
+            generation = {prefix: {"kind": "directory", "mode": 0o700}}
+            home = {".": {"dev": 1, "ino": 2}, prefix: {**generation[prefix], "dev": 1, "ino": 3, "uid": M.UID, "gid": M.UID}}
+            sealed = {"context": original["context"], "accountUid": M.UID, "home": home, "journal": before}
             env = {**environment(), "GITHUB_WORKSPACE": str(workspace), "RUNNER_TEMP": str(root), "CONTROLLER_NODE": str(node)}
             control, output = base / "migrated-update", base / "result/migrated-update"
             for name, value in (("BASE", base), ("HERE", source), ("CONTROL", control), ("OUTPUT", output)):
@@ -553,7 +729,7 @@ class BrokerTests(unittest.TestCase):
             stack.enter_context(patch.object(C, "adopt", return_value=sealed))
             stack.enter_context(patch.object(M, "native_process_inventory", return_value={"processes": [], "terminalProcesses": []}))
             stack.enter_context(patch.object(U, "offline_verifier", return_value=(verifier, qualification)))
-            stack.enter_context(patch.object(C, "verify_inputs", return_value=({"baseline": {}}, {"successorGeneration": {}, "baseline": {}})))
+            stack.enter_context(patch.object(C, "verify_inputs", return_value=({"baseline": {}}, {"successorGeneration": generation, "baseline": {}})))
             stack.enter_context(patch.object(U, "verify_installed"))
             stack.enter_context(patch.object(C, "preserve"))
             preserved = stack.enter_context(patch.object(C, "verify_preservation"))
