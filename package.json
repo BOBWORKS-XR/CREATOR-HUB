@@ -1,6 +1,6 @@
 {
   "name": "creator-hub",
-  "version": "0.1.16",
+  "version": "0.1.17",
   "private": true,
   "description": "Creator Hub and its internal Unity tooling modules",
   "scripts": {
