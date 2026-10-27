@@ -1,0 +1,159 @@
+name: Synthetic Linux MCP Node observer (not native admission)
+
+on:
+  push:
+    branches: [validation/linux-mcp-node-observer-01]
+
+permissions:
+  contents: read
+
+jobs:
+  observer:
+    if: >-
+      github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.repository_id == '1364807512' &&
+      github.ref == 'refs/heads/validation/linux-mcp-node-observer-01' && github.event_name == 'push' &&
+      github.workflow_ref == 'BOBWORKS-XR/CREATOR-HUB/.github/workflows/linux-mcp-node-observer-01.yml@refs/heads/validation/linux-mcp-node-observer-01'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    env:
+      RESULT_DIR: ${{ runner.temp }}/linux-mcp-node-observer-01
+      CARGO_TARGET_DIR: ${{ github.workspace }}/native/mcp-router/target
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Create exclusive results outside every cache
+        id: result
+        run: |
+          set -euo pipefail
+          test ! -e "$RESULT_DIR"
+          mkdir -m700 "$RESULT_DIR"
+      - name: Bind exact9737 parent, five-file projection and reviewed observer sources
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          /usr/bin/python3 -I -S -B - <<'PY' > "$RESULT_DIR/preflight.stdout" 2> "$RESULT_DIR/preflight.stderr"
+          import hashlib, json, os, subprocess
+          from pathlib import Path
+          def git(*args):
+              return subprocess.check_output(['git', '--no-optional-locks', *args], text=True).strip()
+          base = '9737d409b78c53d2bb5e95542452ce4e36565a3d'
+          assert git('rev-parse', 'HEAD') == os.environ['GITHUB_SHA']
+          assert git('rev-list', '--parents', '-n', '1', 'HEAD').split() == [os.environ['GITHUB_SHA'], base]
+          assert git('rev-parse', base + '^{tree}') == '328de64be38d0b2279d3c615ebcb4770ea505c58'
+          assert os.environ['RUNNER_OS'] == 'Linux' and os.environ['RUNNER_ARCH'] == 'X64'
+          assert git('status', '--porcelain=v1', '--untracked-files=normal') == ''
+          changes = dict(line.split('\t', 1)[::-1] for line in git('diff-tree', '--no-commit-id', '--name-status', '-r', 'HEAD').splitlines())
+          assert changes == {
+              'native/mcp-router/tests/unix-execution.cjs': 'M',
+              'native/mcp-router/tests/linux-node-observer.py': 'A',
+              'native/mcp-router/tests/linux-node-observer.test.py': 'A',
+              '.github/workflows/linux-mcp-node-observer-01.yml': 'A',
+              'scripts/linux-mcp-node-observer-workflow.test.cjs': 'A',
+          }
+          pins = {
+              'native/mcp-router/tests/unix-execution.cjs': (17624, '52b3b27adc692b33533af47cedec44805ca1e9a585f7a56fc6aec20735e10be8'),
+              'native/mcp-router/tests/linux-node-observer.py': (12415, '7f0dcc3d7b8588dfcf01f652f5a3911a4427de077a56afe928955e13a81395a5'),
+              'native/mcp-router/tests/linux-node-observer.test.py': (12632, '02ff1f6051c05338f00b6ece302a40fdfae347686e0b7150116ccd501b41ba05'),
+              'native/mcp-router/src/unix_exec.rs': (10594, 'a8e714620c90ac852eaa0b583ecf11ca33ec7dcd3ab5ed176b3bc266cada4872'),
+              'native/mcp-router/src/unix_exec_linux.rs': (5948, 'ca4552a4db13d5580cdf282da929faec4d08975710decbbe0ad555b1361940a7'),
+          }
+          for name, (size, digest) in pins.items():
+              body = Path(name).read_bytes()
+              assert len(body) == size and hashlib.sha256(body).hexdigest() == digest, name
+          assert not Path('modules/mcp/release/creator-works-mcp.mjs').exists()
+          print(json.dumps({'base': base, 'source': os.environ['GITHUB_SHA'], 'pins': pins, 'qualified': False, 'releaseReady': False}))
+          PY
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24.17.0
+          cache: npm
+      - name: Check exact existing Node bytes before dependency installation
+        run: |
+          set -euo pipefail
+          {
+            NODE="$(readlink -f "$(command -v node)")"
+            test "$("$NODE" --version)" = v24.17.0
+            test "$(sha256sum "$NODE" | cut -d' ' -f1)" = 62d66443847de1f527f74afe715900b12884ace52136dc9cd8e91e61acc2f527
+            printf 'Node24.17.0 SHA62d66443847de1f527f74afe715900b12884ace52136dc9cd8e91e61acc2f527 checked\n'
+          } >> "$RESULT_DIR/preflight.stdout" 2>> "$RESULT_DIR/preflight.stderr"
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Pure workflow and source preflight before fixture compilation
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          node --test scripts/linux-mcp-node-observer-workflow.test.cjs > "$RESULT_DIR/workflow.stdout" 2> "$RESULT_DIR/workflow.stderr"
+      - name: Fifteen pure observer cases, not Linux process acceptance
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          /usr/bin/python3 -I -S -B native/mcp-router/tests/linux-node-observer.test.py > "$RESULT_DIR/pure.stdout" 2> "$RESULT_DIR/pure.stderr"
+      - uses: dtolnay/rust-toolchain@1.99.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native/mcp-router -> target
+          cache-on-failure: true
+      - name: One existing synthetic Unix router qualification, no product bundle
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          test ! -e artifacts/unix-native-results
+          test ! -e modules/mcp/release/creator-works-mcp.mjs
+          NODE="$(readlink -f "$(command -v node)")"
+          test "$(sha256sum "$NODE" | cut -d' ' -f1)" = 62d66443847de1f527f74afe715900b12884ace52136dc9cd8e91e61acc2f527
+          test "$(cargo --version | cut -d' ' -f2)" = 1.99.0
+          test "$(rustc --version | cut -d' ' -f2)" = 1.99.0
+          { cargo --version; rustc --version; } >> "$RESULT_DIR/preflight.stdout" 2>> "$RESULT_DIR/preflight.stderr"
+          "$NODE" native/mcp-router/tests/unix-execution.cjs "$NODE" > "$RESULT_DIR/original.stdout" 2> "$RESULT_DIR/original.stderr"
+      - name: Copy only the single original native-result JSON, never temporary payloads
+        if: always() && steps.result.outcome == 'success'
+        run: |
+          /usr/bin/python3 -I -S -B - <<'PY'
+          import json, os, re, stat
+          from pathlib import Path
+          result = Path(os.environ['RESULT_DIR'])
+          assert result.resolve(strict=True) == result and result.is_dir()
+          source = Path(os.environ['GITHUB_WORKSPACE']) / 'artifacts/unix-native-results'
+          if source.exists():
+              assert source.resolve(strict=True) == source and source.is_dir()
+              entries = list(source.iterdir())
+              assert len(entries) == 1 and re.fullmatch(r'linux-x86_64-[0-9a-f-]{36}\.json', entries[0].name)
+              file = entries[0]; before = file.lstat()
+              assert stat.S_ISREG(before.st_mode) and before.st_nlink == 1 and before.st_uid == result.stat().st_uid
+              assert 0 < before.st_size <= 262144
+              fields = ('st_dev', 'st_ino', 'st_size', 'st_mode', 'st_uid', 'st_gid', 'st_nlink', 'st_mtime_ns', 'st_ctime_ns')
+              stamp = lambda info: tuple(getattr(info, field) for field in fields)
+              fd = os.open(file, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0))
+              with os.fdopen(fd, 'rb') as stream:
+                  assert stamp(os.fstat(stream.fileno())) == stamp(before)
+                  raw = stream.read(262145)
+                  assert len(raw) == before.st_size and stamp(os.fstat(stream.fileno())) == stamp(before)
+              assert stamp(file.lstat()) == stamp(before)
+              value = json.loads(raw)
+              assert value['platform'] == 'linux' and value['arch'] == 'x86_64' and type(value['passed']) is bool
+              assert value['writableGuiAccepted'] is value['releaseReady'] is False
+              if value['passed']:
+                  observer = value['processObserver']
+                  assert observer['passed'] is observer['syntheticFixtureOnly'] is True
+                  assert all(observer[k] is False for k in ('qualified', 'nativeAdmissionAccepted', 'liveMcpProtocolAccepted', 'payloadSwapAccepted', 'releaseReady'))
+              with (result / 'native-result.json').open('xb') as stream:
+                  assert stream.write(raw) == len(raw)
+                  stream.flush(); os.fsync(stream.fileno())
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.result.outcome == 'success'
+        with:
+          name: linux-mcp-node-observer-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            ${{ env.RESULT_DIR }}/preflight.stdout
+            ${{ env.RESULT_DIR }}/preflight.stderr
+            ${{ env.RESULT_DIR }}/workflow.stdout
+            ${{ env.RESULT_DIR }}/workflow.stderr
+            ${{ env.RESULT_DIR }}/pure.stdout
+            ${{ env.RESULT_DIR }}/pure.stderr
+            ${{ env.RESULT_DIR }}/original.stdout
+            ${{ env.RESULT_DIR }}/original.stderr
+            ${{ env.RESULT_DIR }}/native-result.json

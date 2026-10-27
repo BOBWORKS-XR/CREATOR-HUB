@@ -134,6 +134,55 @@ async function close(child, code) {
   const echo = line(client); client.stdin.write('unchanged transport\n'); assert.equal(await echo, 'unchanged transport');
   await close(client, 0);
   report.checks.push('Exact stdio, original module URL/argv, EOF and owned helper cleanup');
+  if (process.platform === 'linux') {
+    // Fixture-only A/B differ in bytes, not Node, module semver or declared tools.
+    const sourceA = Buffer.concat([script('approved'), Buffer.from('\n// observer source A\n')]);
+    const sourceB = Buffer.concat([script('approved'), Buffer.from('\n// observer source B\n')]);
+    const a = stage('observer-a', sourceA), b = stage('observer-b', sourceB);
+    const liveA = await connect(a), liveB = await connect(b);
+    for (const child of [liveA, liveB]) {
+      const echo = line(child); child.stdin.write('observer steady state\n');
+      assert.equal(await echo, 'observer steady state');
+      assert.equal(child.frame.argv.length, 2, 'Fixture loader has already replaced the JS argv array');
+    }
+    const image = file => ({ size: fs.statSync(file).size, sha256: hash(fs.readFileSync(file)) });
+    const common = { callerPid: process.pid, uid: process.getuid(), gid: process.getgid(), routerPath: fs.realpathSync(driver),
+      routerImage: image(driver), nodeImage: image(node) };
+    const expected = (fixture, child, source) => ({ ...common, routerPid: child.pid,
+      nodePath: fixture.node, serverPath: fixture.server, sourceSha256: hash(source) });
+    const observe = value => spawnSync('/usr/bin/python3', [path.join(__dirname, 'linux-node-observer.py')], {
+      input: JSON.stringify(value), env: { PATH: '/usr/bin:/bin', LANG: 'C', LC_ALL: 'C' }, cwd: profile,
+      encoding: 'utf8', timeout: 15000, maxBuffer: 65536,
+    });
+    const observedA = observe(expected(a, liveA, sourceA));
+    const observedB = observe(expected(b, liveB, sourceB));
+    for (const result of [observedA, observedB]) assert.equal(result.status, 0, result.stdout + result.stderr);
+    const proofA = JSON.parse(observedA.stdout), proofB = JSON.parse(observedB.stdout);
+    assert.equal(proofA.snapshot.serverNode.pid, liveA.frame.pid);
+    assert.equal(proofB.snapshot.serverNode.pid, liveB.frame.pid);
+    assert.equal(proofA.snapshot.serverNode.argv.length, 6, 'Read kernel argv, not the two-element JS argv view');
+    assert.equal(proofB.snapshot.serverNode.argv.length, 6);
+    assert.equal(proofA.snapshot.serverNode.imagePin.sha256, proofB.snapshot.serverNode.imagePin.sha256);
+    assert.notEqual(proofA.sourceSha256, proofB.sourceSha256);
+    const tools = ['get_bridge_status', 'get_unity_command_status', 'list_unity_projects', 'select_unity_project'];
+    const metadataA = { node: common.nodeImage, semver: '2.7.7', declaredFixtureTools: tools };
+    const metadataB = { node: common.nodeImage, semver: '2.7.7', declaredFixtureTools: tools };
+    assert.deepEqual(metadataA, metadataB);
+    // Keep A's path/PID: prove B's digest alone rejects the live stale A child.
+    const stale = observe(expected(a, liveA, sourceB));
+    assert.equal(stale.status, 1, stale.stdout + stale.stderr);
+    const staleProof = JSON.parse(stale.stdout);
+    assert.equal(staleProof.passed, false);
+    assert.match(staleProof.message, /Fixed loader argv\/server\/source digest differs/);
+    const stalePath = observe({ ...expected(b, liveA, sourceB) });
+    assert.equal(stalePath.status, 1, stalePath.stdout + stalePath.stderr);
+    report.processObserver = { scope: 'synthetic-linux-router-node-observer-only', passed: true,
+      syntheticFixtureOnly: true, qualified: false, nativeAdmissionAccepted: false,
+      liveMcpProtocolAccepted: false, payloadSwapAccepted: false, releaseReady: false,
+      sameDeclaredMetadata: metadataA, a: proofA, b: proofB, staleSourceRejected: true, stalePathRejected: true };
+    await close(liveA, 0); await close(liveB, 0);
+    report.checks.push('Synthetic sealed server Node observed through kernel ancestry/argv/digest; stale A rejected despite equal Node/semver/declared tools');
+  }
   const code = await connect(stage('exit-status')); await close(code, 23);
   report.checks.push('Actual Node exit status forwarded after owned cleanup');
   for (const action of ['server-write', 'server-replace']) {
