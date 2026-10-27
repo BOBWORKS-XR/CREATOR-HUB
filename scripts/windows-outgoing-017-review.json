@@ -1,33 +1,33 @@
 {
   "schemaVersion": 1,
   "kind": "direct-outgoing-016-017",
-  "receiptSha256": "b6bf6f7156a39d627541a893f037b7ab9f9a2dac5f61a0b4970846d595c74f39",
-  "configCanonicalSha256": "20b75bc86bbd3866af31ed08b10af3f98fdd250f1731f9339fb27654220a686d",
+  "receiptSha256": "06616536ee0809a5c54c050dd64f635b69a5283e963a9102157262a1e114aaa7",
+  "configCanonicalSha256": "328e14abbbecf5c10dac9b57e177330b0178d8e50f8dbdbd76df778d3c7f3ed5",
   "stagerWorkflow": ".github/workflows/windows-outgoing-017-input.yml",
   "files": {
     "Creator.Hub_0.1.16_x64-setup.exe": {
-      "bytes": 38224253,
-      "sha256": "c7885a1e898a4dcc887ca275cf9483c0067002f9157bcc1dbc443b2e060ff1bc"
+      "bytes": 38207720,
+      "sha256": "35c9b066ecab363bf6151e00ab97b1da46ca07c6fa9c2e28453f8990d5b63a66"
     },
     "Creator_Hub_0.1.17_x64-acceptance-only-setup.exe": {
-      "bytes": 38211549,
-      "sha256": "4dcc0c7a50f0e1aeebafa1fd828e0a6dda619427a64ca150a5ea2c808b76beb2"
+      "bytes": 38213593,
+      "sha256": "17fafb1bdd7b7be9eea701c4eb371dc16e905b02f6ec74d3f1f979faf0f7ad9c"
     },
     "creator-hub-windows-x86_64.json": {
       "bytes": 520,
-      "sha256": "ebf3e56323650ba7d42cc062fbd0c39343c1baffc9bf27365b0a06024c62572c"
+      "sha256": "8d030da10d25f085d2dad7b41b1003c6366e19b5d4fabb2aaa85a152cb735649"
     },
     "creator-hub-windows-x86_64.json.minisig": {
       "bytes": 300,
-      "sha256": "ca1eee503505b4fab3bc0927b7863add4f9dc6e6549bac4120611f5ee0ab8c78"
+      "sha256": "b7310b9aec173611295e2c968b6865944fce14a01cf584ca83d0b4c849cf3e19"
     },
     "latest.json": {
       "bytes": 667,
-      "sha256": "a4de80cb822b0c92db274e8a6d5afb365321728452edb68c7e4ae935e4d50530"
+      "sha256": "916e97ab83a9f8ea4d6d87a96d4a6cdc41638864bae37c11e1b34a42e7a61aac"
     },
     "outgoing-017-template.json": {
       "bytes": 1227,
-      "sha256": "a29b22f2a478f613f92d84ee2e6488e25a82d4738af7c43cde8a146e3b7f53ed"
+      "sha256": "c3688b7b0d7ff7d4b46809965c2fb3d7edbf948d210480ad6e7a53fa7f95139a"
     }
   }
 }

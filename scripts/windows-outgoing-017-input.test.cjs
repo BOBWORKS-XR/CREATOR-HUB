@@ -14,9 +14,9 @@ assert.ok(pinBlock.test(script));
 const powershell = process.platform === 'win32' ? 'powershell.exe' : 'pwsh';
 function fixture() {
   const rows = Object.entries(outgoing.LIMITS).map(([name, limit], index) => ({ name,
-    sourceName: index === 0 ? 'Creator.Hub_0.1.16_x64-settings-v3-setup.exe' : `test-outgoing17-${name}`,
-    id: String(index === 0 ? 680035905 : 101 + index), bytes: index === 0 ? 38224253 : 123,
-    sha: index === 0 ? 'c7885a1e898a4dcc887ca275cf9483c0067002f9157bcc1dbc443b2e060ff1bc' : String(index).repeat(64), limit }));
+    sourceName: index === 0 ? 'Creator.Hub_0.1.16_x64-settings-v4-setup.exe' : `test-outgoing17-${name}`,
+    id: String(index === 0 ? 680176209 : 101 + index), bytes: index === 0 ? 38207720 : 123,
+    sha: index === 0 ? '35c9b066ecab363bf6151e00ab97b1da46ca07c6fa9c2e28453f8990d5b63a66' : String(index).repeat(64), limit }));
   return { rows, receipt: 'a'.repeat(64), review: 'b'.repeat(64), inputReview: 'b'.repeat(64),
     release: { id: 424919952, draft: true, prerelease: true, tag_name: 'lab-windows-menu-merge-20261027',
       assets: rows.map(row => ({ id: Number(row.id), name: row.sourceName, size: row.bytes, digest: `sha256:${row.sha}`, state: 'uploaded' })) },
@@ -86,7 +86,7 @@ test('output is exactly the six admission filenames, never an incoming artifact 
   const files = [...workflow.matchAll(/^            windows-outgoing-017-input\/([^\r\n]+)$/gm)].map(m => m[1]);
   assert.deepEqual(files.sort(), Object.keys(outgoing.LIMITS).sort());
   assert.match(workflow, /compression-level: 0/); assert.match(workflow, /if-no-files-found: error/);
-  assert.ok(script.includes("id='680035905';bytes=38224253L;sha='c7885a1e898a4dcc887ca275cf9483c0067002f9157bcc1dbc443b2e060ff1bc'"));
+  assert.ok(script.includes("id='680176209';bytes=38207720L;sha='35c9b066ecab363bf6151e00ab97b1da46ca07c6fa9c2e28453f8990d5b63a66'"));
   assert.ok(script.indexOf('Exact private asset metadata differs') < script.indexOf('New-Item -ItemType Directory'));
 });
 test('mismatched independent review refuses checked-in pins before HTTP or writes', () => {
@@ -101,16 +101,16 @@ test('actual checked-in PowerShell pins match the immutable reviewed file and ap
   assert.equal(result.status, 0, result.stdout + result.stderr);
   const pins = JSON.parse(result.stdout.trim());
   const bytes = fs.readFileSync(path.join(__dirname, 'windows-outgoing-017-review.json'));
-  assert.equal(pins.review, '944eebfdb7899b31383d5c2178ab4b4ad212e87cde41195d33f02969f72b75cb');
+  assert.equal(pins.review, 'bce4d1bd6619df5af4ee5e5556a16305fc151e5836c5683d01aa34bb3f9e2c05');
   const review = outgoing.reviewBytes(bytes, pins.review);
   assert.equal(pins.receipt, review.receiptSha256);
   assert.deepEqual(pins.rows.map(row => [row.name, row.sourceName, row.id]), [
-    [outgoing.BASELINE, 'Creator.Hub_0.1.16_x64-settings-v3-setup.exe', '680035905'],
-    [outgoing.TARGET, outgoing.TARGET, '680096165'],
-    [outgoing.DESCRIPTOR, 'outgoing-017-creator-hub-windows-x86_64.json', '680096175'],
-    [`${outgoing.DESCRIPTOR}.minisig`, 'outgoing-017-creator-hub-windows-x86_64.json.minisig', '680096174'],
-    ['latest.json', 'outgoing-017-latest.json', '680096172'],
-    [outgoing.TEMPLATE, outgoing.TEMPLATE, '680096163'],
+    [outgoing.BASELINE, 'Creator.Hub_0.1.16_x64-settings-v4-setup.exe', '680176209'],
+    [outgoing.TARGET, 'Creator_Hub_0.1.17_x64-settings-v4-acceptance-only-setup.exe', '680219533'],
+    [outgoing.DESCRIPTOR, 'outgoing-017-settings-v4-creator-hub-windows-x86_64.json', '680220762'],
+    [`${outgoing.DESCRIPTOR}.minisig`, 'outgoing-017-settings-v4-creator-hub-windows-x86_64.json.minisig', '680220783'],
+    ['latest.json', 'outgoing-017-settings-v4-latest.json', '680220796'],
+    [outgoing.TEMPLATE, 'outgoing-017-settings-v4-template.json', '680220821'],
   ]);
   assert.deepEqual(Object.fromEntries(pins.rows.map(row => [row.name, { bytes: row.bytes, sha256: row.sha }])), review.files);
   assert.deepEqual(Object.fromEntries(pins.rows.map(row => [row.name, row.limit])), outgoing.LIMITS);

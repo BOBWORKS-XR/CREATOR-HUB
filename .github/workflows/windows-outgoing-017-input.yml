@@ -27,15 +27,15 @@ jobs:
           $ErrorActionPreference = 'Stop'
           # BEGIN REVIEWED OUTGOING PINS
           # Completed Root17 receipt and exact reviewed admission-file bytes.
-          $receiptSha256 = 'b6bf6f7156a39d627541a893f037b7ab9f9a2dac5f61a0b4970846d595c74f39'
-          $reviewSha256 = '944eebfdb7899b31383d5c2178ab4b4ad212e87cde41195d33f02969f72b75cb'
+          $receiptSha256 = '06616536ee0809a5c54c050dd64f635b69a5283e963a9102157262a1e114aaa7'
+          $reviewSha256 = 'bce4d1bd6619df5af4ee5e5556a16305fc151e5836c5683d01aa34bb3f9e2c05'
           $rows = @(
-            @{name='Creator.Hub_0.1.16_x64-setup.exe';sourceName='Creator.Hub_0.1.16_x64-settings-v3-setup.exe';id='680035905';bytes=38224253L;sha='c7885a1e898a4dcc887ca275cf9483c0067002f9157bcc1dbc443b2e060ff1bc';limit=64MB}
-            @{name='Creator_Hub_0.1.17_x64-acceptance-only-setup.exe';sourceName='Creator_Hub_0.1.17_x64-acceptance-only-setup.exe';id='680096165';bytes=38211549L;sha='4dcc0c7a50f0e1aeebafa1fd828e0a6dda619427a64ca150a5ea2c808b76beb2';limit=64MB}
-            @{name='creator-hub-windows-x86_64.json';sourceName='outgoing-017-creator-hub-windows-x86_64.json';id='680096175';bytes=520L;sha='ebf3e56323650ba7d42cc062fbd0c39343c1baffc9bf27365b0a06024c62572c';limit=32768}
-            @{name='creator-hub-windows-x86_64.json.minisig';sourceName='outgoing-017-creator-hub-windows-x86_64.json.minisig';id='680096174';bytes=300L;sha='ca1eee503505b4fab3bc0927b7863add4f9dc6e6549bac4120611f5ee0ab8c78';limit=4096}
-            @{name='latest.json';sourceName='outgoing-017-latest.json';id='680096172';bytes=667L;sha='a4de80cb822b0c92db274e8a6d5afb365321728452edb68c7e4ae935e4d50530';limit=32768}
-            @{name='outgoing-017-template.json';sourceName='outgoing-017-template.json';id='680096163';bytes=1227L;sha='a29b22f2a478f613f92d84ee2e6488e25a82d4738af7c43cde8a146e3b7f53ed';limit=32768}
+            @{name='Creator.Hub_0.1.16_x64-setup.exe';sourceName='Creator.Hub_0.1.16_x64-settings-v4-setup.exe';id='680176209';bytes=38207720L;sha='35c9b066ecab363bf6151e00ab97b1da46ca07c6fa9c2e28453f8990d5b63a66';limit=64MB}
+            @{name='Creator_Hub_0.1.17_x64-acceptance-only-setup.exe';sourceName='Creator_Hub_0.1.17_x64-settings-v4-acceptance-only-setup.exe';id='680219533';bytes=38213593L;sha='17fafb1bdd7b7be9eea701c4eb371dc16e905b02f6ec74d3f1f979faf0f7ad9c';limit=64MB}
+            @{name='creator-hub-windows-x86_64.json';sourceName='outgoing-017-settings-v4-creator-hub-windows-x86_64.json';id='680220762';bytes=520L;sha='8d030da10d25f085d2dad7b41b1003c6366e19b5d4fabb2aaa85a152cb735649';limit=32768}
+            @{name='creator-hub-windows-x86_64.json.minisig';sourceName='outgoing-017-settings-v4-creator-hub-windows-x86_64.json.minisig';id='680220783';bytes=300L;sha='b7310b9aec173611295e2c968b6865944fce14a01cf584ca83d0b4c849cf3e19';limit=4096}
+            @{name='latest.json';sourceName='outgoing-017-settings-v4-latest.json';id='680220796';bytes=667L;sha='916e97ab83a9f8ea4d6d87a96d4a6cdc41638864bae37c11e1b34a42e7a61aac';limit=32768}
+            @{name='outgoing-017-template.json';sourceName='outgoing-017-settings-v4-template.json';id='680220821';bytes=1227L;sha='c3688b7b0d7ff7d4b46809965c2fb3d7edbf948d210480ad6e7a53fa7f95139a';limit=32768}
           )
           # END REVIEWED OUTGOING PINS
           if ($receiptSha256 -cnotmatch '^[a-f0-9]{64}$' -or $receiptSha256 -ceq ('0'*64) -or $reviewSha256 -cnotmatch '^[a-f0-9]{64}$' -or $reviewSha256 -ceq ('0'*64) -or $env:INPUT_REVIEW_SHA256 -cne $reviewSha256) { throw 'Completed Root17 receipt and independent outgoing review pins are required.' }
