@@ -58,8 +58,7 @@ test('Linux integration validates structured workflow contracts early and keeps 
   assert.ok(preflight < compile);
 });
 
-test('Linux integration runs MCP server tests before bundling and native compilation', () => {
-  const workflow = yaml.parse(fs.readFileSync(path.join(root, '.github/workflows/linux-integrated-features.yml'), 'utf8'));
+function requireMcpTestsBeforeCompiler(workflow) {
   const steps = workflow.jobs['native-libraries'].steps;
   const commands = steps.flatMap(step => String(step.run || '').split(/\r?\n/).map(line => line.trim()));
   const install = commands.indexOf('npm ci --prefix modules/mcp');
@@ -67,9 +66,57 @@ test('Linux integration runs MCP server tests before bundling and native compila
   const bundle = commands.indexOf('npm --prefix modules/mcp run release:launcher');
   const compile = commands.findIndex(command => command.startsWith('cargo clippy'));
   assert.ok(install >= 0 && test > install, 'Run the actual MCP suite after installing its locked dependencies');
-  assert.ok(bundle > test && compile > bundle, 'Fail MCP tests before bundling or native compilation');
+  assert.ok(compile > test, 'Fail MCP tests before any clippy');
+  if (bundle >= 0) {
+    assert.ok(bundle > test && compile > bundle, 'Fail MCP tests before bundling or native compilation');
+  } else {
+    const source = steps.findIndex(s => s.run?.trim() === 'python3 -I -S -B scripts/linux-root-compiler-input.py source');
+    const verify = steps.findIndex(s => s.name === 'Acquire one exact original unsigned compiler input ZIP' && s.uses === 'actions/github-script@v8');
+    const stage = steps.findIndex(s => s.run?.trim() === 'python3 -I -S -B scripts/linux-root-compiler-input.py stage');
+    const compiler = steps.findIndex(s => String(s.run || '').split(/\r?\n/).some(line => line.trim().startsWith('cargo clippy')));
+    const mcp = steps.findIndex(s => String(s.run || '').split(/\r?\n/).includes('npm --prefix modules/mcp test'));
+    const resources = steps.findIndex(s => s.run?.trim() === 'python3 -I -S -B scripts/linux-root-compiler-input.py resources');
+    assert.ok(source >= 0, 'Exact frozen-source validation required');
+    assert.ok(verify > source, 'Fixed verified ZIP acquisition required after source validation');
+    assert.ok(stage > verify && compiler > stage, 'Exact data-only stage required before compiler');
+    assert.ok(resources > mcp && compiler > resources, 'Default Tauri resources may only be staged after the full MCP suite and before clippy');
+    const mcpCommands = steps[mcp].run.trim().split(/\r?\n/);
+    const absent = 'python3 -I -S -B scripts/linux-root-compiler-input.py no-release';
+    assert.ok(mcpCommands.indexOf(absent) < mcpCommands.indexOf('npm ci --prefix modules/mcp') && mcpCommands.indexOf(absent) >= 0);
+    assert.ok(mcpCommands.lastIndexOf(absent) > mcpCommands.indexOf('npm ci --prefix modules/mcp') && mcpCommands.lastIndexOf(absent) < mcpCommands.indexOf('npm --prefix modules/mcp test'));
+    const sha = text => require('node:crypto').createHash('sha256').update(text.replace(/\r\n/g, '\n')).digest('hex');
+    assert.equal(sha(steps[verify].with.script), '9605f6a02d425b2a53708e54ef91563bee807b63384cd41fafa4f41744b99989', 'Reviewed read-only API/raw-ZIP verifier required');
+    assert.equal(sha(fs.readFileSync(path.join(root, 'scripts/linux-root-compiler-input.py'), 'utf8')), 'db1d8a4e1e19b3b421324281c5a9fa775e31588f840bb3bf8d1b461f07eafa0a', 'Reviewed data-only stager required');
+    assert.equal(sha(fs.readFileSync(path.join(root, 'scripts/linux-root-compiler-input.json'), 'utf8')), '5517ecce2cf0da3fc1be2fe310cc03355cdf21e594134c43004984f1a9660c5a', 'Fixed source/ZIP/raw-input/resource contract required');
+    assert.deepEqual(workflow.jobs['native-libraries'].permissions, { contents: 'read', actions: 'read' });
+    for (const step of steps.filter(s => String(s.run || '').split(/\r?\n/).some(line => line.trim().startsWith('cargo clippy')))) {
+      assert.equal(step.env?.CREATOR_HUB_INTEGRATED_MCP_PAYLOAD, '${{ runner.temp }}/root-linux-compiler-input-40580977821/payload', 'Bound compiler selector required');
+    }
+  }
   const step = steps.find(step => String(step.run || '').split(/\r?\n/).includes('npm --prefix modules/mcp test'));
   assert.match(step.run, /^set -euo pipefail\n/);
   assert.equal(step['continue-on-error'], undefined);
   assert.equal(step.if, undefined);
+}
+
+test('Linux integration runs locked MCP tests before native compilation with reviewed bundling or exact reuse', () => {
+  requireMcpTestsBeforeCompiler(yaml.parse(fs.readFileSync(path.join(root, '.github/workflows/linux-integrated-features.yml'), 'utf8')));
+});
+
+test('unchanged original072 bundling workflow still satisfies MCP-before-bundle-before-clippy', () => {
+  const original = spawnSync('git', ['show', '07216630590e3ac4fd7bd8656a8140b36ee88b66:.github/workflows/linux-integrated-features.yml'], { cwd: root, encoding: 'utf8', timeout: 10000, windowsHide: true });
+  assert.equal(original.status, 0, original.stderr);
+  requireMcpTestsBeforeCompiler(yaml.parse(original.stdout));
+});
+
+for (const [name, mutate] of [
+  ['source validation', steps => steps.filter(s => !s.name?.startsWith('Verify exact 982'))],
+  ['verified acquisition', steps => steps.filter(s => !s.name?.startsWith('Acquire one exact'))],
+  ['data stage', steps => steps.filter(s => !s.name?.startsWith('Stage only four'))],
+  ['compiler selector', steps => { for (const s of steps.filter(s => s.name?.startsWith('Compile the in-process'))) delete s.env; return steps; }],
+  ['arbitrary verifier fallback', steps => { steps.find(s => s.name?.startsWith('Acquire one exact')).with.script = 'return;'; return steps; }],
+]) test(`reuse without ${name} is refused, never treated as bundling absence alone`, () => {
+  const value = yaml.parse(fs.readFileSync(path.join(root, '.github/workflows/linux-integrated-features.yml'), 'utf8'));
+  value.jobs['native-libraries'].steps = mutate(value.jobs['native-libraries'].steps);
+  assert.throws(() => requireMcpTestsBeforeCompiler(value));
 });
