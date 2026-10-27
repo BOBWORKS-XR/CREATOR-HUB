@@ -15,7 +15,7 @@ const STATE_FILES: Record<string, string[]> = {
 
 export const READ_RESPONSE_BUDGET_SCHEMA = {
   type: "integer", minimum: 16384, maximum: 4194304, default: 65536,
-  description: "Maximum UTF-8 bytes of the complete result text: 16384-4194304, default 65536. This is a ceiling, not a minimum response size. Omitted entries are reported; narrow filters or explicitly raise the budget for more detail.",
+  description: "UTF-8 ceiling: 16384-4194304, default 65536. Omissions are reported.",
 };
 
 export function hasReadResponseBudget(name: string): boolean {

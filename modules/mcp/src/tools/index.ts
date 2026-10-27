@@ -1119,7 +1119,7 @@ Use after writing multiple files to force Unity to import them.`,
     {
       name: "wait_for_unity_compile",
       description: `Wait until Unity is no longer compiling or updating assets.
-Waits through stale heartbeat/domain reload up to timeoutMs; requires a fresh settled Editor and completed compilation. Does not request a refresh. Use afterCommandId from refresh_unity_assets to wait for that command, and sinceTimestamp=refreshRequestedAt to require a compilation completed after the refresh request (for C# changes). Without these boundaries this is only an idle-state check, not proof newly written files compiled. A timeout does not cancel pending commands; poll their original IDs instead of resubmitting.`,
+Idle state alone is not new-file proof. afterCommandId binds a refresh; sinceTimestamp requires a newer completed compile. Does not refresh or cancel. On timeout poll the original command ID; do not resubmit. Returns compiler errors.`,
       inputSchema: {
         type: "object",
         properties: {
@@ -1132,12 +1132,12 @@ Waits through stale heartbeat/domain reload up to timeoutMs; requires a fresh se
           },
           afterCommandId: {
             type: "string",
-            description: "UUID returned by a refresh command in the selected project. Require successful completion and a subsequent Editor heartbeat; never resubmit it.",
+            description: "Refresh UUID: require successful completion and a later Editor heartbeat in this project.",
           },
           sinceTimestamp: {
             type: "integer",
             minimum: 0,
-            description: "Unix milliseconds, e.g. refreshRequestedAt. Require a completed compilation at or after this boundary. Asset-only refreshes may not compile and can time out with this option.",
+            description: "Unix ms (refreshRequestedAt): require a completed compile at/after this time. Asset-only refresh may not compile.",
           },
         },
       },
@@ -1454,7 +1454,7 @@ Requires BanterMCPBridge extension.`,
           },
           componentId: {
             type: "string",
-            description: "Source component globalObjectId for duplicate types. Also supply its owning GameObject through objectId or objectPath; componentId alone is not an owner selector.",
+            description: "Component globalObjectId; also supply owning objectId or objectPath. componentId alone is not an owner selector.",
           },
           propertyName: {
             type: "string",
