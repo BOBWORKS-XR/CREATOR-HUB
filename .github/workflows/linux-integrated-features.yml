@@ -23,6 +23,25 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: 22.22.3
+      - uses: actions/setup-python@v6
+        id: preflight_python
+        with:
+          python-version: '3.11.17'
+          update-environment: false
+      - name: Install locked pure-test dependencies without lifecycle hooks
+        run: |
+          set -euo pipefail
+          npm ci --ignore-scripts
+      - name: Pure updater context and menu preflight
+        timeout-minutes: 5
+        env:
+          PREFLIGHT_PYTHON: ${{ steps.preflight_python.outputs.python-path }}
+        run: |
+          set -euo pipefail
+          "$PREFLIGHT_PYTHON" -I -S -B -c 'import sys; assert sys.version_info[:3] == (3, 11, 17)'
+          node --test scripts/linux-portable-restart-ci.test.cjs
+          "$PREFLIGHT_PYTHON" -I -S -B scripts/native-linux-production-016-update.test.py
+          "$PREFLIGHT_PYTHON" -I -S -B scripts/native-linux-migrated-update.test.py
       - uses: dtolnay/rust-toolchain@1.99.0
         with:
           components: clippy
@@ -44,8 +63,7 @@ jobs:
       - name: Test portable producer flags and actual Unix profile inventory without packaging
         run: |
           set -euo pipefail
-          npm ci --ignore-scripts
-          node --test scripts/build-unified.test.cjs scripts/linux-016-portable-package.test.cjs scripts/linux-retirement-package.test.cjs scripts/assemble-unix-payload.test.cjs scripts/linux-portable-signed-controls.test.cjs scripts/linux-portable-restart-ci.test.cjs
+          node --test scripts/build-unified.test.cjs scripts/linux-016-portable-package.test.cjs scripts/linux-retirement-package.test.cjs scripts/assemble-unix-payload.test.cjs scripts/linux-portable-signed-controls.test.cjs
       - name: Prepare the real MCP runtime hash inputs without signing or packaging
         run: |
           set -euo pipefail

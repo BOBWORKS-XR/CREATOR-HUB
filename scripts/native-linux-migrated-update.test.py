@@ -156,8 +156,12 @@ class AdmissionTests(unittest.TestCase):
             return json.dumps(value).encode() if file == C.INTENT else real_read(file, *args, **kwargs)
         with patch.object(C, "admission"), patch.object(C, "boot_id", return_value="boot"), patch.object(U, "read", side_effect=read):
             self.assertEqual(C.intent(environment()), value)
-            value["sources"]["native-linux-migrated-update.py"]["sha256"] = "0" * 64
-            with self.assertRaisesRegex(RuntimeError, "Independent bytes differ"): C.intent(environment())
+            for name in ("native-linux-migrated-update.py", "native-linux-production-016-update.py", "native-linux-production-016-migration.py"):
+                with self.subTest(source=name):
+                    original = value["sources"][name]["sha256"]
+                    value["sources"][name]["sha256"] = "0" * 64
+                    with self.assertRaisesRegex(RuntimeError, "Independent bytes differ"): C.intent(environment())
+                    value["sources"][name]["sha256"] = original
 
 
 class MigrationGateTests(unittest.TestCase):
@@ -425,6 +429,50 @@ class SuccessorStateTests(unittest.TestCase):
 
 
 class InterfaceTests(unittest.TestCase):
+    def test_real_tls_helper_filters_context_before_any_mutation(self):
+        env = {**environment(), "UNREVIEWED": "not-forwarded"}
+        real_context = U.clean_context
+        for migrated in (False, True):
+            with self.subTest(migrated=migrated):
+                contexts = []
+                def capture(values, **kwargs):
+                    context = real_context(values, **kwargs)
+                    contexts.append(context)
+                    return context
+                with patch.object(U, "clean_context", side_effect=capture), \
+                     patch.object(Path, "mkdir", side_effect=RuntimeError("unit boundary before TLS files")) as mkdir:
+                    with self.assertRaisesRegex(RuntimeError, "unit boundary before TLS files"):
+                        U.prepare_tls(env, migrated=migrated)
+                expected = C.child_environment(env) if migrated else {
+                    **{key: env[key] for key in U.ENVIRONMENT}, "PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"}
+                self.assertEqual(contexts, [expected])
+                mkdir.assert_called_once_with(mode=0o700)
+                self.assertNotIn("UNREVIEWED", contexts[0])
+                self.assertEqual(contexts[0]["GITHUB_WORKFLOW_REF"], M.WORKFLOW)
+
+    def test_real_transport_helper_admits_context_without_cross_import_or_child(self):
+        env = {**environment(), "UNREVIEWED": "not-forwarded"}
+        root = Path("/unit/transport")
+        for migrated in (False, True):
+            with self.subTest(migrated=migrated):
+                with patch.object(U, "PipeChild", side_effect=RuntimeError("unit boundary before process creation")) as child:
+                    with self.assertRaisesRegex(RuntimeError, "unit boundary before process creation"):
+                        U.start_transport(env, root, "deb", {}, migrated=migrated)
+                control, _ = U.update_channel(migrated)
+                operation = "update-migrated-016-017" if migrated else "update-016-017"
+                expected = C.transport_environment(env) if migrated else {
+                    **{key: env[key] for key in U.ENVIRONMENT}, "PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C",
+                    "RUNNER_TEMP": str(U.BASE / "result"), "HOME": str(U.BASE / "result/home")}
+                child.assert_called_once_with([env["CONTROLLER_NODE"], str(control / "scripts/linux-update-lab-feed.cjs"),
+                    operation, "deb", str(root)], expected, "transport", synthetic=True)
+                self.assertNotIn("UNREVIEWED", expected)
+                self.assertEqual(expected["GITHUB_REF"], M.BRANCH)
+        for name in ("native-linux-migrated-update", "../native-linux-migrated-update"):
+            with self.assertRaisesRegex(RuntimeError, "Only reviewed neutral source"):
+                U.load(name)
+        self.assertTrue({"native-linux-production-016-update.py", "native-linux-production-016-migration.py"}
+                        <= set(U.SOURCES) <= set(C.sources()))
+
     def test_legacy_paths_unchanged_and_unknown_channels_refused(self):
         self.assertEqual(U.update_channel(), (U.BASE, U.BASE / "result"))
         self.assertEqual(M.inventory_paths(), (M.BASE, M.BASE / "result"))

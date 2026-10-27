@@ -2409,6 +2409,26 @@ def field_text(surface, source_id):
     return row.get("text") or row["name"]
 
 
+def source_menu_profile(source):
+    """Pure source expectations, not executable admission or a live UI fallback."""
+    require(type(source) is str and source in (
+        "a89ed2b90278b33bebd0b4ba29d87904d2fe683b", FIXED["17"]["source"],
+        "085131ba6f3050a795fd513139a34975658ba321"), "Unreviewed menu source; version or UI labels are not source identity")
+    if source == "085131ba6f3050a795fd513139a34975658ba321":
+        return {"source": source,
+                "initial": {"hub": "Home Projects and updates", "mcp": "MCP AI bridge for Unity Checking",
+                            "setup": "Setup / Repair Unity + Creator SDK project setup and repair Checking"},
+                "ready": {"hub": "Home Projects and updates", "mcp": "MCP AI bridge for Unity",
+                          "setup": "Setup / Repair Unity + Creator SDK project setup and repair"},
+                "hideReadyStatus": True, "rewriteHomeCaption": False}
+    return {"source": source,
+            "initial": {"hub": "H Creator Hub Apps and projects", "mcp": "M Creator Works MCP AI tools for Unity Checking",
+                        "setup": "P Project Setup Unity + Creator SDK projects Checking"},
+            "ready": {"hub": "H Creator Hub Projects", "mcp": "M Creator Works MCP AI tools for Unity Included in Hub",
+                      "setup": "P Project Setup Unity + Creator SDK projects Included in Hub"},
+            "hideReadyStatus": False, "rewriteHomeCaption": True}
+
+
 def direct_pages(surface, actions):
     surface.call_phase = "direct-pages"
     phase_processes(surface)
@@ -3618,8 +3638,11 @@ def prepare_fixture_config(created):
             os.close(fd)
 
 
-def clean_context(env):
-    return {**{key: env[key] for key in ENVIRONMENT}, "PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"}
+def clean_context(env, *, migrated=False):
+    names = ENVIRONMENT
+    if migrated:
+        names += load("native-linux-production-016-migration").ENVIRONMENT + ("CREATOR_MIGRATED_UPDATE_EXECUTE",)
+    return {**{key: env[key] for key in names}, "PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"}
 
 
 def copy_inputs(source, target, profile):
@@ -3982,6 +4005,7 @@ class PipeChild:
 
 def prepare_tls(env, *, migrated=False):
     control, _ = update_channel(migrated)
+    context = clean_context(env, migrated=migrated)
     folder = BASE / "tls"; folder.mkdir(mode=0o700)
     require(not os.path.lexists(TLS_CERT), "Pre-existing test CA refused")
     before = trust_snapshot()
@@ -4000,7 +4024,6 @@ def prepare_tls(env, *, migrated=False):
     finally:
         os.close(directory_fd)
     script = "native-linux-migrated-update.py" if migrated else Path(__file__).name
-    context = load("native-linux-migrated-update").child_environment(env) if migrated else clean_context(env)
     child = PipeChild(["/usr/bin/python3", "-B", str(control / "scripts" / script), "_tls-guard"], context, "tls-guard")
     try:
         require(child.ready()["kind"] == "tls-cleanup-armed", "Cleanup lease was not armed")
@@ -4012,9 +4035,10 @@ def prepare_tls(env, *, migrated=False):
         raise
 
 
-def transport_context(env):
-    result = clean_context(env)
-    result["RUNNER_TEMP"] = str(BASE / "result")
+def transport_context(env, *, migrated=False):
+    _, output = update_channel(migrated)
+    result = clean_context(env, migrated=migrated)
+    result["RUNNER_TEMP"] = str(output)
     result["HOME"] = str(BASE / "result/home")
     return result
 
@@ -4031,7 +4055,7 @@ def inspect_transport(env, root, mode):
 def start_transport(env, root, mode, request_value, *, migrated=False):
     control, _ = update_channel(migrated)
     operation = "update-migrated-016-017" if migrated else "update-016-017"
-    context = load("native-linux-migrated-update").transport_environment(env) if migrated else transport_context(env)
+    context = transport_context(env, migrated=migrated)
     argv = [env["CONTROLLER_NODE"], str(control / "scripts/linux-update-lab-feed.cjs"), operation, mode, str(root)]
     child = PipeChild(argv, context, "transport", synthetic=True)
     try:

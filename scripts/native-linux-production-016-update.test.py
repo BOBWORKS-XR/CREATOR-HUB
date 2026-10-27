@@ -3171,11 +3171,14 @@ class DirectMenuLabels(unittest.TestCase):
         Menu.LABELS = self.LABELS
         menu = Menu(); menu.feed((HERE.parent / "src/index.html").read_text(encoding="utf8"))
         self.assertEqual(set(menu.labels), set(self.LABELS))
-        for feature, expected in self.LABELS.items():
-            self.assertEqual(menu.labels[feature], expected.removesuffix("Included in Hub") + "Checking")
+        profile = M.source_menu_profile("085131ba6f3050a795fd513139a34975658ba321")
+        for feature in self.LABELS:
+            self.assertEqual(menu.labels[feature], profile["initial"][feature])
         source = (HERE.parent / "src/app.js").read_text(encoding="utf8")
         self.assertIn("const label = directFeatures ? state?.issue ? 'Unavailable' : 'Included in Hub'", source)
         self.assertIn("byId(`menu-status-${id}`).textContent = directFeatures ? label", source)
+        self.assertTrue(profile["hideReadyStatus"])
+        self.assertIn("byId(`menu-status-${id}`).hidden = directFeatures && !state?.issue;", source)
 
     def test_unknown_badges_status_suffixes_and_other_rows_are_not_alternatives(self):
         for feature, label in self.LABELS.items():
@@ -3431,11 +3434,13 @@ class HomeMenuLabels(unittest.TestCase):
             def handle_endtag(self, tag):
                 if tag == "button" and self.active: self.labels.append(" ".join(self.parts)); self.active = False
         menu = Menu(); menu.feed((HERE.parent / "src/index.html").read_text(encoding="utf8"))
-        self.assertEqual(menu.labels, ["H Creator Hub Apps and projects"])
+        profile = M.source_menu_profile("085131ba6f3050a795fd513139a34975658ba321")
+        self.assertEqual(menu.labels, [profile["initial"]["hub"]])
         source = (HERE.parent / "src/app.js").read_text(encoding="utf8")
         self.assertIn("if (directFeatures) {", source)
-        self.assertIn("menu.querySelector('[data-view=\"hub\"] small').textContent = 'Projects';", source)
-        self.assertEqual(menu.labels[0].replace("Apps and projects", "Projects"), self.LABEL)
+        self.assertFalse(profile["rewriteHomeCaption"])
+        self.assertNotIn("menu.querySelector('[data-view=\"hub\"] small').textContent = 'Projects';", source)
+        self.assertEqual(menu.labels, [profile["ready"]["hub"]])
 
     def test_home_refusal_rechecks_exact_row_and_wire_reference_before_action(self):
         source = ast.unparse(next(n for n in ast.parse(Path(M.__file__).read_text()).body
@@ -3465,6 +3470,45 @@ class HomeMenuLabels(unittest.TestCase):
             exec(compile(ast.fix_missing_locations(ast.Module(body=[function], type_ignores=[])), "actual-wire-refusal", "exec"), namespace)
             with self.subTest(function=function_name), self.assertRaisesRegex(RuntimeError, "(?:Navigation changed before input|Home navigation changed)"):
                 namespace["identity"]()
+
+
+class SourceMenuProfiles(unittest.TestCase):
+    def test_exact_sources_separate_current_expectations_from_historical_live_selectors(self):
+        historical = {"hub": HomeMenuLabels.LABEL, **DirectMenuLabels.LABELS}
+        for source in ("a89ed2b90278b33bebd0b4ba29d87904d2fe683b", M.FIXED["17"]["source"]):
+            profile = M.source_menu_profile(source)
+            self.assertEqual(profile["source"], source)
+            self.assertEqual(profile["ready"], historical)
+            self.assertEqual(profile["initial"], {
+                "hub": "H Creator Hub Apps and projects", "mcp": "M Creator Works MCP AI tools for Unity Checking",
+                "setup": "P Project Setup Unity + Creator SDK projects Checking"})
+            self.assertFalse(profile["hideReadyStatus"])
+            self.assertTrue(profile["rewriteHomeCaption"])
+        current = M.source_menu_profile("085131ba6f3050a795fd513139a34975658ba321")
+        self.assertEqual(current, {
+            "source": "085131ba6f3050a795fd513139a34975658ba321",
+            "initial": {"hub": "Home Projects and updates", "mcp": "MCP AI bridge for Unity Checking",
+                        "setup": "Setup / Repair Unity + Creator SDK project setup and repair Checking"},
+            "ready": {"hub": "Home Projects and updates", "mcp": "MCP AI bridge for Unity",
+                      "setup": "Setup / Repair Unity + Creator SDK project setup and repair"},
+            "hideReadyStatus": True, "rewriteHomeCaption": False})
+        tree = ast.parse(Path(M.__file__).read_text())
+        helper = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "source_menu_profile")
+        self.assertEqual({ast.unparse(n.func) for n in ast.walk(helper) if isinstance(n, ast.Call)}, {"require", "type"})
+        callers = [n for n in tree.body if n is not helper and any(isinstance(c, ast.Call)
+                   and isinstance(c.func, ast.Name) and c.func.id == "source_menu_profile" for c in ast.walk(n))]
+        self.assertEqual(callers, [], "Current source-only labels must not change historical native admission or selectors")
+
+    def test_versions_aliases_unknown_sources_and_current_labels_cannot_admit_a_live_target(self):
+        for source in ("0.1.16", "0.1.17", "085131b", "current", "historical", "f" * 40, None, {}):
+            with self.subTest(source=source), self.assertRaisesRegex(RuntimeError, "Unreviewed menu source"):
+                M.source_menu_profile(source)
+        current = M.source_menu_profile("085131ba6f3050a795fd513139a34975658ba321")
+        for feature in DirectMenuLabels.LABELS:
+            with self.subTest(feature=feature), self.assertRaisesRegex(RuntimeError, "One exact first-party"):
+                DirectMenuLabels().selection(feature, [DirectMenuLabels.row(current["ready"][feature])])
+        with self.assertRaisesRegex(RuntimeError, "One exact Home"):
+            HomeMenuLabels().select([DirectMenuLabels.row(current["ready"]["hub"])])
 
 
 class FixtureConfigCreationContext(unittest.TestCase):
