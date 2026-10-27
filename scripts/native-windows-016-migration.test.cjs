@@ -53,10 +53,10 @@ test('data-only file and directory forms resolve only the exact canonical instal
 });
 
 test('exact frozen installer and installer-extracted EXE pins remain independent of optional signed input files', () => {
-  assert.equal(driver.TARGET.installer, '35c9b066ecab363bf6151e00ab97b1da46ca07c6fa9c2e28453f8990d5b63a66');
-  assert.equal(driver.TARGET.exe, 'd6b851e9f2d4ed1db0f881d9d867b1c0554263833d779ab38b8aedea79c1c461');
-  assert.equal(driver.TARGET.productSource, '7f007549f37fc5346df1e5309e098d92c8a6cfef');
-  assert.equal(driver.TARGET.bytes, 38207720);
+  assert.equal(driver.TARGET.installer, '898e57b1f3dd87b0f871965eb955d54cc88a573a3b879303805defa829d1b89a');
+  assert.equal(driver.TARGET.exe, '54bca157eb4a525981754e59d182669dd38a01ff3683ee08296cfa3d01049cb2');
+  assert.equal(driver.TARGET.productSource, '958233ffd5c52ea6c4168ecd2419f5c3fdfadb7a');
+  assert.equal(driver.TARGET.bytes, 38216528);
   assert.strictEqual(driver.TARGET, require('./windows-incoming-016.cjs').TARGET);
   assert.equal(driver.TARGET.asset, 'Creator.Hub_0.1.16_x64-setup.exe');
   assert.equal(Object.isFrozen(driver.TARGET), true);
@@ -75,9 +75,9 @@ test('immutable artifact preflight is required for this exact code revision befo
   }
 });
 
-// Exact small public metadata from settings-build-v3, not a synthesized
+// Exact small public metadata from settings-build-v5, not a synthesized
 // build receipt. Both strings are independently hash-pinned by the driver.
-const runtimeBytes = Buffer.from('{"schemaVersion":1,"product":"com.creatorworks.hub.mcp-runtime","hubVersion":"0.1.16","platform":"windows","arch":"x86_64","module":{"executable":"mcp/creator-works-mcp-launcher.exe","version":"2.7.7","files":{"mcp/creator-works-mcp-launcher.exe":"0d9467e91fbfd8b4a833dff6d7089bd75152ed23f26f53753afe51f3d15940df","mcp/server/LICENSE":"7e1bc8fb937a3324de67fb2439b8e943dda3efc6b62684da2697e1bfcfe7414e","mcp/server/THIRD_PARTY_NOTICES.md":"4a4fb0b35a2ace85eb634cddc5acab3152d570481e0efabc5369550370eb25b7","mcp/server/creator-works-mcp.mjs":"b940bbd33e3e81181212fcd645c2126f9bed18bc961b892e293a63211d9a6337","mcp/server/runtime/LICENSE":"8efdacdc1cfa3460aeb7fe98e3c54337b971d5da70e6eee292b73b981acb220c","mcp/server/runtime/VERSION":"98182b41c9ce3357797985cf12dc3b0124490ef88bc918a905373e7688e6aec9","mcp/server/runtime/node.exe":"c6335d08331c23d68b9f2b18adb102002d76ef150b47248e954c507e0d033664","mcp/server/unity-extension/Editor/BanterMCPBridge.cs":"0fbae419bb9e1a88d6d86404708d0e84414796bbb4fdbb95874ca88a4f93d1c2","mcp/server/unity-extension/Editor/CreatorWorksMCPLogo.png":"f3f68baa0d887de92e6cf7aba8beae7ff8ea5c44b13444f018413041ade19ea7"}}}');
+const runtimeBytes = Buffer.from('{"schemaVersion":1,"product":"com.creatorworks.hub.mcp-runtime","hubVersion":"0.1.16","platform":"windows","arch":"x86_64","module":{"executable":"mcp/creator-works-mcp-launcher.exe","version":"2.7.7","files":{"mcp/creator-works-mcp-launcher.exe":"2a3a8b248c14e9882b8747c7bdb48ac4e5e8aba942ce2f8c36e14f8a42d7237a","mcp/server/LICENSE":"7e1bc8fb937a3324de67fb2439b8e943dda3efc6b62684da2697e1bfcfe7414e","mcp/server/THIRD_PARTY_NOTICES.md":"4a4fb0b35a2ace85eb634cddc5acab3152d570481e0efabc5369550370eb25b7","mcp/server/creator-works-mcp.mjs":"b940bbd33e3e81181212fcd645c2126f9bed18bc961b892e293a63211d9a6337","mcp/server/runtime/LICENSE":"8efdacdc1cfa3460aeb7fe98e3c54337b971d5da70e6eee292b73b981acb220c","mcp/server/runtime/VERSION":"98182b41c9ce3357797985cf12dc3b0124490ef88bc918a905373e7688e6aec9","mcp/server/runtime/node.exe":"c6335d08331c23d68b9f2b18adb102002d76ef150b47248e954c507e0d033664","mcp/server/unity-extension/Editor/BanterMCPBridge.cs":"0fbae419bb9e1a88d6d86404708d0e84414796bbb4fdbb95874ca88a4f93d1c2","mcp/server/unity-extension/Editor/CreatorWorksMCPLogo.png":"f3f68baa0d887de92e6cf7aba8beae7ff8ea5c44b13444f018413041ade19ea7"}}}');
 const routerBytes = Buffer.from('{"schemaVersion":1,"product":"com.creatorworks.hub.mcp-router","platform":"windows","arch":"x86_64","protocol":1,"sha256":"e03924ba3db7d2331c7d0f5e33f270e220dc720d4d67340e6edd1be573b6cde4"}');
 
 test('installed small descriptors bind all MCP, Setup, router, metadata and signature images', () => {

@@ -456,6 +456,80 @@ fn semantic_equivalence_refuses_invalid_types_jsonc_and_duplicate_unknown_keys()
     assert!(settings_equivalent(&after(), &vec![b' '; MAX_CONFIG + 1]).is_err());
 }
 
+#[cfg(windows)]
+#[test]
+fn single_store_duplicate_unknown_keys_refuse_inspection_load_and_save() {
+    let mut accepted = Vec::new();
+    for legacy_only in [false, true] {
+        for (keys, unknown) in [
+            ("literal", r#"{"mode":"keep","mode":"other"}"#),
+            ("escaped", r#"{"mode":"keep","\u006dode":"other"}"#),
+        ] {
+            let fixture = Fixture::new();
+            let server = fixture.root.path().join("server.mjs");
+            fs::write(&server, "// fixture only; never executed").unwrap();
+            let original = format!(
+                r#"{{"channels":[],"active_channel_id":null,"auto_start":false,"mcp_server_path":{},"tool_groups":"read","future":{unknown}}}"#,
+                serde_json::to_string(&server.to_string_lossy()).unwrap()
+            )
+            .into_bytes();
+            let selected = if legacy_only {
+                &fixture.paths.legacy
+            } else {
+                &fixture.paths.current
+            };
+            fs::write(selected, &original).unwrap();
+            let label = format!("legacy_only={legacy_only}, keys={keys}");
+            let images = || {
+                (
+                    storage::read_bytes(&fixture.paths.current).unwrap(),
+                    storage::read_bytes(&fixture.paths.legacy).unwrap(),
+                )
+            };
+            let before = images();
+            if let Ok(report) = inspect_paths(&fixture.paths) {
+                accepted.push(format!("{label}: inspection admitted {:?}", report.status));
+            }
+            let form = snapshot(&fixture.paths).and_then(|saved| {
+                loaded_config(&saved, || panic!("An existing store must not use defaults"))
+            });
+            if let Ok(config) = form {
+                accepted.push(format!(
+                    "{label}: form loader admitted future={:?}",
+                    config.extra.get("future")
+                ));
+            }
+            let operation = load_operation_at(fixture.paths.clone(), || {
+                panic!("An existing store must not use defaults")
+            });
+            assert_eq!(images(), before, "Read paths changed {label}");
+            assert!(!fixture.paths.journal.exists());
+            if let Ok((mut config, operation)) = operation {
+                accepted.push(format!(
+                    "{label}: operation loader admitted future={:?}",
+                    config.extra.get("future")
+                ));
+                // This is the normal encoded_config/save_snapshot publication path,
+                // using only this fixture's paths, not global LOADED or profile roots.
+                config.auto_start = true;
+                if commit_operation(config, operation).is_ok() {
+                    accepted.push(format!("{label}: explicit save accepted ambiguous input"));
+                }
+            }
+            if images() != before {
+                accepted.push(format!("{label}: explicit save changed an active store"));
+            }
+            if fixture.paths.journal.exists() || backup_path(selected, &original).exists() {
+                accepted.push(format!("{label}: publication or backup evidence was created"));
+            }
+        }
+    }
+    assert!(
+        accepted.is_empty(),
+        "Ambiguous single-store paths accepted: {accepted:#?}"
+    );
+}
+
 #[test]
 fn formatting_change_after_approval_is_stale_for_server_save_import_and_backup_boundaries() {
     for index in 0..2 {

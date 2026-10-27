@@ -8,15 +8,15 @@ const KIND = 'public14-incoming-direct16';
 const BASELINE = Object.freeze({ version: '0.1.14',
   installer: '284820f92de487e8a0f1bb5b3b99cafe5e073f0402a9350a2ea6e76fa9543157',
   exe: 'cd5e3fd2829727d06444c0f3266b178798d1b55c63df651be12eb38ac4523a86' });
-const TARGET = Object.freeze({ version: '0.1.16', asset: 'Creator.Hub_0.1.16_x64-setup.exe', bytes: 38207720,
-  productSource: '7f007549f37fc5346df1e5309e098d92c8a6cfef',
-  installer: '35c9b066ecab363bf6151e00ab97b1da46ca07c6fa9c2e28453f8990d5b63a66',
-  exe: 'd6b851e9f2d4ed1db0f881d9d867b1c0554263833d779ab38b8aedea79c1c461' });
+const TARGET = Object.freeze({ version: '0.1.16', asset: 'Creator.Hub_0.1.16_x64-setup.exe', bytes: 38216528,
+  productSource: '958233ffd5c52ea6c4168ecd2419f5c3fdfadb7a',
+  installer: '898e57b1f3dd87b0f871965eb955d54cc88a573a3b879303805defa829d1b89a',
+  exe: '54bca157eb4a525981754e59d182669dd38a01ff3683ee08296cfa3d01049cb2' });
 // Source association is not a claim that this later snapshot commit was built.
 // Digest: SHA256(JSON.stringify(before.sources)), no newline; no private settings.
 const BUILD_INPUT = Object.freeze({ builtFromDirtyWorktree: true, sourceSnapshotBuilt: false,
   buildSourceBase: 'cf6c2db2a4260e02206c91133878ff82bf3bb084', buildSourceFileCount: 781,
-  buildInputDigest: 'ef441cb45490c509d82f775d19adfe4c7f0b49394e62db0ef34d39352c2fdd2b',
+  buildInputDigest: '52a0ac264c54769360e05d7be6149712771af3f1a366649ae3b7f04b2d19f1b5',
   sourceSnapshotTestOnlyDifferences: Object.freeze([]) });
 const productProvenance = () => ({ productSource: TARGET.productSource, ...BUILD_INPUT });
 function freshSettingsBytes() {

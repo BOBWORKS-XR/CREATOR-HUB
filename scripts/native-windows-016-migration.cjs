@@ -22,11 +22,11 @@ const CONTEXT = Object.freeze({ GITHUB_ACTIONS: 'true', RUNNER_ENVIRONMENT: 'git
 const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
-// Independently frozen from the settings-build-v3 installer payload. The signed runtime
+// Independently frozen from the settings-build-v5 installer payload. The signed runtime
 // descriptor binds all nine MCP files; these pins also bind Setup and routing.
 const RESOURCE_PINS = Object.freeze({
-  'routing/runtime.json': '3e101bb7ee0d9548cec390a4b35a9177b84ae801190a3851762f2e7f6504e40c',
-  'routing/runtime.minisig': '1288435da22951b8e3723407cfd8c806da20c5b5d8cb075b94aa865263e16e6f',
+  'routing/runtime.json': 'a75073747ab35d1e9073760e29e4028948d952be7db16a9f76855f8f49a83259',
+  'routing/runtime.minisig': '83c8bb76eca9adf31c480e43f876d74b08be64c88e917b3869d0acfccfae16fb',
   'routing/router.json': '4138e47641b11c3a154577bbc13ec58afcb3a9f97430679a9c51fbcde81f3a00',
   'routing/router.minisig': 'f9fb497a5ea5e2a0cceceffad8efccd3e14e57cfa7d3af1763afc858eaecabb1',
   'routing/creator-hub-mcp-router.exe': 'e03924ba3db7d2331c7d0f5e33f270e220dc720d4d67340e6edd1be573b6cde4',

@@ -56,11 +56,11 @@ jobs:
           MANIFEST_BYTES: ${{ inputs.manifest_bytes }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $rows = @(@{name='Creator.Hub_0.1.16_x64-setup.exe';sourceName='Creator.Hub_0.1.16_x64-settings-v4-setup.exe';id='680176209';bytes=38207720L;sha='35c9b066ecab363bf6151e00ab97b1da46ca07c6fa9c2e28453f8990d5b63a66'})
+          $rows = @(@{name='Creator.Hub_0.1.16_x64-setup.exe';sourceName='Creator.Hub_0.1.16_x64-settings-v5-setup.exe';id='680325441';bytes=38216528L;sha='898e57b1f3dd87b0f871965eb955d54cc88a573a3b879303805defa829d1b89a'})
           $metadata = @(
-            @{name='creator-hub-windows-x86_64.json';sourceName='creator-hub-windows-x86_64-settings-v4.json';id=$env:DESCRIPTOR_ID;bytes=$env:DESCRIPTOR_BYTES;sha=$env:DESCRIPTOR_SHA256;limit=32768}
-            @{name='creator-hub-windows-x86_64.json.minisig';sourceName='creator-hub-windows-x86_64-settings-v4.json.minisig';id=$env:MINISIG_ID;bytes=$env:MINISIG_BYTES;sha=$env:MINISIG_SHA256;limit=4096}
-            @{name='latest.json';sourceName='latest-settings-v4.json';id=$env:MANIFEST_ID;bytes=$env:MANIFEST_BYTES;sha=$env:MANIFEST_SHA256;limit=32768}
+            @{name='creator-hub-windows-x86_64.json';sourceName='creator-hub-windows-x86_64-settings-v5.json';id=$env:DESCRIPTOR_ID;bytes=$env:DESCRIPTOR_BYTES;sha=$env:DESCRIPTOR_SHA256;limit=32768}
+            @{name='creator-hub-windows-x86_64.json.minisig';sourceName='creator-hub-windows-x86_64-settings-v5.json.minisig';id=$env:MINISIG_ID;bytes=$env:MINISIG_BYTES;sha=$env:MINISIG_SHA256;limit=4096}
+            @{name='latest.json';sourceName='latest-settings-v5.json';id=$env:MANIFEST_ID;bytes=$env:MANIFEST_BYTES;sha=$env:MANIFEST_SHA256;limit=32768}
           )
           $supplied = @($metadata | ForEach-Object { $_.id; $_.bytes; $_.sha } | Where-Object { -not [string]::IsNullOrEmpty($_) })
           if ($supplied.Count -ne 0 -and $supplied.Count -ne 9) { throw 'Signed metadata must be an all-or-none independently pinned set.' }

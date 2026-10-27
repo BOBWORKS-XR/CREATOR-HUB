@@ -460,8 +460,8 @@ ConvertTo-Json -InputObject $results -Compress
   assert.deepEqual(JSON.parse(result.stdout.trim()), cases.map(item => item.expected));
 });
 
-const localBuildReceipt = path.join(root, 'artifacts/menu-merge-20261027/settings-build-v4/build-receipt.json');
-test('local v4 build receipt title and outgoing version replacement satisfy the actual close title predicate',
+const localBuildReceipt = path.join(root, 'artifacts/menu-merge-20261027/settings-build-v5/build-receipt.json');
+test('local v5 build receipt title and outgoing version replacement satisfy the actual close title predicate',
   { skip: process.platform !== 'win32' || !fs.existsSync(localBuildReceipt) }, () => {
     const receipt = JSON.parse(fs.readFileSync(localBuildReceipt));
     assert.equal(receipt.version, '0.1.16');

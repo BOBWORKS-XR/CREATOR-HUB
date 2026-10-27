@@ -52,7 +52,7 @@ test('stager identity binds repository, manual workflow, branch, successful run,
   for (const change of [{ id: 1 }, { name: 'wrong' }, { expired: true }, { digest: `sha256:${'0'.repeat(64)}` },
     { workflow_run: { id: run.id, head_sha: revision } }, { size_in_bytes: 65 * 1024 * 1024 }]) assert.throws(() => driver.bindInput(run, { ...artifact, ...change }, env));
   assert.equal(migration.TARGET, candidate.TARGET);
-  assert.doesNotMatch(source, /35c9b066|d6b851e9|7f007549|c7885a1e|f562192c|2a809353|944eebfd|b6bf6f71/, 'No duplicated candidate or outgoing pins');
+  assert.doesNotMatch(source, /898e57b1|54bca157|958233ff|35c9b066|d6b851e9|7f007549|c7885a1e|f562192c|2a809353|944eebfd|b6bf6f71/, 'No duplicated candidate or outgoing pins');
   assert.match(source, /candidate\.installer\(args\[0\]\)/); assert.match(source, /migration\.inspectInstalledResources\(path\.dirname\(hub\)\)/);
 });
 test('fixtures retain nondefault preferences and unknown fields; bootstrap requires genuine matching native review', () => {
@@ -213,7 +213,7 @@ test('native confirmation text and current product/UI semantics match the finite
   assert.ok(menu.includes("name: 'Open menu'")); assert.ok(menu.includes("name: 'Creator tools'"));
   assert.match(menu, /mcp: \/\^MCP/); assert.match(menu, /hub: \/\^Home/);
   const close = text('scripts/native-window.ps1');
-  const localReceipt = path.join(root, 'artifacts/menu-merge-20261027/settings-build-v4/build-receipt.json');
+  const localReceipt = path.join(root, 'artifacts/menu-merge-20261027/settings-build-v5/build-receipt.json');
   if (fs.existsSync(localReceipt)) assert.ok(close.includes(JSON.parse(fs.readFileSync(localReceipt)).title));
   assert.match(source, /assert\.equal\(requiredFalse\.required, false\)/);
   assert.match(source, /assert\.equal\(initialStatus\.settingsImportAvailable, false\)/);
