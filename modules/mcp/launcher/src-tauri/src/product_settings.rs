@@ -71,6 +71,10 @@ fn validate_config(bytes: &[u8]) -> Result<(), String> {
     if config.channels.len() > 256 {
         return Err("Product settings exceed the existing 256-channel preview limit.".into());
     }
+    crate::jsonc::parse_unambiguous(
+        std::str::from_utf8(bytes)
+            .map_err(|_| "Invalid product settings; originals were left unchanged.")?,
+    )?;
     Ok(())
 }
 fn settings_equivalent(current: &[u8], legacy: &[u8]) -> Result<bool, String> {

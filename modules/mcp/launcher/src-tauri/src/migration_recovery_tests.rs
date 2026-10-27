@@ -585,6 +585,73 @@ fn partially_applied_batch_resumes_without_rewriting_completed_members() {
     assert_eq!(repeated.journal, result.journal);
 }
 
+#[cfg(windows)]
+#[test]
+fn declining_partially_applied_batch_preserves_all_retained_bytes() {
+    fn files(root: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+        let mut result = std::collections::BTreeMap::new();
+        let mut directories = vec![root.to_path_buf()];
+        while let Some(directory) = directories.pop() {
+            for entry in fs::read_dir(directory).unwrap() {
+                let entry = entry.unwrap();
+                let kind = entry.file_type().unwrap();
+                assert!(!kind.is_symlink());
+                if kind.is_dir() {
+                    directories.push(entry.path());
+                } else {
+                    result.insert(
+                        entry.path().strip_prefix(root).unwrap().to_path_buf(),
+                        fs::read(entry.path()).unwrap(),
+                    );
+                }
+            }
+        }
+        result
+    }
+
+    // Coverage extension, not a known bug: decline after one real publication.
+    let f = Fixture::new(2);
+    let t = f.prepare();
+    assert!(t
+        .resume_with(|_| true, &mut |at| {
+            if at == Boundary::Outcome(0) {
+                Err("injected stop after first member".into())
+            } else {
+                Ok(())
+            }
+        })
+        .is_err());
+    assert_eq!(fs::read(&f.paths[0]).unwrap(), Fixture::after(0));
+    assert_eq!(fs::read(&f.paths[1]).unwrap(), Fixture::before(1));
+    let t = f.open(&t);
+    let before = files(&f.root);
+    let mut prompts = 0;
+    let declined = t
+        .resume(|_| {
+            prompts += 1;
+            false
+        })
+        .unwrap();
+    assert_eq!(prompts, 1);
+    assert!(!declined.completed);
+    assert_eq!(declined.files[0].status, Status::Applied);
+    assert_eq!(declined.files[1].status, Status::Ready);
+    assert_eq!(files(&f.root), before);
+    assert!(!t.directory.join("completed.json").exists());
+    f.images(&t);
+    assert!(t
+        .resume_with(|_| true, &mut |at| {
+            assert_ne!(at, Boundary::BeforePublish(0));
+            Ok(())
+        })
+        .unwrap()
+        .completed);
+    for (index, target) in f.paths.iter().enumerate() {
+        assert_eq!(fs::read(target).unwrap(), Fixture::after(index));
+    }
+    f.images(&t);
+}
+
 #[test]
 fn identical_after_images_without_any_journal_are_refused() {
     let f = Fixture::new(1);
