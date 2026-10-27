@@ -603,7 +603,8 @@ class FailedProcessAttributionTests(unittest.TestCase):
             record = {"scenarioPassed": False, **M.FLAGS}
             callback = Mock(**({"side_effect": diagnostic} if isinstance(diagnostic, Exception) else {"return_value": diagnostic}))
             scope = {"error": original, "record": record, "child": Mock(), "helper": Mock(), "failed_process_attribution": callback,
-                     "capture_wrapper": Mock(), "logs": Mock(), "wrapper_started": 0, "deadline": 540}
+                     "capture_wrapper": Mock(), "logs": Mock(), "wrapper_started": 0, "deadline": 540,
+                     "InventoryDirectoryRefusal": M.InventoryDirectoryRefusal}
             exec(block, scope)
             self.assertIs(scope["failure"], original); callback.assert_called_once_with(scope["child"], scope["helper"])
             self.assertEqual(record["refusal"], {"type": "RuntimeError", "message": str(original)})
@@ -1595,6 +1596,253 @@ class AuthenticationDetailsTests(unittest.TestCase):
             with self.subTest(phase=phase), self.assertRaises(RuntimeError):
                 native.cancel_once(Mock(side_effect=profiles), Mock(), {"mode": "cancel"})
             action.do_action.assert_not_called()
+
+
+class HelperProcessDiagnosticTests(unittest.TestCase):
+    def identities(self):
+        def identity(pid, parent, executable, uids, sha):
+            return {"pid": pid, "parentPid": parent, "startTime": str(pid * 10), "uids": uids,
+                    "executable": executable, "kernelImageSha256": sha,
+                    "image": {"st_size": "64", "st_uid": "0", "st_gid": "0", "st_mode": str(M.stat.S_IFREG | 0o755)}}
+        hub = identity(10, 9, M.HUB, [M.UID] * 4, "a" * 64)
+        pkexec = identity(20, 10, "/usr/bin/pkexec", [M.UID, 0, 0, 0], "b" * 64)
+        current = {10: hub, 20: identity(20, 10, M.HELPER, [0] * 4, "a" * 64),
+                   30: identity(30, 20, "/usr/bin/dpkg", [0] * 4, "c" * 64)}
+        proof = {"root": hub, "pkexec": pkexec, "target": "mcp"}
+        def observed(pid, _helper, full=True):
+            value = copy.deepcopy(current[pid])
+            if not full: value.pop("kernelImageSha256")
+            return value
+        return proof, current, SimpleNamespace(native_process=Mock(side_effect=observed))
+
+    def request(self, phase=0):
+        return {"phase": M.HELPER_DIAGNOSTIC_PHASES[phase], "harnessSource": "f" * 40, "scenario": M.SCENARIOS[3],
+                "inputIndex": 5, "mcpDismissedNs": 100, "setupWaitStartedNs": 101 if phase else None,
+                "observedNs": 200 if phase else 100}
+
+    def test_exact_authorized_exec_transition_and_root_descendants_only(self):
+        proof, current, native = self.identities()
+        sample = lambda pid, identity, *_: ({"identity": identity, "state": "S"}, [30] if pid == 20 else [])
+        with patch.object(M, "helper_diagnostic_sample", side_effect=sample) as sampled, \
+                patch.object(M.subprocess, "Popen") as spawn, patch.object(M, "tool") as tool:
+            rows = M.helper_diagnostic_processes(proof, binding(), native, Mock())
+        self.assertEqual([row["identity"]["pid"] for row in rows], [20, 30])
+        self.assertEqual(sampled.call_count, 2); spawn.assert_not_called(); tool.assert_not_called()
+        current[20] = copy.deepcopy(proof["pkexec"])
+        with patch.object(M, "helper_diagnostic_sample", return_value=({"state": "S", "identity": current[20]}, [])):
+            self.assertEqual(len(M.helper_diagnostic_processes(proof, binding(), native, Mock())), 1)
+
+    def test_foreign_reused_reparented_changed_or_oversize_image_refuses_before_sample(self):
+        mutations = (
+            lambda c: c[20].update(startTime="201"), lambda c: c[20].update(parentPid=999),
+            lambda c: c[20].update(uids=[999] * 4), lambda c: c[20].update(executable="/tmp/foreign"),
+            lambda c: c[20].update(kernelImageSha256="d" * 64), lambda c: c[20]["image"].update(st_size=str(16 * 1024 * 1024 + 1)),
+            lambda c: c[20]["image"].update(st_mode=str(M.stat.S_IFREG | 0o777)), lambda c: c[10].update(startTime="101"),
+        )
+        for mutate in mutations:
+            proof, current, native = self.identities(); proof = copy.deepcopy(proof); mutate(current)
+            with self.subTest(mutate=mutate), patch.object(M, "helper_diagnostic_sample") as sample, self.assertRaises(RuntimeError):
+                M.helper_diagnostic_processes(proof, binding(), native, Mock())
+            sample.assert_not_called()
+
+    def test_foreign_descendant_and_cycle_or_overflow_never_expand_observation(self):
+        for kind in ("parent", "birth", "uid", "cycle", "count"):
+            proof, current, native = self.identities()
+            if kind == "parent": current[30]["parentPid"] = 999
+            if kind == "birth": current[30]["startTime"] = "1"
+            if kind == "uid": current[30]["uids"] = [M.UID] * 4
+            children = [20] if kind == "cycle" else list(range(30, 39)) if kind == "count" else [30]
+            with self.subTest(kind=kind), patch.object(M, "helper_diagnostic_sample", return_value=({"identity": current[20]}, children)) as sample, self.assertRaises(RuntimeError):
+                M.helper_diagnostic_processes(proof, binding(), native, Mock())
+            self.assertEqual(sample.call_count, 1)
+
+    def test_mailbox_rejects_foreign_extra_path_pid_oversize_and_changed_clock(self):
+        for update in ({"scenario": M.SCENARIOS[0]}, {"harnessSource": "e" * 40}, {"inputIndex": 4},
+                       {"inputIndex": True}, {"pid": 20}, {"path": "/proc/20/environ"}, {"mcpDismissedNs": 2**63},
+                       {"observedNs": 99}, {"setupWaitStartedNs": 100}):
+            value = {**self.request(), **update}
+            with self.subTest(update=update), self.assertRaises(RuntimeError):
+                M.helper_diagnostic_request(value, M.HELPER_DIAGNOSTIC_PHASES[0], "f" * 40, M.SCENARIOS[3], 5)
+        M.helper_diagnostic_request(self.request(1), M.HELPER_DIAGNOSTIC_PHASES[1], "f" * 40, M.SCENARIOS[3], 5)
+
+    def test_fixed_leaf_reader_rejects_paths_links_hardlinks_size_and_inode_drift(self):
+        meta = SimpleNamespace(st_mode=M.stat.S_IFREG | 0o400, st_nlink=1, st_size=0, st_dev=1, st_ino=2,
+                               st_uid=0, st_gid=0, st_mtime_ns=3, st_ctime_ns=4)
+        class Stream(io.BytesIO):
+            def fileno(self): return 123
+        for kind in ("ok", "path", "symlink", "hardlink", "declared-size", "actual-size", "race"):
+            info = copy.copy(meta)
+            if kind == "symlink": info.st_mode = M.stat.S_IFLNK | 0o777
+            if kind == "hardlink": info.st_nlink = 2
+            if kind == "declared-size": info.st_size = 129
+            body = b"x" * 129 if kind == "actual-size" else b"do_wait"
+            changed = copy.copy(info)
+            if kind == "race": changed.st_ino += 1
+            with self.subTest(kind=kind), ExitStack() as stack:
+                stack.enter_context(patch.multiple(M.os, O_NOFOLLOW=0x10000, O_CLOEXEC=0x20000, O_NONBLOCK=0x40000, create=True))
+                stack.enter_context(patch.object(M.os, "stat", return_value=info))
+                stack.enter_context(patch.object(M.os, "fstat", return_value=changed))
+                opened = stack.enter_context(patch.object(M.os, "open", return_value=123))
+                stack.enter_context(patch.object(M.os, "fdopen", return_value=Stream(body)))
+                if kind == "ok":
+                    self.assertEqual(M.helper_diagnostic_read(12, "wchan", 128), body)
+                    self.assertEqual(opened.call_args.kwargs, {"dir_fd": 12})
+                    self.assertEqual(opened.call_args.args[0], "wchan")
+                else:
+                    with self.assertRaises(RuntimeError):
+                        M.helper_diagnostic_read(12, "../environ" if kind == "path" else "wchan", 128)
+
+    def test_broker_capture_is_once_non_authoritative_and_refusal_does_not_raise(self):
+        proof, _, native = self.identities()
+        context = {"mcpDiagnosticProof": (5, proof)}
+        record = {"scenario": M.SCENARIOS[3], "scenarioPassed": False, **M.FLAGS}
+        requests = [self.request(), self.request(1)]
+        with patch.multiple(M.os, getuid=Mock(return_value=0), geteuid=Mock(return_value=0), create=True), \
+                patch.object(M.os.path, "lexists", return_value=True), patch.object(M, "inventory_channel"), \
+                patch.object(M, "read_file", side_effect=lambda path, limit, **kw: json.dumps(requests[int(path.stem[-1]) - 1]).encode()) as read, \
+                patch.object(M, "helper_diagnostic_processes", side_effect=[[], OSError("PRIVATE")]) as capture, \
+                patch.object(M, "publish") as publish:
+            M.serve_helper_diagnostics(context, record, environment(M.SCENARIOS[3]), binding(), native, Mock())
+            M.serve_helper_diagnostics(context, record, environment(M.SCENARIOS[3]), binding(), native, Mock())
+        self.assertEqual(capture.call_count, 2); self.assertEqual(read.call_count, 2); publish.assert_not_called()
+        first, second = (record["helperDiagnostics"][phase] for phase in M.HELPER_DIAGNOSTIC_PHASES)
+        self.assertEqual(first["status"], "captured"); self.assertEqual(second["status"], "unavailable")
+        self.assertEqual(first["stage"], "complete"); self.assertEqual(second["stage"], "process-binding")
+        self.assertEqual(second["errorType"], "OSError"); self.assertNotIn("PRIVATE", json.dumps(record))
+        self.assertFalse(record["scenarioPassed"])
+        for row in (first, second):
+            for key, value in M.HELPER_DIAGNOSTIC_FLAGS.items(): self.assertIs(row[key], value)
+        with patch.object(M, "collect_helper_diagnostics", side_effect=RuntimeError("PRIVATE")):
+            M.serve_helper_diagnostics(context, record, environment(), binding(), native, Mock())
+        self.assertEqual(record["helperDiagnosticChannelRefusal"]["errorType"], "RuntimeError")
+
+    def test_static_failure_stage_separates_identity_hash_and_counter_refusal(self):
+        for kind, stage in (("stale", "authorized-identity"), ("hash", "authorized-image-pin"), ("image", "image-bound")):
+            proof, current, native = self.identities(); diagnostic = {}
+            if kind == "stale": current[20]["startTime"] = "201"
+            if kind == "hash": current[20]["kernelImageSha256"] = "d" * 64
+            if kind == "image": current[20]["image"]["st_size"] = str(16 * 1024 * 1024 + 1)
+            with self.subTest(kind=kind), self.assertRaises(RuntimeError):
+                M.helper_diagnostic_processes(proof, binding(), native, Mock(), diagnostic)
+            self.assertEqual(diagnostic, {"stage": stage})
+
+    def test_real_sample_parser_has_fixed_counters_and_refuses_unknown_or_oversize_fields(self):
+        proof, current, native = self.identities()
+        meta = SimpleNamespace(st_mode=M.stat.S_IFDIR | 0o555, st_nlink=2, st_size=0, st_dev=1, st_ino=2,
+                               st_uid=0, st_gid=0, st_mtime_ns=3, st_ctime_ns=4)
+        fields = ["S", "10", *(["0"] * 9), "7", "8", *(["0"] * 6), "200"]
+        bodies = {"stat": ("20 (helper) " + " ".join(fields)).encode(), "wchan": b"do_wait",
+                  "io": b"rchar: 1\nwchar: 2\nsyscr: 3\nsyscw: 4\nread_bytes: 5\nwrite_bytes: 6\ncancelled_write_bytes: 7\n",
+                  "children": b"30 "}
+        for kind in ("ok", "io-extra", "io-duplicate", "io-missing", "cpu", "wchan", "child", "threads"):
+            raw = dict(bodies)
+            if kind == "io-extra": raw["io"] += b"secret: 1\n"
+            if kind == "io-duplicate": raw["io"] += b"rchar: 1\n"
+            if kind == "io-missing": raw["io"] = b"rchar: 1\n"
+            if kind == "cpu": raw["stat"] = raw["stat"].replace(b" 7 ", b" -1 ")
+            if kind == "wchan": raw["wchan"] = b"/foreign/path"
+            if kind == "child": raw["children"] = b"../99"
+            entries = [SimpleNamespace(name="20")] * (65 if kind == "threads" else 1)
+            with self.subTest(kind=kind), ExitStack() as stack:
+                stack.enter_context(patch.multiple(M.os, O_DIRECTORY=0x10000, O_NOFOLLOW=0x20000, O_CLOEXEC=0x40000, create=True))
+                stack.enter_context(patch.object(M.os, "open", return_value=123))
+                stack.enter_context(patch.object(M.os, "close"))
+                stack.enter_context(patch.object(M.os, "fstat", return_value=meta))
+                stack.enter_context(patch.object(M.Path, "lstat", return_value=meta))
+                scan = stack.enter_context(patch.object(M.os, "scandir"))
+                scan.return_value.__enter__.return_value = iter(entries)
+                read = stack.enter_context(patch.object(M, "helper_diagnostic_read", side_effect=lambda _fd, leaf, _limit: raw[leaf]))
+                helper = SimpleNamespace(parse_start=lambda *_: "200")
+                if kind == "ok":
+                    row, children = M.helper_diagnostic_sample(20, current[20], native, helper)
+                    self.assertEqual(row["cpuTicks"], {"user": 7, "system": 8})
+                    self.assertEqual(row["io"]["write_bytes"], 6); self.assertEqual(children, [30])
+                    self.assertEqual({c.args[1] for c in read.call_args_list}, {"stat", "io", "wchan", "children"})
+                else:
+                    diagnostic = {}
+                    with self.assertRaises(RuntimeError): M.helper_diagnostic_sample(20, current[20], native, helper, diagnostic)
+                    self.assertEqual(diagnostic["stage"], "proc-io" if kind.startswith("io-") else
+                                     {"cpu": "proc-stat", "wchan": "proc-wchan", "child": "proc-children", "threads": "proc-children"}[kind])
+
+    def test_broker_oversized_or_foreign_request_never_reads_processes(self):
+        proof, _, native = self.identities()
+        for error in (RuntimeError("oversize"), RuntimeError("foreign path")):
+            record = {"scenario": M.SCENARIOS[3]}
+            with patch.multiple(M.os, getuid=Mock(return_value=0), geteuid=Mock(return_value=0), create=True), \
+                    patch.object(M.os.path, "lexists", return_value=True), patch.object(M, "inventory_channel"), \
+                    patch.object(M, "read_file", side_effect=error), patch.object(M, "helper_diagnostic_processes") as capture:
+                M.serve_helper_diagnostics({"mcpDiagnosticProof": (5, proof)}, record, environment(), binding(), native, Mock())
+            capture.assert_not_called()
+            self.assertTrue(all(row["status"] == "unavailable" for row in record["helperDiagnostics"].values()))
+
+    def test_request_queue_never_waits_and_capture_refusal_preserves_setup_exception(self):
+        session = SimpleNamespace(evidence={}, polkit=SimpleNamespace(windows=Mock(return_value=[])), helper=Mock(), x11=Mock())
+        error = RuntimeError("Read-only readiness deadline; no mutation retried")
+        session.pages = SimpleNamespace(wait=Mock(side_effect=error))
+        authorizer = M.Authorization(session, Mock(), {"pid": 123}, {}, {}, Mock(), Mock(), Mock(), "fixed", [5], Mock(), {})
+        authorizer.mcp_dismissed_ns = 100
+        with patch.dict(M.os.environ, environment(M.SCENARIOS[3])), patch.object(M.time, "monotonic_ns", side_effect=[101, 200]), \
+                patch.object(M, "publish", side_effect=OSError("PRIVATE")) as publish, self.assertRaises(RuntimeError) as raised:
+            authorizer.act("setup", True, None)
+        self.assertIs(raised.exception, error)
+        self.assertEqual(session.pages.wait.call_args.args[1], 180)
+        publish.assert_called_once()
+        self.assertEqual(authorizer.records, [])
+        self.assertEqual(session.evidence["helperDiagnostics"][M.HELPER_DIAGNOSTIC_PHASES[1]]["errorType"], "OSError")
+        with patch.dict(M.os.environ, environment(M.SCENARIOS[3])), patch.object(M, "publish") as publish:
+            authorizer.helper_diagnostic(M.HELPER_DIAGNOSTIC_PHASES[0])
+            authorizer.helper_diagnostic(M.HELPER_DIAGNOSTIC_PHASES[0])
+        publish.assert_called_once()
+        self.assertEqual(session.pages.wait.call_count, 1)
+        self.assertEqual(publish.call_args.args[1]["observedNs"], 100)
+
+    def test_actual_mcp_hook_runs_after_one_action_and_exact_dismissal_only(self):
+        for authenticate, capture_fails in ((True, False), (True, True), (False, False)):
+            events = []
+            session = SimpleNamespace(evidence={}, helper=Mock(), x11=Mock())
+            session.polkit = SimpleNamespace(windows=Mock(return_value=[{"window": 42}]),
+                authenticate_once=Mock(side_effect=lambda *_: events.append("authenticate")),
+                cancel_once=Mock(side_effect=lambda *_: events.append("cancel")))
+            session.native = SimpleNamespace(native_ax_references=lambda: (Mock(), Mock()))
+            session.pages = SimpleNamespace(wait=lambda check, seconds: check())
+            session.native_target_absent = lambda *_: events.append("dismissed") or True
+            authorizer = M.Authorization(session, Mock(), {"pid": 123}, {}, {}, Mock(), Mock(), Mock(), "fixed", [5], Mock(), {})
+            def publish(*_):
+                events.append("diagnostic")
+                if capture_fails: raise OSError("PRIVATE")
+            with self.subTest(authenticate=authenticate, capture_fails=capture_fails), \
+                    patch.dict(M.os.environ, environment(M.SCENARIOS[3])), patch.object(M, "publish", side_effect=publish):
+                authorizer.act("mcp", authenticate, None)
+            self.assertEqual(events, ["authenticate", "dismissed", "diagnostic"] if authenticate else ["cancel", "dismissed"])
+            self.assertEqual(session.polkit.authenticate_once.call_count, int(authenticate))
+            self.assertEqual(session.polkit.cancel_once.call_count, int(not authenticate))
+            self.assertNotIn("PRIVATE", json.dumps(session.evidence))
+
+    def test_diagnostic_functions_cannot_launch_signal_or_authorize_and_export_already_exists(self):
+        tree = ast.parse(Path(M.__file__).read_text())
+        functions = [node for node in tree.body if isinstance(node, ast.FunctionDef) and
+                     (node.name.startswith("helper_diagnostic") or node.name in ("collect_helper_diagnostics", "serve_helper_diagnostics"))]
+        calls = [ast.unparse(n.func) for function in functions for n in ast.walk(function) if isinstance(n, ast.Call)]
+        for denied in ("tool", "subprocess.Popen", "subprocess.run", "os.kill", "signal.pidfd_send_signal", "observe_request", "publish", "time.sleep"):
+            self.assertNotIn(denied, calls)
+        authorizer = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "Authorization")
+        act = next(node for node in authorizer.body if isinstance(node, ast.FunctionDef) and node.name == "act")
+        waits = [n for n in ast.walk(act) if isinstance(n, ast.Call) and ast.unparse(n.func) == "s.pages.wait"]
+        self.assertEqual([ast.unparse(n.args[1]) for n in waits], ["seconds", "30"])
+        budget = next(n for n in ast.walk(act) if isinstance(n, ast.Assign)
+                      and any(isinstance(target, ast.Name) and target.id == "seconds" for target in n.targets))
+        self.assertEqual(ast.unparse(budget.value), "180 if target == 'setup' and self.mcp_dismissed_ns is not None else 30")
+        self.assertEqual(sum(isinstance(n, ast.Call) and ast.unparse(n.func) == "p.authenticate_once" for n in ast.walk(act)), 1)
+        self.assertEqual(sum(isinstance(n, ast.Call) and ast.unparse(n.func) == "p.cancel_once" for n in ast.walk(act)), 1)
+        hooks = [n for n in ast.walk(act) if isinstance(n, ast.Call) and ast.unparse(n.func) == "self.helper_diagnostic"]
+        self.assertEqual(sorted(ast.unparse(n.args[0]) for n in hooks), ["HELPER_DIAGNOSTIC_PHASES[0]", "HELPER_DIAGNOSTIC_PHASES[1]"])
+        broker = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "broker")
+        drains = [n for n in ast.walk(broker) if isinstance(n, ast.Call) and ast.unparse(n.func) == "serve_helper_diagnostics"]
+        self.assertEqual(len(drains), 2)
+        outer = next(n for n in broker.body if isinstance(n, ast.Try))
+        self.assertEqual(sum(call in list(ast.walk(n)) for call in drains for n in outer.finalbody), 1)
+        text = (HERE.parent / ".github/workflows/native-linux-production-016-migration.yml").read_text()
+        self.assertIn("names = ['broker.json'", text)
 
 
 class AuthorizationReadinessCaptureTests(unittest.TestCase):
@@ -3639,6 +3887,41 @@ class ControllerTests(unittest.TestCase):
         session.child.terminate.assert_not_called(); send.assert_not_called()
         session.native.native_process.assert_called_once_with(12, session.helper)
 
+    def test_backend_disposal_missing_bound_executable_waits_existing_pidfd_without_signals(self):
+        session = self.disposal_fixture(FileNotFoundError(2, "synthetic exited backend", "/proc/12/exe"))
+        polls = []
+        def poll(*args):
+            self.assertEqual(args, ([99], [], [], 0)); polls.append(True)
+            return ([99] if len(polls) == 3 else [], [], [])
+        with patch.object(M.select, "select", side_effect=poll), patch.object(M.signal, "pidfd_send_signal", create=True) as send:
+            session.dispose_tools(99)
+        self.assertEqual(len(polls), 3)
+        session.child.terminate.assert_not_called(); send.assert_not_called()
+        session.pages.wait.assert_called_once()
+
+    def test_backend_disposal_missing_executable_is_not_exit_until_pidfd_signals(self):
+        session = self.disposal_fixture(FileNotFoundError(2, "synthetic exited backend", "/proc/12/exe"))
+        with patch.object(M.select, "select", return_value=([], [], [])), patch.object(M.signal, "pidfd_send_signal", create=True) as send:
+            with self.assertRaises(TimeoutError): session.dispose_tools(99)
+        session.child.terminate.assert_not_called(); send.assert_not_called()
+
+    def test_backend_disposal_unknown_missing_paths_subclasses_or_missing_normal_close_still_refuse(self):
+        class UnknownMissingFile(FileNotFoundError):
+            pass
+        errors = [FileNotFoundError(2, "synthetic", path) for path in (None, "/proc/13/exe", "/proc/12/stat", "/tmp/12/exe")]
+        errors += [FileNotFoundError(13, "synthetic", "/proc/12/exe"), UnknownMissingFile(2, "synthetic", "/proc/12/exe")]
+        for original in errors:
+            session = self.disposal_fixture(original)
+            with self.subTest(error=type(original).__name__, path=original.filename), \
+                    patch.object(M.select, "select", return_value=([], [], [])), patch.object(M.signal, "pidfd_send_signal", create=True) as send:
+                with self.assertRaises(type(original)) as raised: session.dispose_tools(99)
+            self.assertIs(raised.exception, original); session.pages.wait.assert_not_called(); send.assert_not_called()
+        original = FileNotFoundError(2, "synthetic", "/proc/12/exe")
+        session = self.disposal_fixture(original); session.evidence["normalCloseObserved"] = False
+        with patch.object(M.select, "select", return_value=([], [], [])), patch.object(M.signal, "pidfd_send_signal", create=True) as send:
+            with self.assertRaises(FileNotFoundError) as raised: session.dispose_tools(99)
+        self.assertIs(raised.exception, original); session.pages.wait.assert_not_called(); send.assert_not_called()
+
     def test_backend_disposal_preserves_other_refusals_and_requires_normal_root_close(self):
         class DifferentRuntimeError(RuntimeError):
             pass
@@ -3729,6 +4012,90 @@ class ControllerTests(unittest.TestCase):
         self.assertIn("= " + M.SDK_LOCK, workflow)
         self.assertIn('digest(read_file(source / "package-lock.json", 2 * 1024 * 1024)) == SDK_LOCK',
                       (HERE / "native-linux-production-016-migration.py").read_text())
+
+
+class AuthorizationObservationDeadline(unittest.TestCase):
+    def test_wait_for_first_dialog_remains_30_seconds(self):
+        authorizer = M.Authorization.__new__(M.Authorization)
+        authorizer.identity, authorizer.mcp_dismissed_ns = {"pid": 13}, None
+        authorizer.s = SimpleNamespace(polkit=Mock(), pages=Mock())
+        authorizer.s.pages.wait.side_effect = RuntimeError("Synthetic observation stop")
+        with self.assertRaisesRegex(RuntimeError, "Synthetic observation stop"):
+            authorizer.act("mcp", True, None)
+        self.assertEqual(authorizer.s.pages.wait.call_args.args[1], 30)
+
+    def test_setup_wait_includes_the_declared_cleanup_tool_deadline_only_after_mcp_dismissal(self):
+        authorizer = M.Authorization.__new__(M.Authorization)
+        authorizer.identity, authorizer.mcp_dismissed_ns = {"pid": 13}, 1
+        authorizer.s = SimpleNamespace(polkit=Mock(), pages=Mock())
+        original = RuntimeError("Synthetic observation stop")
+        authorizer.s.pages.wait.side_effect = original
+        authorizer.helper_diagnostic = Mock()
+        with self.assertRaises(RuntimeError) as caught:
+            authorizer.act("setup", True, None)
+        self.assertIs(caught.exception, original)
+        self.assertEqual(authorizer.s.pages.wait.call_args.args[1], 180)
+        authorizer.helper_diagnostic.assert_called_once()
+        self.assertIn("Duration::from_secs(180)", (HERE.parent / "native/linux-deb-retirement/src/linux.rs").read_text())
+
+    def test_setup_without_observed_mcp_dismissal_does_not_get_extra_time(self):
+        authorizer = M.Authorization.__new__(M.Authorization)
+        authorizer.identity, authorizer.mcp_dismissed_ns = {"pid": 13}, None
+        authorizer.s = SimpleNamespace(polkit=Mock(), pages=Mock())
+        authorizer.s.pages.wait.side_effect = RuntimeError("Synthetic observation stop")
+        with self.assertRaises(RuntimeError): authorizer.act("setup", True, None)
+        self.assertEqual(authorizer.s.pages.wait.call_args.args[1], 30)
+
+
+class InventoryDirectoryDiagnostics(unittest.TestCase):
+    def info(self, **changes):
+        values = dict(st_dev=1, st_ino=5001, st_mode=M.stat.S_IFDIR | 0o500, st_uid=M.UID,
+                      st_gid=M.UID, st_nlink=9, st_size=0, st_mtime_ns=11, st_ctime_ns=12)
+        return SimpleNamespace(**{**values, **changes})
+
+    def test_unchanged_snapshot_has_no_new_authority_or_additional_reads(self):
+        info = self.info()
+        with patch.object(M.os, "open", side_effect=AssertionError("No extra proc read")):
+            self.assertIsNone(M.inventory_directory_guard(5152, Path("/proc/5152"), info, info, info, "final"))
+
+    def test_every_metadata_difference_still_refuses_and_retains_only_exact_pid_fields(self):
+        for key in vars(self.info()):
+            for position in ("opened", "named"):
+                with self.subTest(field=key, position=position):
+                    origin = self.info()
+                    altered = self.info(**{key: getattr(origin, key) + 1})
+                    args = (altered, origin) if position == "opened" else (origin, altered)
+                    with self.assertRaises(M.InventoryDirectoryRefusal) as caught:
+                        M.inventory_directory_guard(5152, Path("/proc/5152"), origin, *args, "final")
+                    record = caught.exception.observation
+                    self.assertFalse(record["validationAuthority"])
+                    self.assertTrue(record["readOnly"])
+                    self.assertEqual(record["pid"], 5152)
+                    self.assertEqual(record["phase"], "final")
+                    self.assertEqual(record["origin"]["path"], "/proc/5152")
+                    self.assertNotEqual(record[position], record["origin"])
+                    self.assertLess(len(json.dumps(record)), 4096)
+                    self.assertNotEqual(str(caught.exception), "Owned process is not live")
+
+    def test_initial_owner_and_type_failures_remain_refusals(self):
+        for changed in (self.info(st_uid=0), self.info(st_mode=M.stat.S_IFREG | 0o500)):
+            with self.assertRaisesRegex(M.InventoryDirectoryRefusal, "Inventory proc directory changed"):
+                M.inventory_directory_guard(5152, Path("/proc/5152"), changed, changed, changed, "initial")
+
+    def test_unknown_scope_is_rejected_without_observation(self):
+        info = self.info()
+        for pid, file, phase in ((True, Path("/proc/1"), "final"), (0, Path("/proc/0"), "final"),
+                                 (5152, Path("/proc/5152"), "retry")):
+            with self.assertRaises(RuntimeError):
+                M.inventory_directory_guard(pid, file, info, info, info, phase)
+
+    def test_broker_retains_diagnostic_without_converting_refusal_to_success(self):
+        source = (HERE / "native-linux-production-016-migration.py").read_text()
+        broker = source[source.index("def broker(env):"):]
+        self.assertIn('if type(error) is InventoryDirectoryRefusal:', broker)
+        self.assertIn('record["inventorySnapshotRefusal"] = error.observation', broker)
+        self.assertIn('failure = error', broker)
+        self.assertIn('"scenarioPassed": False', broker)
 
 
 class CombinedInventoryContract(unittest.TestCase):

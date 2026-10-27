@@ -60,8 +60,8 @@ def profile(portable=False):
             result["artifacts"][role]["files"][member] = {"size": 1, "sha256": "f" * 64}
             result["objects"][name] = {"artifact": role, "member": member}
     def delivery(role, names):
-        item = {"asset": 658078066 if role == "signedDeb17" else int(role[-2:]),
-                "name": M.delivery_name(result, role), "zip": {"size": 64362879, "sha256": "252f14b4b119412d4c0017b18479077c3050228f17725464688545a5fd298a6f"}, "files": {}}
+        item = {"asset": 682573088 if role == "signedDeb17" else int(role[-2:]),
+                "name": M.delivery_name(result, role), "zip": {"size": 64413335, "sha256": "fcb4f79958993a8ddd19665c33b3926b0568630170fdfe2d80a80fbd4df195ec"}, "files": {}}
         for name in names:
             member = name + ".json"; item["files"][member] = {"size": 1, "sha256": "f" * 64}
             result["objects"][name] = {"artifact": role, "member": member}
@@ -141,6 +141,8 @@ def manifest(version="17", icons=False):
 
 def compared_packages():
     baseline = profile()["baseline"]
+    if M.FIXED["17"]["source"] == "dce183ec0a0f23210d83b064c04ecc8b6af999fe":
+        baseline["helper"] = dict(M.FIXED["17"]["helper"])
     helper = "usr/libexec/creator-hub-deb-retirement-helper"
     archive = "usr/lib/Creator Hub/modules.tar.gz"
     policy = "usr/share/polkit-1/actions/com.creatorworks.hub.deb-retirement.policy"
@@ -155,7 +157,7 @@ def compared_packages():
     new = copy.deepcopy(old); new["fields"].update(Version="0.1.17", **{"Installed-Size": "101"})
     new["files"][M.ROOT_ENTRY] = member(M.FIXED["17"]["hub"], 0o755, "5")
     new["files"][archive] = member(M.FIXED["17"]["archive"], 0o644, "6")
-    new["files"][helper] = member({"size": 1167744, "sha256": "501e97da9c93d370caa750c46f4c3f272d546281e8e2eeedfaf4f01193d644be"}, 0o755, "7")
+    new["files"][helper] = member(M.FIXED["17"]["helper"], 0o755, "7")
     for package in (old, new): package["md5sums"] = {name: value["md5"] for name, value in package["files"].items()}
     return old, new, baseline
 
@@ -475,7 +477,7 @@ class SyntheticUseraddDiagnostics(unittest.TestCase):
 
 
 class Pure(unittest.TestCase):
-    def startup_surface(self, *, guide=True, first=True, closes=True, later_name="Not now", delayed_guide=False, inventory_completes=True, inventory_count=2):
+    def startup_surface(self, *, guide=True, first=True, closes=True, later_name="Not now", delayed_guide=False, inventory_completes=True, inventory_count=2, menu_source=None):
         offered = "before-guide" if delayed_guide else "guide"
         state = SimpleNamespace(phase="terms" if first else offered if guide else "home", actions=[], reads=[], closing_reads=0,
                                 offer_reads=0, inventory_reads=0)
@@ -529,7 +531,11 @@ class Pure(unittest.TestCase):
                     "showing": True, "enabled": True, "sensitive": True, "busy": False, "defunct": False}
                     for name in ("Open selected-project", "Open other-project")]
             return rows, []
-        return SimpleNamespace(source=source, click=click, snapshot=snapshot, atspi=SimpleNamespace(Role=SimpleNamespace(PUSH_BUTTON=43))), state, bounded_wait
+        surface = SimpleNamespace(source=source, click=click, snapshot=snapshot, atspi=SimpleNamespace(Role=SimpleNamespace(PUSH_BUTTON=43)),
+                                  record={"pid": 42, "startTime": "23", "kernelImageSha256": "a" * 64, "image": {"st_size": "11"}}, recheck=Mock())
+        M.bind_source_menu(surface, M.HISTORICAL_MENU_SOURCES[0] if menu_source is None else menu_source,
+                           {"size": 11, "sha256": "a" * 64})
+        return surface, state, bounded_wait
 
     def test_startup_defers_observed_modal_once_before_waiting_for_inert_home(self):
         surface, state, waiting = self.startup_surface()
@@ -1502,7 +1508,7 @@ class Pure(unittest.TestCase):
         receipt = M.compare_update_packages(old, new, baseline)
         self.assertEqual((old, new, baseline), original)
         self.assertEqual(receipt["targetRetirementHelper"], M.FIXED["17"]["helper"])
-        self.assertTrue(receipt["privateDebApprovalRestoresOldRetirementHelper"])
+        self.assertFalse(receipt["privateDebApprovalRestoresOldRetirementHelper"])
         self.assertFalse(receipt["targetFixNativeAcceptance"])
         self.assertFalse(receipt["futurePublic017Qualified"])
         self.assertFalse(receipt["final016HelperFixRetained"])
@@ -1911,7 +1917,7 @@ process.stdout.write(JSON.stringify({error,calls,phases,signals,abortEvents,
     def test_data_receipt_bound_to_scenario_profile_run_source(self):
         p, env = profile(), environment(); receipt = M.delivery_receipt(p, env)
         self.assertEqual(receipt["profileSha256"], env["UPDATE_PROFILE_SHA256"])
-        self.assertEqual(receipt["assets"]["signedDeb17"]["asset"], 658078066)
+        self.assertEqual(receipt["assets"]["signedDeb17"]["asset"], 682573088)
         self.assertTrue(all(receipt[key] is False for key in M.FALSE))
         self.assertNotEqual(receipt, M.delivery_receipt(p, {**env, "GITHUB_SHA": "c" * 40}))
 
@@ -1945,6 +1951,8 @@ process.stdout.write(JSON.stringify({error,calls,phases,signals,abortEvents,
             "/usr/bin/python3 -I -S -c 'import sys; assert sys.version_info[:2] == (3, 10)'",
             "/usr/bin/python3 -I -S -B scripts/native-linux-production-016-update.py preflight-import",
             "/usr/bin/python3 -I -S -B scripts/native-linux-production-016-update.test.py",
+            "/usr/bin/python3 -I -S -B scripts/native-linux-migrated-update.test.py",
+            "node --test scripts/linux-update-lab-feed.test.cjs",
             "/usr/bin/python3 -I -S -B scripts/native-linux-update-mcp.test.py",
             "/usr/bin/python3 -I -S -B scripts/native-linux-update-flatpak.test.py",
             "\"$PREFLIGHT_PYTHON\" -I -c 'import sys, tomllib; assert sys.version_info[:3] == (3, 11, 17)'",
@@ -1993,7 +2001,7 @@ process.stdout.write(JSON.stringify({error,calls,phases,signals,abortEvents,
         for forbidden in ("child_process", "execFile", "extract", "unzip", "eval(", "new Function", "updateRelease", "uploadReleaseAsset", "deleteReleaseAsset"):
             self.assertNotIn(forbidden, script)
         self.assertIn("release_id:411494394", script)
-        self.assertIn("658078066", script)
+        self.assertIn("682573088", script)
         self.assertEqual(self.workflow["on"]["push"]["branches"], ["validation/native-linux-production-016-update"])
         guard = ("github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.repository_id == '1364807512' && "
                  "github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/validation/native-linux-production-016-update' && "
@@ -2194,8 +2202,9 @@ process.stdout.write(JSON.stringify({error,calls,phases,signals,abortEvents,
 
     def test_large_installer_is_not_sent_to_metadata_verifier(self):
         tree = ast.parse((HERE / "native-linux-production-016-update.py").read_text())
-        stage = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "stage")
-        calls = [ast.unparse(n) for n in ast.walk(stage) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "signature"]
+        stages = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in ("stage", "review_staged_packages")]
+        self.assertEqual(len(stages), 2)
+        calls = [ast.unparse(n) for stage in stages for n in ast.walk(stage) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "signature"]
         self.assertEqual(len(calls), 3)
         self.assertFalse(any("deb17" in call for call in calls))
 
@@ -2372,7 +2381,7 @@ process.stdout.write(JSON.stringify({error,calls,phases,signals,abortEvents,
             evidence = {**common, "nativeActions": ["Not now" if scenario.endswith("native-cancel") else "Update Hub"],
                         "systemActions": ["Authenticate"] if scenario == "deb-approve" else ["Cancel"] if scenario == "deb-auth-cancel" else [],
                         "oldSelectionUnchanged": True, "initialRootSurvived": True, "automaticSuccessor": None, "sealed17Observed": True,
-                        "oldRetirementHelperRestored": scenario == "deb-approve"}
+                        "oldRetirementHelperRestored": False, "targetRetirementHelperVerified": scenario == "deb-approve"}
             if scenario.endswith("approve"):
                 evidence.update(dict.fromkeys(("oldNormalExit", "automaticRestartObserved", "installed17Verified", "fresh17UiVersion", "directPagesObserved"), True)); evidence["automaticSuccessor"] = {"pid": 2}
             if scenario == M.COMBINED:
@@ -2395,7 +2404,8 @@ process.stdout.write(JSON.stringify({error,calls,phases,signals,abortEvents,
             with self.assertRaises(RuntimeError): M.outcome(scenario, {**evidence, "releaseReady": True})
             altered = copy.deepcopy(evidence); altered["privateTargetQualification"]["futurePublic017Qualified"] = True
             with self.assertRaises(RuntimeError): M.outcome(scenario, altered)
-            with self.assertRaises(RuntimeError): M.outcome(scenario, {**evidence, "oldRetirementHelperRestored": scenario != "deb-approve"})
+            with self.assertRaises(RuntimeError): M.outcome(scenario, {**evidence, "oldRetirementHelperRestored": not evidence["oldRetirementHelperRestored"]})
+            with self.assertRaises(RuntimeError): M.outcome(scenario, {**evidence, "targetRetirementHelperVerified": not evidence["targetRetirementHelperVerified"]})
 
     def test_scope_cannot_accept_second_authorization_or_missing_ui(self):
         evidence = {**M.FALSE, **dict.fromkeys(("initial16Verified", "nativeConfirmationObserved", "settingsPreserved", "runtimeSurvived", "normalFinalClose", "oldNormalExit", "automaticRestartObserved", "installed17Verified", "fresh17UiVersion", "directPagesObserved"), True),
@@ -3121,7 +3131,8 @@ class DirectMenuLabels(unittest.TestCase):
         tree = ast.parse(Path(M.__file__).read_text())
         direct = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "direct_pages")
         loop = next(n for n in direct.body if isinstance(n, ast.For))
-        labels = dict(ast.literal_eval(loop.iter))
+        menu = M.source_menu_profile(M.HISTORICAL_MENU_SOURCES[0])
+        labels = dict(eval(compile(ast.Expression(copy.deepcopy(loop.iter)), "bound-menu-labels", "eval"), {"menu": menu}))
         nodes = [object() for _ in rows]
         clicks = []
         surface = SimpleNamespace(atspi=SimpleNamespace(Role=SimpleNamespace(PUSH_BUTTON=43)),
@@ -3168,11 +3179,14 @@ class DirectMenuLabels(unittest.TestCase):
         Menu.LABELS = self.LABELS
         menu = Menu(); menu.feed((HERE.parent / "src/index.html").read_text(encoding="utf8"))
         self.assertEqual(set(menu.labels), set(self.LABELS))
-        for feature, expected in self.LABELS.items():
-            self.assertEqual(menu.labels[feature], expected.removesuffix("Included in Hub") + "Checking")
+        profile = M.source_menu_profile("085131ba6f3050a795fd513139a34975658ba321")
+        for feature in self.LABELS:
+            self.assertEqual(menu.labels[feature], profile["initial"][feature])
         source = (HERE.parent / "src/app.js").read_text(encoding="utf8")
         self.assertIn("const label = directFeatures ? state?.issue ? 'Unavailable' : 'Included in Hub'", source)
         self.assertIn("byId(`menu-status-${id}`).textContent = directFeatures ? label", source)
+        self.assertTrue(profile["hideReadyStatus"])
+        self.assertIn("byId(`menu-status-${id}`).hidden = directFeatures && !state?.issue;", source)
 
     def test_unknown_badges_status_suffixes_and_other_rows_are_not_alternatives(self):
         for feature, label in self.LABELS.items():
@@ -3390,7 +3404,9 @@ class HomeMenuLabels(unittest.TestCase):
             kwonlyargs=[], kw_defaults=[], defaults=[]), body=body, decorator_list=[])
         clicks, nodes = [], [object() for _ in rows]
         surface = SimpleNamespace(click=lambda control, actions: clicks.append((control, actions)),
-            snapshot=lambda: (rows, nodes), atspi=SimpleNamespace(Role=SimpleNamespace(PUSH_BUTTON=43)))
+            snapshot=lambda: (rows, nodes), atspi=SimpleNamespace(Role=SimpleNamespace(PUSH_BUTTON=43)),
+            record={"pid": 42, "startTime": "23", "kernelImageSha256": "a" * 64, "image": {"st_size": "11"}}, recheck=Mock())
+        M.bind_source_menu(surface, M.HISTORICAL_MENU_SOURCES[0], {"size": 11, "sha256": "a" * 64})
         namespace = dict(vars(M))
         exec(compile(ast.fix_missing_locations(ast.Module(body=[function], type_ignores=[])), "actual-home-selection", "exec"), namespace)
         result = namespace["select"](surface)
@@ -3428,11 +3444,13 @@ class HomeMenuLabels(unittest.TestCase):
             def handle_endtag(self, tag):
                 if tag == "button" and self.active: self.labels.append(" ".join(self.parts)); self.active = False
         menu = Menu(); menu.feed((HERE.parent / "src/index.html").read_text(encoding="utf8"))
-        self.assertEqual(menu.labels, ["H Creator Hub Apps and projects"])
+        profile = M.source_menu_profile("085131ba6f3050a795fd513139a34975658ba321")
+        self.assertEqual(menu.labels, [profile["initial"]["hub"]])
         source = (HERE.parent / "src/app.js").read_text(encoding="utf8")
         self.assertIn("if (directFeatures) {", source)
-        self.assertIn("menu.querySelector('[data-view=\"hub\"] small').textContent = 'Projects';", source)
-        self.assertEqual(menu.labels[0].replace("Apps and projects", "Projects"), self.LABEL)
+        self.assertFalse(profile["rewriteHomeCaption"])
+        self.assertNotIn("menu.querySelector('[data-view=\"hub\"] small').textContent = 'Projects';", source)
+        self.assertEqual(menu.labels, [profile["ready"]["hub"]])
 
     def test_home_refusal_rechecks_exact_row_and_wire_reference_before_action(self):
         source = ast.unparse(next(n for n in ast.parse(Path(M.__file__).read_text()).body
@@ -3462,6 +3480,46 @@ class HomeMenuLabels(unittest.TestCase):
             exec(compile(ast.fix_missing_locations(ast.Module(body=[function], type_ignores=[])), "actual-wire-refusal", "exec"), namespace)
             with self.subTest(function=function_name), self.assertRaisesRegex(RuntimeError, "(?:Navigation changed before input|Home navigation changed)"):
                 namespace["identity"]()
+
+
+class SourceMenuProfiles(unittest.TestCase):
+    def test_exact_sources_separate_current_expectations_from_historical_live_selectors(self):
+        historical = {"hub": HomeMenuLabels.LABEL, **DirectMenuLabels.LABELS}
+        for source in M.HISTORICAL_MENU_SOURCES:
+            profile = M.source_menu_profile(source)
+            self.assertEqual(profile["source"], source)
+            self.assertEqual(profile["ready"], historical)
+            self.assertEqual(profile["initial"], {
+                "hub": "H Creator Hub Apps and projects", "mcp": "M Creator Works MCP AI tools for Unity Checking",
+                "setup": "P Project Setup Unity + Creator SDK projects Checking"})
+            self.assertFalse(profile["hideReadyStatus"])
+            self.assertTrue(profile["rewriteHomeCaption"])
+        current = M.source_menu_profile("085131ba6f3050a795fd513139a34975658ba321")
+        self.assertEqual(current, {
+            "source": "085131ba6f3050a795fd513139a34975658ba321",
+            "initial": {"hub": "Home Projects and updates", "mcp": "MCP AI bridge for Unity Checking",
+                        "setup": "Setup / Repair Unity + Creator SDK project setup and repair Checking"},
+            "ready": {"hub": "Home Projects and updates", "mcp": "MCP AI bridge for Unity",
+                      "setup": "Setup / Repair Unity + Creator SDK project setup and repair"},
+            "hideReadyStatus": True, "rewriteHomeCaption": False})
+        tree = ast.parse(Path(M.__file__).read_text())
+        helper = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "source_menu_profile")
+        self.assertEqual({ast.unparse(n.func) for n in ast.walk(helper) if isinstance(n, ast.Call)}, {"require", "type"})
+        callers = [n for n in tree.body if n is not helper and any(isinstance(c, ast.Call)
+                   and isinstance(c.func, ast.Name) and c.func.id == "source_menu_profile" for c in ast.walk(n))]
+        self.assertEqual({n.name for n in callers}, {"bind_source_menu", "bound_source_menu"},
+                         "Only the explicit source/image binding may select menu expectations")
+
+    def test_versions_aliases_unknown_sources_and_current_labels_cannot_admit_a_live_target(self):
+        for source in ("0.1.16", "0.1.17", "085131b", "current", "historical", "f" * 40, None, {}):
+            with self.subTest(source=source), self.assertRaisesRegex(RuntimeError, "Unreviewed menu source"):
+                M.source_menu_profile(source)
+        current = M.source_menu_profile("085131ba6f3050a795fd513139a34975658ba321")
+        for feature in DirectMenuLabels.LABELS:
+            with self.subTest(feature=feature), self.assertRaisesRegex(RuntimeError, "One exact first-party"):
+                DirectMenuLabels().selection(feature, [DirectMenuLabels.row(current["ready"][feature])])
+        with self.assertRaisesRegex(RuntimeError, "One exact Home"):
+            HomeMenuLabels().select([DirectMenuLabels.row(current["ready"]["hub"])])
 
 
 class FixtureConfigCreationContext(unittest.TestCase):
@@ -6711,12 +6769,25 @@ class ColdFlatpakPageContracts(unittest.TestCase):
         self.assertLess(source.index('if (!pending?.length) return;', start), source.index('selectView(app);', start))
 
     @contextmanager
-    def cold_surface(self, fault=None, *, footer_showing=False):
+    def cold_surface(self, fault=None, *, footer_showing=False, menu_source=None):
         state = SimpleNamespace(view='projects', menu=False, home_reads=0, events=[], checks=0)
         bus, x11, native = Mock(), Mock(), Mock()
         native.bitmap.return_value = dict(nonblank=True, windowOnly=True)
-        record = dict(pid=99, startTime='31', kernelImageSha256='a' * 64)
-        review = dict(portable={'16': dict(generation='a'), '17': dict(manifest={})})
+        target_manifest, _ = manifest()
+        if menu_source is not None:
+            target_manifest['sourceCommit'] = menu_source
+            target_manifest['sourceTree'] = {
+                '085131ba6f3050a795fd513139a34975658ba321': 'feccbd2ca251f75f95bca1730e458605f1b3558c',
+                'dce183ec0a0f23210d83b064c04ecc8b6af999fe': '6d881eade5b3178913012d3a6c6632bd41b0e849',
+            }.get(menu_source, target_manifest['sourceTree'])
+        image = target_manifest['entries'][M.ROOT_ENTRY]
+        record = dict(pid=99, startTime='31', executable='/unit/reviewed/usr/bin/creator-hub',
+                      kernelImageSha256=image['sha256'], image={'st_size': image['size']})
+        if fault == 'image-hash': record['kernelImageSha256'] = '0' * 64
+        if fault == 'image-size': record['image']['st_size'] += 1
+        if fault == 'image-pid': record['pid'] = 1
+        if fault == 'image-start': record['startTime'] = '0'
+        review = dict(portable={'16': dict(generation='a'), '17': dict(manifest=target_manifest)})
         version, wrapper, footer = Mock(), Mock(), Mock()
         version.get_attributes.return_value = {'tag': 'span'}
         wrapper.get_attributes.return_value = {'tag': 'span'}
@@ -6738,6 +6809,8 @@ class ColdFlatpakPageContracts(unittest.TestCase):
         navigation = {key: action_node(lambda key=key: select(key)) for key in ('mcp', 'setup')}
         def init(value, *args, **kwargs):
             state.surface = value
+            value.record, value.root, value.pid = record, record, record['pid']
+            value.manifest, value.generation_dir = kwargs['manifest'], kwargs['generation_dir']
             value.bus, value.x11, value.window, value.request = bus, x11, 11, 'request'
             value.atspi = SimpleNamespace(Role=SimpleNamespace(PUSH_BUTTON=43))
             value.last_inventory, value.html_actions = {}, []
@@ -6769,8 +6842,11 @@ class ColdFlatpakPageContracts(unittest.TestCase):
                 add(version_row, version)
                 if fault == 'duplicate': add(dict(version_row), version)
                 if state.menu:
-                    for key, label in (('mcp', 'M Creator Works MCP AI tools for Unity Included in Hub'),
-                                       ('setup', 'P Project Setup Unity + Creator SDK projects Included in Hub')):
+                    labels = {'mcp': 'MCP AI bridge for Unity', 'setup': 'Setup / Repair Unity + Creator SDK project setup and repair'} \
+                        if target_manifest['sourceCommit'] in ('085131ba6f3050a795fd513139a34975658ba321', 'dce183ec0a0f23210d83b064c04ecc8b6af999fe') else \
+                        {'mcp': 'M Creator Works MCP AI tools for Unity Included in Hub',
+                         'setup': 'P Project Setup Unity + Creator SDK projects Included in Hub'}
+                    for key, label in labels.items():
                         button = row(label, 'button', 'navigation-' + key)
                         if fault == 'hidden-menu': button['showing'] = False
                         if fault == 'disabled-menu': button['enabled'] = False
@@ -6797,6 +6873,8 @@ class ColdFlatpakPageContracts(unittest.TestCase):
             return real_feature_ready(surface, feature)
         real_feature_ready = M.feature_ready
         with ExitStack() as stack:
+            if menu_source is not None:
+                stack.enter_context(patch.dict(M.FIXED['17'], source=menu_source, tree=target_manifest['sourceTree']))
             stack.enter_context(patch.object(M.Surface, '__init__', init))
             stack.enter_context(patch.object(M, 'portable_state'))
             stack.enter_context(patch.object(M, 'phase_processes'))
@@ -6823,6 +6901,8 @@ class ColdFlatpakPageContracts(unittest.TestCase):
                 self.assertEqual(proof['actions'], ['view-mcp', 'view-setup'])
                 self.assertEqual(proof['footerVersion']['name'], '0.1.17')
                 self.assertEqual(proof['footerVersion']['showing'], showing)
+                image = state.surface.manifest['entries'][M.ROOT_ENTRY]
+                self.assertEqual(state.surface.menu_binding, (M.FIXED['17']['source'], image['sha256'], image['size'], 99, '31'))
                 bus.close_sync.assert_called_once_with(None); x11.dispose.assert_not_called()
 
     def test_readonly_footer_still_refuses_unowned_missing_changed_or_ambiguous_version(self):
@@ -6837,6 +6917,28 @@ class ColdFlatpakPageContracts(unittest.TestCase):
             with self.subTest(fault=fault), self.cold_surface(fault) as (state, run, bus, x11, saved):
                 with self.assertRaises(RuntimeError): run()
                 self.assertFalse(any(event.startswith('navigate-') for event in state.events))
+                saved.assert_not_called(); bus.close_sync.assert_called_once_with(None); x11.dispose.assert_not_called()
+
+    def test_current_cold_pages_use_real_source_image_binding_and_current_menu(self):
+        for source in ('085131ba6f3050a795fd513139a34975658ba321', 'dce183ec0a0f23210d83b064c04ecc8b6af999fe'):
+            with self.subTest(source=source), self.cold_surface(menu_source=source) as (state, run, bus, x11, saved):
+                result = run()
+                self.assertTrue(result['ownedAxConnectionClosed'])
+                image = state.surface.manifest['entries'][M.ROOT_ENTRY]
+                self.assertEqual(state.surface.menu_binding, (source, image['sha256'], image['size'], 99, '31'))
+                self.assertEqual(saved.call_args.args[1]['actions'], ['view-mcp', 'view-setup'])
+                bus.close_sync.assert_called_once_with(None); x11.dispose.assert_not_called()
+
+    def test_cold_source_and_live_image_guard_refuse_before_any_page_probe(self):
+        for fault, source, message in (
+                (None, 'f' * 40, 'Unreviewed menu source'),
+                *[(fault, None, 'Exact menu source image required')
+                  for fault in ('image-hash', 'image-size', 'image-pid', 'image-start')]):
+            with self.subTest(fault=fault, source=source), self.cold_surface(fault, menu_source=source) as (state, run, bus, x11, saved):
+                with self.assertRaisesRegex(RuntimeError, message): run()
+                self.assertFalse(hasattr(state.surface, 'menu_binding'))
+                self.assertEqual(state.home_reads, 0)
+                self.assertEqual(state.events, [])
                 saved.assert_not_called(); bus.close_sync.assert_called_once_with(None); x11.dispose.assert_not_called()
 
 
@@ -6892,12 +6994,17 @@ class CombinedOuterContracts(unittest.TestCase):
         bus, x11, native = Mock(), Mock(), Mock()
         node = Mock(); node.get_attributes.return_value = {'tag': 'footer'}
         row = dict(showing=True, defunct=False, tag='span', toolkit='WebKitGTK', name='0.1.17')
-        record = {'pid': 99}
+        target_manifest, _ = manifest()
+        image = target_manifest['entries'][M.ROOT_ENTRY]
+        record = dict(pid=99, startTime='31', executable='/unit/reviewed/usr/bin/creator-hub',
+                      kernelImageSha256=image['sha256'], image={'st_size': image['size']})
         def init(value, *args, **kwargs):
+            value.record, value.root, value.pid = record, record, record['pid']
+            value.manifest, value.generation_dir = kwargs['manifest'], kwargs['generation_dir']
             value.bus, value.request, value.last, value.last_inventory = bus, 'request', [], {}
             value.snapshot = Mock(return_value=([row], [node]))
             value.node, value.recheck = Mock(), Mock()
-        review = dict(portable={'16': dict(generation='a'), '17': dict(manifest={})})
+        review = dict(portable={'16': dict(generation='a'), '17': dict(manifest=target_manifest)})
         for failure in (None, 'version', 'pages', 'bitmap'):
             bus.reset_mock(); x11.reset_mock(); row['name'] = '0.1.16' if failure == 'version' else '0.1.17'
             native.bitmap.return_value = dict(nonblank=failure != 'bitmap', windowOnly=True)
@@ -6955,7 +7062,7 @@ class CombinedOuterContracts(unittest.TestCase):
         self.assertNotIn('F.run_session', [name for _, name in calls])
 
     def test_combined_cannot_pass_with_only_portable_result_or_without_original_mcp(self):
-        proof = dict(privateTargetQualification=M.private_target_qualification(), oldRetirementHelperRestored=False,
+        proof = dict(privateTargetQualification=M.private_target_qualification(), oldRetirementHelperRestored=False, targetRetirementHelperVerified=False,
             **M.FALSE, **dict.fromkeys(('initial16Verified','nativeConfirmationObserved','settingsPreserved',
             'runtimeSurvived','normalFinalClose','oldNormalExit','automaticRestartObserved','installed17Verified',
             'fresh17UiVersion','directPagesObserved'), True), nativeActions=['Update Hub'], systemActions=[],
@@ -6990,6 +7097,273 @@ class CombinedOuterContracts(unittest.TestCase):
         self.assertIn("sha('sha1',Buffer.concat", text)
         self.assertIn("sha('sha256',body),pin.sha256", text)
         self.assertIn('native-linux-production-016-update-api-observations', text)
+
+
+class LiveSourceMenuWiring(unittest.TestCase):
+    CURRENT = ("085131ba6f3050a795fd513139a34975658ba321", "dce183ec0a0f23210d83b064c04ecc8b6af999fe")
+    HISTORICAL = ("a89ed2b90278b33bebd0b4ba29d87904d2fe683b", "75a99ff4a267064aaa3ac9e30039bc91dc791d89")
+    CURRENT_READY = {"hub": "Home Projects and updates", "mcp": "MCP AI bridge for Unity",
+                     "setup": "Setup / Repair Unity + Creator SDK project setup and repair"}
+    OLD_READY = {"hub": HomeMenuLabels.LABEL, **DirectMenuLabels.LABELS}
+
+    @classmethod
+    def surface(cls, source, *, labels=None, bound=True):
+        value = SimpleNamespace(record={"pid": 42, "startTime": "23", "kernelImageSha256": "a" * 64,
+                                       "image": {"st_size": "11"}}, recheck=Mock(), inputs=[], presses=[], menu_open=False)
+        value.atspi = SimpleNamespace(Role=SimpleNamespace(PUSH_BUTTON=43))
+        if bound:
+            value.menu_binding = (source, "a" * 64, 11, 42, "23")
+        labels = labels or (cls.CURRENT_READY if source in cls.CURRENT else cls.OLD_READY)
+        def click(control, actions):
+            value.inputs.append(control)
+            value.menu_open = True
+        def snapshot():
+            names = list(labels.values()) if value.menu_open else ["Open selected-project", "Open other-project"]
+            rows = [DirectMenuLabels.row(name, reference=[":1.4", "/" + str(i)]) for i, name in enumerate(names)]
+            return rows, [object() for _ in rows]
+        def interface(node, row, label):
+            def press(index):
+                cls.assert_index(index)
+                value.presses.append(label)
+                value.menu_open = False
+                return True
+            return SimpleNamespace(do_action=press), {"label": label}
+        value.click, value.snapshot = click, snapshot
+        value.source = lambda source_id, optional=False: ({"name": "Projects", "text": "Projects"}, object())
+        value.html_action_interface = interface
+        value.html_action_operands = lambda interface, observation: (1, "press")
+        return value
+
+    @staticmethod
+    def assert_index(index):
+        if index != 0:
+            raise AssertionError("Only the existing one press action is allowed")
+
+    @staticmethod
+    def ready(surface, feature):
+        return [DirectMenuLabels.row("Select Selected update project for MCP", pressed=True),
+                DirectMenuLabels.row("Select Other update project for MCP", pressed=False)]
+
+    def test_exact_finite_catalog_maps_final_successor_to085_not_intermediate8d(self):
+        self.assertEqual(M.CURRENT_MENU_SOURCES, self.CURRENT)
+        self.assertEqual(M.HISTORICAL_MENU_SOURCES, self.HISTORICAL)
+        for source in self.CURRENT:
+            self.assertEqual(M.source_menu_profile(source)["ready"], self.CURRENT_READY)
+        for source in self.HISTORICAL:
+            self.assertEqual(M.source_menu_profile(source)["ready"], self.OLD_READY)
+        for source in ("8d59507fc739879577c28b28748fa64039d51c36", "f" * 40, "0.1.17", "dce183e", None, {}):
+            with self.subTest(source=source), self.assertRaisesRegex(RuntimeError, "Unreviewed menu source"):
+                M.source_menu_profile(source)
+        with patch.dict(M.FIXED["17"], source="f" * 40):
+            with self.assertRaisesRegex(RuntimeError, "Unreviewed menu source"):
+                M.source_menu_profile("f" * 40)
+
+    def test_actual_current_ax_functions_select_exact085_and_final_successor_menus(self):
+        for source in self.CURRENT:
+            surface, actions = self.surface(source), []
+            with self.subTest(source=source), patch.object(M, "phase_processes"), patch.object(M, "feature_ready", side_effect=self.ready):
+                self.assertTrue(M.direct_pages(surface, actions))
+                M.navigate_home(surface)
+            self.assertEqual(actions, ["view-mcp", "view-setup"])
+            self.assertEqual(surface.presses, ["navigation-mcp", "navigation-setup", "navigation-home"])
+            self.assertTrue(all(call.kwargs == {"full": True} for call in surface.recheck.call_args_list))
+
+    def test_actual_historical_ax_functions_preserve_both_old_lanes(self):
+        for source in self.HISTORICAL:
+            surface, actions = self.surface(source), []
+            with self.subTest(source=source), patch.object(M, "phase_processes"), patch.object(M, "feature_ready", side_effect=self.ready):
+                self.assertTrue(M.direct_pages(surface, actions))
+                M.navigate_home(surface)
+            self.assertEqual(surface.presses, ["navigation-mcp", "navigation-setup", "navigation-home"])
+
+    def test_wrong_menu_family_is_not_an_alternative_or_a_discovery_fallback(self):
+        for source, labels in ((self.CURRENT[0], self.OLD_READY), (self.HISTORICAL[0], self.CURRENT_READY)):
+            surface = self.surface(source, labels=labels)
+            with self.subTest(source=source), patch.object(M, "phase_processes"), patch.object(M, "feature_ready", side_effect=self.ready), self.assertRaisesRegex(RuntimeError, "One exact first-party"):
+                M.direct_pages(surface, [])
+            self.assertEqual(surface.presses, [])
+            surface = self.surface(source, labels=labels)
+            with self.assertRaisesRegex(RuntimeError, "One exact Home"):
+                M.navigate_home(surface)
+            self.assertEqual(surface.presses, [])
+
+    def test_startup_refuses_unbound_unknown_or_wrong_image_before_any_wait_or_input(self):
+        bad = [None, ("f" * 40, "a" * 64, 11, 42, "23"),
+               (self.CURRENT[0], "b" * 64, 11, 42, "23"), (self.CURRENT[0], "a" * 64, 12, 42, "23"),
+               (self.CURRENT[0], "a" * 64, 11, 43, "23"), (self.CURRENT[0], "a" * 64, 11, 42, "24")]
+        for binding in bad:
+            surface = self.surface(self.CURRENT[0], bound=False)
+            if binding is not None:
+                surface.menu_binding = binding
+            with self.subTest(binding=binding), patch.object(M, "wait", side_effect=AssertionError("Must refuse before UI wait")), self.assertRaises(RuntimeError):
+                M.startup_ui(surface, Path("/fixture/home"), first=True)
+            self.assertEqual(surface.inputs, [])
+
+    def test_valid_current_and_historical_startup_preserve_original_actions(self):
+        for source in self.CURRENT + self.HISTORICAL:
+            for first in (True, False):
+                surface, state, waiting = Pure().startup_surface(first=first, menu_source=source)
+                with self.subTest(source=source, first=first), patch.object(M, "wait", side_effect=waiting), patch.object(M, "read", return_value=b'{"autoDownload":false}'):
+                    actions = M.startup_ui(surface, Path("/fixture/home"), first=first)
+                expected = (["usage-terms-checkbox", "usage-terms-continue"] if first else []) + ["convergence-later"]
+                self.assertEqual(actions, expected)
+                self.assertEqual(state.actions, expected)
+                self.assertEqual(M.bound_source_menu(surface)["source"], source)
+
+    def test_binding_requires_the_verified_source_image_pair_and_cannot_be_reassigned(self):
+        source = self.CURRENT[-1]
+        surface = self.surface(source, bound=False)
+        M.bind_source_menu(surface, source, {"size": 11, "sha256": "a" * 64})
+        self.assertEqual(M.bound_source_menu(surface)["source"], source)
+        with self.assertRaisesRegex(RuntimeError, "already bound"):
+            M.bind_source_menu(surface, self.HISTORICAL[0], {"size": 11, "sha256": "a" * 64})
+        for pin in ({"size": 11, "sha256": "b" * 64}, {"size": 12, "sha256": "a" * 64}):
+            fresh = self.surface(source, bound=False)
+            with self.subTest(pin=pin), self.assertRaises(RuntimeError):
+                M.bind_source_menu(fresh, source, pin)
+            self.assertFalse(hasattr(fresh, "menu_binding"))
+
+    def test_image_change_during_full_recheck_refuses_before_navigation(self):
+        surface = self.surface(self.CURRENT[0])
+        surface.recheck.side_effect = lambda **kwargs: surface.record.update(kernelImageSha256="b" * 64)
+        with self.assertRaisesRegex(RuntimeError, "menu source image"):
+            M.navigate_home(surface)
+        self.assertEqual(surface.inputs, [])
+
+    def test_source_catalog_does_not_change_existing_artifact_admission(self):
+        self.assertEqual(M.FIXED["17"]["source"], self.CURRENT[-1])
+        p = profile()
+        p["artifacts"]["assembly17"]["source"] = self.HISTORICAL[-1]
+        with self.assertRaisesRegex(RuntimeError, "assembly identity"):
+            M.validate_profile(p, "deb-approve")
+
+    def test_verified_phase_call_sites_bind_before_ax_or_html_startup(self):
+        tree = ast.parse(Path(M.__file__).read_text())
+        functions = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
+        session = ast.unparse(functions["native_session"])
+        self.assertIn("bind_source_menu(surface, profile['baseline']['source'], expected)", session)
+        self.assertIn("bind_source_menu(replacement, FIXED['17']['source'], new_pin)", session)
+        self.assertLess(session.index("old = phase_identity("), session.index("bind_source_menu(surface,"))
+        self.assertLess(session.index("bind_source_menu(surface,"), session.index("html.startup("))
+        self.assertLess(session.index("observe_successor("), session.index("bind_source_menu(replacement,"))
+        self.assertLess(session.index("bind_source_menu(replacement,"), session.index("replacement_html.restored("))
+        cold = ast.unparse(functions["reactivated_pages"])
+        self.assertIn("bind_source_menu(surface, FIXED['17']['source'],", cold)
+        self.assertLess(cold.index("Surface.__init__("), cold.index("bind_source_menu("))
+        self.assertLess(cold.index("bind_source_menu("), cold.index("wait(home_ready"))
+
+
+class DceTargetBindingContracts(unittest.TestCase):
+    TARGET = {
+        "source": "dce183ec0a0f23210d83b064c04ecc8b6af999fe", "tree": "6d881eade5b3178913012d3a6c6632bd41b0e849",
+        "run": 40558857547, "job": 122382352843, "artifact": 12758317802,
+        "zip": {"size": 128307718, "sha256": "0abb50f360d3e6798cd42d07e7117eed1ad29b4294df6d0fa049626fa2c181b1"},
+        "raw": {"size": 28909576, "sha256": "b8b6f63866fce2c7179656a7f9eb3b240c02544df240bd3d34682e53e84f7829"},
+        "deb": {"size": 64455526, "sha256": "f58801c95e6932266a897a7b139c6ad3cf4fdfb22ea518398f3a91ed3829ed54"},
+        "hub": {"size": 28909576, "sha256": "1fae9d03ddd889068fdccb8416ad3644952027304c10038d0b6810f068e2a952"},
+        "helper": {"size": 1168536, "sha256": "7f22822e50ee8b96829c64c95da9e1b098c3e080a1370f577ae2b69055eed94a"},
+        "archive": {"size": 55576696, "sha256": "5cc9719912560fe0dd0efb0482a5257631d5eafd416975a153e8af5c01a99430"},
+    }
+    OLD_SOURCE = "75a99ff4a267064aaa3ac9e30039bc91dc791d89"
+    OLD_TREE = "5f62bf4bc1ba85eb293ca9a5a30330b06b6b4351"
+    OLD_RAW = {"size": 28663912, "sha256": "97f19971eb1ab2e98767aa02f8ea6a585ca617ebef4380ec9e93195a15c779f0"}
+    OLD_HUB = {"size": 28663912, "sha256": "147d7847a1437adbd33d161029307eb32bc1e406482d8f93247822eb805c47cd"}
+    OLD_DEB = {"size": 64296202, "sha256": "efc71fb740ab87e2d8a3d8519cbe8fff38edaa6ee95f358e50b2eccc0f5f80fe"}
+    OLD_HELPER = {"size": 1167744, "sha256": "501e97da9c93d370caa750c46f4c3f272d546281e8e2eeedfaf4f01193d644be"}
+    OLD_ARCHIVE = {"size": 55566243, "sha256": "db14fbe37eb69bfb1093107d4c842e4a14f6dd07b2e747ff675416013ef6d202"}
+
+    def test_exact_target_is_the_observed_successful_dce_assembly(self):
+        self.assertEqual(M.FIXED, {"17": self.TARGET})
+        self.assertEqual(M.FIXED["17"]["helper"], {"size": 1168536,
+            "sha256": "7f22822e50ee8b96829c64c95da9e1b098c3e080a1370f577ae2b69055eed94a"})
+
+    def test_old_and_mixed_source_tree_producer_fields_are_not_aliases(self):
+        old = {"source": self.OLD_SOURCE, "tree": self.OLD_TREE, "run": 39352480021,
+               "job": 118399713148, "artifact": 12234186813,
+               "zip": {"size": 127991424, "sha256": "41afaceed3eb704cf67129c2b1bba01c574535badf94eb721170298b48bf160a"}}
+        for changes in (old, *({key: value} for key, value in old.items()),
+                        {"source": "085131ba6f3050a795fd513139a34975658ba321"},
+                        {"source": "8d59507fc739879577c28b28748fa64039d51c36"}, {"source": "f" * 40}):
+            value = profile(); value["artifacts"]["assembly17"].update(copy.deepcopy(changes))
+            with self.subTest(changes=changes), self.assertRaises(RuntimeError):
+                M.validate_profile(value, "deb-approve")
+
+    def test_raw_root_deb_and_packaged_root_pins_cannot_be_mixed(self):
+        for name, pin in (("raw17", self.OLD_RAW), ("raw17", self.TARGET["hub"]),
+                          ("deb17", self.OLD_DEB), ("deb17", self.TARGET["raw"])):
+            value = profile(); ref = value["objects"][name]
+            value["artifacts"][ref["artifact"]]["files"][ref["member"]] = dict(pin)
+            with self.subTest(name=name, pin=pin), self.assertRaises(RuntimeError):
+                M.validate_profile(value, "deb-approve")
+
+    def test_old_or_cross_role_packaged_root_archive_helper_are_refused(self):
+        for path, pin in ((M.ROOT_ENTRY, self.OLD_HUB), (M.ROOT_ENTRY, self.TARGET["raw"]),
+                          ("usr/lib/Creator Hub/modules.tar.gz", self.OLD_ARCHIVE),
+                          (M.RETIREMENT_HELPER, self.OLD_HELPER)):
+            old, new, baseline = compared_packages()
+            new["files"][path].update(pin)
+            new["md5sums"] = {name: row["md5"] for name, row in new["files"].items()}
+            with self.subTest(path=path, pin=pin), self.assertRaises((RuntimeError, ValueError)):
+                M.compare_update_packages(old, new, baseline)
+
+    def test_carrier_contract_is_actual_dce_and_cannot_admit_old_or_unobserved_pins(self):
+        value = profile(); delivery = value["deliveries"]["signedDeb17"]
+        self.assertEqual(M.delivery_name(value, "signedDeb17"), "signed-private-deb017-carrier-40558857547.zip")
+        self.assertEqual(delivery["asset"], 682573088)
+        self.assertEqual(delivery["zip"], {"size": 64413335,
+            "sha256": "fcb4f79958993a8ddd19665c33b3926b0568630170fdfe2d80a80fbd4df195ec"})
+        # Unit-only altered values, not guessed delivery IDs or real carrier bytes.
+        for changes in ({"asset": 658078066}, {"name": "signed-private-deb017-carrier-39352480021.zip"},
+                        {"zip": {"size": 64362879, "sha256": "252f14b4b119412d4c0017b18479077c3050228f17725464688545a5fd298a6f"}},
+                        {"asset": delivery["asset"] + 1}, {"name": "UNBOUND"},
+                        {"zip": {"size": 1, "sha256": "0" * 64}}):
+            changed = copy.deepcopy(value); changed["deliveries"]["signedDeb17"].update(changes)
+            with self.subTest(changes=changes), self.assertRaises(RuntimeError):
+                M.validate_profile(changed, "deb-approve")
+
+    def test_historical_menu_catalog_is_finite_without_reopening_old_target_admission(self):
+        self.assertEqual(M.HISTORICAL_MENU_SOURCES, ("a89ed2b90278b33bebd0b4ba29d87904d2fe683b", self.OLD_SOURCE))
+        self.assertEqual(M.CURRENT_MENU_SOURCES, ("085131ba6f3050a795fd513139a34975658ba321", self.TARGET["source"]))
+        for source in M.HISTORICAL_MENU_SOURCES + M.CURRENT_MENU_SOURCES:
+            self.assertEqual(M.source_menu_profile(source)["source"], source)
+        for source in ("8d59507fc739879577c28b28748fa64039d51c36", "f" * 40, None, "0.1.17"):
+            with self.subTest(source=source), self.assertRaises(RuntimeError): M.source_menu_profile(source)
+
+    def test_qualification_is_finite_source_tree_helper_metadata_not_native_acceptance(self):
+        for source, tree, helper, old in ((self.OLD_SOURCE, self.OLD_TREE, self.OLD_HELPER, True),
+                                         (self.TARGET["source"], self.TARGET["tree"], self.TARGET["helper"], False)):
+            with self.subTest(source=source), patch.dict(M.FIXED["17"], source=source, tree=tree, helper=helper):
+                value = M.private_target_qualification()
+                self.assertEqual(value["targetSource"], source)
+                self.assertEqual(value["targetRetirementHelper"], helper)
+                self.assertIs(value["privateDebApprovalRestoresOldRetirementHelper"], old)
+                for key in ("final016HelperFixRetained", "targetFixNativeAcceptance", "futurePublic017Qualified", "releaseReady"):
+                    self.assertIs(value[key], False)
+        for changes in ({"source": "f" * 40}, {"source": "085131ba6f3050a795fd513139a34975658ba321"},
+                        {"tree": self.OLD_TREE}, {"helper": self.OLD_HELPER}):
+            with self.subTest(changes=changes), patch.dict(M.FIXED["17"], changes), self.assertRaises(RuntimeError):
+                M.private_target_qualification()
+
+    def test_dce_package_evidence_requires_baseline_helper_equality_not_a_claimed_label(self):
+        old, new, baseline = compared_packages()
+        self.assertEqual(baseline["helper"], self.TARGET["helper"])
+        receipt = M.compare_update_packages(old, new, baseline)
+        self.assertFalse(receipt["privateDebApprovalRestoresOldRetirementHelper"])
+        changed = copy.deepcopy(baseline); changed["helper"] = dict(self.OLD_HELPER)
+        with self.assertRaisesRegex(RuntimeError, "baseline helper bytes"):
+            M.compare_update_packages(old, new, changed)
+
+    def test_native_helper_flags_are_set_only_after_existing_installed_verification(self):
+        tree = ast.parse(Path(M.__file__).read_text())
+        functions = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
+        for name, root in (("native_session", "report"), ("broker", "record")):
+            source = ast.unparse(functions[name])
+            marker = f"{root}['targetRetirementHelperVerified'] = "
+            positions = [index for index in range(len(source)) if source.startswith(marker, index)]
+            self.assertEqual(len(positions), 1)
+            self.assertIn("verify_installed(review,", source[:positions[0]])
+            self.assertIn("private_target_qualification()['privateDebApprovalRestoresOldRetirementHelper']", source)
+        self.assertNotIn("final016HelperFixRetained'] = True", ast.unparse(tree))
 
 
 if __name__ == "__main__":

@@ -51,14 +51,14 @@ TERMS = "data/CreatorHub/consent/hub-usage-terms.json"
 KEY_PIN = {"size": 119, "sha256": "23b3eee2d1c8cb7d705120953cda67ff94a722a207d5be1679c250be8ca90308"}
 FEATURES = ["integrated-features", "experimental-flatpak-host", "linux-production-migration", "experimental-linux-portable-update"]
 FIXED = {
-    "17": {"source": "75a99ff4a267064aaa3ac9e30039bc91dc791d89", "tree": "5f62bf4bc1ba85eb293ca9a5a30330b06b6b4351",
-           "run": 39352480021, "job": 118399713148, "artifact": 12234186813,
-           "zip": {"size": 127991424, "sha256": "41afaceed3eb704cf67129c2b1bba01c574535badf94eb721170298b48bf160a"},
-           "raw": {"size": 28663912, "sha256": "97f19971eb1ab2e98767aa02f8ea6a585ca617ebef4380ec9e93195a15c779f0"},
-           "deb": {"size": 64296202, "sha256": "efc71fb740ab87e2d8a3d8519cbe8fff38edaa6ee95f358e50b2eccc0f5f80fe"},
-           "hub": {"size": 28663912, "sha256": "147d7847a1437adbd33d161029307eb32bc1e406482d8f93247822eb805c47cd"},
-           "helper": {"size": 1167744, "sha256": "501e97da9c93d370caa750c46f4c3f272d546281e8e2eeedfaf4f01193d644be"},
-           "archive": {"size": 55566243, "sha256": "db14fbe37eb69bfb1093107d4c842e4a14f6dd07b2e747ff675416013ef6d202"}},
+    "17": {"source": "dce183ec0a0f23210d83b064c04ecc8b6af999fe", "tree": "6d881eade5b3178913012d3a6c6632bd41b0e849",
+           "run": 40558857547, "job": 122382352843, "artifact": 12758317802,
+           "zip": {"size": 128307718, "sha256": "0abb50f360d3e6798cd42d07e7117eed1ad29b4294df6d0fa049626fa2c181b1"},
+           "raw": {"size": 28909576, "sha256": "b8b6f63866fce2c7179656a7f9eb3b240c02544df240bd3d34682e53e84f7829"},
+           "deb": {"size": 64455526, "sha256": "f58801c95e6932266a897a7b139c6ad3cf4fdfb22ea518398f3a91ed3829ed54"},
+           "hub": {"size": 28909576, "sha256": "1fae9d03ddd889068fdccb8416ad3644952027304c10038d0b6810f068e2a952"},
+           "helper": {"size": 1168536, "sha256": "7f22822e50ee8b96829c64c95da9e1b098c3e080a1370f577ae2b69055eed94a"},
+           "archive": {"size": 55576696, "sha256": "5cc9719912560fe0dd0efb0482a5257631d5eafd416975a153e8af5c01a99430"}},
 }
 FALSE = dict.fromkeys(("publicDiscovery", "flatpakAccepted", "steamDeckAccepted", "liveAiAccepted", "unityAccepted", "releaseReady"), False)
 ENVIRONMENT = ("GITHUB_ACTIONS", "GITHUB_REPOSITORY", "GITHUB_REPOSITORY_ID", "GITHUB_REF", "GITHUB_EVENT_NAME",
@@ -294,7 +294,7 @@ def validate_profile(value, scenario):
         require(type(item["asset"]) is int and item["asset"] > 0 and item["name"] == delivery_name(value, role), "Exact closed private draft asset name/ID required")
         validate_pin(item["zip"], MAX_ZIP)
         if role == "signedDeb17":
-            require(item["asset"] == 658078066 and item["zip"] == {"size": 64362879, "sha256": "252f14b4b119412d4c0017b18479077c3050228f17725464688545a5fd298a6f"}, "Original private017 signed carrier is immutable")
+            require(item["asset"] == 682573088 and item["zip"] == {"size": 64413335, "sha256": "fcb4f79958993a8ddd19665c33b3926b0568630170fdfe2d80a80fbd4df195ec"}, "Observed dce private017 signed carrier is immutable")
         require(type(item["files"]) is dict and 0 < len(item["files"]) <= 16
                 and len({n.lower() for n in item["files"]}) == len(item["files"]), "Complete private ZIP inventory required")
         for name, expected in item["files"].items():
@@ -322,7 +322,7 @@ def validate_profile(value, scenario):
 
 def delivery_name(profile, role):
     if role == "signedDeb17":
-        return "signed-private-deb017-carrier-39352480021.zip"
+        return "signed-private-deb017-carrier-40558857547.zip"
     require(role in ("signedPortable16", "signedPortable17"), "Unknown private delivery role")
     version = role[-2:]
     return "signed-private-portable0" + version + "-carrier-" + str(profile["artifacts"]["portable" + version]["run"]) + ".zip"
@@ -808,24 +808,33 @@ def request(env, profile_raw, api_raw):
 
 
 def private_target_qualification():
-    return {"scope": "private-source75-updater-lifecycle-only", "targetSource": FIXED["17"]["source"],
-            "targetRetirementHelper": dict(FIXED["17"]["helper"]), "privateDebApprovalRestoresOldRetirementHelper": True,
+    source = FIXED["17"]["source"]
+    targets = {
+        "75a99ff4a267064aaa3ac9e30039bc91dc791d89": ("private-source75-updater-lifecycle-only", True,
+            {"size": 1167744, "sha256": "501e97da9c93d370caa750c46f4c3f272d546281e8e2eeedfaf4f01193d644be"}, "5f62bf4bc1ba85eb293ca9a5a30330b06b6b4351"),
+        "dce183ec0a0f23210d83b064c04ecc8b6af999fe": ("private-dce-updater-lifecycle-only", False,
+            {"size": 1168536, "sha256": "7f22822e50ee8b96829c64c95da9e1b098c3e080a1370f577ae2b69055eed94a"}, "6d881eade5b3178913012d3a6c6632bd41b0e849"),
+    }
+    require(source in targets and FIXED["17"]["helper"] == targets[source][2]
+            and FIXED["17"]["tree"] == targets[source][3], "Unreviewed target source/tree/helper semantics")
+    scope, restores_old, helper, _ = targets[source]
+    return {"scope": scope, "targetSource": source,
+            "targetRetirementHelper": dict(helper), "privateDebApprovalRestoresOldRetirementHelper": restores_old,
             "final016HelperFixRetained": False, "targetFixNativeAcceptance": False, "futurePublic017Qualified": False,
             "releaseReady": False}
 
 
 def compare_update_packages(baseline, candidate, baseline_pins):
-    """Closed NEW3 comparison, not an override of the historical017 verifier.
-
-    Source75's exact old helper is intentional private test data. Replacing the
-    final016 helper does not qualify fix retention or a future public017 build.
-    """
+    """Closed source-bound comparison, not native fix-retention acceptance."""
+    qualification = private_target_qualification()
+    if not qualification["privateDebApprovalRestoresOldRetirementHelper"]:
+        require(baseline_pins["helper"] == FIXED["17"]["helper"], "Dce must preserve the independently reviewed baseline helper bytes")
     shared = load("private-linux-update-fixture-017-package-verify")
     expected = {"baseline": {k: baseline_pins[k] for k in ("deb", "hub", "helper", "policy", "service")},
                 "candidate": {k: FIXED["17"][k] for k in ("deb", "hub", "archive")}}
     shared.validate_expected(expected)
     before, after = baseline["fields"], candidate["fields"]
-    require(before["Version"] == "0.1.16" and after["Version"] == "0.1.17" and set(before) == set(after), "Only actual016 -> source75 private017 control fields admitted")
+    require(before["Version"] == "0.1.16" and after["Version"] == "0.1.17" and set(before) == set(after), "Only actual016 -> source-bound private017 control fields admitted")
     for name in before:
         if name not in ("Version", "Installed-Size"):
             require(before[name] == after[name], "Unreviewed package control delta")
@@ -838,7 +847,7 @@ def compare_update_packages(baseline, candidate, baseline_pins):
     require(set(old) == set(new) and {ROOT_ENTRY, archive, RETIREMENT_HELPER}.issubset(new), "Package paths changed")
     for name in old:
         if name not in (ROOT_ENTRY, archive, RETIREMENT_HELPER):
-            require(old[name] == new[name], "Only Root, module archive and the fixed source75 helper may change")
+            require(old[name] == new[name], "Only Root, module archive and the exact reviewed target helper may change")
         else:
             require(all(old[name][k] == new[name][k] for k in ("kind", "mode", "uid", "gid"))
                     and new[name]["kind"] == "file", "Changed regular-member ownership or mode")
@@ -848,12 +857,12 @@ def compare_update_packages(baseline, candidate, baseline_pins):
     shared.baseline_members(candidate, {"hub": FIXED["17"]["hub"], "helper": FIXED["17"]["helper"],
                                         "policy": baseline_pins["policy"], "service": baseline_pins["service"]})
     require({k: new[archive][k] for k in ("size", "sha256")} == FIXED["17"]["archive"]
-            and old[ROOT_ENTRY]["sha256"] != new[ROOT_ENTRY]["sha256"], "Original source75 Root/archive pins required; relabelling refused")
+            and old[ROOT_ENTRY]["sha256"] != new[ROOT_ENTRY]["sha256"], "Original source-bound Root/archive pins required; relabelling refused")
     for name in (ROOT_ENTRY, RETIREMENT_HELPER):
         header = bytes.fromhex(new[name]["header"])
         require(new[name]["mode"] == 0o755 and header[:7] == b"\x7fELF\x02\x01\x01" and header[18:20] == b"\x3e\x00", "Exact native x86_64 executable required")
     require(new[archive]["mode"] == 0o644, "Exact archive mode required")
-    return private_target_qualification()
+    return qualification
 
 
 def baseline_mcp_inputs(folder, profile, package_files, verifier):
@@ -886,23 +895,8 @@ def baseline_mcp_inputs(folder, profile, package_files, verifier):
             {name: manifest["payloadArchive"]["files"][name]["mode"] for name in mcp.MODULE_FILES})
 
 
-def stage(folder, env):
-    scenario = admission(env)
-    profile_raw, api_raw = read(folder / "profile.json", 65536, mode=0o600), read(folder / "api.json", 512 * 1024, mode=0o600)
-    sealed = request(env, profile_raw, api_raw); profile = parse(profile_raw)
-    expected_names = {"profile.json", "api.json", *(n + ".zip" for n in input_roles(profile))}
-    if scenario == COMBINED:
-        expected_names.add("flatpak-source")
-    actual_names = {p.name for p in folder.iterdir()}
-    require(actual_names in (expected_names, expected_names | {"carrier", "carrier.zip"}), "Fresh complete input set, no partial stage adoption")
-    verifier = offline_verifier(env)
-    if os.geteuid() == 0:
-        tool = BASE / "scripts/verify-package-input"
-        bound(tool, sealed["verifier"]["tool"]["pin"], 64 * 1024**2, uid=0, mode=0o755)
-        verifier = (tool, sealed["verifier"])
-    members = folder / "members"; members.mkdir(mode=0o700)
-    for name, artifact in input_roles(profile).items():
-        stage_zip(folder / (name + ".zip"), artifact, members / name)
+def review_staged_packages(folder, profile, verifier, scenario):
+    """Shared inspection only; callers retain separate admission and staging guards."""
     obj = lambda name: object_path(folder, profile, name)
     if scenario.startswith("deb-"):
         signature(obj("debDescriptor17"), obj("debSignature17"), verifier)
@@ -941,6 +935,29 @@ def stage(folder, env):
         native.verify_deb_marker(read(obj("raw" + version), MAX_FILE), packaged_root(obj("deb" + version), baseline["hub"] if version == "16" else FIXED["17"]["hub"]))
     review = {"baseline": baseline, "deb16": old["files"], "deb17": new["files"], "portable": {}, "signaturesVerified": True,
               "privateTargetQualification": qualification, **FALSE}
+    return review
+
+
+def stage(folder, env):
+    scenario = admission(env)
+    profile_raw, api_raw = read(folder / "profile.json", 65536, mode=0o600), read(folder / "api.json", 512 * 1024, mode=0o600)
+    sealed = request(env, profile_raw, api_raw); profile = parse(profile_raw)
+    expected_names = {"profile.json", "api.json", *(n + ".zip" for n in input_roles(profile))}
+    if scenario == COMBINED:
+        expected_names.add("flatpak-source")
+    actual_names = {p.name for p in folder.iterdir()}
+    require(actual_names in (expected_names, expected_names | {"carrier", "carrier.zip"}), "Fresh complete input set, no partial stage adoption")
+    verifier = offline_verifier(env)
+    if os.geteuid() == 0:
+        tool = BASE / "scripts/verify-package-input"
+        bound(tool, sealed["verifier"]["tool"]["pin"], 64 * 1024**2, uid=0, mode=0o755)
+        verifier = (tool, sealed["verifier"])
+    members = folder / "members"; members.mkdir(mode=0o700)
+    for name, artifact in input_roles(profile).items():
+        stage_zip(folder / (name + ".zip"), artifact, members / name)
+    review = review_staged_packages(folder, profile, verifier, scenario)
+    baseline = profile["baseline"]
+    obj = lambda name: object_path(folder, profile, name)
     if scenario.startswith("portable-"):
         for version in ("16", "17"):
             signature(obj("portableDescriptor" + version), obj("portableSignature" + version), verifier)
@@ -998,8 +1015,12 @@ def selection(value, generation, previous=None):
 
 
 def outcome(scenario, evidence):
-    require(evidence.get("privateTargetQualification") == private_target_qualification()
-            and evidence.get("oldRetirementHelperRestored") is (scenario == "deb-approve"), "Private target must disclose the old helper; no fix-retention/public017 qualification")
+    qualification = private_target_qualification()
+    approved_deb = scenario == "deb-approve"
+    require(evidence.get("privateTargetQualification") == qualification
+            and evidence.get("oldRetirementHelperRestored") is (approved_deb and qualification["privateDebApprovalRestoresOldRetirementHelper"])
+            and evidence.get("targetRetirementHelperVerified") is approved_deb,
+            "Exact source-bound helper evidence required; no fix-retention/public017 qualification")
     require(scenario in SCENARIOS and all(evidence.get(n) is True for n in ("initial16Verified", "nativeConfirmationObserved", "settingsPreserved", "runtimeSurvived", "normalFinalClose")), "Full initial/consent/preservation/close proof required")
     mcp_protocol_receipt(evidence.get("mcpProtocol"))
     if scenario in HTML_SCENARIOS:
@@ -1062,11 +1083,16 @@ def mcp_protocol_receipt(value):
     return value
 
 
-def complete_mcp_protocol(connection, report):
+def update_channel(migrated=False):
+    require(type(migrated) is bool, "Fixed update channel selection required")
+    return (BASE / "migrated-update", BASE / "result/migrated-update") if migrated else (BASE, BASE / "result")
+
+
+def complete_mcp_protocol(connection, report, *, migrated=False):
     report["mcpChecks"].append(connection.check("after-hub-close"))
     report["mcpReconnect"] = connection.reconnect()
     report["mcpProtocol"] = mcp_protocol_receipt(connection.close())
-    save(BASE / "result/mcp-protocol.json", report["mcpProtocol"])
+    save(update_channel(migrated)[1] / "mcp-protocol.json", report["mcpProtocol"])
     report["runtimeSurvived"] = True
 
 
@@ -2026,11 +2052,14 @@ def bind_html_owner(surface, *, diagnostic=None):
 
 class HtmlPages:
     """Standard elements only; separate original-Popen and adopted-successor attachments."""
-    def __init__(self, surface, original, pages, driver_pin, port, env, evidence, *, previous=None, root_diagnostics=None):
+    def __init__(self, surface, original, pages, driver_pin, port, env, evidence, *, previous=None, root_diagnostics=None, migrated=False):
+        self.control, self.output = update_channel(migrated)
+        self.migrated = migrated
         self.surface, self.original, self.pages = surface, original, pages
         self.driver_pin, self.port, self.env, self.evidence = driver_pin, port, env, evidence
         require(previous is None or type(previous) is HtmlPages and previous.previous is None
-                and original is previous.original and port == previous.port and driver_pin == previous.driver_pin,
+                and original is previous.original and port == previous.port and driver_pin == previous.driver_pin
+                and migrated == previous.migrated,
                 "One exact initial-to-successor HTML handoff required")
         self.previous = previous
         self.root_diagnostics = previous.root_diagnostics if previous is not None else root_diagnostics
@@ -2152,7 +2181,7 @@ class HtmlPages:
             if self.root_diagnostics is not None:
                 self.root_diagnostics.snapshot(self, "endpoint-refusal")
             raise
-        driver = BASE / "scripts/tauri-driver"
+        driver = self.control / "scripts/tauri-driver"
         bound(driver, self.driver_pin, 64 * 1024**2, uid=0, mode=0o755)
         native = self.pages.record("/usr/bin/WebKitWebDriver")
         require(native["uid"] == native["gid"] == 0 and native["mode"] == 0o755, "Protected WebKitWebDriver required")
@@ -2160,7 +2189,7 @@ class HtmlPages:
         self.evidence["phase"] = "driver-launch"
         self.child = subprocess.Popen([str(driver), "--native-driver", "/usr/bin/WebKitWebDriver"],
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=self.env)
-        self.logs = self.surface.native.Capture(self.child, BASE / "result", self.log_name)
+        self.logs = self.surface.native.Capture(self.child, self.output, self.log_name)
         self.driver_record = kernel_record(self.child.pid, self.surface.native, self.surface.helper)
         require(self.driver_record["parentPid"] == os.getpid() and self.driver_record["uids"] == [UID] * 4
                 and self.driver_record["kernelImageSha256"] == self.driver_pin["sha256"], "Intermediary image/parent/UID differs")
@@ -2319,10 +2348,11 @@ class HtmlPages:
             if feature == "mcp":
                 selected = prefix + ' .feature-project[data-selected="true"] .feature-project-select'
                 other = prefix + ' .feature-project[data-selected="false"] .feature-project-select'
+                names = ("Current retained project", "Earlier unique project") if self.migrated else ("Selected update project", "Other update project")
                 require(self.d.read(selected, "attribute/aria-pressed") == "true"
                         and self.d.read(other, "attribute/aria-pressed") == "false"
-                        and self.d.read(selected + " .feature-project-info strong") == "Selected update project"
-                        and self.d.read(other + " .feature-project-info strong") == "Other update project", "Selected MCP project did not survive")
+                        and self.d.read(selected + " .feature-project-info strong") == names[0]
+                        and self.d.read(other + " .feature-project-info strong") == names[1], "Selected MCP project did not survive")
             phase_processes(self.surface)
         return True
 
@@ -2382,7 +2412,7 @@ class HtmlPages:
         self.evidence["logs"] = metadata
         require(set(metadata) == {"stdout", "stderr"}, "Only owned WebDriver logs permitted")
         for name, row in metadata.items():
-            raw = read(BASE / "result" / (self.log_name + "." + name), self.surface.native.MAX_LOG, uid=UID)
+            raw = read(self.output / (self.log_name + "." + name), self.surface.native.MAX_LOG, uid=UID)
             row["file"] = pin(raw)
             require(len(raw) == row["retainedBytes"] and row["truncated"] is False, "WebDriver log incomplete/overflowed")
 
@@ -2392,7 +2422,60 @@ def field_text(surface, source_id):
     return row.get("text") or row["name"]
 
 
+HISTORICAL_MENU_SOURCES = ("a89ed2b90278b33bebd0b4ba29d87904d2fe683b", "75a99ff4a267064aaa3ac9e30039bc91dc791d89")
+CURRENT_MENU_SOURCES = ("085131ba6f3050a795fd513139a34975658ba321", "dce183ec0a0f23210d83b064c04ecc8b6af999fe")
+
+
+def source_menu_profile(source):
+    """Finite source expectations; this does not admit an artifact or discover UI."""
+    require(type(source) is str and source in HISTORICAL_MENU_SOURCES + CURRENT_MENU_SOURCES,
+            "Unreviewed menu source; version or UI labels are not source identity")
+    if source in CURRENT_MENU_SOURCES:
+        return {"source": source,
+                "initial": {"hub": "Home Projects and updates", "mcp": "MCP AI bridge for Unity Checking",
+                            "setup": "Setup / Repair Unity + Creator SDK project setup and repair Checking"},
+                "ready": {"hub": "Home Projects and updates", "mcp": "MCP AI bridge for Unity",
+                          "setup": "Setup / Repair Unity + Creator SDK project setup and repair"},
+                "hideReadyStatus": True, "rewriteHomeCaption": False}
+    return {"source": source,
+            "initial": {"hub": "H Creator Hub Apps and projects", "mcp": "M Creator Works MCP AI tools for Unity Checking",
+                        "setup": "P Project Setup Unity + Creator SDK projects Checking"},
+            "ready": {"hub": "H Creator Hub Projects", "mcp": "M Creator Works MCP AI tools for Unity Included in Hub",
+                      "setup": "P Project Setup Unity + Creator SDK projects Included in Hub"},
+            "hideReadyStatus": False, "rewriteHomeCaption": True}
+
+
+def bind_source_menu(surface, source, expected_image):
+    """Called only after the existing reviewed phase/source/image checks."""
+    require(not hasattr(surface, "menu_binding"), "Menu source already bound")
+    profile = source_menu_profile(source)
+    validate_pin(expected_image, MAX_FILE)
+    surface.recheck(full=True)
+    record = surface.record
+    require(type(record.get("pid")) is int and record["pid"] > 1
+            and re.fullmatch(r"[1-9][0-9]*", record.get("startTime", ""))
+            and record.get("kernelImageSha256") == expected_image["sha256"]
+            and int(record.get("image", {}).get("st_size", "-1")) == expected_image["size"], "Exact menu source image required")
+    surface.menu_binding = (source, expected_image["sha256"], expected_image["size"], record["pid"], record["startTime"])
+    return profile
+
+
+def bound_source_menu(surface):
+    binding = getattr(surface, "menu_binding", None)
+    require(type(binding) is tuple and len(binding) == 5, "Bound menu source required before UI")
+    source, image_hash, image_size, pid, start = binding
+    profile = source_menu_profile(source)
+    validate_pin({"size": image_size, "sha256": image_hash}, MAX_FILE)
+    surface.recheck(full=True)
+    record = surface.record
+    require(record.get("pid") == pid and record.get("startTime") == start
+            and record.get("kernelImageSha256") == image_hash
+            and int(record.get("image", {}).get("st_size", "-1")) == image_size, "Bound menu source image changed")
+    return profile
+
+
 def direct_pages(surface, actions):
+    menu = bound_source_menu(surface)
     surface.call_phase = "direct-pages"
     phase_processes(surface)
     wait(lambda: surface.source("projects-home-title", optional=True))
@@ -2402,8 +2485,7 @@ def direct_pages(surface, actions):
     require(buttons.count("Open selected-project") == buttons.count("Open other-project") == 1, "Unique selected/other Home projects not observed")
     require(not any(r["tag"] in ("iframe", "object", "embed") for r in rows), "Separate component document refused")
     # The bound integrated Root exposes its badge, description and status in the AX name.
-    for feature, label in (("mcp", "M Creator Works MCP AI tools for Unity Included in Hub"),
-                           ("setup", "P Project Setup Unity + Creator SDK projects Included in Hub")):
+    for feature, label in (("mcp", menu["ready"]["mcp"]), ("setup", menu["ready"]["setup"])):
         surface.click("suite-trigger", [])
         rows, nodes = surface.snapshot()
         candidates = [(row, node) for row, node in zip(rows, nodes) if row["role"] == int(surface.atspi.Role.PUSH_BUTTON)
@@ -2464,6 +2546,8 @@ def reactivated_pages(record, x11, evidence_dir, review, inventory, helper, nati
     try:
         Surface.__init__(surface, record, x11, helper, native, atspi,
                          manifest=review["portable"]["17"]["manifest"], generation_dir=generation, inventory=inventory)
+        image = {key: review["portable"]["17"]["manifest"]["entries"][ROOT_ENTRY][key] for key in ("size", "sha256")}
+        bind_source_menu(surface, FIXED["17"]["source"], image)
         # Cold activation opens Projects; the automatic update successor already claimed restoration.
         def home_ready():
             if not surface.source("projects-home-title", optional=True):
@@ -2522,7 +2606,7 @@ def feature_ready(surface, feature):
     return rows if ready else None
 
 
-def pending_proof(root, native, helper, polkit, baseline):
+def pending_proof(root, native, helper, polkit, baseline, *, migrated=False):
     """Root-only, read-only attribution of the actual sealed private017 stdin."""
     require(os.getuid() == os.geteuid() == 0, "Setuid observer requires the fixed root broker")
     require(root["uids"] == [UID] * 4 and root["executable"] == "/usr/bin/creator-hub"
@@ -2531,7 +2615,10 @@ def pending_proof(root, native, helper, polkit, baseline):
     supervisor = kernel_record(root["parentPid"], native, helper)
     require(supervisor["uids"] == [UID] * 4 and supervisor["executable"] == "/usr/bin/python3.10", "Root must descend from the exact system Python session")
     command = Path(f"/proc/{supervisor['pid']}/cmdline").read_bytes()
-    require(command == b"/usr/bin/python3\0-B\0/opt/creator-polkit-fixture/scripts/native-linux-production-016-update.py\0session\0", "Fixed reviewed session ancestry required")
+    control, _ = update_channel(migrated)
+    script = "native-linux-migrated-update.py" if migrated else "native-linux-production-016-update.py"
+    expected_command = b"\0".join(os.fsencode(part) for part in ("/usr/bin/python3", "-B", str(control / "scripts" / script), "session")) + b"\0"
+    require(command == expected_command, "Fixed reviewed session ancestry required")
     matches = []
     import fcntl
     for pid in children(root["pid"]):
@@ -2620,7 +2707,8 @@ def recheck_endpoint(system, polkit, glib, endpoint, session_identity, pids):
     require(all(polkit.session(system, pid, glib) == session_identity for pid in pids), "Original logind session changed")
 
 
-def authorize(surface, agent, agent_record, parent, endpoint, system, glib, atspi, polkit, flow, helper, native, secret, evidence):
+def authorize(surface, agent, agent_record, parent, endpoint, system, glib, atspi, polkit, flow, helper, native, secret, evidence, *, migrated=False):
+    control, output = update_channel(migrated)
     require(not evidence["systemActions"], "At most one authorization action")
     captured = wait(lambda: polkit.windows(agent.pid, helper, surface.x11), 30)
     require(len(captured) == 1, "One owned system authentication window required")
@@ -2634,8 +2722,8 @@ def authorize(surface, agent, agent_record, parent, endpoint, system, glib, atsp
         polkit.own_agent(agent, agent_record, parent, helper)
         recheck_endpoint(system, polkit, glib, endpoint, session_identity, (parent["pid"], agent.pid, surface.pid))
         counter += 1; require(counter <= 12, "Bounded read-only input proof sequence")
-        save(BASE / "result" / f"input-{counter}.json", {"index": counter})
-        answer_file = BASE / f"input-{counter}.json"
+        save(output / f"input-{counter}.json", {"index": counter})
+        answer_file = control / f"input-{counter}.json"
         wait(answer_file.exists)
         answer = parse(read(answer_file, 32768, uid=0, mode=0o644))
         require(answer["index"] == counter and answer["proof"]["root"] == surface.record and answer["proof"]["package"] == FIXED["17"]["deb"], "Fresh kernel sealed-package input proof refused")
@@ -2712,13 +2800,14 @@ def journal(home, previous=None, *, diagnostics=None):
 
 
 def navigate_home(surface):
+    menu = bound_source_menu(surface)
     surface.call_phase = "navigate-home"
     surface.click("suite-trigger", [])
     rows, nodes = surface.snapshot()
     choices = [(r, n) for r, n in zip(rows, nodes) if r["showing"] and r["role"] == int(surface.atspi.Role.PUSH_BUTTON)
                and r["tag"] == "button" and r["toolkit"] == "WebKitGTK"
                and r["enabled"] and r["sensitive"] and not r["busy"] and not r["defunct"]
-               and r["name"] == "H Creator Hub Projects"]
+               and r["name"] == menu["ready"]["hub"]]
     require(len(choices) == 1, "One exact Home navigation control required")
     row, _ = choices[0]; ref = row["reference"]
     current, current_nodes = surface.snapshot()
@@ -2732,6 +2821,7 @@ def navigate_home(surface):
 
 
 def startup_ui(surface, home, *, first, actions=None, progress=None):
+    bound_source_menu(surface)
     actions = [] if actions is None else actions
     def phase(value):
         surface.call_phase = "startup-ui:" + value
@@ -3103,7 +3193,8 @@ def native_session(env):
               "fromSource": profile["baseline"]["source"], "toSource": FIXED["17"]["source"], "nativeActions": [], "systemActions": [], "journalDiagnostics": [],
               "startupUi": [], "startupPhase": "not-started", "initialPageActionAttempts": [], "successorPageActionAttempts": [],
               "automaticSuccessor": None, "scenarioPassed": False, "disposableTeardownRequired": True,
-              "privateTargetQualification": private_target_qualification(), "oldRetirementHelperRestored": False, **FALSE}
+              "privateTargetQualification": private_target_qualification(), "oldRetirementHelperRestored": False,
+              "targetRetirementHelperVerified": False, **FALSE}
     portable = scenario.startswith("portable-")
     x11, surface, replacement, agent, wm, initial = helper.X11(), None, None, None, None, None
     html = replacement_html = root_diagnostics = None
@@ -3178,6 +3269,7 @@ def native_session(env):
         report["initialRoot"] = old; save(BASE / "result/root.json", old)
         old_bus = verify_bus(old, bus, polkit, GLib, portable=portable)
         surface = Surface(old, x11, helper, native, Atspi, manifest=manifest, generation_dir=generation_dir, inventory=inventory)
+        bind_source_menu(surface, profile["baseline"]["source"], expected)
         if not portable:
             capture_initial_creation_context("before-first-input", home, old, report, native, helper)
         if scenario in HTML_SCENARIOS:
@@ -3237,6 +3329,7 @@ def native_session(env):
             report["automaticSuccessor"], report["nonliveRejected"] = successor, rejected
             verify_bus(successor, bus, polkit, GLib, portable=portable, previous=old_bus)
             replacement = Surface(successor, x11, helper, native, Atspi, manifest=review["portable"]["17"]["manifest"] if portable else None, generation_dir=new_dir, inventory=inventory)
+            bind_source_menu(replacement, FIXED["17"]["source"], new_pin)
             if html is not None:
                 html.finish_tools()
                 replacement_html = HtmlPages(replacement, initial, pages, original_request["htmlDriver"]["pin"], automation_port,
@@ -3263,7 +3356,8 @@ def native_session(env):
                 require(kernel_record(initial.pid, native, helper) == selector_record, "Original signed selector was replaced")
             else:
                 report["installed17"] = verify_installed(review, "17")
-                report["oldRetirementHelperRestored"] = True
+                report["oldRetirementHelperRestored"] = private_target_qualification()["privateDebApprovalRestoresOldRetirementHelper"]
+                report["targetRetirementHelperVerified"] = True
             report["installed17Verified"] = report["automaticRestartObserved"] = True
             if replacement_html is not None:
                 replacement_html.detach()
@@ -3597,8 +3691,11 @@ def prepare_fixture_config(created):
             os.close(fd)
 
 
-def clean_context(env):
-    return {**{key: env[key] for key in ENVIRONMENT}, "PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"}
+def clean_context(env, *, migrated=False):
+    names = ENVIRONMENT
+    if migrated:
+        names += load("native-linux-production-016-migration").ENVIRONMENT + ("CREATOR_MIGRATED_UPDATE_EXECUTE",)
+    return {**{key: env[key] for key in names}, "PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"}
 
 
 def copy_inputs(source, target, profile):
@@ -3959,7 +4056,9 @@ class PipeChild:
             self.capture.close()
 
 
-def prepare_tls(env):
+def prepare_tls(env, *, migrated=False):
+    control, _ = update_channel(migrated)
+    context = clean_context(env, migrated=migrated)
     folder = BASE / "tls"; folder.mkdir(mode=0o700)
     require(not os.path.lexists(TLS_CERT), "Pre-existing test CA refused")
     before = trust_snapshot()
@@ -3977,7 +4076,8 @@ def prepare_tls(env):
         os.fsync(directory_fd)
     finally:
         os.close(directory_fd)
-    child = PipeChild(["/usr/bin/python3", "-B", str(BASE / "scripts" / Path(__file__).name), "_tls-guard"], clean_context(env), "tls-guard")
+    script = "native-linux-migrated-update.py" if migrated else Path(__file__).name
+    child = PipeChild(["/usr/bin/python3", "-B", str(control / "scripts" / script), "_tls-guard"], context, "tls-guard")
     try:
         require(child.ready()["kind"] == "tls-cleanup-armed", "Cleanup lease was not armed")
         child.send(b"install\n")
@@ -3988,9 +4088,10 @@ def prepare_tls(env):
         raise
 
 
-def transport_context(env):
-    result = clean_context(env)
-    result["RUNNER_TEMP"] = str(BASE / "result")
+def transport_context(env, *, migrated=False):
+    _, output = update_channel(migrated)
+    result = clean_context(env, migrated=migrated)
+    result["RUNNER_TEMP"] = str(output)
     result["HOME"] = str(BASE / "result/home")
     return result
 
@@ -4004,9 +4105,12 @@ def inspect_transport(env, root, mode):
     return value
 
 
-def start_transport(env, root, mode, request_value):
-    argv = [env["CONTROLLER_NODE"], str(BASE / "scripts/linux-update-lab-feed.cjs"), "update-016-017", mode, str(root)]
-    child = PipeChild(argv, transport_context(env), "transport", synthetic=True)
+def start_transport(env, root, mode, request_value, *, migrated=False):
+    control, _ = update_channel(migrated)
+    operation = "update-migrated-016-017" if migrated else "update-016-017"
+    context = transport_context(env, migrated=migrated)
+    argv = [env["CONTROLLER_NODE"], str(control / "scripts/linux-update-lab-feed.cjs"), operation, mode, str(root)]
+    child = PipeChild(argv, context, "transport", synthetic=True)
     try:
         native, helper = load("native-linux-root-probe"), load("native-unix-window")
         image = kernel_record(child.child.pid, native, helper)
@@ -4195,7 +4299,8 @@ def broker(env):
     record = {"schemaVersion": 1, "profile": PROFILE, "scenario": scenario, "scenarioPassed": False, "fixtureRelocked": False,
               "fixtureConfigCreationContext": config_context,
               "harnessSource": env["GITHUB_SHA"], "baselineSource": profile["baseline"]["source"], "targetSource": FIXED["17"]["source"],
-              "privateTargetQualification": private_target_qualification(), "oldRetirementHelperRestored": False, **FALSE}
+              "privateTargetQualification": private_target_qualification(), "oldRetirementHelperRestored": False,
+              "targetRetirementHelperVerified": False, **FALSE}
     try:
         guard = prepare_tls(env)
         lab = start_transport(env, transport, mode, sealed)
@@ -4244,7 +4349,8 @@ def broker(env):
             portable_state(BASE / "result/home", review, "17", previous=review["portable"]["16"]["generation"])
         if scenario.startswith("deb-"):
             verify_installed(review, "17" if scenario == "deb-approve" else "16")
-            record["oldRetirementHelperRestored"] = scenario == "deb-approve"
+            record["oldRetirementHelperRestored"] = scenario == "deb-approve" and private_target_qualification()["privateDebApprovalRestoresOldRetirementHelper"]
+            record["targetRetirementHelperVerified"] = scenario == "deb-approve"
         lab.finish(close_message=True); lab = None
         # The adapter report is checked again after its owned process exits.
         transport_report = parse(read(transport / "lab-transport.json", 65536, uid=UID, mode=0o600))

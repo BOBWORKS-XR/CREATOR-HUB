@@ -61,6 +61,8 @@ jobs:
           /usr/bin/python3 -I -S -c 'import sys; assert sys.version_info[:2] == (3, 10)'
           /usr/bin/python3 -I -S -B scripts/native-linux-production-016-update.py preflight-import
           /usr/bin/python3 -I -S -B scripts/native-linux-production-016-update.test.py
+          /usr/bin/python3 -I -S -B scripts/native-linux-migrated-update.test.py
+          node --test scripts/linux-update-lab-feed.test.cjs
           /usr/bin/python3 -I -S -B scripts/native-linux-update-mcp.test.py
           /usr/bin/python3 -I -S -B scripts/native-linux-update-flatpak.test.py
           "$PREFLIGHT_PYTHON" -I -c 'import sys, tomllib; assert sys.version_info[:3] == (3, 11, 17)'
@@ -98,7 +100,7 @@ jobs:
             assert.equal(p.fromVersion, '0.1.16'); assert.equal(p.toVersion, '0.1.17');
             const roles = scenario.startsWith('deb-') ? ['signedDeb17'] : ['signedPortable16','signedPortable17'];
             assert.deepEqual(Object.keys(p.deliveries).sort(), roles.slice().sort());
-            const fixedName = role => role === 'signedDeb17' ? 'signed-private-deb017-carrier-39352480021.zip'
+            const fixedName = role => role === 'signedDeb17' ? 'signed-private-deb017-carrier-40558857547.zip'
               : `signed-private-portable0${role.slice(-2)}-carrier-${p.artifacts['portable'+role.slice(-2)].run}.zip`;
             const dir = path.join(process.env.RUNNER_TEMP, 'production016-update-data-only'); fs.mkdirSync(dir, {mode: 0o700});
             const release = (await github.rest.repos.getRelease({owner:'BOBWORKS-XR',repo:'CREATOR-HUB',release_id:411494394})).data;
@@ -110,7 +112,7 @@ jobs:
               const e = p.deliveries[role]; assert.deepEqual(Object.keys(e).sort(),['asset','files','name','zip']);
               assert.ok(Number.isSafeInteger(e.asset) && e.asset > 0); assert.equal(e.name,fixedName(role));
               assert.ok(Number.isSafeInteger(e.zip.size) && e.zip.size > 0 && e.zip.size <= 768*1024*1024 && /^[a-f0-9]{64}$/.test(e.zip.sha256));
-              if (role === 'signedDeb17') { assert.equal(e.asset,658078066); assert.equal(e.zip.size,64362879); assert.equal(e.zip.sha256,'252f14b4b119412d4c0017b18479077c3050228f17725464688545a5fd298a6f'); }
+              if (role === 'signedDeb17') { assert.equal(e.asset,682573088); assert.equal(e.zip.size,64413335); assert.equal(e.zip.sha256,'fcb4f79958993a8ddd19665c33b3926b0568630170fdfe2d80a80fbd4df195ec'); }
               const found = listing.filter(a => a.id === e.asset && a.name === e.name); assert.equal(found.length,1);
               const a = (await github.rest.repos.getReleaseAsset({owner:'BOBWORKS-XR',repo:'CREATOR-HUB',asset_id:e.asset})).data;
               assert.equal(a.id,e.asset); assert.equal(a.name,e.name); assert.equal(a.size,e.zip.size); assert.equal(a.state,'uploaded'); assert.equal(a.digest,'sha256:'+e.zip.sha256);
