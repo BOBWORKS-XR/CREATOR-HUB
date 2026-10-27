@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "kind": "direct-outgoing-016-017",
+  "receiptSha256": "b6bf6f7156a39d627541a893f037b7ab9f9a2dac5f61a0b4970846d595c74f39",
+  "configCanonicalSha256": "20b75bc86bbd3866af31ed08b10af3f98fdd250f1731f9339fb27654220a686d",
+  "stagerWorkflow": ".github/workflows/windows-outgoing-017-input.yml",
+  "files": {
+    "Creator.Hub_0.1.16_x64-setup.exe": {
+      "bytes": 38224253,
+      "sha256": "c7885a1e898a4dcc887ca275cf9483c0067002f9157bcc1dbc443b2e060ff1bc"
+    },
+    "Creator_Hub_0.1.17_x64-acceptance-only-setup.exe": {
+      "bytes": 38211549,
+      "sha256": "4dcc0c7a50f0e1aeebafa1fd828e0a6dda619427a64ca150a5ea2c808b76beb2"
+    },
+    "creator-hub-windows-x86_64.json": {
+      "bytes": 520,
+      "sha256": "ebf3e56323650ba7d42cc062fbd0c39343c1baffc9bf27365b0a06024c62572c"
+    },
+    "creator-hub-windows-x86_64.json.minisig": {
+      "bytes": 300,
+      "sha256": "ca1eee503505b4fab3bc0927b7863add4f9dc6e6549bac4120611f5ee0ab8c78"
+    },
+    "latest.json": {
+      "bytes": 667,
+      "sha256": "a4de80cb822b0c92db274e8a6d5afb365321728452edb68c7e4ae935e4d50530"
+    },
+    "outgoing-017-template.json": {
+      "bytes": 1227,
+      "sha256": "a29b22f2a478f613f92d84ee2e6488e25a82d4738af7c43cde8a146e3b7f53ed"
+    }
+  }
+}

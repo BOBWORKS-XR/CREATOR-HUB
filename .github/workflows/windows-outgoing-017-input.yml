@@ -1,0 +1,78 @@
+name: Stage exact outgoing16-17 data from private validation draft
+on:
+  push:
+    branches: [validation/windows-menu-merge-20261027]
+  workflow_dispatch:
+    inputs:
+      review_sha256:
+        description: Exact independently reviewed outgoing admission-file SHA256
+        type: string
+        required: true
+permissions:
+  contents: read
+jobs:
+  stage:
+    if: github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/validation/windows-menu-merge-20261027'
+    permissions:
+      contents: write # Required only to GET the existing private draft; no release writes.
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - name: GET and hash exactly six reviewed outgoing data files
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_REVIEW_SHA256: ${{ inputs.review_sha256 }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # BEGIN REVIEWED OUTGOING PINS
+          # Completed Root17 receipt and exact reviewed admission-file bytes.
+          $receiptSha256 = 'b6bf6f7156a39d627541a893f037b7ab9f9a2dac5f61a0b4970846d595c74f39'
+          $reviewSha256 = '944eebfdb7899b31383d5c2178ab4b4ad212e87cde41195d33f02969f72b75cb'
+          $rows = @(
+            @{name='Creator.Hub_0.1.16_x64-setup.exe';sourceName='Creator.Hub_0.1.16_x64-settings-v3-setup.exe';id='680035905';bytes=38224253L;sha='c7885a1e898a4dcc887ca275cf9483c0067002f9157bcc1dbc443b2e060ff1bc';limit=64MB}
+            @{name='Creator_Hub_0.1.17_x64-acceptance-only-setup.exe';sourceName='Creator_Hub_0.1.17_x64-acceptance-only-setup.exe';id='680096165';bytes=38211549L;sha='4dcc0c7a50f0e1aeebafa1fd828e0a6dda619427a64ca150a5ea2c808b76beb2';limit=64MB}
+            @{name='creator-hub-windows-x86_64.json';sourceName='outgoing-017-creator-hub-windows-x86_64.json';id='680096175';bytes=520L;sha='ebf3e56323650ba7d42cc062fbd0c39343c1baffc9bf27365b0a06024c62572c';limit=32768}
+            @{name='creator-hub-windows-x86_64.json.minisig';sourceName='outgoing-017-creator-hub-windows-x86_64.json.minisig';id='680096174';bytes=300L;sha='ca1eee503505b4fab3bc0927b7863add4f9dc6e6549bac4120611f5ee0ab8c78';limit=4096}
+            @{name='latest.json';sourceName='outgoing-017-latest.json';id='680096172';bytes=667L;sha='a4de80cb822b0c92db274e8a6d5afb365321728452edb68c7e4ae935e4d50530';limit=32768}
+            @{name='outgoing-017-template.json';sourceName='outgoing-017-template.json';id='680096163';bytes=1227L;sha='a29b22f2a478f613f92d84ee2e6488e25a82d4738af7c43cde8a146e3b7f53ed';limit=32768}
+          )
+          # END REVIEWED OUTGOING PINS
+          if ($receiptSha256 -cnotmatch '^[a-f0-9]{64}$' -or $receiptSha256 -ceq ('0'*64) -or $reviewSha256 -cnotmatch '^[a-f0-9]{64}$' -or $reviewSha256 -ceq ('0'*64) -or $env:INPUT_REVIEW_SHA256 -cne $reviewSha256) { throw 'Completed Root17 receipt and independent outgoing review pins are required.' }
+          $expected = @('Creator.Hub_0.1.16_x64-setup.exe','Creator_Hub_0.1.17_x64-acceptance-only-setup.exe','creator-hub-windows-x86_64.json','creator-hub-windows-x86_64.json.minisig','latest.json','outgoing-017-template.json')
+          if ($rows.Count -ne 6 -or @(Compare-Object -ReferenceObject $expected -DifferenceObject @($rows.name) -CaseSensitive).Count -ne 0) { throw 'Exactly the six outgoing data names are required.' }
+          foreach ($row in $rows) {
+            if ($row.id -cnotmatch '^[1-9][0-9]{0,19}$' -or $row.sourceName -cnotmatch '^[A-Za-z0-9._-]{1,160}$' -or $row.sourceName.Contains('..') -or $row.bytes -lt 1 -or $row.bytes -gt $row.limit -or $row.sha -cnotmatch '^[a-f0-9]{64}$' -or $row.sha -ceq ('0'*64)) { throw 'Every immutable asset ID/name/size/hash must be reviewed.' }
+          }
+          if (@($rows.id | Sort-Object -Unique).Count -ne 6 -or @($rows.sourceName | Sort-Object -Unique).Count -ne 6) { throw 'All six asset identities must be distinct.' }
+          $directory = Join-Path $PWD 'windows-outgoing-017-input'
+          if (Test-Path -LiteralPath $directory) { throw 'Staging directory already exists; no clobber.' }
+          $metadataHeaders = @{Authorization="Bearer $env:GH_TOKEN";Accept='application/vnd.github+json';'X-GitHub-Api-Version'='2026-03-10'}
+          $downloadHeaders = @{Authorization="Bearer $env:GH_TOKEN";Accept='application/octet-stream';'X-GitHub-Api-Version'='2026-03-10'}
+          $release = Invoke-RestMethod -Method Get -Uri 'https://api.github.com/repos/BOBWORKS-XR/CREATOR-HUB/releases/424919952' -Headers $metadataHeaders -TimeoutSec 30
+          if ($release.id -ne 424919952 -or $release.draft -ne $true -or $release.prerelease -ne $true -or $release.tag_name -cne 'lab-windows-menu-merge-20261027') { throw 'Exact existing validation draft differs.' }
+          foreach ($row in $rows) {
+            $assets = @($release.assets | Where-Object { $_.id.ToString() -ceq $row.id })
+            if ($assets.Count -ne 1 -or $assets[0].name -cne $row.sourceName -or $assets[0].state -cne 'uploaded' -or $assets[0].size -ne [long]$row.bytes -or $assets[0].digest -cne "sha256:$($row.sha)") { throw 'Exact private asset metadata differs.' }
+          }
+          New-Item -ItemType Directory -Path $directory | Out-Null
+          foreach ($row in $rows) {
+            $file = Join-Path $directory $row.name
+            if (Test-Path -LiteralPath $file) { throw 'Staged file already exists; no clobber.' }
+            Invoke-WebRequest -Method Get -Uri "https://api.github.com/repos/BOBWORKS-XR/CREATOR-HUB/releases/assets/$($row.id)" -Headers $downloadHeaders -OutFile $file -MaximumRedirection 5 -TimeoutSec 180
+            if ((Get-Item -LiteralPath $file).Length -ne [long]$row.bytes -or (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant() -cne $row.sha) { throw 'Downloaded byte/hash pin differs.' }
+          }
+          Write-Output "Staged six outgoing data files bound to receipt $receiptSha256 and review $reviewSha256; no native, signing or publication acceptance."
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-outgoing-017-acceptance-input
+          compression-level: 0
+          retention-days: 7
+          if-no-files-found: error
+          path: |
+            windows-outgoing-017-input/Creator.Hub_0.1.16_x64-setup.exe
+            windows-outgoing-017-input/Creator_Hub_0.1.17_x64-acceptance-only-setup.exe
+            windows-outgoing-017-input/creator-hub-windows-x86_64.json
+            windows-outgoing-017-input/creator-hub-windows-x86_64.json.minisig
+            windows-outgoing-017-input/latest.json
+            windows-outgoing-017-input/outgoing-017-template.json

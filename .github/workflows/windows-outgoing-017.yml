@@ -1,0 +1,124 @@
+name: Windows direct16 to root-only17 restore acceptance (not release)
+on:
+  push:
+    branches: [validation/windows-menu-merge-20261027]
+  workflow_dispatch:
+    inputs:
+      artifact_run:
+        description: Completed same-repository reviewed data-stager run
+        type: string
+        required: true
+      artifact_id:
+        type: string
+        required: true
+      archive_sha256:
+        description: Independently reviewed immutable artifact archive SHA256
+        type: string
+        required: true
+      review_sha256:
+        description: Exact SHA256 of the reviewed scripts/windows-outgoing-017-review.json bytes
+        type: string
+        required: true
+permissions:
+  contents: read
+  actions: read
+jobs:
+  acceptance:
+    if: github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/validation/windows-menu-merge-20261027'
+    runs-on: windows-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - case: mcp-restore
+            last_tool: mcp
+            restore: 'true'
+          - case: setup-restore
+            last_tool: setup
+            restore: 'true'
+          - case: setup-no-restore
+            last_tool: setup
+            restore: 'false'
+    env:
+      CREATOR_OUTGOING_CASE: ${{ matrix.case }}
+      CREATOR_OUTGOING_LAST_TOOL: ${{ matrix.last_tool }}
+      CREATOR_OUTGOING_RESTORE: ${{ matrix.restore }}
+      CREATOR_OUTGOING_REVIEW_SHA256: ${{ inputs.review_sha256 }}
+      INPUT_RUN: ${{ inputs.artifact_run }}
+      INPUT_ARTIFACT: ${{ inputs.artifact_id }}
+      INPUT_SHA256: ${{ inputs.archive_sha256 }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - name: Refuse missing reviewed pins before any data download or native work
+        shell: pwsh
+        run: |
+          node scripts/windows-outgoing-017.cjs review
+          if ($LASTEXITCODE -ne 0) { throw 'Outgoing review pins unavailable or not independently bound.' }
+          foreach ($name in @('target.cjs','driver.cjs')) {
+            if (-not (Test-Path -LiteralPath "artifacts/menu-merge-20261027/outgoing/$name" -PathType Leaf)) { throw 'Required reviewed outgoing source helper is missing from checkout.' }
+          }
+      - name: Bind the immutable artifact to its successful same-repository stager
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          New-Item -ItemType Directory -Path artifacts/outgoing-017-control | Out-Null
+          gh api --method GET "repos/BOBWORKS-XR/CREATOR-HUB/actions/runs/$env:INPUT_RUN" | Set-Content artifacts/outgoing-017-control/stager-run.json -Encoding utf8NoBOM
+          if ($LASTEXITCODE -ne 0) { throw 'Stager metadata unavailable.' }
+          gh api --method GET "repos/BOBWORKS-XR/CREATOR-HUB/actions/artifacts/$env:INPUT_ARTIFACT" | Set-Content artifacts/outgoing-017-control/artifact.json -Encoding utf8NoBOM
+          if ($LASTEXITCODE -ne 0) { throw 'Artifact metadata unavailable.' }
+          node scripts/windows-outgoing-017.cjs bind
+          if ($LASTEXITCODE -ne 0) { throw 'Immutable outgoing artifact binding refused.' }
+      - uses: actions/download-artifact@v4
+        with:
+          artifact-ids: ${{ inputs.artifact_id }}
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.artifact_run }}
+          path: artifacts/outgoing-017-data
+          merge-multiple: true
+      - name: Pin both installers, three metadata files and the path-free config before dependencies or trust
+        shell: pwsh
+        run: |
+          $admission = node scripts/windows-outgoing-017.cjs prepare (Join-Path $PWD artifacts/outgoing-017-data) | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $admission.configSha256 -cnotmatch '^[a-f0-9]{64}$') { throw 'Outgoing data/config admission refused.' }
+          "CREATOR_OUTGOING_CONFIG_SHA256=$($admission.configSha256)" | Add-Content -LiteralPath $env:GITHUB_ENV -Encoding utf8
+      - run: npm ci
+      - run: npm --prefix modules/mcp ci
+      - name: Focused pure and host-refusal tests, no installer or trust operations
+        run: node --test scripts/windows-outgoing-017.test.cjs scripts/self-update-lab-feed.test.cjs
+      - name: Validate the unchanged signed contract and parse the lifecycle before trust
+        shell: pwsh
+        run: |
+          node scripts/windows-outgoing-017.cjs contract (Join-Path $PWD artifacts/outgoing-017-data)
+          if ($LASTEXITCODE -ne 0) { throw 'Outgoing signed contract refused.' }
+          $tokens=$null; $errors=$null
+          [void][Management.Automation.Language.Parser]::ParseFile((Join-Path $PWD scripts/native-self-update-lab.ps1),[ref]$tokens,[ref]$errors)
+          if ($errors.Count) { throw 'Native lifecycle parse failed.' }
+          node --check artifacts/menu-merge-20261027/outgoing/driver.cjs
+          if ($LASTEXITCODE -ne 0) { throw 'Outgoing driver parse failed.' }
+      - name: Genuine direct16 signed update and automatic restart into root-only17
+        shell: pwsh
+        run: |
+          ./scripts/native-self-update-lab.ps1 -Outgoing017 -ContractPath (Join-Path $PWD artifacts/outgoing-017-control/runner-config.json) -BaselineInstallerPath (Join-Path $PWD artifacts/outgoing-017-data/Creator.Hub_0.1.16_x64-setup.exe) -TimeoutSeconds 480 | Tee-Object -FilePath artifacts/outgoing-017-control/lifecycle.jsonl
+          if ($LASTEXITCODE -ne 0) { throw 'Outgoing17 native lifecycle failed.' }
+          $reports = @(Get-ChildItem -LiteralPath artifacts/menu-merge-20261027/outgoing -Directory -Filter 'native-*' | ForEach-Object { Get-ChildItem -LiteralPath $_.FullName -File -Filter outgoing-report.json })
+          if ($reports.Count -ne 1) { throw 'Expected one isolated outgoing acceptance receipt.' }
+          node scripts/windows-outgoing-017.cjs receipt (Join-Path $PWD artifacts/outgoing-017-data) $reports[0].FullName (Join-Path $PWD artifacts/outgoing-017-control/lifecycle.jsonl)
+          if ($LASTEXITCODE -ne 0) { throw 'Outgoing native/cleanup receipt refused.' }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-outgoing-017-${{ matrix.case }}-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            artifacts/outgoing-017-control/*.json
+            artifacts/outgoing-017-control/lifecycle.jsonl
+            artifacts/menu-merge-20261027/outgoing/native-*/*.json
+            artifacts/menu-merge-20261027/outgoing/native-*/*.png
