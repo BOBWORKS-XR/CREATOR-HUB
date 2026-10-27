@@ -1462,10 +1462,13 @@ class Session:
         if not select.select([backend_fd], [], [], 0)[0]:
             try:
                 current = self.native.native_process(self.backend["pid"], self.helper)
-            except RuntimeError as error:
-                if type(error) is not RuntimeError or str(error) != "Owned process is not live" or self.evidence.get("normalCloseObserved") is not True:
+            except (RuntimeError, FileNotFoundError) as error:
+                terminal = type(error) is RuntimeError and str(error) == "Owned process is not live"
+                missing_exe = (type(error) is FileNotFoundError and error.errno == 2
+                               and error.filename == f"/proc/{self.backend['pid']}/exe")
+                if not (terminal or missing_exe) or self.evidence.get("normalCloseObserved") is not True:
                     raise
-                # A terminal stat is not thread-group exit; the bound pidfd must become ready.
+                # Neither a terminal stat nor a missing exe proves exit; wait on the held pidfd.
             else:
                 require(current == self.backend, "Native driver changed before disposal")
                 signal.pidfd_send_signal(backend_fd, signal.SIGTERM)

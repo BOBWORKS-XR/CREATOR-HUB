@@ -3884,6 +3884,41 @@ class ControllerTests(unittest.TestCase):
         session.child.terminate.assert_not_called(); send.assert_not_called()
         session.native.native_process.assert_called_once_with(12, session.helper)
 
+    def test_backend_disposal_missing_bound_executable_waits_existing_pidfd_without_signals(self):
+        session = self.disposal_fixture(FileNotFoundError(2, "synthetic exited backend", "/proc/12/exe"))
+        polls = []
+        def poll(*args):
+            self.assertEqual(args, ([99], [], [], 0)); polls.append(True)
+            return ([99] if len(polls) == 3 else [], [], [])
+        with patch.object(M.select, "select", side_effect=poll), patch.object(M.signal, "pidfd_send_signal", create=True) as send:
+            session.dispose_tools(99)
+        self.assertEqual(len(polls), 3)
+        session.child.terminate.assert_not_called(); send.assert_not_called()
+        session.pages.wait.assert_called_once()
+
+    def test_backend_disposal_missing_executable_is_not_exit_until_pidfd_signals(self):
+        session = self.disposal_fixture(FileNotFoundError(2, "synthetic exited backend", "/proc/12/exe"))
+        with patch.object(M.select, "select", return_value=([], [], [])), patch.object(M.signal, "pidfd_send_signal", create=True) as send:
+            with self.assertRaises(TimeoutError): session.dispose_tools(99)
+        session.child.terminate.assert_not_called(); send.assert_not_called()
+
+    def test_backend_disposal_unknown_missing_paths_subclasses_or_missing_normal_close_still_refuse(self):
+        class UnknownMissingFile(FileNotFoundError):
+            pass
+        errors = [FileNotFoundError(2, "synthetic", path) for path in (None, "/proc/13/exe", "/proc/12/stat", "/tmp/12/exe")]
+        errors += [FileNotFoundError(13, "synthetic", "/proc/12/exe"), UnknownMissingFile(2, "synthetic", "/proc/12/exe")]
+        for original in errors:
+            session = self.disposal_fixture(original)
+            with self.subTest(error=type(original).__name__, path=original.filename), \
+                    patch.object(M.select, "select", return_value=([], [], [])), patch.object(M.signal, "pidfd_send_signal", create=True) as send:
+                with self.assertRaises(type(original)) as raised: session.dispose_tools(99)
+            self.assertIs(raised.exception, original); session.pages.wait.assert_not_called(); send.assert_not_called()
+        original = FileNotFoundError(2, "synthetic", "/proc/12/exe")
+        session = self.disposal_fixture(original); session.evidence["normalCloseObserved"] = False
+        with patch.object(M.select, "select", return_value=([], [], [])), patch.object(M.signal, "pidfd_send_signal", create=True) as send:
+            with self.assertRaises(FileNotFoundError) as raised: session.dispose_tools(99)
+        self.assertIs(raised.exception, original); session.pages.wait.assert_not_called(); send.assert_not_called()
+
     def test_backend_disposal_preserves_other_refusals_and_requires_normal_root_close(self):
         class DifferentRuntimeError(RuntimeError):
             pass
