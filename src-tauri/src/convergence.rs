@@ -1,8 +1,6 @@
 //! First-launch adoption of retained Creator stores. Removal has a separate
 //! native provenance/retention gate; a backup or presence label cannot pass it.
-#[allow(dead_code)]
-#[path = "../../modules/mcp/launcher/src-tauri/src/jsonc.rs"]
-mod settings_json;
+use crate::convergence_dependencies as settings_json;
 #[path = "../../native/convergence-store.rs"]
 pub(crate) mod stores;
 

@@ -33,6 +33,7 @@
 #[path = "../../native/legacy-dependencies.rs"]
 mod dependencies;
 
+pub(crate) use dependencies::parse_unambiguous;
 pub use dependencies::{Blocker, Client};
 use dependencies::{
     BlockerKind, ConfigDocument, ConfigFormat, Coverage, DocumentContent, Inspection,

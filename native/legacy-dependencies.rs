@@ -15,6 +15,7 @@
 #[path = "../modules/mcp/launcher/src-tauri/src/jsonc.rs"]
 mod jsonc;
 
+pub(crate) use jsonc::parse_unambiguous;
 use serde::Serialize;
 use serde_json::{Map, Value};
 use std::path::{Component, Path, PathBuf};
@@ -130,7 +131,7 @@ pub fn parse_document(format: ConfigFormat, bytes: &[u8]) -> Result<ParsedDocume
             if format != ConfigFormat::OpenCodeJsonc {
                 serde_json::from_str::<Value>(text).map_err(|_| ParseFailure::Invalid)?;
             }
-            Parsed::Json(jsonc::parse_unambiguous(text).map_err(|_| ParseFailure::Invalid)?)
+            Parsed::Json(parse_unambiguous(text).map_err(|_| ParseFailure::Invalid)?)
         }
     };
     Ok(ParsedDocument { format, document })
