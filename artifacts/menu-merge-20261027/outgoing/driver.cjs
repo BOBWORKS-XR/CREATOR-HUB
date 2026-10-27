@@ -25,6 +25,33 @@ function assertTicket(ticket, lastTool, hub) {
   assert.equal(view.app, lastTool); assert.equal(view.direct, true); assert.equal(view.bundled, true);
   assert.equal(path.win32.normalize(view.path).toLowerCase(), path.win32.normalize(hub).toLowerCase());
 }
+async function completeStartup(page, version, report) {
+  assert.ok(['0.1.16', '0.1.17'].includes(version));
+  const terms = page.locator('#usage-terms-dialog'), guide = page.locator('#convergence-dialog');
+  if (version === '0.1.16') {
+    await terms.waitFor({ state: 'visible' });
+    await page.locator('#usage-terms-checkbox').check(); await page.locator('#usage-terms-continue').click();
+    await terms.waitFor({ state: 'hidden' });
+    await guide.waitFor({ state: 'visible' });
+    await page.locator('#convergence-later').click();
+    await guide.waitFor({ state: 'hidden' }); report.migrationDeferred = true;
+  } else {
+    assert.equal(report.migrationDeferred, true, 'Initial migration review must have been visibly deferred');
+    assert.equal(await terms.isVisible(), false, 'Terms must survive update');
+  }
+  await page.waitForFunction(() => document.querySelector('#convergence-dialog')?.open || !document.querySelector('#check-updates').disabled,
+    null, { timeout: 120000 });
+  assert.equal(await guide.isVisible(), false, 'The deferred unchanged review must stay deferred');
+  if (version === '0.1.17') report.migrationDeferralPreserved = true;
+}
+async function setUpdatePreferences(page, restore) {
+  await direct.showHome(page);
+  await page.locator('#update-settings > summary').click();
+  for (const [id, value] of [['auto-download', false], ['preview-channel', false], ['restore-hosted-views', restore]]) {
+    await page.locator(`#${id}`).setChecked(value);
+  }
+  await page.locator('#update-settings > summary').click();
+}
 async function main() {
   target.assertAdmission(); // Must precede config/profile reads, installers, policy and native probes.
   const config = target.readConfig(process.env.CREATOR_SELF_UPDATE_LAB_CONFIG);
@@ -48,7 +75,7 @@ async function main() {
     path.join(roaming, 'banter-mcp'), path.join(local, 'CreatorProjectSetup'), clientConfig, path.join(home, '.claude.json')]) {
     assert.equal(fs.existsSync(file), false, 'Existing runner product/profile refused');
   }
-  const out = path.join(__dirname, `native-${Date.now()}`); fs.mkdirSync(out);
+  const out = path.join(ROOT, 'artifacts', `native-suite-${Date.now()}`); fs.mkdirSync(out);
   const lastTool = process.env.CREATOR_OUTGOING_LAST_TOOL || 'setup';
   const restore = (process.env.CREATOR_OUTGOING_RESTORE || 'true') === 'true';
   const report = { passed: false, kind: target.KIND, sourceCommit: config.sourceCommit, baseline: config.baseline,
@@ -99,13 +126,7 @@ async function main() {
     page.setDefaultTimeout(30000); requests = direct.watchRequests(page);
     page.on('pageerror', error => { (report.pageErrors ||= []).push(String(error)); });
     await page.waitForFunction(() => window.CreatorHubNative);
-    if (await page.locator('#usage-terms-dialog').isVisible()) {
-      assert.equal(version, '0.1.16', 'Terms must survive update');
-      await page.locator('#usage-terms-checkbox').check(); await page.locator('#usage-terms-continue').click();
-    }
-    await page.waitForFunction(() => document.querySelector('#convergence-dialog')?.open || !document.querySelector('#check-updates').disabled,
-      null, { timeout: 120000 });
-    assert.equal(await page.locator('#convergence-dialog').isVisible(), false, 'Unexpected migration on identical disposable settings');
+    await completeStartup(page, version, report);
     assertProtocol(await page.evaluate(async () => ({ version: window.CreatorHubNative.version,
       protocol: window.__CREATOR_HUB_FEATURE_PROTOCOL__, integrated: window.CreatorHubNative.integratedFeatures,
       services: await window.CreatorHubNative.invoke('feature_status') })), version);
@@ -168,11 +189,7 @@ async function main() {
     sentinel = spawn(process.execPath, [path.join(ROOT, 'scripts/owned-hub-fixture.cjs'), stopFile], { windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] });
     let ready = ''; sentinel.stdout.on('data', bytes => { ready += bytes; });
     await retry(() => { assert.match(ready, /ready/); assert.equal(sentinel.exitCode, null); }); sentinelRecord = record(sentinel.pid);
-    await page.locator('#suite-trigger').click();
-    for (const [id, value] of [['auto-download', false], ['preview-channel', false], ['restore-hosted-views', restore]]) {
-      await page.locator(`#${id}`).setChecked(value);
-    }
-    await page.keyboard.press('Escape');
+    await setUpdatePreferences(page, restore);
     await retry(() => page.locator('#suite-trigger').isEnabled().then(value => assert.equal(value, true)));
     await show(lastTool); await direct.showHome(page);
     settingsBefore = direct.settingsSnapshot(roaming, local); preferencesBefore = await preferences();
@@ -261,5 +278,5 @@ async function main() {
     console.log(JSON.stringify({ out, passed: report.passed, releaseReady: false }));
   }
 }
-module.exports = { assertProtocol, assertTicket, main };
+module.exports = { assertProtocol, assertTicket, completeStartup, setUpdatePreferences, main };
 if (require.main === module) main().catch(error => { console.error(String(error.message).slice(0, 1200)); process.exitCode = 1; });

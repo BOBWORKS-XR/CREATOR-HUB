@@ -212,6 +212,87 @@ test('checkout must include the existing outgoing factory, lifecycle mode and ex
   const driver = require('../artifacts/menu-merge-20261027/outgoing/driver.cjs');
   assert.equal(typeof driver.assertTicket, 'function'); assert.equal(typeof driver.main, 'function');
 });
+test('outgoing caller and receipt/upload paths use the unchanged native-suite policy contract', () => {
+  const source = fs.readFileSync(path.join(__dirname, '../artifacts/menu-merge-20261027/outgoing/driver.cjs'), 'utf8');
+  const policy = fs.readFileSync(path.join(__dirname, 'native-webview-policy.ps1'), 'utf8');
+  assert.ok(source.includes("const out = path.join(ROOT, 'artifacts', `native-suite-${Date.now()}`); fs.mkdirSync(out);"));
+  assert.ok(policy.includes("-notmatch '^native-suite-[0-9]+$'"));
+  assert.match(source, /path\.join\(out, 'webview-policy\.json'\)/);
+  assert.match(source, /path\.join\(out, 'outgoing-report\.json'\)/);
+  assert.ok(workflow.includes("Get-ChildItem -LiteralPath artifacts -Directory -Filter 'native-suite-*'"));
+  assert.match(workflow, /\$reports\.Count -ne 1/);
+  assert.match(workflow, /artifacts\/native-suite-\*\/\*\.json/);
+  assert.match(workflow, /artifacts\/native-suite-\*\/\*\.png/);
+  assert.doesNotMatch(workflow, /outgoing\/native-\*/);
+});
+
+test('initial16 explicitly accepts terms and visibly defers the guide; restart17 never dismisses either', async () => {
+  const driver = require('../artifacts/menu-merge-20261027/outgoing/driver.cjs');
+  function mockPage(visible = {}, missingGuide = false) {
+    const events = [];
+    return { events, locator: selector => ({
+      waitFor: async ({ state }) => {
+        events.push(`${selector}:${state}`);
+        if (missingGuide && selector === '#convergence-dialog' && state === 'visible') throw Error('Guide never appeared');
+      },
+      check: async () => { events.push(`${selector}:check`); },
+      click: async () => { events.push(`${selector}:click`); },
+      isVisible: async () => { events.push(`${selector}:isVisible`); return visible[selector] === true; },
+    }), waitForFunction: async () => { events.push('startup-ready'); } };
+  }
+  const page = mockPage(), report = {};
+  await driver.completeStartup(page, '0.1.16', report);
+  assert.deepEqual(page.events, ['#usage-terms-dialog:visible', '#usage-terms-checkbox:check',
+    '#usage-terms-continue:click', '#usage-terms-dialog:hidden', '#convergence-dialog:visible',
+    '#convergence-later:click', '#convergence-dialog:hidden', 'startup-ready', '#convergence-dialog:isVisible']);
+  assert.equal(report.migrationDeferred, true);
+  const restart = mockPage(); await driver.completeStartup(restart, '0.1.17', report);
+  assert.deepEqual(restart.events, ['#usage-terms-dialog:isVisible', 'startup-ready', '#convergence-dialog:isVisible']);
+  assert.equal(report.migrationDeferralPreserved, true);
+  for (const selector of ['#usage-terms-dialog', '#convergence-dialog']) {
+    const unexpected = mockPage({ [selector]: true });
+    const failed = { migrationDeferred: true };
+    await assert.rejects(driver.completeStartup(unexpected, '0.1.17', failed));
+    assert.equal(unexpected.events.some(event => /:click|:check/.test(event)), false);
+    assert.equal(failed.migrationDeferralPreserved, undefined);
+  }
+  const missing = {}, absentGuide = mockPage({}, true);
+  await assert.rejects(driver.completeStartup(absentGuide, '0.1.16', missing), /Guide never appeared/);
+  assert.equal(missing.migrationDeferred, undefined);
+  await assert.rejects(driver.completeStartup(mockPage(), '0.1.17', {}), /visibly deferred/);
+  const source = fs.readFileSync(path.join(__dirname, '../artifacts/menu-merge-20261027/outgoing/driver.cjs'), 'utf8');
+  assert.match(source, /await completeStartup\(page, version, report\)/);
+  assert.doesNotMatch(driver.completeStartup.toString(), /setItem|\.evaluate\(|force:|\.close\(/);
+});
+
+test('preferences use Home and the actual update-settings summary, with visible UI changes for both restore values', async t => {
+  const driver = require('../artifacts/menu-merge-20261027/outgoing/driver.cjs');
+  const direct = require('./native-self-update-direct.cjs');
+  let events, open;
+  t.mock.method(direct, 'showHome', async () => { events.push('home'); });
+  for (const restore of [true, false]) {
+    events = []; open = false;
+    const page = { locator: selector => ({
+      click: async () => {
+        assert.equal(selector, '#update-settings > summary'); assert.equal(events[0], 'home');
+        open = !open; events.push(open ? 'details-open' : 'details-closed');
+      },
+      setChecked: async value => { assert.equal(open, true); events.push([selector, value]); },
+    }) };
+    await driver.setUpdatePreferences(page, restore);
+    assert.deepEqual(events, ['home', 'details-open', ['#auto-download', false], ['#preview-channel', false],
+      ['#restore-hosted-views', restore], 'details-closed']);
+  }
+  const app = fs.readFileSync(path.join(__dirname, '../src/app.js'), 'utf8');
+  const html = fs.readFileSync(path.join(__dirname, '../src/index.html'), 'utf8');
+  assert.ok(app.includes("byId('update-settings').append(document.querySelector('#view-hub > .update-preferences'))"));
+  assert.match(html, /<details id="update-settings"><summary>Update settings<\/summary>/);
+  const source = fs.readFileSync(path.join(__dirname, '../artifacts/menu-merge-20261027/outgoing/driver.cjs'), 'utf8');
+  assert.match(source, /await setUpdatePreferences\(page, restore\)/);
+  assert.match(source, /saved\.restoreHostedViews, restore/);
+  assert.doesNotMatch(driver.setUpdatePreferences.toString(), /suite-trigger|suite-menu|\.evaluate\(|force:/);
+});
+
 test('all inline PowerShell blocks parse without executing their contents', () => {
   const blocks = [...workflow.matchAll(/        run: \|\r?\n((?:          [^\r\n]*\r?\n)+)/g)]
     .map(match => match[1].split(/\r?\n/).map(line => line.slice(10)).join('\n'));

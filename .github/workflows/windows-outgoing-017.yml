@@ -107,7 +107,7 @@ jobs:
         run: |
           ./scripts/native-self-update-lab.ps1 -Outgoing017 -ContractPath (Join-Path $PWD artifacts/outgoing-017-control/runner-config.json) -BaselineInstallerPath (Join-Path $PWD artifacts/outgoing-017-data/Creator.Hub_0.1.16_x64-setup.exe) -TimeoutSeconds 480 | Tee-Object -FilePath artifacts/outgoing-017-control/lifecycle.jsonl
           if ($LASTEXITCODE -ne 0) { throw 'Outgoing17 native lifecycle failed.' }
-          $reports = @(Get-ChildItem -LiteralPath artifacts/menu-merge-20261027/outgoing -Directory -Filter 'native-*' | ForEach-Object { Get-ChildItem -LiteralPath $_.FullName -File -Filter outgoing-report.json })
+          $reports = @(Get-ChildItem -LiteralPath artifacts -Directory -Filter 'native-suite-*' | ForEach-Object { Get-ChildItem -LiteralPath $_.FullName -File -Filter outgoing-report.json })
           if ($reports.Count -ne 1) { throw 'Expected one isolated outgoing acceptance receipt.' }
           node scripts/windows-outgoing-017.cjs receipt (Join-Path $PWD artifacts/outgoing-017-data) $reports[0].FullName (Join-Path $PWD artifacts/outgoing-017-control/lifecycle.jsonl)
           if ($LASTEXITCODE -ne 0) { throw 'Outgoing native/cleanup receipt refused.' }
@@ -120,5 +120,5 @@ jobs:
           path: |
             artifacts/outgoing-017-control/*.json
             artifacts/outgoing-017-control/lifecycle.jsonl
-            artifacts/menu-merge-20261027/outgoing/native-*/*.json
-            artifacts/menu-merge-20261027/outgoing/native-*/*.png
+            artifacts/native-suite-*/*.json
+            artifacts/native-suite-*/*.png
