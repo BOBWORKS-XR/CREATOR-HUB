@@ -14,9 +14,9 @@ assert.ok(pinBlock.test(script));
 const powershell = process.platform === 'win32' ? 'powershell.exe' : 'pwsh';
 function fixture() {
   const rows = Object.entries(outgoing.LIMITS).map(([name, limit], index) => ({ name,
-    sourceName: index === 0 ? 'Creator.Hub_0.1.16_x64-settings-v4-setup.exe' : `test-outgoing17-${name}`,
-    id: String(index === 0 ? 680176209 : 101 + index), bytes: index === 0 ? 38207720 : 123,
-    sha: index === 0 ? '35c9b066ecab363bf6151e00ab97b1da46ca07c6fa9c2e28453f8990d5b63a66' : String(index).repeat(64), limit }));
+    sourceName: index === 0 ? 'Creator.Hub_0.1.16_x64-settings-v5-setup.exe' : `test-outgoing17-${name}`,
+    id: String(index === 0 ? 680325441 : 101 + index), bytes: index === 0 ? 38216528 : 123,
+    sha: index === 0 ? '898e57b1f3dd87b0f871965eb955d54cc88a573a3b879303805defa829d1b89a' : String(index).repeat(64), limit }));
   return { rows, receipt: 'a'.repeat(64), review: 'b'.repeat(64), inputReview: 'b'.repeat(64),
     release: { id: 424919952, draft: true, prerelease: true, tag_name: 'lab-windows-menu-merge-20261027',
       assets: rows.map(row => ({ id: Number(row.id), name: row.sourceName, size: row.bytes, digest: `sha256:${row.sha}`, state: 'uploaded' })) },
@@ -86,7 +86,7 @@ test('output is exactly the six admission filenames, never an incoming artifact 
   const files = [...workflow.matchAll(/^            windows-outgoing-017-input\/([^\r\n]+)$/gm)].map(m => m[1]);
   assert.deepEqual(files.sort(), Object.keys(outgoing.LIMITS).sort());
   assert.match(workflow, /compression-level: 0/); assert.match(workflow, /if-no-files-found: error/);
-  assert.ok(script.includes("id='680176209';bytes=38207720L;sha='35c9b066ecab363bf6151e00ab97b1da46ca07c6fa9c2e28453f8990d5b63a66'"));
+  assert.ok(script.includes("id='680325441';bytes=38216528L;sha='898e57b1f3dd87b0f871965eb955d54cc88a573a3b879303805defa829d1b89a'"));
   assert.ok(script.indexOf('Exact private asset metadata differs') < script.indexOf('New-Item -ItemType Directory'));
 });
 test('mismatched independent review refuses checked-in pins before HTTP or writes', () => {
@@ -101,16 +101,16 @@ test('actual checked-in PowerShell pins match the immutable reviewed file and ap
   assert.equal(result.status, 0, result.stdout + result.stderr);
   const pins = JSON.parse(result.stdout.trim());
   const bytes = fs.readFileSync(path.join(__dirname, 'windows-outgoing-017-review.json'));
-  assert.equal(pins.review, 'bce4d1bd6619df5af4ee5e5556a16305fc151e5836c5683d01aa34bb3f9e2c05');
+  assert.equal(pins.review, 'a1d91e39e42f3fdbdbb072323971994db43f559e122cabd893586178ed0fc56f');
   const review = outgoing.reviewBytes(bytes, pins.review);
   assert.equal(pins.receipt, review.receiptSha256);
   assert.deepEqual(pins.rows.map(row => [row.name, row.sourceName, row.id]), [
-    [outgoing.BASELINE, 'Creator.Hub_0.1.16_x64-settings-v4-setup.exe', '680176209'],
-    [outgoing.TARGET, 'Creator_Hub_0.1.17_x64-settings-v4-acceptance-only-setup.exe', '680219533'],
-    [outgoing.DESCRIPTOR, 'outgoing-017-settings-v4-creator-hub-windows-x86_64.json', '680220762'],
-    [`${outgoing.DESCRIPTOR}.minisig`, 'outgoing-017-settings-v4-creator-hub-windows-x86_64.json.minisig', '680220783'],
-    ['latest.json', 'outgoing-017-settings-v4-latest.json', '680220796'],
-    [outgoing.TEMPLATE, 'outgoing-017-settings-v4-template.json', '680220821'],
+    [outgoing.BASELINE, 'Creator.Hub_0.1.16_x64-settings-v5-setup.exe', '680325441'],
+    [outgoing.TARGET, 'Creator_Hub_0.1.17_x64-settings-v5-acceptance-only-setup.exe', '680911010'],
+    [outgoing.DESCRIPTOR, 'outgoing-017-settings-v5-creator-hub-windows-x86_64.json', '680911028'],
+    [`${outgoing.DESCRIPTOR}.minisig`, 'outgoing-017-settings-v5-creator-hub-windows-x86_64.json.minisig', '680911014'],
+    ['latest.json', 'outgoing-017-settings-v5-latest.json', '680911024'],
+    [outgoing.TEMPLATE, 'outgoing-017-settings-v5-template.json', '680911019'],
   ]);
   assert.deepEqual(Object.fromEntries(pins.rows.map(row => [row.name, { bytes: row.bytes, sha256: row.sha }])), review.files);
   assert.deepEqual(Object.fromEntries(pins.rows.map(row => [row.name, row.limit])), outgoing.LIMITS);
