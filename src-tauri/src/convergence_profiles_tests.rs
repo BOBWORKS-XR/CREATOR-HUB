@@ -475,33 +475,151 @@ mod settings_profiles {
         config["active_channel_id"] = json!("selected");
         config["mcp_server_path"] = json!(server);
         let current = serde_json::to_vec_pretty(&config).unwrap();
-        let legacy = format!(
+        let crlf = format!(
             "{}\r\n",
             std::str::from_utf8(&current).unwrap().replace('\n', "\r\n")
         )
         .into_bytes();
-        assert_ne!(current, legacy);
-        assert_eq!(
-            serde_json::from_slice::<Value>(&current).unwrap(),
-            serde_json::from_slice::<Value>(&legacy).unwrap()
-        );
-        install_profiles(&base, &mut plan, [Some(&current), Some(&legacy)]);
+        let reversed = format!(
+            "{{{}}}",
+            config
+                .as_object()
+                .unwrap()
+                .iter()
+                .rev()
+                .map(|(key, value)| format!("{}:{value}", serde_json::to_string(key).unwrap()))
+                .collect::<Vec<_>>()
+                .join(",")
+        )
+        .into_bytes();
+        for legacy in [
+            crlf,
+            serde_json::to_vec(&config).unwrap(),
+            format!(" \t\n{} \r\n", std::str::from_utf8(&current).unwrap()).into_bytes(),
+            reversed,
+        ] {
+            assert_ne!(current, legacy);
+            assert_eq!(serde_json::from_slice::<Value>(&legacy).unwrap(), config);
+            install_profiles(&base, &mut plan, [Some(&current), Some(&legacy)]);
+            let before = files_at(temp.path());
+            let proposal = merge_project_settings(&current, &legacy).unwrap();
+            assert_eq!((proposal.added, proposal.already_present), (0, 1));
+            assert_eq!(proposal.bytes, current);
+            assert_eq!(
+                (
+                    settings_conflict(&plan),
+                    settings_need_review(&plan.stores),
+                    settings_import_available(&plan.stores, "review", true),
+                    settings_use_verified_runtime(&plan.stores, &server),
+                ),
+                (false, false, false, true)
+            );
+            assert_eq!(files_at(temp.path()), before);
+        }
+        assert!(settings_equivalent(
+            br#"{"channels":[],"auto_start":false,"future":{"a":1,"b":2}}"#,
+            br#"{"auto_start":false,"channels":[],"future":{"b":2,"a":1}}"#,
+        ));
+    }
+
+    #[test]
+    fn semantic_settings_comparison_keeps_real_differences_and_ambiguous_json_in_review() {
+        let (temp, base, mut plan) = fixture_plan();
+        let current = config_with(vec![project("selected", &base.local_data.join("project"))]);
+        let original = serde_json::to_vec(&current).unwrap();
+        for (pointer, value) in [
+            ("/auto_start", json!(true)),
+            ("/active_channel_id", json!("different")),
+            (
+                "/channels/0/unity_project_path",
+                json!(base.local_data.join("different")),
+            ),
+            ("/channels/0/enabled", json!(true)),
+            ("/futurePreference/keep", json!(false)),
+        ] {
+            let mut changed = current.clone();
+            *changed.pointer_mut(pointer).unwrap() = value;
+            let legacy = serde_json::to_vec(&changed).unwrap();
+            install_profiles(&base, &mut plan, [Some(&original), Some(&legacy)]);
+            let before = files_at(temp.path());
+            assert!(settings_conflict(&plan));
+            assert!(settings_need_review(&plan.stores));
+            assert!(settings_import_available(&plan.stores, "review", true));
+            assert_eq!(files_at(temp.path()), before);
+        }
+        for invalid in [
+            "{",
+            "null",
+            "{}",
+            r#"{"channels":[],"auto_start":"false"}"#,
+            r#"{"channels":[],"auto_start":false,"auto_start":false}"#,
+            r#"{"channels":[],"auto_start":false,"future":{"a":1,"a":1}}"#,
+            r#"{"channels":[],"auto_start":false,"future":{"a":1,"\u0061":1}}"#,
+            r#"{"channels":[],"auto_start":false,"schemaVersion":99}"#,
+            r#"{"channels":[],"auto_start":false,}"#,
+            r#"{/*comment*/"channels":[],"auto_start":false}"#,
+        ] {
+            assert!(!settings_equivalent(invalid.as_bytes(), invalid.as_bytes()));
+            assert!(!settings_equivalent(&original, invalid.as_bytes()));
+            assert!(!settings_equivalent(invalid.as_bytes(), &original));
+        }
+        assert!(!settings_equivalent(&original, &[0xff]));
+        assert!(!settings_equivalent(&original, &vec![b' '; 256 * 1024 + 1]));
+    }
+
+    #[test]
+    fn formatting_changes_remain_stale_against_approved_snapshots() {
+        for index in 0..2 {
+            let (temp, base, mut plan) = conflicting_plan();
+            let proposal = merge_project_settings(
+                plan.stores[0].bytes().unwrap(),
+                plan.stores[1].bytes().unwrap(),
+            )
+            .unwrap();
+            let mut changed = plan.stores[index].bytes().unwrap().to_vec();
+            changed.push(b'\n');
+            assert!(settings_equivalent(
+                plan.stores[index].bytes().unwrap(),
+                &changed
+            ));
+            fs::write(plan.stores[index].store().path(&base).unwrap(), changed).unwrap();
+            let before = files_at(temp.path());
+            assert!(retain_after_close(&mut plan, &base, Some(&proposal), || Ok(())).is_err());
+            assert_eq!(files_at(temp.path()), before);
+            assert!(plan.retained_images.is_empty());
+        }
+    }
+
+    #[test]
+    fn formatting_equivalence_does_not_clear_uncertain_settings_or_operation_journals() {
+        use crate::convergence_recovery::{ReviewedWrite, Transaction};
+        let (temp, base, plan) = conflicting_plan();
+        let current = plan.stores[0].bytes().unwrap();
+        let legacy_path = plan.stores[1].store().path(&base).unwrap();
+        let transaction = Transaction::prepare(
+            &journal(&base),
+            vec![ReviewedWrite::new(
+                "Uncertain fixture publication",
+                &legacy_path,
+                plan.stores[1].bytes().unwrap(),
+                current,
+            )],
+        )
+        .unwrap();
+        let mut formatted = current.to_vec();
+        formatted.push(b'\n');
+        fs::write(&legacy_path, formatted).unwrap();
         let before = files_at(temp.path());
-        let proposal = merge_project_settings(&current, &legacy).unwrap();
-        assert_eq!((proposal.added, proposal.already_present), (0, 1));
-        assert_eq!(proposal.bytes, current);
-        let readiness = (
-            settings_conflict(&plan),
-            settings_need_review(&plan.stores),
-            settings_import_available(&plan.stores, "review", true),
-            settings_use_verified_runtime(&plan.stores, &server),
-        );
+        let mut fresh = restarted_profile(&base);
+        assert!(!settings_conflict(&fresh));
+        assert_import_recovery(&fresh);
+        assert!(!transaction.inspect().unwrap().completed);
         assert_eq!(files_at(temp.path()), before);
-        assert_eq!(
-            readiness,
-            (false, false, false, true),
-            "LF/CRLF-only differences must not create a conflict, offer a zero-project import, or invalidate verified-runtime readiness"
-        );
+        write_outcome(&base, "accepted");
+        fresh.stores[2] =
+            stores::Snapshot::inspect(stores::Store::McpHostedOutcomes, &base).unwrap();
+        assert!(settings_need_review(&fresh.stores));
+        assert!(!settings_import_available(&fresh.stores, "review", true));
     }
 
     #[test]

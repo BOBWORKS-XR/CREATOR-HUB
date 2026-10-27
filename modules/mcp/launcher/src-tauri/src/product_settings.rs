@@ -59,15 +59,30 @@ fn config(path: &Path) -> Result<Option<Vec<u8>>, String> {
     let Some(bytes) = storage::read_bytes(path)? else {
         return Ok(None);
     };
+    validate_config(&bytes)?;
+    Ok(Some(bytes))
+}
+fn validate_config(bytes: &[u8]) -> Result<(), String> {
     if bytes.len() > MAX_CONFIG {
         return Err("Product settings exceed the existing 256 KiB preview limit.".into());
     }
-    let config: crate::LauncherConfig = serde_json::from_slice(&bytes)
+    let config: crate::LauncherConfig = serde_json::from_slice(bytes)
         .map_err(|_| "Invalid product settings; originals were left unchanged.")?;
     if config.channels.len() > 256 {
         return Err("Product settings exceed the existing 256-channel preview limit.".into());
     }
-    Ok(Some(bytes))
+    Ok(())
+}
+fn settings_equivalent(current: &[u8], legacy: &[u8]) -> Result<bool, String> {
+    let parse = |bytes: &[u8]| {
+        // Compare full documents, not defaulted structs. Strict JSON/type/size
+        // validation must precede the duplicate-key-safe JSONC parser.
+        validate_config(bytes)?;
+        crate::jsonc::parse_unambiguous(
+            std::str::from_utf8(bytes).map_err(|_| "Invalid MCP settings.")?,
+        )
+    };
+    Ok(parse(current)? == parse(legacy)?)
 }
 fn snapshot(paths: &Paths) -> Result<Snapshot, String> {
     let current = config(&paths.current)?;
@@ -155,7 +170,7 @@ fn inspect_paths(paths: &Paths) -> Result<Report, String> {
         (None, None) => Status::None,
         (Some(_), None) => Status::Current,
         (None, Some(_)) => Status::LegacyOnly,
-        (Some(a), Some(b)) if a == b => Status::Identical,
+        (Some(a), Some(b)) if settings_equivalent(a, b)? => Status::Identical,
         (Some(_), Some(_)) => Status::Conflict,
     };
     let mut backups = Vec::new();
@@ -293,7 +308,8 @@ fn server_writes(
     server: &Path,
     recognized: impl Fn(&Path) -> Result<bool, String>,
 ) -> Result<Vec<ServerWrite>, String> {
-    if matches!((&saved.current, &saved.legacy), (Some(a), Some(b)) if a != b) {
+    if matches!((&saved.current, &saved.legacy), (Some(a), Some(b)) if !settings_equivalent(a, b)?)
+    {
         return Err("MCP settings conflict; the server path and old apps were kept.".into());
     }
     let target = server

@@ -1,5 +1,8 @@
 //! First-launch adoption of retained Creator stores. Removal has a separate
 //! native provenance/retention gate; a backup or presence label cannot pass it.
+#[allow(dead_code)]
+#[path = "../../modules/mcp/launcher/src-tauri/src/jsonc.rs"]
+mod settings_json;
 #[path = "../../native/convergence-store.rs"]
 pub(crate) mod stores;
 
@@ -462,6 +465,21 @@ fn prompt_review_key(
     Ok(format!("{:x}", Sha256::digest(bytes)))
 }
 
+fn settings_equivalent(current: &[u8], legacy: &[u8]) -> bool {
+    let parse = |store, bytes: &[u8]| -> Result<Value, String> {
+        // Keep strict store validation; the JSONC parser is used only to reject
+        // duplicate keys, including keys in otherwise unknown nested fields.
+        stores::validate(store, bytes)?;
+        settings_json::parse_unambiguous(
+            std::str::from_utf8(bytes).map_err(|_| "Invalid MCP settings.")?,
+        )
+    };
+    matches!(
+        (parse(stores::Store::McpCurrent, current), parse(stores::Store::McpLegacy, legacy)),
+        (Ok(current), Ok(legacy)) if current == legacy
+    )
+}
+
 fn settings_need_review(snapshots: &[stores::Snapshot]) -> bool {
     let current = snapshots
         .iter()
@@ -472,7 +490,9 @@ fn settings_need_review(snapshots: &[stores::Snapshot]) -> bool {
             .iter()
             .find(|saved| saved.store() == stores::Store::McpLegacy)
             .and_then(stores::Snapshot::bytes)
-            .is_some_and(|legacy| current.is_some_and(|current| legacy != current))
+            .is_some_and(|legacy| {
+                current.is_some_and(|current| !settings_equivalent(current, legacy))
+            })
 }
 
 fn settings_import_available(
@@ -680,7 +700,7 @@ fn can_prepare(plan: &Plan) -> Result<(), String> {
 }
 
 fn settings_conflict(plan: &Plan) -> bool {
-    matches!((plan.stores[0].bytes(), plan.stores[1].bytes()), (Some(a), Some(b)) if a != b)
+    matches!((plan.stores[0].bytes(), plan.stores[1].bytes()), (Some(a), Some(b)) if !settings_equivalent(a, b))
 }
 
 fn can_retain(plan: &Plan) -> Result<(), String> {
