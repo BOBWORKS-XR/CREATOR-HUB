@@ -73,7 +73,11 @@ test('Installed metadata errors cannot return before a classified verified resta
   assert.doesNotMatch(afterInstall, /let path = mcp_handoff_path\(\)\?;/,
     'metadata path failure currently strands mapped RootA after Installed');
   assert.match(afterInstall, /complete_deb_install\(&installed_outcome,/);
-  assert.match(afterInstall, /return completion\.finish\(/);
+  const integrated = text.slice(start, text.indexOf('#[cfg(not(feature = "integrated-features"))]', start));
+  const tail = /\n\s*completion\.finish\(&release\.version, \|notice\| \{[\s\S]*?\}, \|\| handle\.request_restart\(\)\)\s*\n\s*\}\s*$/;
+  assert.match(integrated, tail);
+  assert.doesNotMatch(integrated.replace('completion.finish(', 'return completion.finish('), tail);
+  assert.doesNotMatch(integrated.replace('handle.request_restart())', 'handle.request_restart());'), tail);
   assert.doesNotMatch(afterInstall, /map_err\([\s\S]*?review_message/,
     'metadata failure must be captured by typed completion, not escape the Root worker');
 });

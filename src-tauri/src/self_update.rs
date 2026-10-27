@@ -665,9 +665,9 @@ pub async fn install_hub_update(
                         Ok(crate::mcp_update_handoff::Publication::NotRequired)
                     }
                 });
-                return completion.finish(&release.version, |notice| {
+                completion.finish(&release.version, |notice| {
                     let _ = handle.emit("app-progress", Progress { message: notice.into(), received: 0, total: 0, cancellable: false });
-                }, || handle.request_restart());
+                }, || handle.request_restart())
             }
             #[cfg(not(feature = "integrated-features"))]
             if installed_outcome == crate::linux_update::Outcome::Cancelled {
