@@ -16,7 +16,7 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 15
     env:
-      RESULT_DIR: ${{ runner.temp }}/linux-mcp-node-observer-01
+      RESULT_DIR: ${{ github.workspace }}/artifacts/linux-mcp-node-observer-01
       CARGO_TARGET_DIR: ${{ github.workspace }}/native/mcp-router/target
     steps:
       - uses: actions/checkout@v6
@@ -28,8 +28,9 @@ jobs:
         run: |
           set -euo pipefail
           test ! -e "$RESULT_DIR"
+          mkdir -m700 "$GITHUB_WORKSPACE/artifacts"
           mkdir -m700 "$RESULT_DIR"
-      - name: Bind exact9737 parent, five-file projection and reviewed observer sources
+      - name: Bind exactca5736e parent, two-file repair and reviewed observer sources
         run: |
           set -euo pipefail
           set -o noclobber
@@ -38,19 +39,17 @@ jobs:
           from pathlib import Path
           def git(*args):
               return subprocess.check_output(['git', '--no-optional-locks', *args], text=True).strip()
-          base = '9737d409b78c53d2bb5e95542452ce4e36565a3d'
+          base = 'ca5736eaf5bace362c388685dc37a5baa4e240e5'
           assert git('rev-parse', 'HEAD') == os.environ['GITHUB_SHA']
           assert git('rev-list', '--parents', '-n', '1', 'HEAD').split() == [os.environ['GITHUB_SHA'], base]
-          assert git('rev-parse', base + '^{tree}') == '328de64be38d0b2279d3c615ebcb4770ea505c58'
+          assert git('rev-parse', base + '^{tree}') == 'a598554ca1032252c03678e8082305fceea0cffb'
+          assert [line for line in git('cat-file', '-p', base).split('\n\n', 1)[0].splitlines() if line.startswith('parent ')] == ['parent 9737d409b78c53d2bb5e95542452ce4e36565a3d']
           assert os.environ['RUNNER_OS'] == 'Linux' and os.environ['RUNNER_ARCH'] == 'X64'
           assert git('status', '--porcelain=v1', '--untracked-files=normal') == ''
           changes = dict(line.split('\t', 1)[::-1] for line in git('diff-tree', '--no-commit-id', '--name-status', '-r', 'HEAD').splitlines())
           assert changes == {
-              'native/mcp-router/tests/unix-execution.cjs': 'M',
-              'native/mcp-router/tests/linux-node-observer.py': 'A',
-              'native/mcp-router/tests/linux-node-observer.test.py': 'A',
-              '.github/workflows/linux-mcp-node-observer-01.yml': 'A',
-              'scripts/linux-mcp-node-observer-workflow.test.cjs': 'A',
+              '.github/workflows/linux-mcp-node-observer-01.yml': 'M',
+              'scripts/linux-mcp-node-observer-workflow.test.cjs': 'M',
           }
           pins = {
               'native/mcp-router/tests/unix-execution.cjs': (17624, '52b3b27adc692b33533af47cedec44805ca1e9a585f7a56fc6aec20735e10be8'),

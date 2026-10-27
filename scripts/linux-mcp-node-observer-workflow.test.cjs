@@ -20,6 +20,99 @@ const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 const step = prefix => steps.find(value => value.name?.startsWith(prefix));
 const inlinePython = command => [...command.matchAll(/<<'PY'[^\n]*\n([\s\S]*?)^PY\s*$/gm)].map(match => match[1]);
 
+function assertJobEnvContexts(environment) {
+  // GitHub contexts reference: jobs.<job_id>.env, not steps.env.
+  const allowed = new Set(['github', 'needs', 'strategy', 'matrix', 'vars', 'secrets', 'inputs']);
+  for (const value of Object.values(environment)) {
+    assert.equal(typeof value, 'string');
+    const expressions = [...value.matchAll(/\$\{\{([\s\S]*?)\}\}/g)];
+    assert.equal(expressions.length, (value.match(/\$\{\{/g) || []).length);
+    for (const [, expression] of expressions) {
+      const reference = expression.trim().match(/^([a-z_][a-z0-9_]*)\.[a-z_][a-z0-9_.]*$/i);
+      assert.ok(reference, 'Only simple property expressions are reviewed for this job env');
+      assert.ok(allowed.has(reference[1]), `Unavailable job env context: ${reference[1]}`);
+    }
+  }
+}
+
+test('job env contexts reject the original runner.temp grammar failure', () => {
+  assertJobEnvContexts(job.env);
+  assert.throws(() => assertJobEnvContexts({ RESULT_DIR: '${{ runner.temp }}/linux-mcp-node-observer-01' }), /Unavailable job env context: runner/);
+  assert.deepEqual(job.env, {
+    RESULT_DIR: '${{ github.workspace }}/artifacts/linux-mcp-node-observer-01',
+    CARGO_TARGET_DIR: '${{ github.workspace }}/native/mcp-router/target',
+  });
+});
+
+test('Linux result preparation creates its absent ignored parent and refuses existing results', {
+  skip: process.platform !== 'linux' ? 'Requires Linux POSIX mode700 semantics; Windows Bash is syntax-only coverage' : false,
+}, () => {
+  const bash = ['/usr/bin/bash', '/bin/bash'].find(file => fs.existsSync(file));
+  assert.ok(bash);
+  const temporaryRoot = fs.realpathSync(os.tmpdir());
+  const directory = fs.mkdtempSync(path.join(temporaryRoot, 'observer-evidence-unit-'));
+  ownedFixtures.add(directory);
+  const workspace = path.join(directory, 'workspace'); fs.mkdirSync(workspace);
+  const result = path.join(workspace, 'artifacts/linux-mcp-node-observer-01');
+  const execute = () => cp.spawnSync(bash, ['-c', step('Create exclusive').run], {
+    env: { ...cleanEnv, GITHUB_WORKSPACE: workspace, RESULT_DIR: result }, encoding: 'utf8', timeout: 10000, maxBuffer: 65536,
+  });
+  try {
+    assert.equal(fs.existsSync(path.join(workspace, 'artifacts')), false);
+    const first = execute(); assert.equal(first.status, 0, first.stderr);
+    assert.equal(fs.statSync(result).isDirectory(), true);
+    assert.equal(fs.statSync(result).mode & 0o777, 0o700);
+    assert.equal(fs.statSync(path.dirname(result)).mode & 0o777, 0o700);
+    fs.writeFileSync(path.join(result, 'retained'), 'original');
+    assert.notEqual(execute().status, 0);
+    assert.equal(fs.readFileSync(path.join(result, 'retained'), 'utf8'), 'original');
+  } finally { disposeFixture({ directory, temporaryRoot }); }
+});
+
+test('bounded child source guard admits only exact ca parent and two modified route files', () => {
+  const child = 'a'.repeat(40), parent = 'ca5736eaf5bace362c388685dc37a5baa4e240e5';
+  const baseline = '9737d409b78c53d2bb5e95542452ce4e36565a3d';
+  const code = inlinePython(step('Bind exact').run)[0];
+  const replies = [
+    [['rev-parse', 'HEAD'], child],
+    [['rev-list', '--parents', '-n', '1', 'HEAD'], `${child} ${parent}`],
+    [['rev-parse', `${parent}^{tree}`], 'a598554ca1032252c03678e8082305fceea0cffb'],
+    [['cat-file', '-p', parent], `tree a598554ca1032252c03678e8082305fceea0cffb\nparent ${baseline}\n\nSynthetic parent metadata`],
+    [['status', '--porcelain=v1', '--untracked-files=normal'], ''],
+    [['diff-tree', '--no-commit-id', '--name-status', '-r', 'HEAD'],
+      'M\t.github/workflows/linux-mcp-node-observer-01.yml\nM\tscripts/linux-mcp-node-observer-workflow.test.cjs'],
+  ];
+  const harness = [
+    'import json,subprocess,sys',
+    'value=json.load(sys.stdin)',
+    'replies={tuple(args):text for args,text in value["replies"]}',
+    'def fake_git(args, *, text):',
+    ' assert text is True and args[:2] == ["git","--no-optional-locks"]',
+    ' return replies[tuple(args[2:])]',
+    'subprocess.check_output=fake_git',
+    'exec(compile(value["source"],"<exact-workflow-source-guard>","exec"),{})',
+  ].join('\n');
+  const execute = (index, replacement, environment = {}) => {
+    const changed = replies.map(([args, text], i) => [args, i === index ? replacement : text]);
+    return cp.spawnSync(python, ['-I', '-S', '-B', '-c', harness], {
+      cwd: root, env: { ...cleanEnv, GITHUB_SHA: child, RUNNER_OS: 'Linux', RUNNER_ARCH: 'X64', ...environment },
+      input: JSON.stringify({ source: code, replies: changed }), encoding: 'utf8', timeout: 10000, maxBuffer: 65536,
+    });
+  };
+  const accepted = execute(-1); assert.equal(accepted.status, 0, accepted.stderr);
+  assert.equal(JSON.parse(accepted.stdout).source, child);
+  for (const [index, value] of [
+    [0, 'b'.repeat(40)], [1, `${child} ${baseline}`], [1, `${child} ${parent} ${baseline}`],
+    [2, 'b'.repeat(40)], [3, `tree a598554ca1032252c03678e8082305fceea0cffb\nparent ${'b'.repeat(40)}\n\nSynthetic foreign lineage`], [4, ' M scripts/foreign.py'],
+    [5, replies[5][1] + '\nM\tnative/mcp-router/tests/unix-execution.cjs'],
+    [5, replies[5][1].split('\n')[0]], [5, replies[5][1].replace(/^M/, 'A')],
+  ]) {
+    const rejected = execute(index, value); assert.notEqual(rejected.status, 0, JSON.stringify({ index, value }));
+    assert.match(rejected.stderr, /AssertionError/);
+  }
+  assert.notEqual(execute(-1, undefined, { RUNNER_OS: 'Windows' }).status, 0);
+});
+
 test('one exact push branch, read permissions and one Ubuntu job only', () => {
   assert.deepEqual(workflow.on, { push: { branches: [branch] } });
   assert.deepEqual(workflow.permissions, { contents: 'read' });
@@ -54,11 +147,12 @@ test('this branch does not trigger other inspected push routes or workflow_run h
   assert.deepEqual(ci.on.push.branches, ['ui-preview', 'master', 'workflow*']);
 });
 
-test('source guard pins exact parent/tree, three approved postimages and fixed loader source before tools', () => {
-  const binding = step('Bind exact9737'), text = binding.run;
+test('source guard pins exact ca child parent/tree, three approved postimages and fixed loader source before tools', () => {
+  const binding = step('Bind exactca5736e'), text = binding.run;
   assert.ok(steps.indexOf(binding) < steps.findIndex(value => value.uses === 'actions/setup-node@v6'));
   assert.match(text, /9737d409b78c53d2bb5e95542452ce4e36565a3d/);
-  assert.match(text, /328de64be38d0b2279d3c615ebcb4770ea505c58/);
+  assert.match(text, /ca5736eaf5bace362c388685dc37a5baa4e240e5/);
+  assert.match(text, /a598554ca1032252c03678e8082305fceea0cffb/);
   assert.match(text, /rev-list.*--parents/); assert.match(text, /diff-tree.*--name-status/);
   const pins = {
     'native/mcp-router/tests/unix-execution.cjs': [17624, '52b3b27adc692b33533af47cedec44805ca1e9a585f7a56fc6aec20735e10be8'],
@@ -87,10 +181,12 @@ test('exact Node bytes, locked dependencies and fifteen pure tests precede fixtu
 });
 
 test('cache remains outside fresh result directory and actual Unix invocation occurs exactly once', () => {
-  assert.deepEqual(job.env, { RESULT_DIR: '${{ runner.temp }}/linux-mcp-node-observer-01',
+  assert.deepEqual(job.env, { RESULT_DIR: '${{ github.workspace }}/artifacts/linux-mcp-node-observer-01',
     CARGO_TARGET_DIR: '${{ github.workspace }}/native/mcp-router/target' });
   const create = step('Create exclusive'), cache = steps.find(value => value.uses === 'Swatinem/rust-cache@v2');
   assert.equal(create.id, 'result'); assert.match(create.run, /test ! -e "\$RESULT_DIR"/);
+  assert.match(create.run, /mkdir -m700 "\$GITHUB_WORKSPACE\/artifacts"\nmkdir -m700 "\$RESULT_DIR"/);
+  assert.match(fs.readFileSync(path.join(root, '.gitignore'), 'utf8'), /^artifacts\/$/m);
   assert.equal(cache.with.workspaces, 'native/mcp-router -> target');
   assert.ok(steps.indexOf(create) < steps.indexOf(cache));
   assert.doesNotMatch(JSON.stringify(cache), /RESULT_DIR|runner.temp|linux-mcp-node-observer-01/);
