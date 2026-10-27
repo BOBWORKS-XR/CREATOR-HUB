@@ -127,6 +127,12 @@ test('fresh CDP must belong to the exact owned Hub process tree, never a foreign
 
 test('new native lane is explicit/manual, read-only, data-bound and tests before native execution', () => {
   const workflow = fs.readFileSync(path.join(root, '.github/workflows/windows-incoming-016.yml'), 'utf8');
+  const testCommand = workflow.match(/^        run: (node --test[^\r\n]+)$/m)?.[1];
+  assert.deepEqual(testCommand?.split(/\s+/), ['node', '--test', '--test-concurrency=1',
+    'scripts/windows-incoming-016.test.cjs', 'scripts/native-self-update-direct.test.cjs',
+    'scripts/self-update-lab-feed.test.cjs', 'scripts/native-self-update-lab.test.cjs',
+    'scripts/native-unified-outgoing-target.test.cjs', 'scripts/native-windows-016-migration.test.cjs'],
+  'Serialize PowerShell-heavy test files without dropping any pre-native regression');
   assert.match(workflow, /workflow_dispatch:/); assert.match(workflow, /options: \[fresh, guarded, incoming, migration\]/);
   assert.match(workflow, /push:\s+branches: \[validation\/windows-menu-merge-20261027\]/);
   assert.match(workflow, /acceptance:\s+if: github\.repository == 'BOBWORKS-XR\/CREATOR-HUB' && github\.event_name == 'workflow_dispatch'/);

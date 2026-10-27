@@ -86,7 +86,7 @@ jobs:
           node scripts/windows-incoming-016.cjs $env:MODE $directory $env:SIGNED_PINS
           if ($LASTEXITCODE -ne 0) { throw 'Native scenario/signature contract refused; no native work started.' }
       - name: Focused refusal/transport/direct-feature regressions before any native operation
-        run: node --test scripts/windows-incoming-016.test.cjs scripts/native-self-update-direct.test.cjs scripts/self-update-lab-feed.test.cjs scripts/native-self-update-lab.test.cjs scripts/native-unified-outgoing-target.test.cjs scripts/native-windows-016-migration.test.cjs
+        run: node --test --test-concurrency=1 scripts/windows-incoming-016.test.cjs scripts/native-self-update-direct.test.cjs scripts/self-update-lab-feed.test.cjs scripts/native-self-update-lab.test.cjs scripts/native-unified-outgoing-target.test.cjs scripts/native-windows-016-migration.test.cjs
       - name: Parse native lifecycle before execution
         shell: pwsh
         run: |
