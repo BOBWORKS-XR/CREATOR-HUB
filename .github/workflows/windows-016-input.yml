@@ -1,7 +1,7 @@
 name: Stage exact Windows 016 data from private validation draft
 on:
   push:
-    branches: [validation/windows-016-input]
+    branches: [validation/windows-menu-merge-20261027]
   workflow_dispatch:
     inputs:
       descriptor_asset_id:
@@ -35,7 +35,7 @@ permissions:
   contents: read
 jobs:
   stage:
-    if: github.repository == 'BOBWORKS-XR/CREATOR-HUB'
+    if: github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.event_name == 'workflow_dispatch'
     permissions:
       contents: write # Required only to GET the existing private draft; no release writes.
     runs-on: windows-latest
@@ -56,11 +56,11 @@ jobs:
           MANIFEST_BYTES: ${{ inputs.manifest_bytes }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $rows = @(@{name='Creator.Hub_0.1.16_x64-setup.exe';sourceName='Creator.Hub_0.1.16_f9f0e1e_x64-setup.exe';id='657373607';bytes=37980864L;sha='f0092e056f7b4245d10350b7954c3dbe5e5356f2e340143d0aefb80078672bc7'})
+          $rows = @(@{name='Creator.Hub_0.1.16_x64-setup.exe';sourceName='Creator.Hub_0.1.16_x64-settings-v3-setup.exe';id='680035905';bytes=38224253L;sha='c7885a1e898a4dcc887ca275cf9483c0067002f9157bcc1dbc443b2e060ff1bc'})
           $metadata = @(
-            @{name='creator-hub-windows-x86_64.json';sourceName='creator-hub-windows-x86_64-f9f0e1e.json';id=$env:DESCRIPTOR_ID;bytes=$env:DESCRIPTOR_BYTES;sha=$env:DESCRIPTOR_SHA256;limit=32768}
-            @{name='creator-hub-windows-x86_64.json.minisig';sourceName='creator-hub-windows-x86_64-f9f0e1e.json.minisig';id=$env:MINISIG_ID;bytes=$env:MINISIG_BYTES;sha=$env:MINISIG_SHA256;limit=4096}
-            @{name='latest.json';sourceName='latest-windows-f9f0e1e.json';id=$env:MANIFEST_ID;bytes=$env:MANIFEST_BYTES;sha=$env:MANIFEST_SHA256;limit=32768}
+            @{name='creator-hub-windows-x86_64.json';sourceName='creator-hub-windows-x86_64.json';id=$env:DESCRIPTOR_ID;bytes=$env:DESCRIPTOR_BYTES;sha=$env:DESCRIPTOR_SHA256;limit=32768}
+            @{name='creator-hub-windows-x86_64.json.minisig';sourceName='creator-hub-windows-x86_64.json.minisig';id=$env:MINISIG_ID;bytes=$env:MINISIG_BYTES;sha=$env:MINISIG_SHA256;limit=4096}
+            @{name='latest.json';sourceName='latest.json';id=$env:MANIFEST_ID;bytes=$env:MANIFEST_BYTES;sha=$env:MANIFEST_SHA256;limit=32768}
           )
           $supplied = @($metadata | ForEach-Object { $_.id; $_.bytes; $_.sha } | Where-Object { -not [string]::IsNullOrEmpty($_) })
           if ($supplied.Count -ne 0 -and $supplied.Count -ne 9) { throw 'Signed metadata must be an all-or-none independently pinned set.' }
@@ -78,8 +78,8 @@ jobs:
           if (Test-Path -LiteralPath $directory) { throw 'Staging directory already exists; no clobber.' }
           $metadataHeaders = @{Authorization="Bearer $env:GH_TOKEN";Accept='application/vnd.github+json';'X-GitHub-Api-Version'='2026-03-10'}
           $downloadHeaders = @{Authorization="Bearer $env:GH_TOKEN";Accept='application/octet-stream';'X-GitHub-Api-Version'='2026-03-10'}
-          $release = Invoke-RestMethod -Method Get -Uri 'https://api.github.com/repos/BOBWORKS-XR/CREATOR-HUB/releases/411494394' -Headers $metadataHeaders -TimeoutSec 30
-          if ($release.id -ne 411494394 -or $release.draft -ne $true -or $release.tag_name -cne 'v0.1.13-validation') { throw 'Exact private validation draft differs.' }
+          $release = Invoke-RestMethod -Method Get -Uri 'https://api.github.com/repos/BOBWORKS-XR/CREATOR-HUB/releases/424919952' -Headers $metadataHeaders -TimeoutSec 30
+          if ($release.id -ne 424919952 -or $release.draft -ne $true -or $release.prerelease -ne $true -or $release.tag_name -cne 'lab-windows-menu-merge-20261027') { throw 'Exact new isolated validation draft differs.' }
           foreach ($row in $rows) {
             $assets = @($release.assets | Where-Object { $_.id.ToString() -ceq $row.id })
             if ($assets.Count -ne 1 -or $assets[0].name -cne $row.sourceName -or $assets[0].state -cne 'uploaded' -or $assets[0].size -ne [long]$row.bytes -or $assets[0].digest -cne "sha256:$($row.sha)") { throw 'Exact private asset metadata differs.' }

@@ -5,7 +5,7 @@
 // The parent must create artifacts/incoming-016/input-binding.json after its
 // immutable artifact/run provenance preflight, before invoking this driver.
 // Baselines directory: the three exact assets exported by native-installed-baseline.cjs.
-// Required lane: validation/windows-incoming-016, CREATOR_WINDOWS_016_MIGRATION=1.
+// Required lane: validation/windows-menu-merge-20261027, CREATOR_WINDOWS_016_MIGRATION=1.
 // Install/update/restart signing and real AI application acceptance remain separate.
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -14,27 +14,23 @@ const crypto = require('node:crypto');
 const { spawn, execFileSync } = require('node:child_process');
 const { createRequire } = require('node:module');
 
-const TARGET = Object.freeze({ version: '0.1.16', bytes: 37980864,
-  asset: 'Creator.Hub_0.1.16_x64-setup.exe',
-  productSource: 'f9f0e1e5cb27b3ae5178c8aac16429e83ba34593',
-  installer: 'f0092e056f7b4245d10350b7954c3dbe5e5356f2e340143d0aefb80078672bc7',
-  exe: '8e140ba93190bb717ea30587dbb9dcf4e1c40bf7c1d08ca06b2da947e3b6d30b' });
+const { TARGET, productProvenance } = require('./windows-incoming-016.cjs');
 const CONTEXT = Object.freeze({ GITHUB_ACTIONS: 'true', RUNNER_ENVIRONMENT: 'github-hosted',
   RUNNER_OS: 'Windows', RUNNER_ARCH: 'X64', GITHUB_REPOSITORY: 'BOBWORKS-XR/CREATOR-HUB',
   GITHUB_EVENT_NAME: 'workflow_dispatch',
-  GITHUB_REF: 'refs/heads/validation/windows-incoming-016', CREATOR_WINDOWS_016_MIGRATION: '1' });
+  GITHUB_REF: 'refs/heads/validation/windows-menu-merge-20261027', CREATOR_WINDOWS_016_MIGRATION: '1' });
 const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
-// Independently frozen from the f9 installer payload. The signed runtime
+// Independently frozen from the settings-build-v3 installer payload. The signed runtime
 // descriptor binds all nine MCP files; these pins also bind Setup and routing.
 const RESOURCE_PINS = Object.freeze({
-  'routing/runtime.json': 'c0c0c426b88a0511fe6a311932cf620e5a3737a403d4345e178a207a8491a8cd',
-  'routing/runtime.minisig': '1194ae21d5eb0eb1c70b39edcd1d546b830e37a5d37b7675077836dd750efbdb',
+  'routing/runtime.json': '3e101bb7ee0d9548cec390a4b35a9177b84ae801190a3851762f2e7f6504e40c',
+  'routing/runtime.minisig': '1288435da22951b8e3723407cfd8c806da20c5b5d8cb075b94aa865263e16e6f',
   'routing/router.json': '4138e47641b11c3a154577bbc13ec58afcb3a9f97430679a9c51fbcde81f3a00',
-  'routing/router.minisig': 'ad9abdc42b88945637b21322829582082ea368e60a0a8c90a749d790f427a575',
+  'routing/router.minisig': 'f9fb497a5ea5e2a0cceceffad8efccd3e14e57cfa7d3af1763afc858eaecabb1',
   'routing/creator-hub-mcp-router.exe': 'e03924ba3db7d2331c7d0f5e33f270e220dc720d4d67340e6edd1be573b6cde4',
-  'setup/creator-project-setup.exe': '6b60d3b32424a3987e988e4c219311594e6d2d7e8b0c79ab313c4c012055184c',
+  'setup/creator-project-setup.exe': '1ef1266ce57b28bf5b0dc9972a1f6c9ea6e95ef7e373a80fcca75a2965339ff4',
 });
 const MCP_FILES = Object.freeze(['mcp/creator-works-mcp-launcher.exe', 'mcp/server/creator-works-mcp.mjs',
   'mcp/server/runtime/node.exe', 'mcp/server/runtime/LICENSE', 'mcp/server/runtime/VERSION',
@@ -305,7 +301,7 @@ function dialogCommand(pid, executable, selected) {
 
 function reportTemplate(testSource) {
   return { schemaVersion: 1, scope: 'exact-direct16-three-client-clean-legacy-guide-probe',
-    productSource: TARGET.productSource, testSource, installerSha256: TARGET.installer, executableSha256: TARGET.exe,
+    ...productProvenance(), testSource, installerSha256: TARGET.installer, executableSha256: TARGET.exe,
     passed: false, nativeGuideAccepted: false, migrationAccepted: false, signedUpdateAccepted: false,
     liveAiAppAccepted: false, crashRecoveryAccepted: false, backupBeforeEveryWriteAccepted: false,
     releaseReady: false, userMachineUsed: false, checks: [], limitations: [

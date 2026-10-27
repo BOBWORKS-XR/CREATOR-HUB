@@ -8,10 +8,24 @@ const KIND = 'public14-incoming-direct16';
 const BASELINE = Object.freeze({ version: '0.1.14',
   installer: '284820f92de487e8a0f1bb5b3b99cafe5e073f0402a9350a2ea6e76fa9543157',
   exe: 'cd5e3fd2829727d06444c0f3266b178798d1b55c63df651be12eb38ac4523a86' });
-const TARGET = Object.freeze({ version: '0.1.16', asset: 'Creator.Hub_0.1.16_x64-setup.exe', bytes: 37980864,
-  productSource: 'f9f0e1e5cb27b3ae5178c8aac16429e83ba34593',
-  installer: 'f0092e056f7b4245d10350b7954c3dbe5e5356f2e340143d0aefb80078672bc7',
-  exe: '8e140ba93190bb717ea30587dbb9dcf4e1c40bf7c1d08ca06b2da947e3b6d30b' });
+const TARGET = Object.freeze({ version: '0.1.16', asset: 'Creator.Hub_0.1.16_x64-setup.exe', bytes: 38224253,
+  productSource: '2a80935315bd6fae5d305e387ce38ac6bb37c32e',
+  installer: 'c7885a1e898a4dcc887ca275cf9483c0067002f9157bcc1dbc443b2e060ff1bc',
+  exe: 'f562192cc4d530993c565e12c0c2059a1011c3f2b329b91902fb3ff115660f7c' });
+// Source association is not a claim that this later snapshot commit was built.
+// Digest: SHA256(JSON.stringify(before.sources)), no newline; no private settings.
+const BUILD_INPUT = Object.freeze({ builtFromDirtyWorktree: true, sourceSnapshotBuilt: false,
+  buildSourceBase: 'cf6c2db2a4260e02206c91133878ff82bf3bb084', buildSourceFileCount: 781,
+  buildInputDigest: '874a1ca81bbbc22363705122ae9ba456c0d8c707f75bdc84d697e4c1acb4da58',
+  sourceSnapshotTestOnlyDifferences: Object.freeze([]) });
+const productProvenance = () => ({ productSource: TARGET.productSource, ...BUILD_INPUT });
+function freshSettingsBytes() {
+  const settings = { channels: [], active_channel_id: null, auto_start: false, mcp_server_path: '', tool_groups: 'read',
+    enable_custom_scripts: false, allow_all_tests: false, automatic_update_checks: false, connection_guide_version: 1,
+    incoming16_unknown: { keep: 'exact bytes; no merge or reset' } };
+  return { current: Buffer.from(JSON.stringify(settings)),
+    legacy: Buffer.from(JSON.stringify(settings, null, 2).replace(/\n/g, '\r\n') + '\r\n') };
+}
 const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 const feed = () => require('./self-update-lab-feed.cjs');
 
@@ -75,7 +89,7 @@ function selectLab(file, target, fixture, env = process.env) {
 }
 function discoveryScope(contract) {
   assert.equal(contract.targetVersion, TARGET.version); assert.deepEqual(contract.baseline, BASELINE);
-  return { kind: KIND, previousStable: BASELINE.version, targetVersion: TARGET.version, pins: contract.pins,
+  return { kind: KIND, previousStable: BASELINE.version, targetVersion: TARGET.version, pins: contract.pins, ...productProvenance(),
     labDiscovery: true, publicDiscovery: false, liveAiAcceptance: false, migrationAccepted: false, releaseReady: false };
 }
 function checkBaseline(contract, baseline, executable) {
@@ -84,6 +98,8 @@ function checkBaseline(contract, baseline, executable) {
 }
 function checkReceipt(receipt, mode) {
   assert.equal(receipt.passed, true); assert.equal(receipt.releaseReady, false);
+  const provenance = mode === 'incoming' ? receipt.feed : receipt;
+  for (const [name, value] of Object.entries(productProvenance())) assert.deepEqual(provenance?.[name], value, `Product provenance differs: ${name}`);
   if (mode === 'guarded') {
     assert.equal(receipt.installerScope, 'guarded-nsis-update-default-location-no-msi');
     assert.equal(receipt.scope, 'exact-public14-to-direct16-guarded-nsis-only');
@@ -105,6 +121,13 @@ function checkReceipt(receipt, mode) {
     assert.equal(receipt.freshInstallAccepted, true); assert.equal(receipt.installerSha256, TARGET.installer);
     assert.equal(receipt.executableSha256, TARGET.exe); assert.equal(receipt.migrationAccepted, false);
     assert.equal(receipt.settingsPreserved, true); assert.equal(receipt.pluginsRemoved, true); assert.equal(receipt.signedUpdateAccepted, false);
+    assert.equal(receipt.formattingEquivalentSettingsAccepted, true);
+    assert.equal(receipt.manualNormalRestartAccepted, true); assert.equal(receipt.signedAutomaticRestartAccepted, false);
+    assert.equal(receipt.normalCloses?.length, 2);
+    for (const close of receipt.normalCloses) {
+      assert.ok(Number.isSafeInteger(close.pid) && close.pid > 0); assert.equal(close.exitCode, 0);
+    }
+    assert.notEqual(receipt.normalCloses[0].pid, receipt.normalCloses[1].pid, 'Reopened process must be new');
   } else {
     assert.equal(mode, 'incoming'); assert.equal(receipt.from.version, BASELINE.version);
     assert.equal(receipt.from.installer, BASELINE.installer); assert.equal(receipt.from.exe, BASELINE.exe);
@@ -112,6 +135,13 @@ function checkReceipt(receipt, mode) {
     for (const field of ['selfUpdateTested', 'directHubUpdateTested', 'managedRouteReconnectTested', 'pluginsRemoved', 'labDiscovery']) assert.equal(receipt[field], true);
     assert.equal(receipt.publicDiscovery, false);
   }
+}
+
+async function showPage(page, feature) {
+  const names = { hub: /^Home\b/, mcp: /^MCP\b/, setup: /^Setup \/ Repair\b/ };
+  assert.ok(Object.hasOwn(names, feature));
+  await page.getByRole('button', { name: 'Open menu', exact: true }).click();
+  await page.getByRole('navigation', { name: 'Creator tools', exact: true }).getByRole('button', { name: names[feature] }).click();
 }
 
 function assertOwnedDebugging(state, pid, executable) {
@@ -132,7 +162,7 @@ function assertOwnedDebugging(state, pid, executable) {
   assert.ok(active.length && active.every(listener => owned.has(listener.OwningProcess)), 'Debugging endpoint must belong to the owned Hub tree');
 }
 
-module.exports = { KIND, BASELINE, TARGET, hash, keys, validatePins, validateInput, validateConfig, installer, loadContract,
+module.exports = { KIND, BASELINE, TARGET, BUILD_INPUT, productProvenance, freshSettingsBytes, showPage, hash, keys, validatePins, validateInput, validateConfig, installer, loadContract,
   assertBaselineBytes, assertProxy, selectLab, discoveryScope, checkBaseline, checkReceipt, assertOwnedDebugging,
   assertRunner: (...args) => feed().assertRunner(...args), readBounded: (...args) => feed().readBounded(...args),
   get LIMITS() { return feed().LIMITS; }, startLabProxy: (...args) => feed().startLabProxy(...args) };
@@ -148,7 +178,7 @@ if (require.main === module) {
       loadContract(config);
       fs.writeFileSync(path.join(directory, 'incoming-016-config.json'), JSON.stringify(config), { flag: 'wx' });
     }
-    console.log(JSON.stringify({ kind: KIND, mode, installer: TARGET.installer, executable: TARGET.exe,
+    console.log(JSON.stringify({ kind: KIND, mode, installer: TARGET.installer, executable: TARGET.exe, ...productProvenance(),
       signedContractBound: mode === 'incoming', releaseReady: false }));
   } catch (error) { console.error(error.message); process.exitCode = 1; }
 }

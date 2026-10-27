@@ -1,7 +1,7 @@
 name: Windows exact 016 fresh or public14 incoming (not release)
 on:
   push:
-    branches: [validation/windows-incoming-016]
+    branches: [validation/windows-menu-merge-20261027]
   workflow_dispatch:
     inputs:
       mode:
