@@ -1182,6 +1182,75 @@ def retain_refusal_diagnostic(record, error):
         record.setdefault("refusalDiagnosticUnavailable", True)
 
 
+SESSION_PHASES = (
+    "html-start-before", "html-start-after", "startup-before", "startup-after",
+    "direct-pages-before", "direct-pages-after", "initial-bitmap-before", "initial-bitmap-after",
+    "first-journal-before", "first-journal-after",
+    "home-open-menu-before", "home-open-menu-after", "home-select-before", "home-select-after",
+    "home-readiness-before", "home-readiness-after", "home-title-before", "home-title-after",
+    "update-status-before", "update-status-after", "update-enabled-before", "update-enabled-after",
+    "update-click-before", "update-click-after", "consent-surface-before", "consent-surface-after",
+    "consent-input-before", "consent-input-after", "cleanup-before",
+)
+SESSION_DIAGNOSTIC_FILES = (
+    "result/session-refusal-early.json", "session-wrapper-outcome.json",
+    *(f"result/session-phase-{index:02d}.json" for index in range(len(SESSION_PHASES))),
+)
+
+
+def capture_session_diagnostic(name, value):
+    """Exclusive, fsynced, bounded evidence; capture failures have no authority."""
+    try:
+        if name not in SESSION_DIAGNOSTIC_FILES:
+            return False
+        raw = (json.dumps(value, sort_keys=True, indent=2) + "\n").encode()
+        if len(raw) > 16384:
+            return False
+        write(BASE / name, raw)
+        return True
+    except Exception:
+        return False
+
+
+def session_phase(report, phase):
+    try:
+        if phase not in SESSION_PHASES:
+            return False
+        report["diagnosticPhase"] = phase
+        return capture_session_diagnostic(f"result/session-phase-{SESSION_PHASES.index(phase):02d}.json", {
+            "schemaVersion": 1, "scope": "session-phase-only", "phase": phase,
+            "harnessSource": report.get("harnessSource"), "scenario": report.get("scenario"),
+            "monotonic": time.monotonic(), "validationAuthority": False,
+        })
+    except Exception:
+        return False
+
+
+def session_early_refusal(report, error):
+    try:
+        return capture_session_diagnostic("result/session-refusal-early.json", {
+            "schemaVersion": 1, "scope": "session-early-refusal-only",
+            "harnessSource": report.get("harnessSource"), "scenario": report.get("scenario"),
+            "phase": report.get("diagnosticPhase"), "monotonic": time.monotonic(),
+            "refusal": {"type": type(error).__name__[:128], "message": str(error)[:1000]},
+            "refusalDiagnostic": refusal_diagnostic(error), "validationAuthority": False,
+        })
+    except Exception:
+        return False
+
+
+def session_wrapper_outcome(record, session, deadline):
+    try:
+        value = {"schemaVersion": 1, "scope": "session-wrapper-outcome-only",
+                 "harnessSource": record.get("harnessSource"), "scenario": record.get("scenario"),
+                 "returnCode": None if session is None else session.returncode,
+                 "deadlineExpired": None if deadline is None else time.monotonic() >= deadline,
+                 "wrapperExecMainStatus": None, "validationAuthority": False}
+        return capture_session_diagnostic("session-wrapper-outcome.json", value)
+    except Exception:
+        return False
+
+
 def fingerprint(file):
     first = Path(file).lstat(); raw = read(file, 2 * 1024**2)
     require(stamp(Path(file).lstat()) == stamp(first), "Fixture changed during observation")
@@ -2377,11 +2446,27 @@ class HtmlPages:
         require(not self.d.elements("iframe,object,embed"), "Separate restored document refused")
         report["restoredLastTool"] = "setup"
 
+    def diagnostic_phase(self, phase):
+        try:
+            callback = getattr(self, "diagnostic_callback", None)
+            if callback is not None:
+                callback(phase)
+        except Exception:
+            pass
+
     def home(self):
+        self.diagnostic_phase("home-open-menu-before")
         self.click("#suite-trigger", [], "suite-trigger")
+        self.diagnostic_phase("home-open-menu-after")
+        self.diagnostic_phase("home-select-before")
         self.click('#suite-menu [data-view="hub"]', [], "view-home")
+        self.diagnostic_phase("home-select-after")
+        self.diagnostic_phase("home-readiness-before")
         wait(lambda: self.optional("#view-projects", "attribute/aria-busy") == "false")
+        self.diagnostic_phase("home-readiness-after")
+        self.diagnostic_phase("home-title-before")
         require(self.d.read("#projects-home-title") == "Projects", "Projects home missing")
+        self.diagnostic_phase("home-title-after")
 
     def detach(self):
         require(self.probed and not self.detach_started and not self.input_unknown, "One qualified attachment release only")
@@ -3275,18 +3360,34 @@ def native_session(env):
         if scenario in HTML_SCENARIOS:
             html = HtmlPages(surface, initial, pages, original_request["htmlDriver"]["pin"], automation_port, app_env,
                              report.setdefault("htmlWebDriver", {}), root_diagnostics=root_diagnostics)
+            session_phase(report, "html-start-before")
             html.start()  # Mandatory runtime compatibility proof, with zero UI inputs before it returns.
+            session_phase(report, "html-start-after")
+            session_phase(report, "startup-before")
             html.startup(home, report)
+            session_phase(report, "startup-after")
+            session_phase(report, "direct-pages-before")
             html.direct_pages(report["initialPageActionAttempts"])
+            session_phase(report, "direct-pages-after")
         else:
             startup_ui(surface, home, first=not portable, actions=report["startupUi"], progress=report)
             direct_pages(surface, report["initialPageActionAttempts"])
+        session_phase(report, "initial-bitmap-before")
         report["initialBitmap"] = phase_bitmap(surface, "initial-bitmap")
+        session_phase(report, "initial-bitmap-after")
+        if html is not None:
+            html.diagnostic_callback = lambda phase: session_phase(report, phase)
+        session_phase(report, "first-journal-before")
         first_journal = journal(home, diagnostics=report["journalDiagnostics"])
+        session_phase(report, "first-journal-after")
         if html is not None:
             html.home()
+            session_phase(report, "update-status-before")
             wait(lambda: html.optional("#hub-update-status") in ("Version 0.1.17 is available.", "Version 0.1.17 is ready to install."), 90)
+            session_phase(report, "update-status-after")
+            session_phase(report, "update-enabled-before")
             require(html.d.read("#hub-update-button", "enabled") is True, "Actual Update Hub action is not enabled")
+            session_phase(report, "update-enabled-after")
         else:
             navigate_home(surface)
             wait(lambda: field_text(surface, "hub-update-status") in ("Version 0.1.17 is available.", "Version 0.1.17 is ready to install."), 90)
@@ -3298,17 +3399,23 @@ def native_session(env):
         generations = set(p.name for p in (home / STORE / "generations").iterdir()) if portable else None
         baseline = children(parent_pid)
         report["initial16Verified"] = True
+        session_phase(report, "update-click-before")
         if html is not None:
             html.click("#hub-update-button", [], "hub-update-button")
         else:
             surface.click("hub-update-button", [])
+        session_phase(report, "update-click-after")
+        session_phase(report, "consent-surface-before")
         modal = Surface(old, x11, helper, native, Atspi, title="Update Creator Hub", dialog=True)
+        session_phase(report, "consent-surface-after")
         report["nativeConfirmationObserved"] = True
         try:
             require(set(windows(x11)) == {surface.window, modal.window}, "Only exact main/consent pair may receive native input")
             if html is not None and scenario != HTML_SCENARIO:
                 html.detach()  # Release the old live target before native approval can install/restart it.
+            session_phase(report, "consent-input-before")
             modal.dialog_action(question(portable), ("Update Hub", "Not now"), "Not now" if scenario.endswith("native-cancel") else "Update Hub", report["nativeActions"])
+            session_phase(report, "consent-input-after")
         finally:
             modal.bus.close_sync(None)
         wait(lambda: modal.window not in windows(x11), 30)
@@ -3405,11 +3512,13 @@ def native_session(env):
         report["disposableTeardownRequired"] = False
     except Exception as error:
         failure = error
+        session_early_refusal(report, error)
         report["refusal"] = {"type": type(error).__name__, "message": str(error)[:1000]}
         retain_refusal_diagnostic(report, error)
         if not portable and report.get("initialRoot") is not None:
             capture_initial_creation_context("after-refusal", home, report["initialRoot"], report, native, helper)
     finally:
+        session_phase(report, "cleanup-before")
         if secret is not None:
             secret[:] = b"\0" * len(secret)
         for current in (surface, replacement):
@@ -4358,6 +4467,7 @@ def broker(env):
         record["scenarioPassed"] = True
     except Exception as error:
         failure = error
+        session_wrapper_outcome(record, session, locals().get("deadline"))
         record["refusal"] = {"type": type(error).__name__, "message": str(error)[:1000]}
         retain_refusal_diagnostic(record, error)
         report_path = BASE / "result/report.json"
@@ -4425,6 +4535,7 @@ def export_evidence(env):
              "result/portable-ancestry-before-launch.json", "result/portable-ancestry-after-refusal.json",
              "result/mcp-protocol.json", "result/mcp/existing/sdk.stdout", "result/mcp/existing/sdk.stderr", "result/mcp/existing/sdk-result.json",
              "result/mcp/reconnect/sdk.stdout", "result/mcp/reconnect/sdk.stderr", "result/mcp/reconnect/sdk-result.json")
+    names += ("result/root.json", *SESSION_DIAGNOSTIC_FILES)
     diagnostics = sorted((*BASE.glob("public-tool-failure-*.json"), *BASE.glob("tls-restore-failure-*.json")))
     require(len(diagnostics) <= 8 and all(re.fullmatch(r"(?:public-tool-failure-(baseline-dpkg-install|update-ca-certificates|synthetic-useradd)|tls-restore-failure)-[1-9][0-9]*\.json", file.name)
                                         and file.lstat().st_uid == 0 for file in diagnostics), "Unknown public tool evidence refused")

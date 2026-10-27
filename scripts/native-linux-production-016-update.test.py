@@ -5154,8 +5154,10 @@ class RefusalDiagnostics(unittest.TestCase):
                        and ast.unparse(s.value.func) == "retain_refusal_diagnostic")
             original = self.trace(RuntimeError("original source refusal")); record = {}
             namespace = {"error": original, "report": record, "record": record,
-                         "retain_refusal_diagnostic": M.retain_refusal_diagnostic}
-            with self.subTest(function=name):
+                         "retain_refusal_diagnostic": M.retain_refusal_diagnostic,
+                         "session_early_refusal": M.session_early_refusal,
+                         "session_wrapper_outcome": M.session_wrapper_outcome, "session": None}
+            with self.subTest(function=name), tempfile.TemporaryDirectory() as temporary, patch.object(M, "BASE", Path(temporary)):
                 exec(compile(ast.Module(body=copy.deepcopy(body[:end + 1]), type_ignores=[]), "actual-refusal-handler", "exec"), namespace)
                 self.assertIs(namespace["failure"], original)
                 self.assertEqual(record["refusal"], {"type": "RuntimeError", "message": "original source refusal"})
@@ -7364,6 +7366,123 @@ class DceTargetBindingContracts(unittest.TestCase):
             self.assertIn("verify_installed(review,", source[:positions[0]])
             self.assertIn("private_target_qualification()['privateDebApprovalRestoresOldRetirementHelper']", source)
         self.assertNotIn("final016HelperFixRetained'] = True", ast.unparse(tree))
+
+
+class EarlySessionDiagnostics(unittest.TestCase):
+    def report(self):
+        return {"harnessSource": "a" * 40, "scenario": "deb-native-cancel", "secret": "NEVER-CAPTURE-THIS"}
+
+    @contextmanager
+    def evidence(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary).resolve(); (base / "result").mkdir()
+            with patch.object(M, "BASE", base):
+                yield base
+
+    def test_fixed_phase_files_are_durable_finite_and_do_not_copy_private_report_fields(self):
+        with self.evidence() as base:
+            report = self.report()
+            self.assertTrue(M.session_phase(report, "first-journal-before"))
+            index = M.SESSION_PHASES.index("first-journal-before")
+            file = base / "result" / f"session-phase-{index:02d}.json"
+            raw = file.read_bytes(); value = json.loads(raw)
+            self.assertEqual(value["phase"], "first-journal-before")
+            self.assertFalse(value["validationAuthority"])
+            self.assertNotIn(b"NEVER-CAPTURE", raw)
+            self.assertLessEqual(len(raw), 16384)
+            self.assertFalse(M.session_phase(report, "../../arbitrary"))
+            self.assertEqual(len(list((base / "result").iterdir())), 1)
+            self.assertFalse(M.session_phase(report, "first-journal-before"))
+            self.assertEqual(file.read_bytes(), raw)
+
+    def test_capture_bounds_and_write_failures_have_no_execution_authority(self):
+        with self.evidence() as base:
+            self.assertFalse(M.capture_session_diagnostic("result/session-refusal-early.json", {"x": "x" * 16385}))
+            self.assertFalse(M.capture_session_diagnostic("result/report.json", {}))
+            with patch.object(M, "write", side_effect=OSError("capture disk failure")):
+                self.assertFalse(M.session_phase(self.report(), "update-status-before"))
+                self.assertFalse(M.session_early_refusal(self.report(), RuntimeError("original")))
+            self.assertEqual(list((base / "result").iterdir()), [])
+
+    def handler_replay(self, original, cleanup):
+        source = ast.parse(Path(M.__file__).read_text())
+        function = next(node for node in source.body if isinstance(node, ast.FunctionDef) and node.name == "native_session")
+        blocks = [node for node in function.body if isinstance(node, ast.Try) and node.handlers]
+        self.assertEqual(len(blocks), 1)
+        block = copy.deepcopy(blocks[0])
+        block.body = [ast.Raise(exc=ast.Name(id="original", ctx=ast.Load()), cause=None)]
+        block.orelse = []
+        block.finalbody = [ast.Raise(exc=ast.Name(id="cleanup", ctx=ast.Load()), cause=None)] if cleanup else [ast.Pass()]
+        tail = ast.If(test=ast.Compare(left=ast.Name(id="failure", ctx=ast.Load()), ops=[ast.IsNot()], comparators=[ast.Constant(None)]),
+                      body=[ast.Raise(exc=ast.Name(id="failure", ctx=ast.Load()), cause=None)], orelse=[])
+        module = ast.fix_missing_locations(ast.Module(body=[block, tail], type_ignores=[]))
+        report = self.report(); M.session_phase(report, "update-status-before")
+        scope = {**M.__dict__, "report": report, "portable": True, "failure": None, "original": original, "cleanup": cleanup}
+        exec(compile(module, "pure-native-handler-replay", "exec"), scope)
+
+    def test_actual_except_handler_persists_original_refusal_before_a_failing_finalizer(self):
+        with self.evidence() as base:
+            original, cleanup = RuntimeError("ORIGINAL-REFUSAL"), ValueError("cleanup later failed")
+            with self.assertRaises(ValueError) as caught:
+                self.handler_replay(original, cleanup)
+            self.assertIs(caught.exception, cleanup)
+            value = json.loads((base / "result/session-refusal-early.json").read_bytes())
+            self.assertEqual(value["refusal"], {"type": "RuntimeError", "message": "ORIGINAL-REFUSAL"})
+            self.assertEqual(value["phase"], "update-status-before")
+            self.assertFalse(value["validationAuthority"])
+
+    def test_failed_early_capture_cannot_replace_original_exception(self):
+        with self.evidence(), patch.object(M, "write", side_effect=OSError("capture refused")):
+            original = RuntimeError("ORIGINAL")
+            with self.assertRaises(RuntimeError) as caught:
+                self.handler_replay(original, None)
+            self.assertIs(caught.exception, original)
+
+    def test_first_refusal_cannot_be_overwritten_by_later_cleanup_failure(self):
+        with self.evidence() as base:
+            report = self.report(); M.session_phase(report, "home-select-before")
+            self.assertTrue(M.session_early_refusal(report, RuntimeError("first")))
+            file = base / "result/session-refusal-early.json"; original = file.read_bytes()
+            M.session_phase(report, "cleanup-before")
+            self.assertFalse(M.session_early_refusal(report, RuntimeError("later")))
+            self.assertEqual(file.read_bytes(), original)
+
+    def test_home_capture_callbacks_do_not_add_or_resubmit_inputs_even_when_capture_fails(self):
+        home = M.HtmlPages.__new__(M.HtmlPages)
+        home.click = Mock(); home.optional = Mock(return_value="false")
+        home.d = SimpleNamespace(read=Mock(return_value="Projects"))
+        phases = []
+        home.diagnostic_callback = phases.append
+        M.HtmlPages.home(home)
+        self.assertEqual(phases, ["home-open-menu-before", "home-open-menu-after", "home-select-before", "home-select-after",
+                                 "home-readiness-before", "home-readiness-after", "home-title-before", "home-title-after"])
+        expected = [("#suite-trigger", [], "suite-trigger"), ('#suite-menu [data-view="hub"]', [], "view-home")]
+        self.assertEqual([call.args for call in home.click.call_args_list], expected)
+        home.click.reset_mock(); home.diagnostic_callback = Mock(side_effect=OSError("capture refused"))
+        M.HtmlPages.home(home)
+        self.assertEqual([call.args for call in home.click.call_args_list], expected)
+
+    def test_wrapper_capture_records_cached_status_without_polling_or_inventing_exec_main_status(self):
+        with self.evidence() as base, patch.object(M.time, "monotonic", return_value=10):
+            session = SimpleNamespace(returncode=17, poll=Mock(side_effect=AssertionError("No extra poll")))
+            self.assertTrue(M.session_wrapper_outcome(self.report(), session, 900))
+            value = json.loads((base / "session-wrapper-outcome.json").read_bytes())
+            self.assertEqual(value["returnCode"], 17)
+            self.assertFalse(value["deadlineExpired"])
+            self.assertIsNone(value["wrapperExecMainStatus"])
+            session.poll.assert_not_called()
+
+    def test_export_is_fixed_bounded_and_original_deadline_and_cleanup_contract_remain(self):
+        self.assertEqual(len(M.SESSION_DIAGNOSTIC_FILES), len(M.SESSION_PHASES) + 2)
+        self.assertEqual(len(set(M.SESSION_DIAGNOSTIC_FILES)), len(M.SESSION_DIAGNOSTIC_FILES))
+        for name in M.SESSION_DIAGNOSTIC_FILES: M.safe_name(name)
+        source = ast.parse(Path(M.__file__).read_text())
+        functions = {node.name: ast.unparse(node) for node in source.body if isinstance(node, ast.FunctionDef)}
+        self.assertIn("time.monotonic() + 900", functions["broker"])
+        self.assertIn("SESSION_DIAGNOSTIC_FILES", functions["export_evidence"])
+        self.assertIn("'result/root.json'", functions["export_evidence"])
+        self.assertIn("info.st_uid in (0, UID)", functions["export_evidence"])
+        self.assertNotIn("session.poll(", functions["session_wrapper_outcome"])
 
 
 if __name__ == "__main__":
