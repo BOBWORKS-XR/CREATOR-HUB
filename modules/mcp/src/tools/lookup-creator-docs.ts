@@ -169,6 +169,7 @@ export function createCreatorDocsLookup(options: Options = {}) {
         }
         if (args.contentHash !== undefined && args.contentHash !== document.hash) throw new Refusal("Page content hash changed. Read the page again from offset zero.");
         let startOffset = offset as number;
+        let excerptLimit = document.text.length;
         if (query) {
           const sections = splitReferenceMarkdown(document.text);
           let cursor = 0;
@@ -176,15 +177,25 @@ export function createCreatorDocsLookup(options: Options = {}) {
             const sectionOffset = document.text.indexOf(section.text, cursor);
             if (sectionOffset < 0) throw new Refusal("Documentation section could not be located. Read the exact page path instead.");
             cursor = sectionOffset + section.text.length;
-            return { startOffset: sectionOffset, rank: score(section.title, terms) * 4 + score(section.text, terms) };
+            return { startOffset: sectionOffset, text: section.text, rank: score(section.title, terms) * 4 + score(section.text, terms) };
           })
             .sort((a, b) => b.rank - a.rank)[0];
           startOffset = best?.startOffset ?? 0;
+          const initial = document.text.slice(startOffset, startOffset + excerptLength(document.text.slice(startOffset)));
+          if (best && score(initial, terms) === 0) {
+            // termsFor returns ASCII word tokens; match indices address the original UTF-16 text.
+            const match = new RegExp(terms.join("|"), "i").exec(best.text);
+            if (match) {
+              startOffset += Math.max(0, match.index - 128);
+              if (startOffset > best.startOffset && /[\uDC00-\uDFFF]/.test(document.text[startOffset]) && /[\uD800-\uDBFF]/.test(document.text[startOffset - 1])) startOffset--;
+              excerptLimit = best.startOffset + best.text.length;
+            }
+          }
         }
         if (startOffset >= document.text.length || (startOffset > 0 && /[\uDC00-\uDFFF]/.test(document.text[startOffset]) && /[\uD800-\uDBFF]/.test(document.text[startOffset - 1]))) {
           throw new Refusal("startOffset is outside this page or splits a Unicode character. Use its returned nextOffset.");
         }
-        const end = startOffset + excerptLength(document.text.slice(startOffset));
+        const end = startOffset + excerptLength(document.text.slice(startOffset, excerptLimit));
         entries.push({ ...page, url: pageUrl(page.path), sourceUrl: `${RAW}${index.revision}/Docs/${page.path}`,
           contentHash: document.hash, fetchedAt: new Date(document.fetchedAt).toISOString(), cached,
           text: document.text.slice(startOffset, end), startOffset, nextOffset: end < document.text.length ? end : null,
