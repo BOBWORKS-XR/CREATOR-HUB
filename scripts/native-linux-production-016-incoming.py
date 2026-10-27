@@ -38,28 +38,28 @@ FLAGS = dict.fromkeys(("freshInstallAccepted", "manualPublic012UpgradeAccepted",
                       "unityAccepted", "releaseReady"), False)
 PROFILE = {
     "schemaVersion": 1, "cohort": "production-migration-016", "mode": "pages",
-    "assembly": {"sourceCommit": "4d9e073465928b9e00719d5ba594343281cd1280",
-                 "sourceTree": "e338ffaea6ab359fb37a212f96ac2d6172b6484c", "runId": 39430509970,
-                 "runAttempt": 1, "jobId": 118654160337, "artifactId": 12268801490, "zipBytes": 183661772,
-                 "zipSha256": "ffc211f64dd131f926cc3b47bdb93513aa8c2096afbc08f8a0968517f139016d"},
+    "assembly": {"sourceCommit": "a89ed2b90278b33bebd0b4ba29d87904d2fe683b",
+                 "sourceTree": "afa55697087e3d5d0916c3f06a75d2bab258789d", "runId": 40403377032,
+                 "runAttempt": 1, "jobId": 121854945353, "artifactId": 12691700373, "zipBytes": 183728136,
+                 "zipSha256": "4226e62399d7fb11d51abdb802acbf7f87455d9a6b1d10f456a34b167454fe5c"},
     "pins": {
-        "rawHub": {"size": 28808088, "sha256": "b3ec9649a072de2fd229bce70533427b128f6ec0c8eb17445ac0bae03158daba"},
-        "deb": {"size": 64351274, "sha256": "73497fcf96112e85427f8ba92ff2dcc1816e7f95a6d3a0fe9f8be1893f951d18"},
-        "hub": {"size": 28808088, "sha256": "bb7087c07ea4b68c70c1e6f7c6630f83199950d0af8158c9541d6ed317dc6811"},
-        "manifest": {"size": 3663, "sha256": "d52dc1f5fd6ef4ce373db605411fb53a93aa45bbd1cf4d72994ffe07e22c41a3"},
-        "modulesArchive": {"size": 55566243, "sha256": "5dc48637de643ff52d09fbfbf7dd4e258116646d6cf44ea58b1679237c3a8fb0"},
-        "assemblyReceipt": {"size": 3547, "sha256": "fd4def1a2fbf3a5610b91fcfc21bdb22e2580323697bf083bf2699aad0cd6db7"},
-        "packageIntegrity": {"size": 2151, "sha256": "434f1fb84746bb8d547c6efbc12d1387d4faa84d371b7c23a31da1f7cb221770"},
+        "rawHub": {"size": 28829744, "sha256": "5a8d01fb4a223ca192a8ac6050be65b7c3b96b6a056c61c319cb9d517450f598"},
+        "deb": {"size": 64379148, "sha256": "a07cf7bc62044dde7c923fa4507f58a61fa0491a8cc187fa4c317ec0cf6dc53d"},
+        "hub": {"size": 28829744, "sha256": "ac6e53ca75ef7d12d641f602ed77309bf386b1a070c338c7bb813b2dd74e1f06"},
+        "manifest": {"size": 3663, "sha256": "75404884b30272286c4210b1520fe6a4f059e182674fa7b63efe4527609b1fad"},
+        "modulesArchive": {"size": 55576564, "sha256": "a64faef7c7ad830558c9db85c83baf1ff64fb462510292af4c0c718794515e64"},
+        "assemblyReceipt": {"size": 3547, "sha256": "690f838aca5519247f7cdb0c5e4ef0ba9852af62eb599a150175a58e2e122c3a"},
+        "packageIntegrity": {"size": 2151, "sha256": "a6e7d2e61b78371178d831f4488b74155bd8244b78bf01b4f678ca666e2570ca"},
         "helper": {"size": 1168536, "sha256": "7f22822e50ee8b96829c64c95da9e1b098c3e080a1370f577ae2b69055eed94a"},
         "policy": {"size": 878, "sha256": "f4819f08e0a96e98d10a449a82a26b4f59d69714460eb9082387f746e1889bb4"},
         "service": {"size": 92, "sha256": "9a270a39c219b4f2d294cfaa2a849db84b1e1883fa532d2c90d7f95625780340"}}}
 BASELINE = {"releaseId": 402585934, "assetId": 608099582, "tagObject": "4c11a9ebaf5076fe0b051455b35b7d2dce48c119",
             "source": "35a16a45814d821d65b5d203628478449174cd55", "name": "Creator.Hub_0.1.12_amd64.deb",
             "size": 5911218, "sha256": "a1d20fb23544356d90ab2314b6d430b274220e97d9129815eea731ac39c7ffd2"}
-INSPECTION = {"run": 39435273515, "job": 118670553277, "workflow": 389992948,
-              "artifact": 12270560239, "size": 5438,
-              "sha256": "5d7214eae45ecffd23a499ecd9aa2c92f087265197baf5605c96e3fc365044cf",
-              "source": "19440127394abe5d5fddc333df009aa3ffe1528d"}
+INSPECTION = {"run": 40405503488, "job": 121862099500, "workflow": 389992948,
+              "artifact": 12691197198, "size": 5428,
+              "sha256": "0ad92b325c9767f179c358609f07968ffdde2b9da6efc9ae81cb6a4f3a95eb14",
+              "source": "69ff07d93bbd65fa5d3e82e63dbf62e02c043c58"}
 PREF_KEYS = ("creator-hub.preview", "creator-hub.auto-download", "creator-hub.restore-hosted-views")
 PREF_IDS = ("preview-channel", "auto-download", "restore-hosted-views")
 # https://github.com/BOBWORKS-XR/CREATOR-HUB/blob/35a16a45814d821d65b5d203628478449174cd55/src/app.js
@@ -165,7 +165,7 @@ def validate_api(value):
             and run["repository"]["id"] == 1364807512 and run["status"] == "completed" and run["conclusion"] == "success", "Original production inspection run differs")
     require(job["id"] == INSPECTION["job"] and job["run_id"] == run["id"] and job["run_attempt"] == 1
             and job["status"] == "completed" and job["conclusion"] == "success", "Original inspection job differs")
-    require(artifact["id"] == INSPECTION["artifact"] and artifact["name"] == "native-linux-production-016-inspection-39435273515-1"
+    require(artifact["id"] == INSPECTION["artifact"] and artifact["name"] == "native-linux-production-016-inspection-40405503488-1"
             and artifact["size_in_bytes"] == INSPECTION["size"] and artifact["digest"] == "sha256:" + INSPECTION["sha256"]
             and artifact["expired"] is False and artifact["workflow_run"]["id"] == run["id"]
             and artifact["workflow_run"]["head_sha"] == run["head_sha"]

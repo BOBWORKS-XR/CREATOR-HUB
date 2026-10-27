@@ -411,6 +411,46 @@ test('exact five scenario dispatch guard refuses wrong modes, local execution an
   }
 });
 
+const migratedRunner = () => {
+  const branch = 'refs/heads/validation/native-linux-production-016';
+  return { ...updateRunner('deb'), GITHUB_REF: branch,
+    GITHUB_WORKFLOW_REF: `BOBWORKS-XR/CREATOR-HUB/.github/workflows/native-linux-production-016-migration.yml@${branch}`,
+    CREATOR_NATIVE_LINUX_PRODUCTION_016: '1', CREATOR_MIGRATION_016_EXECUTE: 'true', CREATOR_MIGRATION_016_SCENARIO: 'migration-approve',
+    CREATOR_MIGRATED_UPDATE_EXECUTE: 'true', UPDATE_SCENARIO: 'deb-approve',
+    UPDATE_PROFILE_SHA256: '808f83a6cdc14a2d49000a2c9cd340397a748e166dfdb29720fe4af07ff91e66' };
+};
+
+test('migrated DEB transport admits actual migration context only with explicit separate approval', () => {
+  const env = migratedRunner(), original = structuredClone(env);
+  lab.assertUpdateRunner('deb', env, 'linux', 'x64', 21314, 21314, true);
+  assert.deepEqual(env, original);
+  assert.throws(() => lab.assertUpdateRunner('deb', env, 'linux', 'x64', 21314, 21314));
+  assert.throws(() => lab.assertUpdateRunner('deb', updateRunner('deb'), 'linux', 'x64', 21314, 21314, true));
+  for (const name of ['CREATOR_NATIVE_LINUX_PRODUCTION_016', 'CREATOR_MIGRATED_UPDATE_EXECUTE', 'CREATOR_MIGRATION_016_EXECUTE',
+    'CREATOR_MIGRATION_016_SCENARIO', 'UPDATE_EXECUTE', 'UPDATE_PROFILE_SHA256', 'GITHUB_SHA', 'GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT']) {
+    assert.throws(() => lab.assertUpdateRunner('deb', { ...env, [name]: '' }, 'linux', 'x64', 21314, 21314, true), undefined, name);
+  }
+});
+
+test('migrated transport retains exact scenario, workflow, host and injection refusals', () => {
+  for (const [key, value] of [['GITHUB_REF', lab.UPDATE_BRANCH], ['GITHUB_WORKFLOW_REF', updateRunner('deb').GITHUB_WORKFLOW_REF],
+    ['GITHUB_EVENT_NAME', 'push'], ['UPDATE_SCENARIO', 'deb-auth-cancel'], ['CREATOR_MIGRATION_016_SCENARIO', 'migration-guide-cancel'],
+    ...['HTTPS_PROXY', 'LD_PRELOAD', 'NODE_OPTIONS', 'PYTHONPATH', 'APPIMAGE', 'SSL_CERT_FILE'].map(k => [k, ''])]) {
+    assert.throws(() => lab.assertUpdateRunner('deb', { ...migratedRunner(), [key]: value }, 'linux', 'x64', 21314, 21314, true), undefined, key);
+  }
+  for (const args of [['win32', 'x64', 21314, 21314], ['linux', 'arm64', 21314, 21314], ['linux', 'x64', 0, 0]]) {
+    assert.throws(() => lab.assertUpdateRunner('deb', migratedRunner(), ...args, true));
+  }
+  for (const flag of ['true', 1, null, {}]) assert.throws(() => lab.assertUpdateRunner('deb', migratedRunner(), 'linux', 'x64', 21314, 21314, flag));
+  assert.throws(() => lab.assertUpdateRunner('portable', migratedRunner(), 'linux', 'x64', 21314, 21314, true));
+});
+
+test('migrated transport refusal precedes access to TLS options or transport startup', async () => {
+  const untouched = new Proxy({}, { get() { throw new Error('TLS options must not be read'); } });
+  await assert.rejects(lab.startUpdate016017Proxy(updateContract(updateInput('deb')), untouched,
+    { ...migratedRunner(), CREATOR_MIGRATED_UPDATE_EXECUTE: 'false' }, true), error => !error.message.includes('TLS options must not be read'));
+});
+
 test('new loader reads only the exact fixed layout, bounded independent pins and complete input set', t => {
   const directory = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'production-update-feed-'))), fixture = updateInput();
   t.after(() => { assert.equal(path.dirname(directory), fs.realpathSync(os.tmpdir())); assert.ok(path.basename(directory).startsWith('production-update-feed-'));

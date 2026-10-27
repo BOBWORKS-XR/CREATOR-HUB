@@ -61,6 +61,8 @@ jobs:
           /usr/bin/python3 -I -S -c 'import sys; assert sys.version_info[:2] == (3, 10)'
           /usr/bin/python3 -I -S -B scripts/native-linux-production-016-update.py preflight-import
           /usr/bin/python3 -I -S -B scripts/native-linux-production-016-update.test.py
+          /usr/bin/python3 -I -S -B scripts/native-linux-migrated-update.test.py
+          node --test scripts/linux-update-lab-feed.test.cjs
           /usr/bin/python3 -I -S -B scripts/native-linux-update-mcp.test.py
           /usr/bin/python3 -I -S -B scripts/native-linux-update-flatpak.test.py
           "$PREFLIGHT_PYTHON" -I -c 'import sys, tomllib; assert sys.version_info[:3] == (3, 11, 17)'

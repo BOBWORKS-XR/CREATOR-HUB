@@ -93,6 +93,64 @@ async function expectProjectsHome(page) {
   await expect(page.locator('iframe')).toHaveCount(0);
 }
 
+for (const width of [320, 390, 940, 1440]) {
+  test(`named menu and text-only navigation fit ${width}px without loading remote assets`, async ({ page }, testInfo) => {
+    await page.setViewportSize({ width, height: 640 });
+    const requests = [];
+    page.on('request', request => requests.push(request.url()));
+    const state = await load(page);
+    const trigger = page.getByRole('button', { name: 'Open menu', exact: true });
+    await expect(trigger.locator('.suite-menu-label')).toHaveText('Menu');
+    await expect(trigger.locator('.icon-menu')).toBeVisible();
+    await expect(trigger.locator('.hub-mark')).toBeHidden();
+    await trigger.click();
+    const menu = page.getByRole('navigation', { name: 'Creator tools', exact: true });
+    await expect(page.getByRole('button', { name: 'Close menu', exact: true })).toBeVisible();
+    await expect(page.locator('.suite-brand')).toHaveText('CREATOR HUB');
+    await expect(page.getByRole('button', { name: 'Close menu', exact: true }).locator('.hub-mark')).toBeVisible();
+    await expect(menu.locator('.suite-item strong')).toHaveText(['Home', 'MCP', 'Setup / Repair', 'Creator Converter']);
+    await expect(menu.locator('.suite-item small')).toHaveText(['Projects and updates', 'AI bridge for Unity', 'Unity + Creator SDK project setup and repair', 'SideQuest / Coming soon']);
+    await expect(menu.locator('img, .suite-mark, .suite-letter')).toHaveCount(0);
+    await expect(menu.locator('.suite-item-status:visible')).toHaveCount(0);
+    await expect(menu.locator('.unavailable')).toHaveAttribute('aria-disabled', 'true');
+    await page.evaluate(() => document.fonts.ready);
+    expect(await page.evaluate(() => document.fonts.check('600 16px "Space Grotesk"'))).toBe(true);
+    await expect(page.locator('#suite-shell')).toHaveCSS('width', '304px');
+    expect(await page.locator('#suite-shell').evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
+    for (const text of await menu.locator('strong, small').all()) {
+      expect(await text.evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
+    }
+    expect(await menu.evaluate(el => el.scrollHeight <= el.clientHeight)).toBe(true);
+    expect(requests.filter(url => !url.startsWith('http://127.0.0.1:4188/'))).toEqual([]);
+    await page.screenshot({ path: testInfo.outputPath('menu.png') });
+    await page.keyboard.press('ArrowDown');
+    await expect(menu.locator('[data-view="mcp"]')).toBeFocused();
+    await page.keyboard.press('End');
+    await expect(menu.locator('[data-view="setup"]')).toBeFocused();
+    await page.keyboard.press('Enter');
+    await expect(menu).toBeHidden();
+    await expect(page.getByRole('button', { name: 'Open menu', exact: true }).locator('.suite-menu-label')).toBeVisible();
+    await selectSuiteView(page, 'hub');
+    await expectProjectsHome(page);
+    expect(state.errors).toEqual([]);
+    expect(state.unexpected).toEqual([]);
+  });
+}
+
+test('menu remains scrollable on short windows and Escape restores focus', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 260 });
+  await load(page);
+  await page.getByRole('button', { name: 'Open menu', exact: true }).click();
+  const menu = page.locator('#suite-menu');
+  expect(await menu.evaluate(el => el.scrollHeight > el.clientHeight)).toBe(true);
+  await page.keyboard.press('End');
+  await expect(menu.locator('[data-view="setup"]')).toBeFocused();
+  await expect(menu.locator('[data-view="setup"]')).toBeInViewport();
+  await page.keyboard.press('Escape');
+  await expect(menu).toHaveJSProperty('inert', true);
+  await expect(page.getByRole('button', { name: 'Open menu', exact: true })).toBeFocused();
+});
+
 test('direct mode defaults to Projects even without a launch request', async ({ page }) => {
   const state = await load(page, { noLaunchRequest: true });
   await expectProjectsHome(page);

@@ -1945,6 +1945,8 @@ process.stdout.write(JSON.stringify({error,calls,phases,signals,abortEvents,
             "/usr/bin/python3 -I -S -c 'import sys; assert sys.version_info[:2] == (3, 10)'",
             "/usr/bin/python3 -I -S -B scripts/native-linux-production-016-update.py preflight-import",
             "/usr/bin/python3 -I -S -B scripts/native-linux-production-016-update.test.py",
+            "/usr/bin/python3 -I -S -B scripts/native-linux-migrated-update.test.py",
+            "node --test scripts/linux-update-lab-feed.test.cjs",
             "/usr/bin/python3 -I -S -B scripts/native-linux-update-mcp.test.py",
             "/usr/bin/python3 -I -S -B scripts/native-linux-update-flatpak.test.py",
             "\"$PREFLIGHT_PYTHON\" -I -c 'import sys, tomllib; assert sys.version_info[:3] == (3, 11, 17)'",
@@ -2194,8 +2196,9 @@ process.stdout.write(JSON.stringify({error,calls,phases,signals,abortEvents,
 
     def test_large_installer_is_not_sent_to_metadata_verifier(self):
         tree = ast.parse((HERE / "native-linux-production-016-update.py").read_text())
-        stage = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "stage")
-        calls = [ast.unparse(n) for n in ast.walk(stage) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "signature"]
+        stages = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in ("stage", "review_staged_packages")]
+        self.assertEqual(len(stages), 2)
+        calls = [ast.unparse(n) for stage in stages for n in ast.walk(stage) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "signature"]
         self.assertEqual(len(calls), 3)
         self.assertFalse(any("deb17" in call for call in calls))
 

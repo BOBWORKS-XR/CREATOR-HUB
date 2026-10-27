@@ -65,6 +65,8 @@ jobs:
           node --test scripts/native-linux-production-016-input.test.cjs scripts/native-linux-production-016-migration-workflow.test.cjs
           "$PREFLIGHT_PYTHON" -B scripts/native-linux-production-016-stage.test.py
           "$PREFLIGHT_PYTHON" -B scripts/native-linux-production-016-migration.test.py
+          "$PREFLIGHT_PYTHON" -I -S -B scripts/native-linux-migrated-update.test.py
+          node --test scripts/linux-update-lab-feed.test.cjs
       - name: Use unchanged production API admission and bound downloads
         uses: actions/github-script@v8
         env:

@@ -7,6 +7,8 @@
 import * as fs from "fs";
 import * as path from "path";
 import type { BanterMCPConfig } from "../lib/config.js";
+import { getUnityCommandStatus } from "./get-unity-command-status.js";
+import { projectIdForPath } from "../lib/project-router.js";
 
 export interface ImportStatusResult {
   success: boolean;
@@ -91,6 +93,10 @@ export interface UnityCompileStatusResult {
   heartbeatStale?: boolean;
   compilationStatusAgeMs?: number;
   compilationStale?: boolean;
+  afterCommandId?: string;
+  commandStatus?: string;
+  sinceTimestamp?: number;
+  compilationSinceVerified?: boolean;
   message: string;
 }
 
@@ -254,7 +260,7 @@ export async function checkImportStatus(
 export async function waitForUnityCompile(
   timeoutMs: number = 30000,
   config: BanterMCPConfig,
-  options: { waitForFreshHeartbeat?: boolean } = {}
+  options: { waitForFreshHeartbeat?: boolean; afterCommandId?: string; sinceTimestamp?: number } = {}
 ): Promise<UnityCompileStatusResult> {
   if (!Number.isFinite(timeoutMs) || timeoutMs < 1000 || timeoutMs > 120000) {
     return {
@@ -264,10 +270,55 @@ export async function waitForUnityCompile(
     };
   }
 
+  if (options.afterCommandId !== undefined && (typeof options.afterCommandId !== "string" ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(options.afterCommandId))) {
+    return { success: false, settled: false, message: "afterCommandId must be a UUID returned by a Unity command. No command was sent." };
+  }
+  if (options.sinceTimestamp !== undefined && (!Number.isSafeInteger(options.sinceTimestamp) ||
+      options.sinceTimestamp < 0 || options.sinceTimestamp > Date.now())) {
+    return { success: false, settled: false, message: "sinceTimestamp must be Unix milliseconds between 0 and the current time." };
+  }
+
   const startedAt = Date.now();
   let settledSince: number | undefined;
+  let commandStatus: string | undefined;
+  const proof = (current: ReturnType<typeof readCurrentEditorAndCompilationState>) => ({
+    ...(options.afterCommandId !== undefined ? { afterCommandId: options.afterCommandId, commandStatus } : {}),
+    ...(options.sinceTimestamp !== undefined ? { sinceTimestamp: options.sinceTimestamp,
+      compilationSinceVerified: current.compilationCompleted === true &&
+        typeof current.compilationTimestamp === "number" && current.compilationTimestamp >= options.sinceTimestamp } : {}),
+  });
   while (Date.now() - startedAt < timeoutMs) {
     const current = readCurrentEditorAndCompilationState(config);
+    if ((options.afterCommandId !== undefined || options.sinceTimestamp !== undefined) &&
+        (!Number.isSafeInteger(current.editorStateTimestamp) || (current.editorStateTimestamp as number) < 0)) {
+      settledSince = undefined;
+      await sleep(250);
+      continue;
+    }
+    if (options.afterCommandId !== undefined) {
+      const projectId = config.projectId || projectIdForPath(config.unityProjectPath);
+      const command = getUnityCommandStatus(options.afterCommandId, projectId, { ...config, projectId });
+      commandStatus = command.status;
+      if (command.status === "unknown" || (command.status === "completed" && !command.success)) {
+        return { success: false, settled: false, ...current, ...proof(current),
+          message: `The correlated Unity command could not be verified as successful: ${command.error || command.message || command.status}. Do not resubmit it automatically.` };
+      }
+      if (command.status !== "completed") {
+        settledSince = undefined;
+        await sleep(250);
+        continue;
+      }
+      if (typeof command.lastObservedAt !== "number" || !Number.isSafeInteger(command.lastObservedAt) || command.lastObservedAt < 0) {
+        return { success: false, settled: false, ...current, ...proof(current),
+          message: "The correlated Unity command has no valid completion timestamp; later Editor state cannot be verified." };
+      }
+      if (current.editorStateTimestamp === undefined || current.editorStateTimestamp < command.lastObservedAt) {
+        settledSince = undefined;
+        await sleep(250);
+        continue;
+      }
+    }
     if (current.stale || (options.waitForFreshHeartbeat !== false && current.heartbeatStale)) {
       settledSince = undefined;
       if (options.waitForFreshHeartbeat !== false) {
@@ -278,11 +329,14 @@ export async function waitForUnityCompile(
         success: false,
         settled: false,
         ...current,
+        ...proof(current),
         message: "Unity editor state is stale; compilation status cannot be verified.",
       };
     }
 
-    if (current.isCompiling === false && current.isUpdating === false && current.compilationCompleted === true) {
+    const compilationBoundaryVerified = options.sinceTimestamp === undefined ||
+      (typeof current.compilationTimestamp === "number" && current.compilationTimestamp >= options.sinceTimestamp);
+    if (current.isCompiling === false && current.isUpdating === false && current.compilationCompleted === true && compilationBoundaryVerified) {
       settledSince ??= Date.now();
       if (Date.now() - settledSince < 500) {
         await sleep(100);
@@ -294,6 +348,7 @@ export async function waitForUnityCompile(
         success: !hasErrors,
         settled: true,
         ...current,
+        ...proof(current),
         message: hasErrors
           ? `Unity compilation settled with ${current.compilerErrors?.length ?? 0} reported errors.`
           : current.heartbeatStale
@@ -312,10 +367,13 @@ export async function waitForUnityCompile(
     success: false,
     settled: false,
     ...current,
+    ...proof(current),
     message: `Timeout waiting for Unity compilation and asset updates (${timeoutMs}ms).` +
       (current.heartbeatStale
         ? " The Editor heartbeat is stale. Check Unity for a dialog or open menu, domain reload, long-running work, or a closed Editor; the cause is not known. Pending commands may still execute: poll their original command IDs instead of resubmitting."
-        : " Fresh settled compilation was not confirmed."),
+        : " Fresh settled compilation was not confirmed.") +
+      (options.afterCommandId ? ` Command ${options.afterCommandId}: ${commandStatus || "unknown"}; poll its original ID, do not resubmit.` : "") +
+      (options.sinceTimestamp !== undefined ? ` A completed compilation at or after ${options.sinceTimestamp} was required; asset-only refreshes may not compile.` : ""),
   };
 }
 

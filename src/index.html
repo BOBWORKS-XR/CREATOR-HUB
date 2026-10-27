@@ -13,12 +13,12 @@
   <div id="suite-dismiss" class="suite-dismiss" aria-hidden="true"></div>
   <div id="suite-shell" class="suite-shell">
   <div class="suite-brand" aria-hidden="true"><span>CREATOR</span> <strong>HUB</strong></div>
-  <button class="suite-trigger" id="suite-trigger" type="button" aria-expanded="false" aria-controls="suite-menu" aria-label="Open Creator apps" title="Creator apps"><span class="suite-mark hub-mark"><img src="creator-works-logo.png" alt=""><span class="suite-letter">H</span></span></button>
-  <nav id="suite-menu" class="suite-menu" aria-label="Creator apps" aria-hidden="true" inert>
-    <button class="suite-item current" data-view="hub" type="button" aria-current="page"><span class="suite-mark hub-mark"><img src="creator-works-logo.png" alt=""><span class="suite-letter">H</span></span><span class="suite-item-copy"><strong>Creator Hub</strong><small>Apps and projects</small></span></button>
-    <div class="suite-entry"><button class="suite-item" data-view="mcp" type="button"><span class="suite-mark"><img src="creator-works-logo.png" alt=""><span class="suite-letter">M</span></span><span class="suite-item-copy"><strong>Creator Works MCP</strong><small>AI tools for Unity</small><span id="menu-status-mcp" class="suite-item-status">Checking</span></span></button><button id="menu-download-mcp" class="suite-download hidden" type="button" title="Download latest Creator Works MCP" aria-label="Download latest Creator Works MCP"><span class="icon icon-download" aria-hidden="true"></span></button></div>
-    <div class="suite-entry"><button class="suite-item" data-view="setup" type="button"><span class="suite-mark"><img src="creator-works-logo.png" alt=""><span class="suite-letter">P</span></span><span class="suite-item-copy"><strong>Project Setup</strong><small>Unity + Creator SDK projects</small><span id="menu-status-setup" class="suite-item-status">Checking</span></span></button><button id="menu-download-setup" class="suite-download hidden" type="button" title="Download latest Project Setup" aria-label="Download latest Project Setup"><span class="icon icon-download" aria-hidden="true"></span></button></div>
-    <div class="suite-item unavailable"><span class="suite-mark converter-mark"><img src="sidequest-mark-white.svg" alt=""><span class="suite-letter">C</span></span><span class="suite-item-copy"><strong>Creator Converter</strong><small>SideQuest / Coming soon</small></span></div>
+  <button class="suite-trigger" id="suite-trigger" type="button" aria-expanded="false" aria-controls="suite-menu" aria-label="Open menu" title="Open menu"><span class="suite-menu-label"><span class="icon icon-menu" aria-hidden="true"></span><span>Menu</span></span><span class="suite-mark hub-mark suite-trigger-brand" aria-hidden="true"><img src="creator-works-logo.png" alt=""><span class="suite-letter">H</span></span></button>
+  <nav id="suite-menu" class="suite-menu" aria-label="Creator tools" aria-hidden="true" inert>
+    <button class="suite-item current" data-view="hub" type="button" aria-current="page"><span class="suite-item-copy"><strong>Home</strong><small>Projects and updates</small></span></button>
+    <div class="suite-entry"><button class="suite-item" data-view="mcp" type="button"><span class="suite-item-copy"><strong>MCP</strong><small>AI bridge for Unity</small><span id="menu-status-mcp" class="suite-item-status">Checking</span></span></button><button id="menu-download-mcp" class="suite-download hidden" type="button" title="Download latest Creator Works MCP" aria-label="Download latest Creator Works MCP"><span class="icon icon-download" aria-hidden="true"></span></button></div>
+    <div class="suite-entry"><button class="suite-item" data-view="setup" type="button"><span class="suite-item-copy"><strong>Setup / Repair</strong><small>Unity + Creator SDK project setup and repair</small><span id="menu-status-setup" class="suite-item-status">Checking</span></span></button><button id="menu-download-setup" class="suite-download hidden" type="button" title="Download latest Project Setup" aria-label="Download latest Project Setup"><span class="icon icon-download" aria-hidden="true"></span></button></div>
+    <div class="suite-item unavailable" aria-disabled="true"><span class="suite-item-copy"><strong>Creator Converter</strong><small>SideQuest / Coming soon</small></span></div>
   </nav>
   </div>
   <header class="app-header">
@@ -123,15 +123,24 @@
   <footer><span>Creator Hub <span class="footer-version">Preview</span></span><div class="footer-links"><button id="convergence-reopen" class="text-button" type="button" hidden>Review migration</button><button class="text-button" type="button" data-resource="hub-plan">Roadmap <span class="icon icon-external" aria-hidden="true"></span></button><button class="text-button" type="button" data-resource="github">GitHub <span class="icon icon-external" aria-hidden="true"></span></button><button class="text-button" type="button" data-resource="sdk-source">Creator SDK source <span class="icon icon-external" aria-hidden="true"></span></button></div></footer>
   <button id="context-help-open" class="context-help-open" type="button" aria-haspopup="dialog" aria-controls="context-help-dialog" title="Help and troubleshooting">Help</button>
   <dialog id="context-help-dialog" class="context-help-dialog" aria-labelledby="context-help-title">
-    <div class="context-help-heading"><div><h2 id="context-help-title">Creator Hub help</h2><p>What each app does and where to start.</p></div><button id="context-help-close" class="icon-button" type="button" aria-label="Close help" title="Close help">×</button></div>
+    <div class="context-help-heading"><div><h2 id="context-help-title">Creator Hub help</h2><p>What each tool does and where to start.</p></div><button id="context-help-close" class="icon-button" type="button" aria-label="Close help" title="Close help">×</button></div>
     <div class="context-help-content" id="hub-help-content">
-      <details open><summary>Which app do I need?</summary><p><strong>Creator Hub</strong> brings your Creator tools and Unity projects together. <strong>Project Setup</strong> creates and validates a Creator SDK project. <strong>Creator Works MCP</strong> connects a supported AI client to Unity tools. Setup is not the MCP.</p></details>
-      <details><summary>An app says Not installed</summary><p>Choose its download/install action in Apps. Hub checks the release and verifies the download before asking you to approve installation. Unity Editor licensing and sign-in remain with Unity.</p></details>
+      <details open><summary>Which tool do I need?</summary><p><strong>Creator Hub</strong> brings your Creator tools and Unity projects together. <strong>Project Setup</strong> creates and validates a Creator SDK project. <strong>Creator Works MCP</strong> connects a supported AI client to Unity tools. Setup is not the MCP.</p></details>
+      <details><summary>MCP or Setup is unavailable</summary><p>In unified Creator Hub, MCP and Project Setup are included. Open them from the Creator tools menu; no separate app installation is needed. Read any error shown and check for a Creator Hub update. Unity Editor licensing and sign-in remain with Unity.</p></details>
       <details><summary>My AI cannot see MCP tools</summary><p>Open Creator Works MCP and use its Connection guide when available, or check the existing client setup controls. Claude Code and Claude Desktop are separate clients; the Claude website is not Claude Desktop. Compatible MCP builds offer Desktop configuration on Windows and macOS, not Linux. Fully quit and reopen a changed client, then ask your AI to call get_bridge_status. Saved settings alone do not prove a live connection. The AI model and billing come from your chosen client/provider, not MCP.</p></details>
       <details><summary>AI token or usage costs are high</summary><p>Charges depend on your AI provider, client and model. Check provider billing and usage limits, reduce unnecessary context, disable fast/high-cost modes where available, and try a less expensive model for routine MCP tasks. MCP cannot set or cap your provider’s charges.</p></details>
       <details><summary>Something failed</summary><p>Read the message shown in the app first. Retry discovery for app status, or refresh the relevant list. For project operations, close the project in Unity when asked and keep a separate backup. Include the app version and its local log when reporting a problem; remove private project paths or credentials first.</p></details>
     </div>
     <div class="context-help-content" id="feature-help-content" hidden></div>
+    <div class="context-help-content" id="security-help-content">
+      <details id="defender-help"><summary>Windows Defender blocks or quarantines a component</summary>
+        <p>If Microsoft Defender blocks or quarantines a Hub, MCP or Setup component, stop the affected operation and leave the file quarantined while it is reviewed. Do not assume a false positive or restore or allow an unknown file.</p>
+        <p>In Windows Security, open <strong>Virus &amp; threat protection &gt; Protection history</strong>. Record the exact detection name, affected file path, time, app/component version and build, and download source. Update Defender security intelligence (definitions) under <strong>Virus &amp; threat protection &gt; Protection updates &gt; Check for updates</strong>, then report the details to the developer. Remove credentials and unrelated private information from the report.</p>
+        <p>An unsigned-app or SmartScreen &quot;unrecognized app&quot; reputation warning is different from a malware or Trojan detection. Check the exact message; a familiar app name or a reputation warning does not prove a file is safe.</p>
+        <p>Do not disable Defender or add ignore/exclusion rules for Node.js, PowerShell, Unity, projects or app folders. Microsoft advises reviewing and classifying detections before considering exclusions; exclusions reduce protection.</p>
+        <p><button class="text-button" type="button" data-resource="defender-detections">Microsoft: investigate detections <span class="icon icon-external" aria-hidden="true"></span></button><br><button class="text-button" type="button" data-resource="windows-security">Microsoft: Windows Security guidance <span class="icon icon-external" aria-hidden="true"></span></button></p>
+      </details>
+    </div>
   </dialog>
   <script src="native.js"></script>
   <script src="hosted.js"></script>
@@ -161,6 +170,11 @@
       <li>Back up settings, add missing projects without duplicates, and keep your current preferences and selection.</li>
       <li>Reconnect recognised AI setups to Hub without changing your other MCP connections.</li>
       <li>Remove recognised old app launchers only after checks pass. Keep settings, Unity projects and required runtime files.</li>
+    </ul>
+    <ul id="convergence-import-explanation" hidden>
+      <li>Back up both original settings files before changing anything.</li>
+      <li>Add missing projects by folder, without duplicates. Keep current preferences and the selected project.</li>
+      <li>Leave Unity projects, AI connections and installed apps unchanged.</li>
     </ul>
     <p id="convergence-progress" role="status" aria-live="polite" hidden></p>
     <details id="convergence-backups"><summary>Backup and retained-state details</summary><ul id="convergence-details"></ul></details>

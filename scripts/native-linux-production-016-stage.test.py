@@ -25,6 +25,8 @@ HERE = Path(__file__).resolve().parent
 spec = importlib.util.spec_from_file_location("production_stage", HERE / "native-linux-production-016-stage.py")
 P = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(P)
+PRODUCTION_PRIVATE = {"sourceCommit": "a89ed2b90278b33bebd0b4ba29d87904d2fe683b", "runId": 40400463940, "runAttempt": 1}
+FORMER_PRIVATE = {"sourceCommit": "52e3a537c9d323c81ab259cb82b44bbe0828b414", "runId": 39326776585, "runAttempt": 1}
 
 
 def pin(raw):
@@ -84,7 +86,7 @@ class Fixture:
                    "rootFeature": "linux-production-migration", "helperFeature": "production-transaction", "profile": P.COHORT, "productionContract": contract,
                    "files": {"/" + P.S.DEB_MEMBERS[name]: {**self.p["pins"][name], "mode": mode, "uid": 0, "gid": 0} for name, mode in (("helper", 0o755), ("policy", 0o644))}, **flags}
         self.receipt = {"schemaVersion": 1, "product": "com.creatorworks.hub.unix-signed-assembly", "platform": "linux", "arch": "x86_64", "hubVersion": "0.1.16",
-                        "assemblyCommit": self.p["assembly"]["sourceCommit"], "privateSource": dict(P.PRIVATE), "handoffSha256": "d" * 64,
+                        "assemblyCommit": self.p["assembly"]["sourceCommit"], "privateSource": dict(PRODUCTION_PRIVATE), "handoffSha256": "d" * 64,
                         "compiledFeatures": list(P.FEATURES), "mcpMode": "writable", "privateModulesRecompiled": False, "privateModulesResigned": False,
                         "nativeGuiAccepted": False, "releaseReady": False,
                         "productionMigration": {"schemaVersion": 1, "profile": P.COHORT, "sourceCommit": self.p["assembly"]["sourceCommit"],
@@ -102,7 +104,7 @@ class Fixture:
         self.control = tar([("control", control, 0o644, tarfile.REGTYPE), ("md5sums", b"", 0o644, tarfile.REGTYPE)])
         self.legacy = {}
         self.api = {"schemaVersion": 1, "cohort": P.COHORT, "harnessSource": "f" * 40, "assembly": self.p["assembly"],
-                    "privatePayload": dict(P.PRIVATE), "privateSourcePaths": {key: "9" * 40 for key in P.PRIVATE_PATHS}, "legacy": [], **P.FLAGS}
+                    "privatePayload": dict(PRODUCTION_PRIVATE), "privateSourcePaths": {key: "9" * 40 for key in P.PRIVATE_PATHS}, "legacy": [], **P.FLAGS}
         for product, repo, tag, name in (("mcp", "CREATOR-WORKS-UNITY-MCP", "v2.7.7", "Creator.Works.MCP_2.7.7_amd64.deb"),
                 ("setup", "CREATOR-PROJECT-SETUP", "v0.3.7", "Creator.Project.Setup_0.3.7_amd64.deb")):
             body = ("synthetic original " + product).encode()
@@ -169,6 +171,31 @@ class ProductionStageTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         return Fixture(Path(temporary.name).resolve())
 
+    def test_production_private_identity_is_distinct_from_the_preserved_neutral_source(self):
+        self.assertEqual(P.PRIVATE, PRODUCTION_PRIVATE)
+        self.assertEqual(P.S.PRIVATE_SOURCE, FORMER_PRIVATE["sourceCommit"])
+
+    def test_former_private_payload_and_wrong_attempt_api_evidence_refuse_before_staging(self):
+        for identity in (FORMER_PRIVATE, {**PRODUCTION_PRIVATE, "sourceCommit": FORMER_PRIVATE["sourceCommit"]},
+                         {**PRODUCTION_PRIVATE, "runId": FORMER_PRIVATE["runId"]}, {**PRODUCTION_PRIVATE, "runAttempt": 2}):
+            with self.subTest(identity=identity):
+                f = self.fixture()
+                f.api["privatePayload"] = dict(identity)
+                with patch.object(P, "inspect_stage", side_effect=AssertionError("Refuse before staging")) as inspect:
+                    with self.assertRaisesRegex(RuntimeError, "Production API/source binding differs"):
+                        f.inspect()
+                    inspect.assert_not_called()
+
+    def test_former_private_receipt_and_wrong_attempt_refuse_with_current_api_evidence(self):
+        for identity in (FORMER_PRIVATE, {**PRODUCTION_PRIVATE, "runAttempt": 2}):
+            with self.subTest(identity=identity):
+                f = self.fixture()
+                f.receipt["privateSource"] = dict(identity)
+                f.repack()
+                with self.assertRaises(subprocess.CalledProcessError):
+                    f.inspect()
+                self.assertFalse((f.output / "binding.json").exists())
+
     def test_real_pure_verifiers_bind_synthetic_archive_package_resources_and_both_root_proofs(self):
         f = self.fixture()
         binding = f.inspect()
@@ -177,6 +204,7 @@ class ProductionStageTests(unittest.TestCase):
         self.assertEqual(binding["productionProof"]["rawHub"], f.p["pins"]["rawHub"])
         self.assertEqual(binding["productionProof"]["hub"], f.p["pins"]["hub"])
         self.assertEqual(binding["productionProof"]["sourceTree"], f.p["assembly"]["sourceTree"])
+        self.assertEqual(binding["api"]["privatePayload"], PRODUCTION_PRIVATE)
         for key in P.FLAGS:
             self.assertIs(binding[key], False)
         self.assertFalse((f.output / "binding.json").exists())  # only guarded main publishes it

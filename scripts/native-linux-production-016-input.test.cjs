@@ -8,6 +8,7 @@ const crypto = require('node:crypto');
 const L = require('./native-linux-production-016-input.cjs');
 const old = require('./native-linux-016-input.cjs');
 const retirement = require('./linux-retirement-package.cjs');
+const PRODUCTION_PRIVATE = { sourceCommit: 'a89ed2b90278b33bebd0b4ba29d87904d2fe683b', runId: 40400463940, runAttempt: 1 };
 const clone = x => JSON.parse(JSON.stringify(x));
 const hash = b => crypto.createHash('sha256').update(b).digest('hex');
 const pin = b => ({ size: b.length, sha256: hash(b) });
@@ -25,7 +26,7 @@ function fixture() {
     rootFeature: 'linux-production-migration', helperFeature: 'production-transaction', profile: L.COHORT,
     productionContract: clone(retirement.PRODUCTION_CONTRACT), files, ...retirement.FLAGS };
   const receipt = { schemaVersion: 1, product: 'com.creatorworks.hub.unix-signed-assembly', platform: 'linux', arch: 'x86_64', hubVersion: '0.1.16',
-    assemblyCommit: p.assembly.sourceCommit, privateSource: { ...old.PRIVATE }, handoffSha256: 'd'.repeat(64), compiledFeatures: [...L.FEATURES],
+    assemblyCommit: p.assembly.sourceCommit, privateSource: { ...PRODUCTION_PRIVATE }, handoffSha256: 'd'.repeat(64), compiledFeatures: [...L.FEATURES],
     portableHostBuild: { schemaVersion: 1, version: '0.1.16', target: 'x86_64-unknown-linux-gnu', sourceCommit: p.assembly.sourceCommit,
       sourceTree: p.assembly.sourceTree, compiledFeatures: [...L.FEATURES], startupImageBinding: 1, rawHub: p.pins.rawHub },
     productionMigration: { schemaVersion: 1, profile: L.COHORT, sourceCommit: p.assembly.sourceCommit, sourceTree: p.assembly.sourceTree,
@@ -39,6 +40,40 @@ function context() {
     GITHUB_EVENT_NAME: c.eventName, GITHUB_REF: c.ref, GITHUB_SHA: c.sha, RUNNER_ENVIRONMENT: 'github-hosted', RUNNER_OS: 'Linux', RUNNER_ARCH: 'X64' };
   return { c, env };
 }
+test('production pins its own private payload and rejects the former payload receipt', () => {
+  assert.deepEqual(L.PRIVATE, PRODUCTION_PRIVATE);
+  assert.ok(Object.isFrozen(L.PRIVATE));
+  assert.deepEqual(old.PRIVATE, { sourceCommit: '52e3a537c9d323c81ab259cb82b44bbe0828b414', runId: 39326776585, runAttempt: 1 });
+  const { p, receipt } = fixture();
+  L.proofs(receipt, p);
+  for (const privateSource of [old.PRIVATE, { ...PRODUCTION_PRIVATE, sourceCommit: old.PRIVATE.sourceCommit },
+    { ...PRODUCTION_PRIVATE, runId: old.PRIVATE.runId }, { ...PRODUCTION_PRIVATE, runAttempt: 2 }]) {
+    assert.throws(() => L.proofs({ ...receipt, privateSource }, p), { code: 'ERR_ASSERTION' });
+  }
+});
+test('production requests the new producer and rejects former or wrong-attempt API evidence before assembly access', async () => {
+  const { c, env } = context(), p = fixture().p;
+  const boundary = new Error('Private producer accepted; stop before assembly access');
+  for (const identity of [PRODUCTION_PRIVATE, old.PRIVATE, { ...PRODUCTION_PRIVATE, runAttempt: 2 }]) {
+    const calls = [];
+    const repository = { id: 1364807512, full_name: 'BOBWORKS-XR/CREATOR-HUB' };
+    const github = { rest: { actions: { async getWorkflowRun({ run_id }) {
+      calls.push(run_id);
+      if (calls.length > 1) throw boundary;
+      return { data: { id: identity.runId, head_sha: identity.sourceCommit, run_attempt: identity.runAttempt,
+        status: 'completed', conclusion: 'success', path: '.github/workflows/unix-managed-payload.yml',
+        head_branch: 'validation/unix-payload-016', event: 'push', repository, head_repository: repository } };
+    } } } };
+    const result = L.run({ github, context: c, env, profile: JSON.stringify(p) });
+    if (identity === PRODUCTION_PRIVATE) {
+      await assert.rejects(result, error => error === boundary);
+      assert.deepEqual(calls, [PRODUCTION_PRIVATE.runId, p.assembly.runId]);
+    } else {
+      await assert.rejects(result, { code: 'ERR_ASSERTION' });
+      assert.deepEqual(calls, [PRODUCTION_PRIVATE.runId]);
+    }
+  }
+});
 test('production schema is distinct, bounded and documents every exact pin', () => {
   const { p } = fixture(); L.validate(p); L.validate({ ...p, mode: 'migration-cancel' });
   const schema = JSON.parse(fs.readFileSync(path.join(__dirname, 'native-linux-production-016-input.schema.json')));
@@ -120,9 +155,13 @@ test('invalid invocation or historical branch refuses before read-only API acces
 });
 test('API commit tree and unchanged private source identities are separately verified', async () => {
   const { p } = fixture();
+  const commits = [];
   const ids = { original: '0'.repeat(40), current: p.assembly.sourceTree, modules: '2'.repeat(40), native: '3'.repeat(40), src: '4'.repeat(40), nested: '5'.repeat(40) };
   const github = { rest: { git: {
-    async getCommit({ commit_sha }) { return { data: { sha: commit_sha, tree: { sha: commit_sha === old.PRIVATE.sourceCommit ? ids.original : ids.current } } }; },
+    async getCommit({ commit_sha }) {
+      commits.push(commit_sha);
+      return { data: { sha: commit_sha, tree: { sha: commit_sha === PRODUCTION_PRIVATE.sourceCommit ? ids.original : ids.current } } };
+    },
     async getTree({ tree_sha }) {
       let tree;
       if ([ids.original, ids.current].includes(tree_sha)) tree = [['modules', ids.modules], ['native', ids.native], ['src-tauri', ids.src]].map(([path, sha]) => ({ path, sha, type: 'tree' }));
@@ -134,6 +173,7 @@ test('API commit tree and unchanged private source identities are separately ver
     },
   } } };
   assert.deepEqual(Object.keys(await L.sourceBinding(github, p.assembly)), old.PRIVATE_PATHS);
+  assert.deepEqual(commits, [p.assembly.sourceCommit, PRODUCTION_PRIVATE.sourceCommit, p.assembly.sourceCommit]);
   await assert.rejects(L.sourceBinding(github, { ...p.assembly, sourceTree: '9'.repeat(40) }));
   const saved = github.rest.git.getTree;
   github.rest.git.getTree = async args => {

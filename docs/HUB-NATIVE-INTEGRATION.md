@@ -146,9 +146,14 @@ The target is one product and interface, not an artificial single-process limit.
 - MCP and Setup render as ordinary Hub pages, without feature iframes, imported
   standalone documents, nested navigation, independent app updater controls or
   another application permission prompt just to select a page.
-- Preserve the existing font/icons. One Hub shell owns navigation, terms, help
+- Keep one Hub shell for navigation, terms, help
   and platform labeling. Pages retain form state across navigation; IDs, styles,
   events, timers, errors and busy state cannot leak between pages.
+- Navigation revision requested 2026-10-27: a labelled hamburger Menu trigger,
+  Creator Hub wordmark and Hub logo in the expanded header, and text-only Home,
+  MCP, Setup / Repair and Creator Converter entries. Bundle the navigation font
+  locally; keep system-font form/body text, clear current-page state, keyboard
+  navigation, short-window scrolling and reduced-motion support.
 - One Refresh action causes one operation. Navigation or duplicate clicks cannot
   restart work. Close/update remains blocked during active work; cancellation and
   failure leave a visible, retryable state without forced process termination.

@@ -14,6 +14,7 @@
       || (value.retirementAvailable !== undefined && typeof value.retirementAvailable !== 'boolean')
       || (value.streamlined !== undefined && typeof value.streamlined !== 'boolean')
       || (value.moveAvailable !== undefined && typeof value.moveAvailable !== 'boolean')
+      || (value.settingsImportAvailable !== undefined && typeof value.settingsImportAvailable !== 'boolean')
       || (value.recoveryHelp != null && !text(value.recoveryHelp, 16384))
       || (value.reviewKey != null && (typeof value.reviewKey !== 'string' || !/^[a-f0-9]{64}$/.test(value.reviewKey)))
       || (value.stage === 'complete' && (value.required || value.retirementAvailable === true || value.legacyApps.length))) {
@@ -22,6 +23,7 @@
     return { enabled: value.enabled, required: value.required, stage: value.stage,
       streamlined: value.streamlined === true,
       moveAvailable: value.moveAvailable !== false,
+      settingsImportAvailable: value.settingsImportAvailable === true,
       settings: [...value.settings], backups: [...value.backups], message: value.message,
       reviewKey: value.reviewKey || null,
       recoveryHelp: value.recoveryHelp || null,
@@ -52,7 +54,7 @@
       let current, initialError;
       try { current = report(await native.invoke('convergence_status')); }
       catch (reason) { initialError = reason; }
-      if (!initialError && (!current.enabled || !current.required)) {
+      if (!initialError && (!current.enabled || (!current.required && !current.settingsImportAvailable && !current.recoveryHelp))) {
         const reopen = resumeButton || (current.streamlined && document.querySelector('#convergence-reopen'));
         if (reopen) { reopen.hidden = true; reopen.style?.setProperty('display', 'none'); }
         active = undefined; resolve(); return;
@@ -76,9 +78,12 @@
       if (Object.values(elements).some(node => !node)) throw new Error('The migration guide is unavailable. Existing apps are kept.');
       const { dialog, title, summary, details, error, prepare, connections, retire, refresh, later } = elements;
       const streamlined = current?.streamlined === true || (!current && native.integratedFeatures === true);
+      const settingsOnly = current?.required === false && current.settingsImportAvailable;
+      if (reopen) reopen.textContent = settingsOnly ? 'Review saved MCP settings' : 'Review migration';
       const move = streamlined && document.querySelector('#convergence-move');
       const progress = streamlined && document.querySelector('#convergence-progress');
       const explanation = document.querySelector('#convergence-explanation');
+      const importExplanation = document.querySelector('#convergence-import-explanation');
       const backupDetails = document.querySelector('#convergence-backups');
       const recovery = document.querySelector('#convergence-recovery');
       const recoveryText = document.querySelector('#convergence-recovery-text');
@@ -116,7 +121,7 @@
         details.replaceChildren(...rows.map(value => {
           const item = document.createElement('li'); item.textContent = value; return item;
         }));
-        const writable = current?.enabled === true && current.required === true;
+        const writable = current?.enabled === true && (current.required === true || (settingsOnly && current.settingsImportAvailable));
         prepare.hidden = stage !== 'review';
         connections.hidden = stage !== 'backed-up';
         retire.hidden = stage !== 'connections-reviewed' || !current?.retirementAvailable;
@@ -135,7 +140,8 @@
           copyRecovery.disabled = busy || recovery.hidden;
           copyStatus.textContent = '';
         }
-        if (streamlined) {
+        if (importExplanation) importExplanation.hidden = !settingsOnly || stage !== 'review';
+        if (streamlined && !settingsOnly) {
           title.textContent = stage === 'complete' ? 'Move complete' : current?.recoveryHelp ? 'Migration needs review' : 'Move to Hub';
           summary.textContent = stage === 'complete' ? 'Your existing setup is now managed in Creator Hub.'
             : current?.recoveryHelp ? 'Settings and backups are kept. Migration has not completed.'
@@ -152,6 +158,23 @@
             connections: 'Moving existing connections...', cleanup: 'Checking standalone app cleanup...' };
           progress.textContent = busy ? phases[phase] || phases.review : stopped ? '' : result || (stage !== 'review' || !current?.moveAvailable ? current?.message || '' : '');
           progress.hidden = !progress.textContent;
+        }
+        if (settingsOnly) {
+          const imported = stage === 'backed-up' && !current.settingsImportAvailable;
+          title.textContent = imported ? 'Saved MCP projects imported' : 'Import saved MCP projects';
+          summary.textContent = imported
+            ? 'Current preferences and project selection were kept. Original settings are backed up.'
+            : 'Combine your saved MCP project lists while keeping your current preferences.';
+          if (explanation) explanation.hidden = true;
+          if (backupDetails) backupDetails.hidden = !details.childElementCount;
+          if (move) move.hidden = true;
+          if (progress) progress.hidden = true;
+          connections.hidden = retire.hidden = true;
+          prepare.hidden = imported || !current?.settingsImportAvailable;
+          prepare.textContent = 'Back up and import projects';
+          refresh.hidden = imported || (error.hidden && current.settingsImportAvailable);
+          refresh.textContent = 'Check again';
+          later.textContent = imported ? 'Continue in Hub' : reminderSaveFailed ? 'Continue without saving reminder' : 'Not now';
         }
       }
       function release() {
@@ -174,7 +197,8 @@
       function laterClick(event) {
         event.preventDefault();
         if (ended || busy || later.disabled || !dialog.open) return;
-        if (current?.stage !== 'complete' && current?.reviewKey && reopen && !reminderSaveFailed) {
+        const imported = settingsOnly && current?.stage === 'backed-up' && !current.settingsImportAvailable;
+        if (current?.stage !== 'complete' && !imported && current?.reviewKey && reopen && !reminderSaveFailed) {
           try {
             window.localStorage.setItem(REMINDER, JSON.stringify({ schemaVersion: 1, reviewKey: current.reviewKey }));
             if (!reminderMatches(current.reviewKey)) throw new Error('Reminder readback failed');
@@ -184,7 +208,7 @@
             render(); return;
           }
         }
-        if (current?.stage === 'complete' && reopen) {
+        if ((current?.stage === 'complete' || imported) && reopen) {
           reopen.hidden = true;
           reopen.style?.setProperty('display', 'none');
         }
@@ -194,7 +218,7 @@
       }
       async function change(command, from, to) {
         if (ended || busy || !dialog.open || current?.stage !== from
-          || current.enabled !== true || current.required !== true) return;
+          || current.enabled !== true || (!current.required && !(settingsOnly && current.settingsImportAvailable))) return;
         if (window.CreatorHubNative !== native || native.convergencePersistence !== true) {
           showError('Native migration support changed. Existing apps are kept.'); return;
         }
@@ -202,6 +226,7 @@
         try {
           const next = report(await native.invoke(command));
           if (![from, to].includes(next.stage)) throw new Error('The native migration phase changed unexpectedly. Review again before continuing.');
+          if (settingsOnly && (next.required || (next.stage === 'backed-up' && next.settingsImportAvailable))) throw new Error('Settings import could not be verified. Check retained settings before continuing.');
           current = next;
         } catch (reason) { showError(reason); }
         finally { busy = false; render(); }

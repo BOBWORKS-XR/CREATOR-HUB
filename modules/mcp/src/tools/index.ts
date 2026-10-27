@@ -1119,7 +1119,7 @@ Use after writing multiple files to force Unity to import them.`,
     {
       name: "wait_for_unity_compile",
       description: `Wait until Unity is no longer compiling or updating assets.
-Waits through stale heartbeat/domain reload up to timeoutMs; requires a fresh settled Editor and completed compilation. Returns compiler diagnostics. A timeout does not cancel pending commands; poll their original IDs instead of resubmitting.`,
+Waits through stale heartbeat/domain reload up to timeoutMs; requires a fresh settled Editor and completed compilation. Does not request a refresh. Use afterCommandId from refresh_unity_assets to wait for that command, and sinceTimestamp=refreshRequestedAt to require a compilation completed after the refresh request (for C# changes). Without these boundaries this is only an idle-state check, not proof newly written files compiled. A timeout does not cancel pending commands; poll their original IDs instead of resubmitting.`,
       inputSchema: {
         type: "object",
         properties: {
@@ -1129,6 +1129,15 @@ Waits through stale heartbeat/domain reload up to timeoutMs; requires a fresh se
             maximum: 120000,
             default: 30000,
             description: "Maximum time to wait for Unity to settle",
+          },
+          afterCommandId: {
+            type: "string",
+            description: "UUID returned by a refresh command in the selected project. Require successful completion and a subsequent Editor heartbeat; never resubmit it.",
+          },
+          sinceTimestamp: {
+            type: "integer",
+            minimum: 0,
+            description: "Unix milliseconds, e.g. refreshRequestedAt. Require a completed compilation at or after this boundary. Asset-only refreshes may not compile and can time out with this option.",
           },
         },
       },
@@ -1445,7 +1454,7 @@ Requires BanterMCPBridge extension.`,
           },
           componentId: {
             type: "string",
-            description: "Preferred when duplicate component types exist: source component globalObjectId",
+            description: "Source component globalObjectId for duplicate types. Also supply its owning GameObject through objectId or objectPath; componentId alone is not an owner selector.",
           },
           propertyName: {
             type: "string",
@@ -2070,7 +2079,8 @@ export async function handleToolCall(
     case "wait_for_unity_compile":
       result = await waitForUnityCompile(
         args.timeoutMs as number | undefined,
-        config
+        config,
+        { afterCommandId: args.afterCommandId as string | undefined, sinceTimestamp: args.sinceTimestamp as number | undefined }
       );
       break;
 
@@ -2476,6 +2486,7 @@ async function refreshUnityAssets(
   assetPath: string | undefined,
   config: BanterMCPConfig
 ): Promise<unknown> {
+  const refreshRequestedAt = Date.now();
   const result = await sendUnityCommand({
     type: "refresh",
     path: assetPath || null,
@@ -2485,6 +2496,9 @@ async function refreshUnityAssets(
   return {
     ...commandResponse(result, "Unity asset refresh requested."),
     path: assetPath || "all assets",
+    refreshRequestedAt,
+    nextAction: { tool: "wait_for_unity_compile", arguments: { afterCommandId: result.commandId } },
+    compilationNote: "For C# changes, also pass sinceTimestamp=refreshRequestedAt to require a newer completed compilation. Refresh acknowledgement alone does not prove compilation finished.",
   };
 }
 
@@ -4028,6 +4042,9 @@ async function setObjectReference(
   targetComponent: string | undefined,
   config: BanterMCPConfig
 ): Promise<unknown> {
+  if (![objectId, objectPath].some(value => typeof value === "string" && value.trim().length > 0)) {
+    return { success: false, error: "set_object_reference requires the owning GameObject's objectId or objectPath; componentId alone is not an owner selector. No command was sent." };
+  }
   const command = {
     type: "set_object_reference",
     objectId: objectId || null,

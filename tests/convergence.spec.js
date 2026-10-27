@@ -1,7 +1,7 @@
 const { test, expect } = require('@playwright/test');
 
-async function load(page, { required = true, failPrepare = false, holdPrepare = false, retirementReady = false, pauseRetirement = false, reviewKey = 'a'.repeat(64), streamlined = false, failPhase = '', nativeCancel = false, holdMove = false, uncertain = false, invalidComplete = false, initialRecovery = null } = {}) {
-  await page.addInitScript(({ required, failPrepare, holdPrepare, retirementReady, pauseRetirement, reviewKey, streamlined, failPhase, nativeCancel, holdMove, uncertain, invalidComplete, initialRecovery }) => {
+async function load(page, { required = true, failPrepare = false, holdPrepare = false, retirementReady = false, pauseRetirement = false, reviewKey = 'a'.repeat(64), streamlined = false, failPhase = '', nativeCancel = false, holdMove = false, uncertain = false, invalidComplete = false, initialRecovery = null, settingsImportAvailable = false } = {}) {
+  await page.addInitScript(({ required, failPrepare, holdPrepare, retirementReady, pauseRetirement, reviewKey, streamlined, failPhase, nativeCancel, holdMove, uncertain, invalidComplete, initialRecovery, settingsImportAvailable }) => {
     localStorage.setItem('creator-usage-terms.hub', JSON.stringify({ policyVersion: '2026-09-28-v1', acceptedAt: '2026-09-28T00:00:00.000Z' }));
     localStorage.setItem('creator-hub.auto-download', 'false');
     window.__CREATOR_HUB_CONVERGENCE_PROTOCOL__ = 1;
@@ -12,7 +12,7 @@ async function load(page, { required = true, failPrepare = false, holdPrepare = 
       legacyApps: required ? [{ name: 'Creator Works MCP', path: 'C:/fixture-only/Creator Works MCP/launcher.exe' }] : [],
       backups: [], retirementAvailable: false, message: 'Your saved projects and settings stay where they are.',
       reviewKey,
-      streamlined, moveAvailable: !initialRecovery, recoveryHelp: initialRecovery,
+      streamlined, moveAvailable: !initialRecovery, recoveryHelp: initialRecovery, settingsImportAvailable,
     };
     window.__TAURI__ = {
       event: { listen: async (name, callback) => {
@@ -49,7 +49,7 @@ async function load(page, { required = true, failPrepare = false, holdPrepare = 
         if (command === 'prepare_convergence') {
           if (holdPrepare) await new Promise(resolve => { window.releasePrepare = resolve; });
           if (failPrepare) throw Error('Settings changed; original retained.');
-          window.report = { ...window.report, stage: 'backed-up', backups: ['C:/fixture-only/exact-before-image.bak'], message: 'Backups verified. Review existing AI connections.' };
+          window.report = { ...window.report, stage: 'backed-up', settingsImportAvailable: false, backups: ['C:/fixture-only/exact-before-image.bak'], message: 'Backups verified. Review existing AI connections.' };
           return window.report;
         }
         if (command === 'migrate_convergence_connections') {
@@ -75,9 +75,63 @@ async function load(page, { required = true, failPrepare = false, holdPrepare = 
         return null;
       } },
     };
-  }, { required, failPrepare, holdPrepare, retirementReady, pauseRetirement, reviewKey, streamlined, failPhase, nativeCancel, holdMove, uncertain, invalidComplete, initialRecovery });
+  }, { required, failPrepare, holdPrepare, retirementReady, pauseRetirement, reviewKey, streamlined, failPhase, nativeCancel, holdMove, uncertain, invalidComplete, initialRecovery, settingsImportAvailable });
   await page.goto('http://127.0.0.1:4188');
 }
+
+for (const width of [940, 390]) test(`settings-only upgrades have a visible import path without old installed apps at ${width}px`, async ({ page }, testInfo) => {
+  await page.setViewportSize({ width, height: 640 });
+  await load(page, { required: false, streamlined: true, settingsImportAvailable: true });
+  const dialog = page.locator('#convergence-dialog');
+  await expect(dialog).toBeVisible();
+  await expect(page.locator('#convergence-title')).toHaveText('Import saved MCP projects');
+  await expect(page.locator('#convergence-import-explanation')).toBeVisible();
+  await expect(page.locator('#convergence-explanation, #convergence-move, #convergence-connections, #convergence-retire')).toHaveCount(4);
+  for (const id of ['explanation', 'move', 'connections', 'retire']) await expect(page.locator(`#convergence-${id}`)).toBeHidden();
+  await page.screenshot({ path: testInfo.outputPath('settings-only-import.png') });
+  await page.getByRole('button', { name: 'Back up and import projects', exact: true }).click();
+  await expect(page.locator('#convergence-title')).toHaveText('Saved MCP projects imported');
+  await page.getByRole('button', { name: 'Continue in Hub', exact: true }).click();
+  await expect(dialog).toBeHidden();
+  expect(await page.evaluate(() => window.calls.filter(call => /^(prepare_convergence|move_to_hub|migrate_convergence_connections|retire_convergence_apps)$/.test(call.command)).map(call => call.command))).toEqual(['prepare_convergence']);
+  // Simulate a restart's now-identical native settings result, not a renderer completion marker.
+  await page.evaluate(() => { window.report = { ...window.report, stage: 'review', settingsImportAvailable: false }; });
+  await page.evaluate(() => window.CreatorConvergence.run());
+  await expect(dialog).toBeHidden();
+  await expect(page.locator('#convergence-reopen')).toBeHidden();
+});
+
+test('settings-only import can be postponed and reopened without triggering connection migration', async ({ page }) => {
+  await load(page, { required: false, streamlined: true, settingsImportAvailable: true, failPrepare: true });
+  await page.getByRole('button', { name: 'Not now', exact: true }).click();
+  await expect(page.locator('#convergence-dialog')).toBeHidden();
+  await page.getByRole('button', { name: 'Review saved MCP settings', exact: true }).click();
+  await page.getByRole('button', { name: 'Back up and import projects', exact: true }).click();
+  await expect(page.locator('#convergence-error')).toContainText('Settings changed; original retained.');
+  await expect(page.getByRole('button', { name: 'Not now', exact: true })).toBeEnabled();
+  await page.getByRole('button', { name: 'Not now', exact: true }).click();
+  expect(await page.evaluate(() => window.calls.filter(call => ['move_to_hub', 'migrate_convergence_connections', 'retire_convergence_apps'].includes(call.command)))).toEqual([]);
+});
+
+for (const required of [false, true]) test(`settings import recovery survives dismissal and reload with required=${required}`, async ({ page }) => {
+  const recovery = 'Settings import needs review. Retained transaction: C:/fixture-only/creator-works-mcp/.creator-hub-product-settings';
+  await load(page, { required, streamlined: true, uncertain: true, initialRecovery: recovery });
+  await expect(page.locator('#convergence-title')).toHaveText('Migration needs review');
+  await expect(page.locator('#convergence-recovery-text')).toHaveValue(recovery);
+  await expect(page.locator('#convergence-move')).toBeHidden();
+  await page.locator('#convergence-later').click();
+  await page.reload();
+  await expect(page.locator('#convergence-reopen')).toBeVisible();
+  await expect(page.locator('#convergence-dialog')).toBeHidden();
+  await page.locator('#convergence-reopen').click();
+  await expect(page.locator('#convergence-recovery-text')).toHaveValue(recovery);
+  await page.locator('#convergence-refresh').click();
+  await expect(page.locator('#convergence-recovery-text')).toHaveValue(recovery);
+  for (const id of ['move', 'prepare', 'connections', 'retire']) await expect(page.locator(`#convergence-${id}`)).toBeHidden();
+  expect(await page.evaluate(() => window.calls.filter(call => /^(prepare_convergence|move_to_hub|migrate_convergence_connections|retire_convergence_apps)$/.test(call.command)))).toEqual([]);
+  await page.locator('#convergence-later').click();
+  await expect(page.locator('#convergence-dialog')).toBeHidden();
+});
 
 for (const width of [1100, 390]) test(`deferred migration survives reload and can be reopened at ${width}px`, async ({ page }, testInfo) => {
   await page.setViewportSize({ width, height: 844 });

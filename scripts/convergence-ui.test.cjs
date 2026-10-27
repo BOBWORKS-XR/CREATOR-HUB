@@ -26,7 +26,7 @@ function fixture(handler = () => report(), capability = true, storage = new Map(
     focus() { document.activeElement = this; }
   }
   const elements = Object.fromEntries(['dialog', 'title', 'summary', 'details', 'error', 'prepare', 'connections', 'retire', 'refresh', 'later', 'reopen',
-    'move', 'progress', 'explanation', 'backups', 'recovery', 'recovery-text', 'copy-recovery', 'copy-status'].map(id => [id, new Element()]));
+    'move', 'progress', 'explanation', 'import-explanation', 'backups', 'recovery', 'recovery-text', 'copy-recovery', 'copy-status'].map(id => [id, new Element()]));
   const main = new Element(), alreadyLocked = new Element(), focus = new Element(); alreadyLocked.inert = true;
   const calls = []; let lookups = 0;
   const document = { body: { children: [main, elements.dialog, alreadyLocked] }, activeElement: focus,
@@ -48,6 +48,82 @@ function fixture(handler = () => report(), capability = true, storage = new Map(
 
 test('loading the controller performs no reads, mutations or modal work', () => {
   const f = fixture(); assert.deepEqual(f.calls, []); assert.equal(f.lookups(), 0); assert.equal(f.elements.dialog.shown, 0);
+});
+
+test('settings-only conflict exposes backed-up import without client migration or retirement', async () => {
+  let value = report({ required: false, streamlined: true, legacyApps: [], settingsImportAvailable: true });
+  const f = fixture(command => {
+    if (command === 'prepare_convergence') value = { ...value, stage: 'backed-up', settingsImportAvailable: false, backups: ['original.bak'] };
+    return value;
+  });
+  const done = f.window.CreatorConvergence.run(); await tick();
+  assert.equal(f.elements.dialog.open, true);
+  assert.equal(f.elements.title.textContent, 'Import saved MCP projects');
+  assert.equal(f.elements.prepare.disabled, false);
+  assert.equal(f.elements.prepare.hidden, false);
+  assert.equal(f.elements.move.hidden, true);
+  assert.equal(f.elements.connections.hidden, true);
+  assert.equal(f.elements.retire.hidden, true);
+  f.click('prepare'); await tick();
+  assert.equal(f.elements.title.textContent, 'Saved MCP projects imported');
+  assert.equal(f.elements.prepare.hidden, true);
+  assert.equal(f.elements.later.textContent, 'Continue in Hub');
+  f.click('later'); await done;
+  assert.deepEqual(f.calls, ['convergence_status', 'prepare_convergence']);
+  assert.equal(f.elements.reopen.hidden, true);
+});
+
+test('settings-only deferral, cancellation and changed-state refusal never move clients', async () => {
+  for (const action of ['later', 'cancel', 'prepare']) {
+    const f = fixture(command => {
+      if (command === 'prepare_convergence') throw Error('Changed during review; originals retained.');
+      return report({ required: false, streamlined: true, legacyApps: [], settingsImportAvailable: true, reviewKey: 'f'.repeat(64) });
+    });
+    const done = f.window.CreatorConvergence.run(); await tick();
+    if (action === 'cancel') f.elements.dialog.dispatch('cancel'); else f.click(action);
+    await tick();
+    if (action === 'prepare') {
+      assert.equal(f.elements.error.hidden, false);
+      assert.equal(f.elements.dialog.open, true);
+      assert.equal(f.elements.prepare.disabled, false);
+      f.click('later');
+    }
+    await done;
+    assert.deepEqual(f.calls, action === 'prepare' ? ['convergence_status', 'prepare_convergence'] : ['convergence_status']);
+  }
+});
+
+test('uncertain settings import retains a review path after dismissal without granting a retry', async () => {
+  for (const required of [false, true]) {
+    let value = report({ required: false, streamlined: true, legacyApps: [], settingsImportAvailable: true });
+    const f = fixture(command => {
+      if (command === 'prepare_convergence') {
+        value = { ...value, required, settingsImportAvailable: false, moveAvailable: false,
+          recoveryHelp: 'Review the retained .creator-hub-product-settings transaction. No automatic retry.',
+          message: 'Settings import needs recovery review.' };
+        throw Error('Settings publication outcome needs review; originals retained.');
+      }
+      return value;
+    });
+    const done = f.window.CreatorConvergence.run(); await tick();
+    f.click('prepare'); await tick();
+    assert.equal(f.elements.error.hidden, false);
+    f.click('later'); await done;
+    f.click('reopen'); await tick();
+    assert.equal(f.elements.dialog.open, true);
+    assert.equal(f.elements.reopen.hidden, false);
+    assert.equal(f.elements.recovery.hidden, false);
+    assert.match(f.elements['recovery-text'].value, /\.creator-hub-product-settings/);
+    assert.equal(f.elements.move.hidden, true);
+    assert.equal(f.elements.prepare.hidden, true);
+    assert.equal(f.elements.connections.hidden, true);
+    assert.equal(f.elements.retire.hidden, true);
+    f.click('refresh'); await tick();
+    assert.equal(f.elements.move.hidden, true);
+    f.click('later'); await tick();
+    assert.equal(f.elements.dialog.open, false);
+    assert.deepEqual(f.calls, ['convergence_status', 'prepare_convergence', 'convergence_status', 'inspect_convergence_outcome']);
+  }
 });
 
 test('Continue for now persists only this native review and keeps a manual resume action', async () => {

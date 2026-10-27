@@ -162,6 +162,10 @@ The bundled reference includes the Unity Visual Scripting JSON manual v2.2, sour
 
 ## Bridge Performance
 
+After writing C# files, use the refresh result's command ID and request timestamp
+for an [explicit compilation boundary](docs/compile-waits.md). A bare idle-state
+wait does not prove newly written files were compiled.
+
 Automatic full-scene state export is disabled by default in both Edit and Play mode. The bridge keeps lightweight status and command polling active, while explicit **Creator Works MCP > Refresh State** and `export-state` requests still produce a full snapshot when needed.
 
 Targeted hierarchy queries serialize only the requested subtree or matching components. Unity object traversal remains on Unity's main thread; the bridge does not use background threads to access Unity objects.

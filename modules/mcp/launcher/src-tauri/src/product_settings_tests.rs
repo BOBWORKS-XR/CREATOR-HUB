@@ -305,6 +305,321 @@ fn reviewed_server_transition_changes_only_path_and_preserves_identical_stores()
 }
 
 #[test]
+fn formatting_and_key_order_equivalence_does_not_rewrite_settings_and_keeps_exact_backups() {
+    let template = Fixture::new();
+    let value: serde_json::Value = serde_json::from_slice(&template.legacy()).unwrap();
+    let current = serde_json::to_vec_pretty(&value).unwrap();
+    let reversed = format!(
+        "{{{}}}",
+        value
+            .as_object()
+            .unwrap()
+            .iter()
+            .rev()
+            .map(|(key, value)| format!("{}:{value}", serde_json::to_string(key).unwrap()))
+            .collect::<Vec<_>>()
+            .join(",")
+    )
+    .into_bytes();
+    for legacy in [
+        serde_json::to_vec(&value).unwrap(),
+        format!(
+            "{}\r\n",
+            std::str::from_utf8(&current).unwrap().replace('\n', "\r\n")
+        )
+        .into_bytes(),
+        format!(" \t\n{} \r\n", std::str::from_utf8(&current).unwrap()).into_bytes(),
+        reversed,
+    ] {
+        let fixture = Fixture::new();
+        fs::write(&fixture.paths.current, &current).unwrap();
+        fs::write(&fixture.paths.legacy, &legacy).unwrap();
+        assert_ne!(current, legacy);
+        let before = inventory(&fixture.paths).unwrap();
+        let report = fixture.inspect();
+        assert_eq!(report.status, Status::Identical);
+        assert!(report.backups.is_empty());
+        assert!(report.recovery.is_empty());
+        assert!(server_writes(
+            &fixture.paths,
+            &before,
+            Path::new("/old/server.mjs"),
+            |_| { panic!("An unchanged server path must not require recognition") }
+        )
+        .unwrap()
+        .is_empty());
+        assert_eq!(inventory(&fixture.paths).unwrap(), before);
+        assert!(!fixture.paths.journal.exists());
+        preserve(&fixture.paths, &before).unwrap();
+        for (path, bytes) in [
+            (&fixture.paths.current, &current),
+            (&fixture.paths.legacy, &legacy),
+        ] {
+            assert_eq!(fs::read(backup_path(path, bytes)).unwrap(), *bytes);
+            assert_eq!(fs::read(path).unwrap(), *bytes);
+        }
+        // Semantic equality does not make a differently formatted backup valid.
+        fs::write(backup_path(&fixture.paths.current, &current), &legacy).unwrap();
+        assert!(inspect_paths(&fixture.paths).is_err());
+        assert!(preserve(&fixture.paths, &before).is_err());
+        assert_eq!(inventory(&fixture.paths).unwrap(), before);
+    }
+    assert!(settings_equivalent(
+        br#"{"channels":[],"auto_start":false,"future":{"a":1,"b":2}}"#,
+        br#"{"auto_start":false,"channels":[],"future":{"b":2,"a":1}}"#,
+    )
+    .unwrap());
+}
+
+#[test]
+fn semantic_conflict_checks_keep_real_preferences_references_and_unknown_fields_distinct() {
+    let fixture = Fixture::new();
+    let original = fixture.legacy();
+    let config: serde_json::Value = serde_json::from_slice(&original).unwrap();
+    fs::write(&fixture.paths.current, &original).unwrap();
+    for (pointer, value) in [
+        ("/auto_start", serde_json::json!(false)),
+        ("/active_channel_id", serde_json::json!(null)),
+        (
+            "/mcp_server_path",
+            serde_json::json!("/different/server.mjs"),
+        ),
+        (
+            "/channels/0/unity_project_path",
+            serde_json::json!("/different/project"),
+        ),
+        ("/futureSetting/unknown", serde_json::json!([3, 2, 1])),
+    ] {
+        let mut changed = config.clone();
+        *changed.pointer_mut(pointer).unwrap() = value;
+        let legacy = serde_json::to_vec(&changed).unwrap();
+        fs::write(&fixture.paths.legacy, &legacy).unwrap();
+        assert_eq!(fixture.inspect().status, Status::Conflict);
+        let saved = inventory(&fixture.paths).unwrap();
+        assert!(server_writes(
+            &fixture.paths,
+            &saved,
+            Path::new("/verified/server.mjs"),
+            |_| { panic!("A genuine settings conflict cannot authorize a server change") }
+        )
+        .is_err());
+        assert_eq!(inventory(&fixture.paths).unwrap(), saved);
+        assert!(!fixture.paths.journal.exists());
+    }
+    assert!(!settings_equivalent(
+        br#"{"channels":[],"auto_start":false}"#,
+        br#"{"channels":[],"auto_start":false,"enable_custom_scripts":false}"#,
+    )
+    .unwrap());
+}
+
+#[test]
+fn semantic_equivalence_refuses_invalid_types_jsonc_and_duplicate_unknown_keys() {
+    let fixture = Fixture::new();
+    let valid = after();
+    for invalid in [
+        "{",
+        "null",
+        "{}",
+        r#"{"channels":[],"auto_start":"false"}"#,
+        r#"{"channels":[],"auto_start":false,"auto_start":false}"#,
+        r#"{"channels":[],"auto_start":false,"future":{"a":1,"a":1}}"#,
+        r#"{"channels":[],"auto_start":false,"future":{"a":1,"\u0061":1}}"#,
+        r#"{"channels":[],"auto_start":false,}"#,
+        r#"{/*comment*/"channels":[],"auto_start":false}"#,
+    ] {
+        for (current, legacy) in [
+            (invalid.as_bytes(), invalid.as_bytes()),
+            (valid.as_slice(), invalid.as_bytes()),
+        ] {
+            assert!(settings_equivalent(current, legacy).is_err());
+            fs::write(&fixture.paths.current, current).unwrap();
+            fs::write(&fixture.paths.legacy, legacy).unwrap();
+            assert!(inspect_paths(&fixture.paths).is_err());
+            let saved = Snapshot {
+                current: Some(current.to_vec()),
+                legacy: Some(legacy.to_vec()),
+            };
+            assert!(server_writes(
+                &fixture.paths,
+                &saved,
+                Path::new("/verified/server.mjs"),
+                |_| Ok(true)
+            )
+            .is_err());
+            assert_eq!(fs::read(&fixture.paths.current).unwrap(), current);
+            assert_eq!(fs::read(&fixture.paths.legacy).unwrap(), legacy);
+            assert!(!fixture.paths.journal.exists());
+        }
+    }
+    assert!(settings_equivalent(&after(), &[0xff]).is_err());
+    assert!(settings_equivalent(&after(), &vec![b' '; MAX_CONFIG + 1]).is_err());
+}
+
+#[cfg(windows)]
+#[test]
+fn single_store_duplicate_unknown_keys_refuse_inspection_load_and_save() {
+    let mut accepted = Vec::new();
+    for legacy_only in [false, true] {
+        for (keys, unknown) in [
+            ("literal", r#"{"mode":"keep","mode":"other"}"#),
+            ("escaped", r#"{"mode":"keep","\u006dode":"other"}"#),
+        ] {
+            let fixture = Fixture::new();
+            let server = fixture.root.path().join("server.mjs");
+            fs::write(&server, "// fixture only; never executed").unwrap();
+            let original = format!(
+                r#"{{"channels":[],"active_channel_id":null,"auto_start":false,"mcp_server_path":{},"tool_groups":"read","future":{unknown}}}"#,
+                serde_json::to_string(&server.to_string_lossy()).unwrap()
+            )
+            .into_bytes();
+            let selected = if legacy_only {
+                &fixture.paths.legacy
+            } else {
+                &fixture.paths.current
+            };
+            fs::write(selected, &original).unwrap();
+            let label = format!("legacy_only={legacy_only}, keys={keys}");
+            let images = || {
+                (
+                    storage::read_bytes(&fixture.paths.current).unwrap(),
+                    storage::read_bytes(&fixture.paths.legacy).unwrap(),
+                )
+            };
+            let before = images();
+            if let Ok(report) = inspect_paths(&fixture.paths) {
+                accepted.push(format!("{label}: inspection admitted {:?}", report.status));
+            }
+            let form = snapshot(&fixture.paths).and_then(|saved| {
+                loaded_config(&saved, || panic!("An existing store must not use defaults"))
+            });
+            if let Ok(config) = form {
+                accepted.push(format!(
+                    "{label}: form loader admitted future={:?}",
+                    config.extra.get("future")
+                ));
+            }
+            let operation = load_operation_at(fixture.paths.clone(), || {
+                panic!("An existing store must not use defaults")
+            });
+            assert_eq!(images(), before, "Read paths changed {label}");
+            assert!(!fixture.paths.journal.exists());
+            if let Ok((mut config, operation)) = operation {
+                accepted.push(format!(
+                    "{label}: operation loader admitted future={:?}",
+                    config.extra.get("future")
+                ));
+                // This is the normal encoded_config/save_snapshot publication path,
+                // using only this fixture's paths, not global LOADED or profile roots.
+                config.auto_start = true;
+                if commit_operation(config, operation).is_ok() {
+                    accepted.push(format!("{label}: explicit save accepted ambiguous input"));
+                }
+            }
+            if images() != before {
+                accepted.push(format!("{label}: explicit save changed an active store"));
+            }
+            if fixture.paths.journal.exists() || backup_path(selected, &original).exists() {
+                accepted.push(format!("{label}: publication or backup evidence was created"));
+            }
+        }
+    }
+    assert!(
+        accepted.is_empty(),
+        "Ambiguous single-store paths accepted: {accepted:#?}"
+    );
+}
+
+#[test]
+fn formatting_change_after_approval_is_stale_for_server_save_import_and_backup_boundaries() {
+    for index in 0..2 {
+        let fixture = Fixture::new();
+        let legacy = fixture.legacy();
+        let current =
+            serde_json::to_vec(&serde_json::from_slice::<serde_json::Value>(&legacy).unwrap())
+                .unwrap();
+        fs::write(&fixture.paths.current, &current).unwrap();
+        assert_eq!(fixture.inspect().status, Status::Identical);
+        let approved = inventory(&fixture.paths).unwrap();
+        let loaded = snapshot(&fixture.paths).unwrap();
+        let server = fixture.root.path().join("verified/server.mjs");
+        let review = server_review(&fixture.paths, &approved, &server, |_| Ok(true)).unwrap();
+        let consent = ConvergenceSettings {
+            paths: fixture.paths.clone(),
+            original: approved.clone(),
+            imported: approved.clone(),
+            server: server.clone(),
+            review,
+            #[cfg(unix)]
+            previous: UnixPreviousServers::new(vec![], 0, "fixture"),
+        };
+        let (path, before) = if index == 0 {
+            (&fixture.paths.current, &current)
+        } else {
+            (&fixture.paths.legacy, &legacy)
+        };
+        let mut changed = before.clone();
+        changed.push(b'\n');
+        fs::write(path, &changed).unwrap();
+        assert_eq!(fixture.inspect().status, Status::Identical);
+        assert!(consent.recheck_original().is_err());
+        assert!(consent.recheck_imported().is_err());
+        assert!(finish_server_review(
+            &fixture.paths,
+            &approved,
+            &server,
+            &consent.review,
+            true,
+            |_| Ok(true)
+        )
+        .err()
+        .unwrap()
+        .contains("changed during review"));
+        assert!(preserve(&fixture.paths, &approved).is_err());
+        if index == 0 {
+            assert!(save_snapshot(&fixture.paths, &loaded, &after()).is_err());
+        }
+        assert_eq!(fs::read(path).unwrap(), changed);
+        assert!(fixture.inspect().backups.is_empty());
+        assert!(!fixture.paths.journal.exists());
+    }
+}
+
+#[test]
+fn semantically_equal_documents_do_not_clear_pending_product_settings_recovery() {
+    let fixture = Fixture::new();
+    let transaction = pending_review_save(&fixture, &fixture.paths.current);
+    let current = fs::read(&fixture.paths.current).unwrap();
+    let mut legacy = current.clone();
+    legacy.push(b'\n');
+    fs::write(&fixture.paths.legacy, &legacy).unwrap();
+    let original = inventory(&fixture.paths).unwrap();
+    let pending_path = transaction.inspect().unwrap().journal.join("pending.json");
+    let pending = fs::read(&pending_path).unwrap();
+    let report = fixture.inspect();
+    assert_eq!(report.status, Status::Identical);
+    assert!(report
+        .recovery
+        .iter()
+        .any(|r| !r.completed && !r.historical_completed));
+    let consent = ConvergenceSettings {
+        paths: fixture.paths.clone(),
+        original: original.clone(),
+        imported: original.clone(),
+        server: fixture.root.path().join("verified/server.mjs"),
+        review: ServerReview {
+            writes: vec![],
+            requires_replacement: false,
+        },
+        #[cfg(unix)]
+        previous: UnixPreviousServers::new(vec![], 0, "fixture"),
+    };
+    assert!(consent.recheck_imported().is_err());
+    assert_eq!(fs::read(pending_path).unwrap(), pending);
+    assert_eq!(inventory(&fixture.paths).unwrap(), original);
+}
+
+#[test]
 fn custom_conflicting_or_duplicate_server_settings_are_not_rewritten() {
     let fixture = Fixture::new();
     let original = fixture.legacy();

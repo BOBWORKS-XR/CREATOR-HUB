@@ -595,12 +595,22 @@ function loadUpdate016017(root, mode) {
   }
   const contract = createUpdate016017(config, input); reviewedUpdateTarget(contract); return contract;
 }
-function assertUpdateRunner(mode, env = process.env, platform = process.platform, arch = process.arch, uid = process.getuid?.(), euid = process.geteuid?.()) {
+function assertUpdateRunner(mode, env = process.env, platform = process.platform, arch = process.arch, uid = process.getuid?.(), euid = process.geteuid?.(), migrated = false) {
+  assert.equal(typeof migrated, 'boolean');
+  const branch = migrated ? 'refs/heads/validation/native-linux-production-016' : UPDATE_BRANCH;
+  const workflow = migrated ? '.github/workflows/native-linux-production-016-migration.yml' : UPDATE_WORKFLOW;
+  if (migrated) {
+    assert.equal(mode, 'deb'); assert.equal(env.UPDATE_SCENARIO, 'deb-approve');
+    assert.equal(env.CREATOR_MIGRATED_UPDATE_EXECUTE, 'true');
+    assert.equal(env.CREATOR_NATIVE_LINUX_PRODUCTION_016, '1');
+    assert.equal(env.CREATOR_MIGRATION_016_EXECUTE, 'true'); assert.equal(env.CREATOR_MIGRATION_016_SCENARIO, 'migration-approve');
+    assert.equal(env.UPDATE_PROFILE_SHA256, '808f83a6cdc14a2d49000a2c9cd340397a748e166dfdb29720fe4af07ff91e66');
+  }
   updateFiles(mode); assert.equal(platform, 'linux'); assert.equal(arch, 'x64');
   assert.ok(Number.isInteger(uid) && uid > 0 && uid === euid);
   for (const [name, expected] of Object.entries({ GITHUB_ACTIONS: 'true', RUNNER_ENVIRONMENT: 'github-hosted', RUNNER_OS: 'Linux', RUNNER_ARCH: 'X64',
     GITHUB_REPOSITORY: 'BOBWORKS-XR/CREATOR-HUB', GITHUB_REPOSITORY_ID: '1364807512', GITHUB_EVENT_NAME: 'workflow_dispatch',
-    GITHUB_REF: UPDATE_BRANCH, GITHUB_WORKFLOW_REF: `BOBWORKS-XR/CREATOR-HUB/${UPDATE_WORKFLOW}@${UPDATE_BRANCH}`, UPDATE_EXECUTE: 'true' })) assert.equal(env[name], expected, name);
+    GITHUB_REF: branch, GITHUB_WORKFLOW_REF: `BOBWORKS-XR/CREATOR-HUB/${workflow}@${branch}`, UPDATE_EXECUTE: 'true' })) assert.equal(env[name], expected, name);
   assert.ok(UPDATE_SCENARIOS[mode].includes(env.UPDATE_SCENARIO), 'Exact mode/scenario pairing required');
   assert.match(env.GITHUB_SHA || '', /^[a-f0-9]{40}$/);
   for (const name of ['GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT']) assert.match(env[name] || '', /^[1-9][0-9]*$/);
@@ -613,14 +623,16 @@ function updateReport(contract, report) {
   return { ...report, scope: `linux-${contract.mode}-production016-to-private017-lab-transport`, mode: contract.mode,
     fromVersion: '0.1.16', targetVersion: '0.1.17', publicDiscovery: false, releaseReady: false };
 }
-async function startUpdate016017Proxy(contract, options, env = process.env) {
-  assertUpdateRunner(contract?.mode, env); reviewedUpdateTarget(contract); assert.ok(!fs.existsSync('/.flatpak-info'));
+async function startUpdate016017Proxy(contract, options, env = process.env, migrated = false) {
+  assertUpdateRunner(contract?.mode, env, process.platform, process.arch, process.getuid?.(), process.geteuid?.(), migrated); reviewedUpdateTarget(contract); assert.ok(!fs.existsSync('/.flatpak-info'));
   const proxy = await startLoopbackTransport(contract, options);
   return { ...proxy, report: () => updateReport(contract, proxy.report()) };
 }
 async function updateMain() {
-  const mode = process.argv[3]; assertUpdateRunner(mode); assert.equal(process.argv.length, 5);
-  const inspect = process.argv[2] === 'update-016-017-inspect'; assert.ok(inspect || process.argv[2] === 'update-016-017');
+  const migrated = ['update-migrated-016-017', 'update-migrated-016-017-inspect'].includes(process.argv[2]);
+  const mode = process.argv[3]; assertUpdateRunner(mode, process.env, process.platform, process.arch, process.getuid?.(), process.geteuid?.(), migrated); assert.equal(process.argv.length, 5);
+  const inspect = process.argv[2] === (migrated ? 'update-migrated-016-017-inspect' : 'update-016-017-inspect');
+  assert.ok(inspect || process.argv[2] === (migrated ? 'update-migrated-016-017' : 'update-016-017'));
   const root = path.join(process.env.RUNNER_TEMP, 'native-linux-production-016-update', 'transport'); assert.equal(process.argv[4], root);
   const folder = fs.lstatSync(root); assert.ok(folder.isDirectory() && !folder.isSymbolicLink() && folder.uid === process.getuid() && (folder.mode & 0o7777) === 0o700);
   const contract = loadUpdate016017(root, mode);
@@ -642,7 +654,7 @@ async function updateMain() {
   const control = json(bounded(await line(2 * LIMITS.tls, LIMITS.handshakeMs), 2 * LIMITS.tls, 'Update TLS control'));
   keys(control, ['key', 'cert'], 'Ephemeral update TLS');
   const key = canonicalBase64(control.key, LIMITS.tls), cert = canonicalBase64(control.cert, LIMITS.tls);
-  const proxy = await startUpdate016017Proxy(contract, { key, cert }); key.fill(0);
+  const proxy = await startUpdate016017Proxy(contract, { key, cert }, process.env, migrated); key.fill(0);
   console.log(JSON.stringify({ kind: 'update-016-017-ready', pid: process.pid, mode, proxyUrl: proxy.proxyUrl,
     publicDiscovery: false, nativeAcceptanceTested: false, signaturesVerifiedByHarness: false, releaseReady: false }));
   try {
@@ -689,7 +701,7 @@ module.exports = { FROM, TO, BRANCH, INTEGRATED_BRANCH, INTEGRATED_TARGET, DESCR
   UPDATE_BRANCH, UPDATE_WORKFLOW, UPDATE_SCENARIOS, UPDATE_DEB, UPDATE_ASSET, UPDATE_SOURCE17,
   updateFiles, createUpdate016017, loadUpdate016017, reviewedUpdateTarget, assertUpdateRunner, startUpdate016017Proxy, updateReport,
   testing: Object.freeze({ startLoopbackTransport }) };
-if (require.main === module) (['update-016-017', 'update-016-017-inspect'].includes(process.argv[2]) ? updateMain()
+if (require.main === module) (['update-016-017', 'update-016-017-inspect', 'update-migrated-016-017', 'update-migrated-016-017-inspect'].includes(process.argv[2]) ? updateMain()
   : ['bootstrap-016', 'bootstrap-016-inspect'].includes(process.argv[2]) ? bootstrapMain() : main()).catch(() => {
   // Never log TLS material, HTTP headers, file contents, or parser exceptions.
   console.error('Linux lab transport refused or failed; no native/public acceptance established.'); process.exitCode = 1;
