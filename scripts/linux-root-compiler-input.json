@@ -1,0 +1,671 @@
+{
+  "schemaVersion": 1,
+  "source": "98245e258249dd2c4e1d72c77d957fd7b00bb573",
+  "tree": "479698017875ebd1b95a940efbf5089f6d2d543f",
+  "runId": 40580977821,
+  "artifactId": 12770466146,
+  "zip": {
+    "size": 53949164,
+    "sha256": "fe64b80761580d1740cd1513db98e9db559d8188103d163ed3be060914f28bbd"
+  },
+  "tar": {
+    "size": 54400508,
+    "sha256": "59cf521d8bce12491a2635b743cfd5f2fc55073db04c7b3265861ac449770b7f"
+  },
+  "selected": {
+    "creator-works-mcp.mjs": {
+      "sha256": "d669a11c904598a6c23221a3c16f9a2f797a006530c43ba26f251aa44b41323e",
+      "size": 1641644,
+      "mode": 420
+    },
+    "runtime/node": {
+      "sha256": "62d66443847de1f527f74afe715900b12884ace52136dc9cd8e91e61acc2f527",
+      "size": 123459976,
+      "mode": 493
+    },
+    "unity-extension/Editor/BanterMCPBridge.cs": {
+      "sha256": "eaa70b9696c05e3ebce0abe3d98d8ebb5188f37d0747e6b143fa43ae48f32aca",
+      "size": 358150,
+      "mode": 420
+    },
+    "unity-extension/Editor/CreatorWorksMCPLogo.png": {
+      "sha256": "f3f68baa0d887de92e6cf7aba8beae7ff8ea5c44b13444f018413041ade19ea7",
+      "size": 52329,
+      "mode": 420
+    }
+  },
+  "sourcePins": {
+    "modules/mcp/launcher/src-tauri/build.rs": {
+      "size": 2295,
+      "sha256": "0e868db8d883cd2332b193689c44c4294587d2f63e1cbaffc72bb1b10b5dd1fd",
+      "normalizeLf": true
+    },
+    "modules/mcp/launcher/src-tauri/build_payload_inputs.rs": {
+      "size": 9212,
+      "sha256": "c06c4a892e28738387c62a6c854d6e010c5bdf99d1599b8ee7c5a8d9dc2b5feb",
+      "normalizeLf": true
+    },
+    "modules/mcp/package-lock.json": {
+      "size": 56888,
+      "sha256": "ded7a99b78aca304253d5287cc1b884a845afde083eb32d1a2abecd14468ba60",
+      "normalizeLf": true
+    },
+    "modules/mcp/package.json": {
+      "size": 1823,
+      "sha256": "f3bfd6874026f881872f949e2cb1b8db84e9d7ad8038914cee0fc9943505a7a1",
+      "normalizeLf": true
+    },
+    "modules/mcp/scripts/smoke-release-bundle.mjs": {
+      "size": 7031,
+      "sha256": "b320e0b1e42b12467e22dfa7f5e8a66b18aa065021ebd4c62121d0b68bbf2cf6",
+      "normalizeLf": true
+    },
+    "modules/mcp/scripts/stage-node-runtime.mjs": {
+      "size": 13144,
+      "sha256": "aaa34fbed0060d46abad73339961f43da2e361641668249b209d5c4f1635ed7d",
+      "normalizeLf": true
+    },
+    "modules/mcp/src/index.ts": {
+      "size": 4169,
+      "sha256": "0a2c89bce413ac43f9db555081022fbc92500658f70e95502402d77f73063161",
+      "normalizeLf": true
+    },
+    "modules/mcp/src/lib/config.ts": {
+      "size": 2824,
+      "sha256": "b474eb18fb665281c00218e730d05a2ef6e096c92e7c503f9ac062af7695685d",
+      "normalizeLf": true
+    },
+    "modules/mcp/src/lib/files.ts": {
+      "size": 1494,
+      "sha256": "a9ae5c02735d950257afe6f136f3201957886e1ebff4d1f7cd07d49ce6428581",
+      "normalizeLf": true
+    },
+    "modules/mcp/src/lib/graph-layout.ts": {
+      "size": 14114,
+      "sha256": "34cb719e8b41a22890fdc543a1af1e005f893335c650b3a68cd2353befe5a150",
+      "normalizeLf": true
+    },
+    "modules/mcp/src/lib/project-router.ts": {
+      "size": 12429,
+      "sha256": "1999580eb8e5c1cfcc06001f35e4aa11f807cf7efd0e1a3103bac09dd1580068",
+      "normalizeLf": true
+    },
+    "modules/mcp/src/lib/unity-bridge-transport.ts": {
+      "size": 10718,
+      "sha256": "ec9efd287aaf3bd8eb17e72d801aa9f5fad09eff6096912fb2b208c49383d4a4",
+      "normalizeLf": true
+    },
+    "modules/mcp/src/lib/version.ts": {
+      "size": 36,
+      "sha256": "6d6cc72fc48c4c28624488ce2662350f1a3c16e040aa41e208c22fedacbb36f2",
+      "normalizeLf": true
+    },
+    "modules/mcp/src/prompts/index.ts": {
+      "size": 6501,
+      "sha256": "171f1a596e3ce3ddd04ca79297efd5e7fb44c31dee932051ff02b0bbbb1dd3aa",
+      "normalizeLf": true
+    },
+    "modules/mcp/src/resources/banter-components.ts": {
+      "size": 42768,
+      "sha256": "c17d9a299b636f0e5a0d533d20acd88a3837c551f452c9cb47f5bb63910d202b",
+      "normalizeLf": true
+    },
+    "modules/mcp/src/resources/banter-custom-vs-nodes.ts": {
+      "size": 168254,
+      "sha256": "83a100680a4ea63055d5fe6a4fa6e013a9511e5d99cc53591ae919ee0b8cd43e",
+      "normalizeLf": true
+    },
+    "modules/mcp/src/resources/banter-js-api.ts": {
+      "size": 20946,
+      "sha256": "abc59d3b4140f52ce9ef61f46935e5fa31ecde944bfed1a9f460754c7e6c1d3d",
+      "normalizeLf": true
+    },
+    "modules/mcp/src/resources/banter-sdk-compatibility.ts": {
+      "size": 6187,
+      "sha256": "2dc45e1ef288f3160ee31650f01f692386ae8cce7d9640c06cbf5269f062e04a",
+      "normalizeLf": true
+    },
+    "modules/mcp/src/resources/banter-vs-nodes.ts": {
+      "size": 23231,
+      "sha256": "64ab4b793acad01d56d6e3cc962fe0bd053b52e020c63d12dbd27aa39f4921e5",
+      "normalizeLf": true
+    },
+    "modules/mcp/src/resources/banter-workflows.ts": {
+      "size": 20680,
+      "sha256": "ba707c1b5dcb8f1c2fdcd20a8618dff80088a66cfb17fe8caf83677e545cec43",
+      "normalizeLf": true
+    },
+    "modules/mcp/src/resources/creator-docs-snapshot.ts": {
+      "size": 395643,
+      "sha256": "9f03b1d0af7cc449d2efc78df2047b76d28d028bb605ff854fc083ff763623a3",
+      "normalizeLf": true
+    },
+    "modules/mcp/src/resources/creator-docs.ts": {
+      "size": 1199,
+      "sha256": "8adc2cda75cbc007f9fe9b2f94ade6bb601fca750f159b42b787f44be54fc480",
+      "normalizeLf": true
+    },
+    "modules/mcp/src/resources/index.ts": {
+      "size": 17967,
+      "sha256": "310ba0b467b427528988ac60150d6dcba59e7980af33612500cb28ddd6900e63",
+      "normalizeLf": true
+    },
+    "modules/mcp/src/resources/unity-types.ts": {
+      "size": 12138,
+      "sha256": "e071677e41b1201b8bdedb793188a6e3bfa236be46abe8a556d2661c81bb0bd7",
+      "normalizeLf": true
+    },
+    "modules/mcp/src/resources/unity-vs-json-errata.ts": {
+      "size": 2066,
+      "sha256": "ca8a7641fe940c39a6bad9a38d7a07f6394ef65de6afd6a70b1a9cc7bc8427fa",
+      "normalizeLf": true
+    },
+    "modules/mcp/src/resources/unity-vs-json-manual.ts": {
+      "size": 49313,
+      "sha256": "dfc4710bd3c54994ced0be47db5ff333f1be9d1bdd7a2629f3d0f2903e14bd56",
+      "normalizeLf": true
+    },
+    "modules/mcp/src/resources/vs-graph-instructions.ts": {
+      "size": 10270,
+      "sha256": "690ca910b7bb7a9b4f384b5f9911884871f2b6dcfc6644bfcdea0e66593ca771",
+      "normalizeLf": true
+    },
+    "modules/mcp/src/tools/check-import-status.ts": {
+      "size": 21447,
+      "sha256": "8375b8c1a251eaf83c3b2aaf459c032f4f688ef73ec78ba48ac0838f9db64dd9",
+      "normalizeLf": true
+    },
+    "modules/mcp/src/tools/generate-vs-graph.ts": {
+      "size": 21792,
+      "sha256": "b10dfc1e19b1eaca52d1a46780124142dd6ebf1d27a31b0174c960233f357f30",
+      "normalizeLf": true
+    },
+    "modules/mcp/src/tools/get-banter-sdk-info.ts": {
+      "size": 18154,
+      "sha256": "8f1139563b53a0df83d9f9b20775a3cf31594982015d44e233832247ed1bf00d",
+      "normalizeLf": true
+    },
+    "modules/mcp/src/tools/get-bridge-status.ts": {
+      "size": 5603,
+      "sha256": "0723d7d1c86192b1e1adef9e00f8b723bf270800f927c733b807d813b86beece",
+      "normalizeLf": true
+    },
+    "modules/mcp/src/tools/get-mcp-reference.ts": {
+      "size": 7741,
+      "sha256": "8fdc505e14950535c9091c0f466086e8e5e68a68341236b31e70e79a48f95e68",
+      "normalizeLf": true
+    },
+    "modules/mcp/src/tools/get-unity-command-status.ts": {
+      "size": 7237,
+      "sha256": "d35eb60c124ac6ddb73519362cf105f542bf4ca491cc132153e6784986904ddb",
+      "normalizeLf": true
+    },
+    "modules/mcp/src/tools/get-unity-packages.ts": {
+      "size": 3166,
+      "sha256": "8296f3e6098820cdd7ddf79266da5da10b53eddb06cd458c1bb6702b167b3ff6",
+      "normalizeLf": true
+    },
+    "modules/mcp/src/tools/index.ts": {
+      "size": 144922,
+      "sha256": "9c3a61f8cba4201b0ee45d0c2ebfaef77d2381497c0283767edfd635bb156af8",
+      "normalizeLf": true
+    },
+    "modules/mcp/src/tools/lookup-creator-docs.ts": {
+      "size": 14296,
+      "sha256": "3b879cbcd95386f667fbc611dc48bc7682d16ad539f6685f057bb9aed71bcd24",
+      "normalizeLf": true
+    },
+    "modules/mcp/src/tools/project-feedback.ts": {
+      "size": 9233,
+      "sha256": "621d41f38feebcdd0d34400b8ce56476797636637b65d8f94773e3b17ea0ea83",
+      "normalizeLf": true
+    },
+    "modules/mcp/src/tools/query-project.ts": {
+      "size": 32888,
+      "sha256": "5dbf7e9502a3aa82290e6f54b4fe76f68a2fa9ca134d7d432578124ac14e5644",
+      "normalizeLf": true
+    },
+    "modules/mcp/src/tools/read-response-budget.ts": {
+      "size": 3849,
+      "sha256": "5271ee0c90fbece2824e06933e8e95717729a9f3462e2e3773b3dbdded9c6522",
+      "normalizeLf": true
+    },
+    "modules/mcp/src/tools/serialize-property-value.ts": {
+      "size": 675,
+      "sha256": "f0c3564742e055efe126a2124551ee9b2e4dfe778bcba9875a10947ae8969e3f",
+      "normalizeLf": true
+    },
+    "modules/mcp/src/tools/shader-graph.ts": {
+      "size": 9246,
+      "sha256": "4fa39bc09069c93ea96ebda7a1fa2b19c03f9cb32b72f4a9c5c8064b3fd0f8c8",
+      "normalizeLf": true
+    },
+    "modules/mcp/src/tools/tool-groups.ts": {
+      "size": 5143,
+      "sha256": "6f31768b88b41662ecb6f9d6b296b30498f398f04f0e77965acd5456449353d1",
+      "normalizeLf": true
+    },
+    "modules/mcp/src/tools/validate-vs-graph.ts": {
+      "size": 20377,
+      "sha256": "6b47c18503d53a60fbbf7bfc538eedb9cf04a1f97c7e21d48a28405140c8bd73",
+      "normalizeLf": true
+    },
+    "modules/mcp/src/tools/write-vs-graph.ts": {
+      "size": 5319,
+      "sha256": "a6950aedd7ac2cd8443812afa30564d2b68dba59a86bab9310150593ee546747",
+      "normalizeLf": true
+    },
+    "modules/mcp/src/tools/write-webroot-js.ts": {
+      "size": 3790,
+      "sha256": "28f8d49cb4ea16586a9b78f462ebbc07a90e0b80dbf1c9835bb3d7935b881c76",
+      "normalizeLf": true
+    },
+    "modules/mcp/tsconfig.json": {
+      "size": 407,
+      "sha256": "97312f3a82ab3d5229e45696a37b5ef72a63b32bb4e5c080bba639365a1924b1",
+      "normalizeLf": true
+    },
+    "modules/mcp/unity-extension/Editor/BanterMCPBridge.cs": {
+      "size": 358150,
+      "sha256": "eaa70b9696c05e3ebce0abe3d98d8ebb5188f37d0747e6b143fa43ae48f32aca",
+      "normalizeLf": true
+    },
+    "modules/mcp/unity-extension/Editor/CreatorWorksMCPLogo.png": {
+      "size": 52329,
+      "sha256": "f3f68baa0d887de92e6cf7aba8beae7ff8ea5c44b13444f018413041ade19ea7",
+      "normalizeLf": false
+    }
+  },
+  "contextPins": {
+    "src-tauri/Cargo.toml": {
+      "size": 2488,
+      "sha256": "aec159f9b59205603ff2ff65fab868341b6fa3146abc72fdea36b949cb963e1a",
+      "normalizeLf": true
+    },
+    "src-tauri/Cargo.lock": {
+      "size": 144663,
+      "sha256": "a9adc1d441d9de2db6ea7b09cdeada20657daa07563f1719e3814a134e9e8764",
+      "normalizeLf": true
+    },
+    "src-tauri/build.rs": {
+      "size": 3499,
+      "sha256": "4894c38042003c92d278055a00f2fe490ae7ea24485bce91ecfa5202d8b48680",
+      "normalizeLf": true
+    },
+    "modules/mcp/launcher/src-tauri/Cargo.toml": {
+      "size": 1383,
+      "sha256": "c63f610d355a46070e0f18a4705a852a4fd801deb9bbe786c6c6edf9a6332a66",
+      "normalizeLf": true
+    },
+    "modules/project-setup/src-tauri/Cargo.toml": {
+      "size": 1389,
+      "sha256": "391a7eab2bf49b403a24f6d77a408f5e2af5022cb5696f44eb825b34fcc32098",
+      "normalizeLf": true
+    },
+    "rust-toolchain.toml": {
+      "size": 86,
+      "sha256": "b2c19d86958ed6810741488db5cd352856f303c53bcf0ea774e72f94ee4d201e",
+      "normalizeLf": true
+    },
+    "src-tauri/src/self_update.rs": {
+      "size": 38992,
+      "sha256": "02fc522b2895cd3f1c788157402275693785d860c52f103199470dc5ee8ed3df",
+      "normalizeLf": true
+    },
+    "src-tauri/src/builtin.rs": {
+      "size": 41845,
+      "sha256": "7a1fb444e9c2178d973d9be4fa3102a46cb5c89fb8ce19ec295aa9133ff9e997",
+      "normalizeLf": true
+    },
+    "src-tauri/src/main.rs": {
+      "size": 26403,
+      "sha256": "17efec95c247e7a481b2cfc382ed0ba17193e902697ce15627407c6d00af9f4d",
+      "normalizeLf": true
+    },
+    "src-tauri/src/portable_update.rs": {
+      "size": 37526,
+      "sha256": "462854396e169d1c628fe0dbcb75f1a4e8542383437074659fe1ad97740f9787",
+      "normalizeLf": true
+    },
+    "src-tauri/src/mcp_update_handoff.rs": {
+      "size": 41851,
+      "sha256": "5a3c4d911bc630fc63a17ae20fb855d61145fc082ae5939f6ca6e59b54d91468",
+      "normalizeLf": true
+    },
+    "src-tauri/src/mcp_update_handoff.test.rs": {
+      "size": 46378,
+      "sha256": "2ab1ed6f4acc6d3bd889db1d76aa9bc87160cc5e4a9b581ccb1d16e48e541e2e",
+      "normalizeLf": true
+    },
+    "scripts/root-mcp-update-handoff.test.cjs": {
+      "size": 8902,
+      "sha256": "b2c8298ae52f6f1d9241d9212ec3a84c303503409b436adfecd314dfaec4f716",
+      "normalizeLf": true
+    },
+    "tests/fixtures/root-handoff/creator-hub-linux-x86_64-deb.json": {
+      "size": 514,
+      "sha256": "c602b641380ea1e7a16ef5c9be0676088ad8d1b3283d27a2256896f294e633cf",
+      "normalizeLf": false
+    },
+    "tests/fixtures/root-handoff/creator-hub-linux-x86_64-deb.json.minisig": {
+      "size": 311,
+      "sha256": "2eb01a05a2f7e46b30f194d0827632510cb1a0f06d38d2c1bf95064c660c1306",
+      "normalizeLf": false
+    },
+    "src/app.js": {
+      "size": 51880,
+      "sha256": "fe386b6b6dc086dbe6d6029158d24d4871848a57f26cfaa646be0aa82bcb84e9",
+      "normalizeLf": true
+    },
+    "src/feature-pages.js": {
+      "size": 7613,
+      "sha256": "5e2b8b6e1f457fc51db30d91c9e391b62ee77d5fed681725bf5e9db2767e0d0a",
+      "normalizeLf": true
+    },
+    "src/features/mcp.js": {
+      "size": 45647,
+      "sha256": "5bce4960dac870194b6bd4eceac455acf8fd8116bd8fba58089daf4f696211ef",
+      "normalizeLf": true
+    },
+    "src/features/styles.css": {
+      "size": 6888,
+      "sha256": "0cad897526d501de81a4bfe8385a497e7086fa71e57587492912a2a21f9a725e",
+      "normalizeLf": true
+    },
+    "src/index.html": {
+      "size": 24898,
+      "sha256": "185362fc9c3ecfe6a2bae7712aee9ae3f2f4b239758b8f364e037d6e4a3dc181",
+      "normalizeLf": true
+    },
+    "src/mcp-route-update.js": {
+      "size": 8454,
+      "sha256": "6a85da44df3f1718146088f06177213a4ee0d0d261443390ad7af41e44ca6bba",
+      "normalizeLf": true
+    },
+    "scripts/mcp-route-update-ui.test.cjs": {
+      "size": 9718,
+      "sha256": "2d63c4b4607bedb8361a926d76773099c243b344fcdd01a905cfa345390fe4c1",
+      "normalizeLf": true
+    },
+    "tests/mcp-route-update.spec.js": {
+      "size": 17803,
+      "sha256": "2bd343054f3785035d2632124a730e6080b8a912db3d265dae7c943aed5dead2",
+      "normalizeLf": true
+    },
+    "tests/server.cjs": {
+      "size": 850,
+      "sha256": "8404435bf78cad72b1e7cc8b037b6d46d947a01ce7d41f045e3ebe2ea72d4c09",
+      "normalizeLf": true
+    },
+    "scripts/ui-test-server.test.cjs": {
+      "size": 1869,
+      "sha256": "f38af7a0c8c45c05514f6bda0925188ac354d11b7ffc54a979845bcbeaf434b4",
+      "normalizeLf": true
+    }
+  },
+  "expectedTests": [
+    "mcp_update_handoff::tests::absent_authority_never_prepares_or_activates_even_with_a_new_signed_payload",
+    "mcp_update_handoff::tests::an_unrelated_already_active_b_is_not_adopted_from_a_ready_intent",
+    "mcp_update_handoff::tests::cancel_does_not_verify_publish_or_restart",
+    "mcp_update_handoff::tests::changed_store_or_raw_handoff_during_install_blocks_publication",
+    "mcp_update_handoff::tests::completion_hint_runs_after_both_busy_state_and_real_file_lock_are_released",
+    "mcp_update_handoff::tests::correct_image_and_published_handoff_emit_pending_not_activation_success_then_restart_once",
+    "mcp_update_handoff::tests::damaged_opaque_backup_is_not_repaired_or_used_to_overwrite_the_original",
+    "mcp_update_handoff::tests::explicit_legacy_apply_to_bound_b_has_positive_readback_without_claiming_an_update_operation",
+    "mcp_update_handoff::tests::failed_new_signature_cannot_supersede_old_bytes_or_create_a_backup",
+    "mcp_update_handoff::tests::failed_target_preparation_is_also_spent_before_any_automatic_retry",
+    "mcp_update_handoff::tests::fresh_publication_rechecks_actual_store_after_backup_without_rolling_it_back",
+    "mcp_update_handoff::tests::fresh_publication_rechecks_old_raw_after_backup_and_never_overwrites_a_concurrent_record",
+    "mcp_update_handoff::tests::fresh_signed_higher_update_supersedes_old_ready_after_explicit_apply_using_actual_current_store",
+    "mcp_update_handoff::tests::fresh_signed_update_retains_owned_non_json_old_record_as_opaque_bytes",
+    "mcp_update_handoff::tests::fresh_supersession_cancel_does_not_archive_or_change_old_record_or_store",
+    "mcp_update_handoff::tests::fresh_update_target_must_exceed_active_hub_version_not_only_the_running_root",
+    "mcp_update_handoff::tests::fresh_user_approved_update_is_not_a_retry_of_a_spent_old_attempt",
+    "mcp_update_handoff::tests::image_change_after_completion_is_checked_again_immediately_before_restart",
+    "mcp_update_handoff::tests::independent_current_payload_readback_does_not_adopt_an_old_ready_operation",
+    "mcp_update_handoff::tests::legacy_same_version_collision_or_unreadable_route_is_unknown_not_a_safe_apply_offer",
+    "mcp_update_handoff::tests::linked_or_nonprivate_handoff_and_linked_lock_refuse",
+    "mcp_update_handoff::tests::malformed_or_oversize_records_do_not_invoke_the_activation_callback",
+    "mcp_update_handoff::tests::metadata_failure_never_overrides_a_failed_final_image_verification",
+    "mcp_update_handoff::tests::native_restart_constructor_does_not_accept_a_fixture_or_different_restart_path",
+    "mcp_update_handoff::tests::no_actual_current_route_still_creates_no_first_time_handoff_even_with_old_metadata",
+    "mcp_update_handoff::tests::no_handoff_and_different_older_generation_is_visible_legacy_recovery_not_automatic_ready",
+    "mcp_update_handoff::tests::no_prior_route_invalid_signature_and_same_version_never_create_authority",
+    "mcp_update_handoff::tests::older_ready_left_by_a_prewrite_refusal_cannot_activate_a_different_root_version",
+    "mcp_update_handoff::tests::opaque_retention_keeps_the_existing_bound_before_any_new_authority",
+    "mcp_update_handoff::tests::outcome_readback_is_read_only_and_keeps_network_and_runtime_ready_out_of_the_proof",
+    "mcp_update_handoff::tests::outcome_recheck_requires_exact_target_plus_history_and_never_retries",
+    "mcp_update_handoff::tests::publication_error_after_ready_rename_still_restarts_verified_b_and_ready_is_consumed_once",
+    "mcp_update_handoff::tests::publication_failure_before_write_restarts_verified_binary_without_creating_route_authority",
+    "mcp_update_handoff::tests::real_store_payload_refusal_preserves_a_and_does_not_retry",
+    "mcp_update_handoff::tests::replacement_verifier_refuses_writable_linked_or_foreign_owned_fixture_images",
+    "mcp_update_handoff::tests::same_payload_is_explicitly_verified_but_absent_route_is_still_none_without_authority",
+    "mcp_update_handoff::tests::skipped_root_version_ordering_requires_new_target_above_both_current_and_active",
+    "mcp_update_handoff::tests::successful_handoff_activates_exact_b_once_and_preserves_resolved_a_and_history",
+    "mcp_update_handoff::tests::system_cancel_publishes_nothing_and_keeps_the_original_receipt",
+    "mcp_update_handoff::tests::target_binding_and_activation_permit_cannot_be_substituted",
+    "mcp_update_handoff::tests::unknown_mcp_state_has_a_separate_hub_only_manual_way_without_route_authority",
+    "mcp_update_handoff::tests::unknown_postcommit_requires_exact_b_history_and_intent_and_never_reactivates",
+    "mcp_update_handoff::tests::unknown_precommit_is_spent_without_retry_or_rollback",
+    "mcp_update_handoff::tests::wrong_replacement_hash_blocks_restart_and_does_not_publish",
+    "mcp_update_handoff::tests::wrong_self_image_version_location_or_release_signature_refuses_before_staging"
+  ],
+  "compilerSource": "ebdaf4f8a5e09f8e759279531c025038fe392593",
+  "compilerTree": "e278c48e964d8917bdb5d3d4b7006d632bfaf3e3",
+  "ciDelta": [
+    ".github/workflows/linux-integrated-features.yml",
+    "scripts/linux-portable-restart-ci.test.cjs",
+    "scripts/linux-root-compiler-input.json",
+    "scripts/linux-root-compiler-input.py",
+    "scripts/linux-root-compiler-input.test.py",
+    "scripts/linux-root-compiler-reuse.test.cjs"
+  ],
+  "tauriResources": {
+    "config": {
+      "path": "modules/mcp/launcher/src-tauri/tauri.conf.json",
+      "size": 2079,
+      "sha256": "4856047ed4e218e5c9cc99a639b5bb380c29c3412b954495e2869d69c30e630e"
+    },
+    "map": {
+      "../../release/creator-works-mcp.mjs": "server/creator-works-mcp.mjs",
+      "../../release/runtime/node": "server/runtime/node",
+      "../../release/runtime/node.exe": "server/runtime/node.exe",
+      "../../release/runtime/LICENSE": "server/runtime/LICENSE",
+      "../../release/runtime/VERSION": "server/runtime/VERSION",
+      "../../unity-extension/Editor/BanterMCPBridge.cs": "server/unity-extension/Editor/BanterMCPBridge.cs",
+      "../../unity-extension/Editor/CreatorWorksMCPLogo.png": "server/unity-extension/Editor/CreatorWorksMCPLogo.png",
+      "../../LICENSE": "server/LICENSE",
+      "../../THIRD_PARTY_NOTICES.md": "server/THIRD_PARTY_NOTICES.md"
+    },
+    "frontendDist": "../src",
+    "frontendRoot": "modules/mcp/launcher/src",
+    "frontend": {
+      "modules/mcp/launcher/src/ai-usage-notice.js": {
+        "size": 2329,
+        "sha256": "a3fff5f66cb8640ba7bcd02286c5fae3a8741af261d83cc3f130aede43769071"
+      },
+      "modules/mcp/launcher/src/app-chrome.js": {
+        "size": 4014,
+        "sha256": "c632bb23badcb0d116cd1c6662b7e5b4db1863fde06e48525bf84fffd0f8ddae"
+      },
+      "modules/mcp/launcher/src/app.js": {
+        "size": 49397,
+        "sha256": "04a60b4ebdeaae70e9f1de2b7f3813470dcfb0a497de6a4c0fd652afa9d2ed43"
+      },
+      "modules/mcp/launcher/src/connection-guide.js": {
+        "size": 6271,
+        "sha256": "099a9108c6c20da71faa01177e9c9f33015e11bfe25442d3830aac5e2ab6db3f"
+      },
+      "modules/mcp/launcher/src/creator-works-logo.png": {
+        "size": 52329,
+        "sha256": "f3f68baa0d887de92e6cf7aba8beae7ff8ea5c44b13444f018413041ade19ea7"
+      },
+      "modules/mcp/launcher/src/help.js": {
+        "size": 372,
+        "sha256": "3972dd02efad2e0ea44a8a2c2d7335286b3fb35c3c851f3c7c8088b657833204"
+      },
+      "modules/mcp/launcher/src/icons/LICENSE-lucide": {
+        "size": 3208,
+        "sha256": "b495047bd93a9b06913511076f504daba17d5bbeb3e0650f3bb53a4220329c57"
+      },
+      "modules/mcp/launcher/src/icons/chevron-left.svg": {
+        "size": 321,
+        "sha256": "390151620a772bcfa5b63b8c0f4bc8a00ccefd727d7aa6d04e3abb6933b497c0"
+      },
+      "modules/mcp/launcher/src/icons/chevron-right.svg": {
+        "size": 321,
+        "sha256": "ed949ffd3821505d3df0877a7384836af5a8334510145e1101d99fb465d9848b"
+      },
+      "modules/mcp/launcher/src/icons/creator-plugins.png": {
+        "size": 32855,
+        "sha256": "ff107f1c0bca0380f35f25754fd023d60311fa4457f6fd84255a8f41f78fee6d"
+      },
+      "modules/mcp/launcher/src/icons/download.svg": {
+        "size": 397,
+        "sha256": "00a4230acc0301502d031e2df7d5f7d99e49f011d75c9f49529053d70ee8cfa5"
+      },
+      "modules/mcp/launcher/src/icons/external-link.svg": {
+        "size": 416,
+        "sha256": "5884e4c214b814d012a7c0d72039fc55d14a8268e30d495fcbd45ca982695de8"
+      },
+      "modules/mcp/launcher/src/icons/folder-open.svg": {
+        "size": 483,
+        "sha256": "d80298b413883b7d2cb7e24fcc9cfc873976545a87d20046fb85dcc2fe509755"
+      },
+      "modules/mcp/launcher/src/icons/layout-grid.svg": {
+        "size": 416,
+        "sha256": "b8903f61d09b1d75e55c71158277d26570962f69c2099446a251871e0a2d6678"
+      },
+      "modules/mcp/launcher/src/icons/list.svg": {
+        "size": 353,
+        "sha256": "ff97a7379eb962ddc3863bb59f0f45875ac8da91aac8a38a67361e7118d2d627"
+      },
+      "modules/mcp/launcher/src/icons/play.svg": {
+        "size": 381,
+        "sha256": "e0309020b8ddcfe41ab4a54385dc833e3542e18b1e1bf5bf1341b633b7e97786"
+      },
+      "modules/mcp/launcher/src/icons/puzzle.svg": {
+        "size": 762,
+        "sha256": "39768ab4f08837fa636c5a88331e8cc549d719206894d48f69f8d33fd48b24f3"
+      },
+      "modules/mcp/launcher/src/icons/refresh-cw.svg": {
+        "size": 473,
+        "sha256": "dbbd3bea6b53b55390865d6cfce235579231405c5dff092116cd396a5fe7e050"
+      },
+      "modules/mcp/launcher/src/index.html": {
+        "size": 27679,
+        "sha256": "6b474aea6fc7258bf86e5a895e7845b7c885c09df93eb030cc7710b5714ec1da"
+      },
+      "modules/mcp/launcher/src/product-settings.js": {
+        "size": 2566,
+        "sha256": "69815a7d511914829ca1cbcad357df67a120bde5ef51f3cb8e0e719b9ca82478"
+      },
+      "modules/mcp/launcher/src/runtime.js": {
+        "size": 6951,
+        "sha256": "acccb029a77150c3c40d0a0a06a86bbef0e1d80dea46825547835fa2a82186b3"
+      },
+      "modules/mcp/launcher/src/sidequest-mark-white.svg": {
+        "size": 925,
+        "sha256": "bd5e1350ad3e1f6a3b767945f43631aa85b3ebb3f4278b1634d86c6e88cf14d6"
+      },
+      "modules/mcp/launcher/src/styles.css": {
+        "size": 28040,
+        "sha256": "03bdad18cf25fd74e48164ca727baa2c04b256eacd06726272e7ce00a80bf560"
+      },
+      "modules/mcp/launcher/src/updates.js": {
+        "size": 2781,
+        "sha256": "4ecf6e1a28ed51daeec339f7841a77e0e06374f6039007fc4337cc02f1f55629"
+      },
+      "modules/mcp/launcher/src/usage-terms.js": {
+        "size": 1749,
+        "sha256": "239997fc314a20f4d9c9a8636866d5b5320cd104f85aeebc3fc1224bbb66b36e"
+      }
+    },
+    "icons": {
+      "modules/mcp/launcher/src-tauri/icons/32x32.png": {
+        "size": 1533,
+        "sha256": "cd24c1c5d53c558422571b466b6f1950ea0ddca76e1e3de9330fb00a5a174e10"
+      },
+      "modules/mcp/launcher/src-tauri/icons/128x128.png": {
+        "size": 6966,
+        "sha256": "cff3b008e6e0379beee23305e683a00ce0013a73cbb7b6a445cdc73217b3ecbe"
+      },
+      "modules/mcp/launcher/src-tauri/icons/128x128@2x.png": {
+        "size": 14336,
+        "sha256": "840d17fe62d8d5230cc9a3611f6e2492f9f9e29bdb6c7c278f762d4d9774f712"
+      },
+      "modules/mcp/launcher/src-tauri/icons/icon.ico": {
+        "size": 24717,
+        "sha256": "b050e8ba1a6bac1234e83de6b48565914d7a362bb9d45f3ec5e9783274360c91"
+      },
+      "modules/mcp/launcher/src-tauri/icons/icon.icns": {
+        "size": 168699,
+        "sha256": "e37475440cfcc412b8fa598cda8257fe8ddee48c0e5bcc3311541dc89b5a0af7"
+      }
+    },
+    "tracked": {
+      "modules/mcp/unity-extension/Editor/BanterMCPBridge.cs": "unity-extension/Editor/BanterMCPBridge.cs",
+      "modules/mcp/unity-extension/Editor/CreatorWorksMCPLogo.png": "unity-extension/Editor/CreatorWorksMCPLogo.png",
+      "modules/mcp/LICENSE": "LICENSE",
+      "modules/mcp/THIRD_PARTY_NOTICES.md": "THIRD_PARTY_NOTICES.md"
+    },
+    "producer": {
+      "LICENSE": {
+        "sha256": "b1cfe8ff7191d3e9c6c6b0f832adcd2ebece8e6070ef72d2f7afc1c082fb757f",
+        "size": 1068,
+        "mode": 420
+      },
+      "THIRD_PARTY_NOTICES.md": {
+        "sha256": "5e9f0fe9b73afe7c6c056a33124ead3110fc03c309f845e9dd6c76b0a9b00560",
+        "size": 9216,
+        "mode": 420
+      },
+      "creator-works-mcp.mjs": {
+        "sha256": "d669a11c904598a6c23221a3c16f9a2f797a006530c43ba26f251aa44b41323e",
+        "size": 1641644,
+        "mode": 420
+      },
+      "runtime/LICENSE": {
+        "sha256": "4573185d56580da2b890ba34a85a409257640f1c5632eade4300137266194d18",
+        "size": 156926,
+        "mode": 420
+      },
+      "runtime/VERSION": {
+        "sha256": "98182b41c9ce3357797985cf12dc3b0124490ef88bc918a905373e7688e6aec9",
+        "size": 8,
+        "mode": 420
+      },
+      "runtime/node": {
+        "sha256": "62d66443847de1f527f74afe715900b12884ace52136dc9cd8e91e61acc2f527",
+        "size": 123459976,
+        "mode": 493
+      },
+      "unity-extension/Editor/BanterMCPBridge.cs": {
+        "sha256": "eaa70b9696c05e3ebce0abe3d98d8ebb5188f37d0747e6b143fa43ae48f32aca",
+        "size": 358150,
+        "mode": 420
+      },
+      "unity-extension/Editor/CreatorWorksMCPLogo.png": {
+        "sha256": "f3f68baa0d887de92e6cf7aba8beae7ff8ea5c44b13444f018413041ade19ea7",
+        "size": 52329,
+        "mode": 420
+      }
+    },
+    "inputs": [
+      "creator-works-mcp.mjs",
+      "runtime/LICENSE",
+      "runtime/VERSION",
+      "runtime/node",
+      "unity-extension/Editor/BanterMCPBridge.cs",
+      "unity-extension/Editor/CreatorWorksMCPLogo.png"
+    ],
+    "releaseFiles": {
+      "creator-works-mcp.mjs": "creator-works-mcp.mjs",
+      "runtime/node": "runtime/node",
+      "runtime/node.exe": "runtime/node",
+      "runtime/LICENSE": "runtime/LICENSE",
+      "runtime/VERSION": "runtime/VERSION"
+    },
+    "temporaryDirectory": "root-linux-compiler-tauri-resources-003"
+  }
+}
