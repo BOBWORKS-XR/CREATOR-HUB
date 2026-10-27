@@ -2276,7 +2276,10 @@ class Authorization:
         s.dialogs = {(self.identity["pid"], "Authenticate")}
         wait_started = time.monotonic_ns()
         try:
-            s.pages.wait(lambda: bool(p.windows(self.identity["pid"], s.helper, s.x11)), 30)
+            # MCP approval dismisses the dialog before its cleanup finishes.
+            # The helper permits 180 seconds per system command; no input is repeated here.
+            seconds = 180 if target == "setup" and self.mcp_dismissed_ns is not None else 30
+            s.pages.wait(lambda: bool(p.windows(self.identity["pid"], s.helper, s.x11)), seconds)
         except Exception:
             if target == "setup" and self.mcp_dismissed_ns is not None:
                 self.helper_diagnostic(HELPER_DIAGNOSTIC_PHASES[1], wait_started)

@@ -1785,7 +1785,7 @@ class HelperProcessDiagnosticTests(unittest.TestCase):
                 patch.object(M, "publish", side_effect=OSError("PRIVATE")) as publish, self.assertRaises(RuntimeError) as raised:
             authorizer.act("setup", True, None)
         self.assertIs(raised.exception, error)
-        self.assertEqual(session.pages.wait.call_args.args[1], 30)
+        self.assertEqual(session.pages.wait.call_args.args[1], 180)
         publish.assert_called_once()
         self.assertEqual(authorizer.records, [])
         self.assertEqual(session.evidence["helperDiagnostics"][M.HELPER_DIAGNOSTIC_PHASES[1]]["errorType"], "OSError")
@@ -1828,7 +1828,10 @@ class HelperProcessDiagnosticTests(unittest.TestCase):
         authorizer = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "Authorization")
         act = next(node for node in authorizer.body if isinstance(node, ast.FunctionDef) and node.name == "act")
         waits = [n for n in ast.walk(act) if isinstance(n, ast.Call) and ast.unparse(n.func) == "s.pages.wait"]
-        self.assertEqual([ast.literal_eval(n.args[1]) for n in waits], [30, 30])
+        self.assertEqual([ast.unparse(n.args[1]) for n in waits], ["seconds", "30"])
+        budget = next(n for n in ast.walk(act) if isinstance(n, ast.Assign)
+                      and any(isinstance(target, ast.Name) and target.id == "seconds" for target in n.targets))
+        self.assertEqual(ast.unparse(budget.value), "180 if target == 'setup' and self.mcp_dismissed_ns is not None else 30")
         self.assertEqual(sum(isinstance(n, ast.Call) and ast.unparse(n.func) == "p.authenticate_once" for n in ast.walk(act)), 1)
         self.assertEqual(sum(isinstance(n, ast.Call) and ast.unparse(n.func) == "p.cancel_once" for n in ast.walk(act)), 1)
         hooks = [n for n in ast.walk(act) if isinstance(n, ast.Call) and ast.unparse(n.func) == "self.helper_diagnostic"]
@@ -4009,6 +4012,39 @@ class ControllerTests(unittest.TestCase):
         self.assertIn("= " + M.SDK_LOCK, workflow)
         self.assertIn('digest(read_file(source / "package-lock.json", 2 * 1024 * 1024)) == SDK_LOCK',
                       (HERE / "native-linux-production-016-migration.py").read_text())
+
+
+class AuthorizationObservationDeadline(unittest.TestCase):
+    def test_wait_for_first_dialog_remains_30_seconds(self):
+        authorizer = M.Authorization.__new__(M.Authorization)
+        authorizer.identity, authorizer.mcp_dismissed_ns = {"pid": 13}, None
+        authorizer.s = SimpleNamespace(polkit=Mock(), pages=Mock())
+        authorizer.s.pages.wait.side_effect = RuntimeError("Synthetic observation stop")
+        with self.assertRaisesRegex(RuntimeError, "Synthetic observation stop"):
+            authorizer.act("mcp", True, None)
+        self.assertEqual(authorizer.s.pages.wait.call_args.args[1], 30)
+
+    def test_setup_wait_includes_the_declared_cleanup_tool_deadline_only_after_mcp_dismissal(self):
+        authorizer = M.Authorization.__new__(M.Authorization)
+        authorizer.identity, authorizer.mcp_dismissed_ns = {"pid": 13}, 1
+        authorizer.s = SimpleNamespace(polkit=Mock(), pages=Mock())
+        original = RuntimeError("Synthetic observation stop")
+        authorizer.s.pages.wait.side_effect = original
+        authorizer.helper_diagnostic = Mock()
+        with self.assertRaises(RuntimeError) as caught:
+            authorizer.act("setup", True, None)
+        self.assertIs(caught.exception, original)
+        self.assertEqual(authorizer.s.pages.wait.call_args.args[1], 180)
+        authorizer.helper_diagnostic.assert_called_once()
+        self.assertIn("Duration::from_secs(180)", (HERE.parent / "native/linux-deb-retirement/src/linux.rs").read_text())
+
+    def test_setup_without_observed_mcp_dismissal_does_not_get_extra_time(self):
+        authorizer = M.Authorization.__new__(M.Authorization)
+        authorizer.identity, authorizer.mcp_dismissed_ns = {"pid": 13}, None
+        authorizer.s = SimpleNamespace(polkit=Mock(), pages=Mock())
+        authorizer.s.pages.wait.side_effect = RuntimeError("Synthetic observation stop")
+        with self.assertRaises(RuntimeError): authorizer.act("setup", True, None)
+        self.assertEqual(authorizer.s.pages.wait.call_args.args[1], 30)
 
 
 class InventoryDirectoryDiagnostics(unittest.TestCase):
