@@ -603,7 +603,8 @@ class FailedProcessAttributionTests(unittest.TestCase):
             record = {"scenarioPassed": False, **M.FLAGS}
             callback = Mock(**({"side_effect": diagnostic} if isinstance(diagnostic, Exception) else {"return_value": diagnostic}))
             scope = {"error": original, "record": record, "child": Mock(), "helper": Mock(), "failed_process_attribution": callback,
-                     "capture_wrapper": Mock(), "logs": Mock(), "wrapper_started": 0, "deadline": 540}
+                     "capture_wrapper": Mock(), "logs": Mock(), "wrapper_started": 0, "deadline": 540,
+                     "InventoryDirectoryRefusal": M.InventoryDirectoryRefusal}
             exec(block, scope)
             self.assertIs(scope["failure"], original); callback.assert_called_once_with(scope["child"], scope["helper"])
             self.assertEqual(record["refusal"], {"type": "RuntimeError", "message": str(original)})
@@ -3973,6 +3974,57 @@ class ControllerTests(unittest.TestCase):
         self.assertIn("= " + M.SDK_LOCK, workflow)
         self.assertIn('digest(read_file(source / "package-lock.json", 2 * 1024 * 1024)) == SDK_LOCK',
                       (HERE / "native-linux-production-016-migration.py").read_text())
+
+
+class InventoryDirectoryDiagnostics(unittest.TestCase):
+    def info(self, **changes):
+        values = dict(st_dev=1, st_ino=5001, st_mode=M.stat.S_IFDIR | 0o500, st_uid=M.UID,
+                      st_gid=M.UID, st_nlink=9, st_size=0, st_mtime_ns=11, st_ctime_ns=12)
+        return SimpleNamespace(**{**values, **changes})
+
+    def test_unchanged_snapshot_has_no_new_authority_or_additional_reads(self):
+        info = self.info()
+        with patch.object(M.os, "open", side_effect=AssertionError("No extra proc read")):
+            self.assertIsNone(M.inventory_directory_guard(5152, Path("/proc/5152"), info, info, info, "final"))
+
+    def test_every_metadata_difference_still_refuses_and_retains_only_exact_pid_fields(self):
+        for key in vars(self.info()):
+            for position in ("opened", "named"):
+                with self.subTest(field=key, position=position):
+                    origin = self.info()
+                    altered = self.info(**{key: getattr(origin, key) + 1})
+                    args = (altered, origin) if position == "opened" else (origin, altered)
+                    with self.assertRaises(M.InventoryDirectoryRefusal) as caught:
+                        M.inventory_directory_guard(5152, Path("/proc/5152"), origin, *args, "final")
+                    record = caught.exception.observation
+                    self.assertFalse(record["validationAuthority"])
+                    self.assertTrue(record["readOnly"])
+                    self.assertEqual(record["pid"], 5152)
+                    self.assertEqual(record["phase"], "final")
+                    self.assertEqual(record["origin"]["path"], "/proc/5152")
+                    self.assertNotEqual(record[position], record["origin"])
+                    self.assertLess(len(json.dumps(record)), 4096)
+                    self.assertNotEqual(str(caught.exception), "Owned process is not live")
+
+    def test_initial_owner_and_type_failures_remain_refusals(self):
+        for changed in (self.info(st_uid=0), self.info(st_mode=M.stat.S_IFREG | 0o500)):
+            with self.assertRaisesRegex(M.InventoryDirectoryRefusal, "Inventory proc directory changed"):
+                M.inventory_directory_guard(5152, Path("/proc/5152"), changed, changed, changed, "initial")
+
+    def test_unknown_scope_is_rejected_without_observation(self):
+        info = self.info()
+        for pid, file, phase in ((True, Path("/proc/1"), "final"), (0, Path("/proc/0"), "final"),
+                                 (5152, Path("/proc/5152"), "retry")):
+            with self.assertRaises(RuntimeError):
+                M.inventory_directory_guard(pid, file, info, info, info, phase)
+
+    def test_broker_retains_diagnostic_without_converting_refusal_to_success(self):
+        source = (HERE / "native-linux-production-016-migration.py").read_text()
+        broker = source[source.index("def broker(env):"):]
+        self.assertIn('if type(error) is InventoryDirectoryRefusal:', broker)
+        self.assertIn('record["inventorySnapshotRefusal"] = error.observation', broker)
+        self.assertIn('failure = error', broker)
+        self.assertIn('"scenarioPassed": False', broker)
 
 
 if __name__ == "__main__":

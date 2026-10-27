@@ -1494,10 +1494,31 @@ def no_legacy_backend(identity, command):
             and b"--creator-hub-host" not in command.split(b"\0"), "A separate MCP/Setup GUI or legacy host backend started")
 
 
+class InventoryDirectoryRefusal(RuntimeError):
+    def __init__(self, message, observation):
+        super().__init__(message)
+        self.observation = observation
+
+
+def inventory_directory_guard(pid, path, origin, opened, named, phase):
+    require(type(pid) is int and 0 < pid <= 2147483647
+            and phase in ("initial", "final"), "Fixed inventory observation scope required")
+    if (stat.S_ISDIR(origin.st_mode) and origin.st_uid == UID
+            and metadata_stamp(opened) == metadata_stamp(origin) == metadata_stamp(named)):
+        return
+    message = "Inventory proc directory changed" + (" during observation" if phase == "final" else "")
+    # Preserve only the values from the failed comparison, not a fresh retry.
+    raise InventoryDirectoryRefusal(message, {
+        "scope": "failed-inventory-directory-comparison-only", "pid": pid, "phase": phase,
+        "readOnly": True, "validationAuthority": False,
+        "origin": metadata_row(path.as_posix(), origin),
+        "opened": metadata_row(path.as_posix(), opened), "named": metadata_row(path.as_posix(), named),
+    })
+
+
 def inventory_process_snapshot(directory, path, pid, helper):
     info = os.fstat(directory)
-    require(stat.S_ISDIR(info.st_mode) and info.st_uid == UID
-            and metadata_stamp(info) == metadata_stamp(path.lstat()), "Inventory proc directory changed")
+    inventory_directory_guard(pid, path, info, info, path.lstat(), "initial")
     def read(leaf, limit):
         before = os.stat(leaf, dir_fd=directory, follow_symlinks=False)
         require(stat.S_ISREG(before.st_mode) and before.st_nlink == 1 and 0 <= before.st_size <= limit, "Nonordinary inventory proc metadata")
@@ -1517,7 +1538,7 @@ def inventory_process_snapshot(directory, path, pid, helper):
         matches = re.findall(rb"^" + name.encode() + rb":\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s*$", status, re.M)
         require(len(matches) == 1, "Inventory credential tuple unavailable")
         ids[name] = [int(value) for value in matches[0]]
-    require(metadata_stamp(os.fstat(directory)) == metadata_stamp(info) == metadata_stamp(path.lstat()), "Inventory proc directory changed during observation")
+    inventory_directory_guard(pid, path, info, os.fstat(directory), path.lstat(), "final")
     return {"pid": pid, "startTime": start, "parentPid": int(fields[1]), "state": fields[0],
             "procDirectory": metadata_row(path.as_posix(), info), **ids}
 
@@ -3067,6 +3088,8 @@ def broker(env):
     except Exception as error:
         failure = error
         record["refusal"] = {"type": type(error).__name__, "message": str(error)[:1000]}
+        if type(error) is InventoryDirectoryRefusal:
+            record["inventorySnapshotRefusal"] = error.observation
         if "sessionWrapper" not in record:
             capture_wrapper(record, child, logs, wrapper_started, deadline)
         try:
