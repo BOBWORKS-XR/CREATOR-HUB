@@ -8,7 +8,8 @@ http.createServer((request, response) => {
     const pathname = decodeURIComponent(new URL(request.url, 'http://localhost').pathname);
     const file = path.resolve(root, `.${pathname === '/' ? '/index.html' : pathname}`);
     if (!file.startsWith(root + path.sep)) throw new Error('Outside static root');
+    const body = fs.readFileSync(file);
     response.writeHead(200, { 'Content-Type': types[path.extname(file)] || 'application/octet-stream' });
-    response.end(fs.readFileSync(file));
+    response.end(body);
   } catch { response.writeHead(404); response.end(); }
 }).listen(4188, '127.0.0.1');

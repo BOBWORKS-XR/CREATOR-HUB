@@ -43,6 +43,11 @@
   const directFeatures = window.CreatorHubNative.integratedFeatures === true;
   const updateRecovery = window.CreatorHubNative.updateRecovery === true;
   let directReady = false;
+  const mcpRouteUpdate = window.CreatorMcpRouteUpdate.create();
+  let routeRead = null;
+  const routeService = { state: mcpRouteUpdate, recheck: recheckMcpRoute, openMcp: () => show('mcp') };
+  window.CreatorMcpRouteUpdate.mount(byId('hub-mcp-route-update'), routeService);
+  window.CreatorFeaturePages.configureMcpRouteUpdate(routeService);
   if (directFeatures) {
     current = 'projects';
     document.body.classList.add('integrated-home');
@@ -484,6 +489,20 @@
     byId('progress-bytes').textContent = payload.total ? `${(payload.received / 1048576).toFixed(1)} / ${(payload.total / 1048576).toFixed(1)} MB` : '';
   }
 
+  async function recheckMcpRoute() {
+    if (routeRead) return routeRead;
+    mcpRouteUpdate.checking(true);
+    routeRead = (async () => {
+      try {
+        const result = await invoke('hub_update_status', { online: false, preview: byId('preview-channel').checked });
+        if (!result || typeof result.currentVersion !== 'string') throw Error('Hub route status is unavailable.');
+        hubUpdate = result; mcpRouteUpdate.observe(result.mcpRouteUpdate); renderState();
+      } catch (reason) { mcpRouteUpdate.failed(reason); }
+      finally { mcpRouteUpdate.checking(false); routeRead = null; }
+    })();
+    return routeRead;
+  }
+
   async function refresh(check = false) {
     if (busy) return;
     let succeeded = false;
@@ -504,9 +523,10 @@
       if (!result || typeof result.currentVersion !== 'string'
         || (result.previewSupported !== undefined && typeof result.previewSupported !== 'boolean')) throw 'Hub update response is unavailable.';
       hubUpdate = result;
+      mcpRouteUpdate.observe(result.mcpRouteUpdate);
       previewSupported = result.previewSupported !== false;
       hubChecked = true;
-    } catch (reason) { hubUpdate = { warning: String(reason) }; }
+    } catch (reason) { hubUpdate = { warning: String(reason) }; mcpRouteUpdate.failed(reason); }
     finally {
       if (updateRecovery) {
         try { acceptRecovery(await invoke('hub_update_recovery_status')); }
@@ -751,6 +771,9 @@
       await window.__TAURI__.event.listen('hub-launch-view', event => applyLaunch(event.payload));
       applyLaunch(await invoke('get_launch_request'));
     } catch (reason) { error.textContent = `Progress reporting unavailable: ${String(reason)}`; error.classList.remove('hidden'); }
+    // A completion hint is read-only; the Root worker must emit after releasing Manager.
+    try { await window.__TAURI__.event.listen('mcp-route-update-complete', () => { void recheckMcpRoute(); }); }
+    catch { /* Explicit route recheck remains available when this event is unsupported. */ }
     busy = true; renderState(); window.CreatorHosted.updating(true);
     await restoreHostedViews();
     window.CreatorHosted.updating(false); busy = false;

@@ -253,6 +253,8 @@ pub(crate) fn check(handle: &tauri::AppHandle, online: bool) -> Result<self_upda
             .clone()
             .or_else(|| release.as_ref().and_then(|r| r.installable().err())),
         warning,
+        #[cfg(feature = "integrated-features")]
+        mcp_route_update: None,
         preview_supported: Some(false),
     };
     runtime.release = release;
