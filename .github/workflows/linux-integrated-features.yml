@@ -3,7 +3,7 @@ name: Linux direct Hub feature libraries
 on:
   workflow_dispatch:
   push:
-    branches: [validation/linux-integrated-features]
+    branches: [validation/linux-root-route-compiler-02]
 
 permissions:
   contents: read
@@ -12,17 +12,68 @@ jobs:
   native-libraries:
     if: >-
       github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.repository_id == '1364807512' &&
-      github.ref == 'refs/heads/validation/linux-integrated-features' &&
+      github.ref == 'refs/heads/validation/linux-root-route-compiler-02' &&
       (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-22.04
     timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
     steps:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
+          fetch-depth: 2
       - uses: actions/setup-node@v6
         with:
           node-version: 22.22.3
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            modules/mcp/package-lock.json
+      - name: Verify exact 982 plus backend04 and UI03 compiler context
+        run: python3 -I -S -B scripts/linux-root-compiler-input.py source
+      - name: Acquire one exact original unsigned compiler input ZIP
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const fs = require('node:fs/promises');
+            const path = require('node:path');
+            const crypto = require('node:crypto');
+            const assert = require('node:assert/strict');
+            assert.equal(context.repo.owner, 'BOBWORKS-XR');
+            assert.equal(context.repo.repo, 'CREATOR-HUB');
+            const args = {owner: context.repo.owner, repo: context.repo.repo};
+            const source = '98245e258249dd2c4e1d72c77d957fd7b00bb573';
+            const sha = 'fe64b80761580d1740cd1513db98e9db559d8188103d163ed3be060914f28bbd';
+            const run = (await github.rest.actions.getWorkflowRun({...args, run_id: 40580977821})).data;
+            assert.equal(run.id, 40580977821); assert.equal(run.run_attempt, 1);
+            assert.equal(run.repository.id, 1364807512); assert.equal(run.head_repository.id, 1364807512);
+            assert.equal(run.head_sha, source); assert.equal(run.head_branch, 'validation/unix-payload-016');
+            assert.equal(run.status, 'completed'); assert.equal(run.conclusion, 'success');
+            assert.equal(run.event, 'push'); assert.equal(run.workflow_id, 383680446);
+            assert.equal(run.path, '.github/workflows/unix-managed-payload.yml');
+            const commit = (await github.rest.git.getCommit({...args, commit_sha: source})).data;
+            assert.equal(commit.tree.sha, '479698017875ebd1b95a940efbf5089f6d2d543f');
+            const item = (await github.rest.actions.getArtifact({...args, artifact_id: 12770466146})).data;
+            assert.equal(item.id, 12770466146); assert.equal(item.expired, false);
+            assert.equal(item.name, 'unsigned-unix-payload-Linux-X64-' + source);
+            assert.equal(item.size_in_bytes, 53949164); assert.equal(item.digest, 'sha256:' + sha);
+            assert.equal(item.workflow_run.id, run.id); assert.equal(item.workflow_run.head_sha, source);
+            assert.equal(item.workflow_run.repository_id, 1364807512);
+            assert.equal(item.workflow_run.head_repository_id, 1364807512);
+            const parent = await fs.realpath(process.env.RUNNER_TEMP);
+            const directory = path.join(parent, 'root-linux-compiler-input-40580977821');
+            await fs.mkdir(directory, {mode: 0o700});
+            const response = await github.rest.actions.downloadArtifact({...args, artifact_id: item.id, archive_format: 'zip'});
+            const raw = Buffer.from(response.data);
+            assert.equal(raw.length, 53949164);
+            assert.equal(crypto.createHash('sha256').update(raw).digest('hex'), sha);
+            const file = await fs.open(path.join(directory, 'original.zip'), 'wx', 0o600);
+            try { await file.writeFile(raw); await file.sync(); } finally { await file.close(); }
+            core.info('Exact producer ZIP verified; unsigned data only, no payload execution.');
+      - name: Stage only four raw compiler hash inputs without payload execution
+        run: python3 -I -S -B scripts/linux-root-compiler-input.py stage
       - uses: dtolnay/rust-toolchain@1.99.0
         with:
           components: clippy
@@ -45,14 +96,17 @@ jobs:
         run: |
           set -euo pipefail
           npm ci --ignore-scripts
+          node --test scripts/linux-root-compiler-reuse.test.cjs
+          python3 -I -S -B scripts/linux-root-compiler-input.test.py
           node --test scripts/build-unified.test.cjs scripts/linux-016-portable-package.test.cjs scripts/linux-retirement-package.test.cjs scripts/assemble-unix-payload.test.cjs scripts/linux-portable-signed-controls.test.cjs scripts/linux-portable-restart-ci.test.cjs
       - name: Prepare the real MCP runtime hash inputs without signing or packaging
         run: |
           set -euo pipefail
           npm ci --prefix modules/mcp
           npm --prefix modules/mcp test
-          npm --prefix modules/mcp run release:launcher
       - name: Compile the in-process Hub APIs and reject warnings
+        env:
+          CREATOR_HUB_INTEGRATED_MCP_PAYLOAD: ${{ runner.temp }}/root-linux-compiler-input-40580977821/payload
         run: |
           set -euo pipefail
           rustc --test --edition=2021 modules/mcp/launcher/src-tauri/build_payload_inputs.rs -o "$RUNNER_TEMP/mcp-build-input-tests"
@@ -67,7 +121,24 @@ jobs:
           cargo clippy --locked --manifest-path native/flatpak-native-activation/Cargo.toml --all-targets -- -D warnings
           cargo clippy --locked --manifest-path native/linux-portable-deployment/Cargo.toml --all-targets -- -D warnings
           cargo clippy --locked --manifest-path native/linux-portable-deployment/Cargo.toml --all-targets --features experimental-restart -- -D warnings
+      - name: Verify all 45 handoff tests in each actual Linux Root configuration
+        env:
+          CREATOR_HUB_INTEGRATED_MCP_PAYLOAD: ${{ runner.temp }}/root-linux-compiler-input-40580977821/payload
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          i=0
+          for features in \
+            integrated-features,experimental-flatpak-host,experimental-linux-migration,experimental-linux-portable-host \
+            integrated-features,experimental-flatpak-host,experimental-linux-migration,experimental-linux-portable-update \
+            integrated-features,experimental-flatpak-host,linux-production-migration,experimental-linux-portable-update; do
+            i=$((i+1))
+            cargo test --locked --manifest-path src-tauri/Cargo.toml --bin creator-hub --features "$features" -- --list > "$RUNNER_TEMP/root-handoff-$i.list"
+            python3 -I -S -B scripts/linux-root-compiler-input.py inventory "$RUNNER_TEMP/root-handoff-$i.list"
+          done
       - name: Test guards, settings preservation and internal feature operations
+        env:
+          CREATOR_HUB_INTEGRATED_MCP_PAYLOAD: ${{ runner.temp }}/root-linux-compiler-input-40580977821/payload
         run: |
           set -euo pipefail
           cargo test --locked --manifest-path src-tauri/Cargo.toml --features integrated-features,experimental-flatpak-host,experimental-linux-migration,experimental-linux-portable-host -- --test-threads=1
@@ -80,6 +151,8 @@ jobs:
           cargo test --locked --manifest-path native/linux-portable-deployment/Cargo.toml -- --test-threads=1
           cargo test --locked --manifest-path native/linux-portable-deployment/Cargo.toml --features experimental-restart -- --test-threads=1
       - name: Verify actual unchanged Setup helper preparation in isolated permission fixtures
+        env:
+          CREATOR_HUB_INTEGRATED_MCP_PAYLOAD: ${{ runner.temp }}/root-linux-compiler-input-40580977821/payload
         run: |
           set -euo pipefail
           command -v setfacl
