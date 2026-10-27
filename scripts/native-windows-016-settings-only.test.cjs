@@ -3,6 +3,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const vm = require('node:vm');
 const { spawnSync } = require('node:child_process');
 const driver = require('./native-windows-016-settings-only.cjs');
 const candidate = require('./windows-incoming-016.cjs');
@@ -91,8 +92,70 @@ test('legacy review must finish its UI lease before either inspecting state or r
   assert.equal(driver.reviewSettled(true, { querySelector: () => null }), false);
   assert.match(source, /await page\.waitForFunction\(reviewSettled, false\)/);
   const cancelledBranch = source.split("await decision('preserve', false);")[1].split("await decision('preserve', true)")[0];
-  assert.ok(cancelledBranch.indexOf('await page.waitForFunction(reviewSettled, true)') < cancelledBranch.indexOf("[data-field=\"controls\"]"));
-  assert.match(cancelledBranch, /isEnabled\(\), false/); assert.match(cancelledBranch, /button\.isEnabled\(\), true/);
+  assert.ok(cancelledBranch.indexOf('await page.waitForFunction(reviewSettled, true)') < cancelledBranch.indexOf('await assertMcpControls(page, false)'));
+  assert.match(cancelledBranch, /button\.isEnabled\(\), true/);
+});
+test('native config verification owns one workflow and finishes the exact lease without retrying failures', async () => {
+  const config = { channels: [{ id: 'retained' }], tool_groups: 'none' };
+  const fixture = failure => {
+    const calls = []; let active = false;
+    const page = { evaluate: fn => vm.runInNewContext(`(${fn.toString()})()`, {
+      window: { CreatorHubNative: { invoke: async (outer, payload) => {
+        assert.equal(outer, 'feature_call'); assert.equal(payload.feature, 'mcp');
+        const { command, args } = payload; calls.push([command, JSON.parse(JSON.stringify(args))]);
+        if (command === 'begin_ui_operation') {
+          assert.equal(active, false); if (failure === command) throw Error(command);
+          active = true; return 41;
+        }
+        if (command === 'load_config') {
+          if (!active) throw Error('Start an owned UI workflow before changing MCP settings or projects.');
+          if (failure === command) throw Error(command); return config;
+        }
+        assert.equal(command, 'finish_ui_operation'); assert.equal(active, true); assert.equal(args.id, 41);
+        if (failure === command) throw Error(command); active = false; return null;
+      } } },
+    }) };
+    return { calls, page };
+  };
+  const success = fixture(); assert.equal(await driver.loadMcpConfig(success.page), config);
+  assert.deepEqual(success.calls, [['begin_ui_operation', {}], ['load_config', {}], ['finish_ui_operation', { id: 41 }]]);
+  for (const failure of ['begin_ui_operation', 'load_config', 'finish_ui_operation']) {
+    const f = fixture(failure); await assert.rejects(driver.loadMcpConfig(f.page), new RegExp(failure));
+    assert.deepEqual(f.calls, failure === 'begin_ui_operation' ? [['begin_ui_operation', {}]] : success.calls);
+  }
+  const commands = text('modules/mcp/launcher/src-tauri/src/hosted_commands.rs');
+  const exempt = commands.split('pub fn needs_workflow(')[1].split('macro_rules! args')[0];
+  assert.ok(commands.split('pub fn needs_workflow(')[0].includes('"load_config"'));
+  assert.match(exempt, /COMMANDS\.contains\(&command\)/); assert.doesNotMatch(exempt, /"load_config"/);
+  assert.match(text('modules/mcp/launcher/src-tauri/src/service.rs'), /if changes && !self\.lifecycle\.has_workflow\(\)/);
+  const controller = text('src/features/common.js').split('async run(')[1].split('dispose()')[0];
+  assert.ok(controller.indexOf("await call('begin_ui_operation')") < controller.indexOf('await action();'));
+  assert.ok(controller.indexOf('await action();') < controller.indexOf("await call('finish_ui_operation', { id: lease })"));
+  assert.match(source, /const loaded = await loadMcpConfig\(page\)/);
+  assert.doesNotMatch(source, /await feature\('load_config'\)/);
+});
+test('fieldset lock checks its disabled property and inherited child-control state before review and after Cancel', async () => {
+  // Playwright treats disabled native inputs/buttons, not the FIELDSET itself, as disabled.
+  const fixture = (disabled, childEnabled = !disabled) => ({ locator: selector => ({
+    evaluate: fn => { assert.equal(selector, '#feature-mcp [data-field="controls"]'); return fn({ disabled }); },
+    isEnabled: async () => {
+      if (selector === '#feature-mcp [data-field="controls"]') return true;
+      assert.ok(['project', 'check'].some(field => selector === `#feature-mcp [data-field="${field}"]`));
+      return childEnabled;
+    },
+  }) });
+  for (const enabled of [false, true]) {
+    await driver.assertMcpControls(fixture(!enabled), enabled);
+    await assert.rejects(driver.assertMcpControls(fixture(enabled), enabled));
+    await assert.rejects(driver.assertMcpControls(fixture(!enabled, !enabled), enabled));
+  }
+  await assert.rejects(driver.assertMcpControls(fixture(undefined), false));
+  assert.match(text('src/features/mcp.js'), /<fieldset data-field="controls" disabled/);
+  assert.match(text('src/features/common.js'), /controls\.disabled = working \|\| !available \|\| poisoned \|\| locked/);
+  assert.match(text('tests/direct-mcp-regressions.spec.js'), /toHaveJSProperty\('disabled', locked\)/);
+  const legacy = source.split('const reviewLegacy = async cancelFirst => {')[1].split('await reviewLegacy(true)')[0];
+  assert.equal((legacy.match(/await assertMcpControls\(page, false\)/g) || []).length, 2);
+  assert.match(source, /await assertMcpControls\(page, true\)/);
 });
 function snapshot(kind, approve = true) {
   const [title, yes, no] = driver.DIALOGS[kind];

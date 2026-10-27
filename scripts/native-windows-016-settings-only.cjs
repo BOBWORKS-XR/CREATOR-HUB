@@ -99,6 +99,20 @@ function reviewSettled(cancelled, document = globalThis.document) {
   return Boolean(root && root.getAttribute('aria-busy') === 'false' && (!cancelled
     || root.querySelector('[data-field="product-status"]')?.textContent.includes('without explicit approval')));
 }
+async function loadMcpConfig(page) {
+  return page.evaluate(async () => {
+    const call = (command, args = {}) => window.CreatorHubNative.invoke('feature_call', { feature: 'mcp', command, args });
+    const id = await call('begin_ui_operation');
+    try { return await call('load_config'); }
+    finally { await call('finish_ui_operation', { id }); }
+  });
+}
+async function assertMcpControls(page, enabled) {
+  assert.equal(await page.locator('#feature-mcp [data-field="controls"]').evaluate(fieldset => fieldset.disabled), !enabled);
+  for (const field of ['project', 'check']) {
+    assert.equal(await page.locator(`#feature-mcp [data-field="${field}"]`).isEnabled(), enabled);
+  }
+}
 const DIALOGS = Object.freeze({
   bootstrap: ['Move to Hub', 'Move to Hub', 'Not now'],
   import: ['Import saved MCP projects', 'Back up and import projects', 'Keep existing'],
@@ -242,8 +256,8 @@ async function main(args = process.argv.slice(2), env = process.env) {
   };
   const readyMcp = async expected => {
     await page.waitForFunction(() => { const root = document.querySelector('#feature-mcp'); return root && !root.hidden && root.getAttribute('aria-busy') === 'false' && root.querySelector('[data-field="status"]')?.textContent === 'Ready'; });
-    assert.equal(await page.locator('#feature-mcp [data-field="controls"]').isEnabled(), true);
-    const loaded = await feature('load_config');
+    await assertMcpControls(page, true);
+    const loaded = await loadMcpConfig(page);
     for (const key of ['active_channel_id', 'mcp_server_path', 'auto_start', 'tool_groups', 'enable_custom_scripts', 'allow_all_tests']) assert.deepEqual(loaded[key], expected[key]);
     assert.deepEqual(loaded.channels, expected.channels);
     assert.equal(await page.locator('#feature-mcp [data-field="project"]').inputValue(), expected.channels.find(row => row.id === expected.active_channel_id).unity_project_path);
@@ -323,13 +337,13 @@ async function main(args = process.argv.slice(2), env = process.env) {
         await panel.waitFor({ state: 'visible' });
         await page.waitForFunction(reviewSettled, false);
         assert.equal((await feature('product_settings_status')).status, 'legacy-only');
-        assert.equal(await page.locator('#feature-mcp [data-field="controls"]').isEnabled(), false); originals();
+        await assertMcpControls(page, false); originals();
         const button = panel.getByRole('button', { name: 'Review saved MCP settings', exact: true });
         if (cancelFirst) {
           const beforeCancel = backupState(); await button.click(); await decision('preserve', false);
           await page.waitForFunction(reviewSettled, true);
           originals(); assert.deepEqual(backupState(), beforeCancel);
-          assert.equal(await page.locator('#feature-mcp [data-field="controls"]').isEnabled(), false);
+          await assertMcpControls(page, false);
           assert.equal(await button.isEnabled(), true, 'Returned cancellation must allow an explicit fresh review'); report.cancelPreserved = true;
         }
         await button.click(); await decision('preserve', true); await readyMcp(initial); backups(); originals();
@@ -372,5 +386,5 @@ async function retry(action, seconds = 90) {
   }
   throw last || Error('Readiness deadline exceeded');
 }
-module.exports = { BRANCH, WORKFLOW, CASES, admission, bindInput, fixture, initialConfig, missingProjectFixture, mergedDocument, reviewSettled, DIALOGS, confirmation, selectDialog, dialogCommand, checkReceipt, main };
+module.exports = { BRANCH, WORKFLOW, CASES, admission, bindInput, fixture, initialConfig, missingProjectFixture, mergedDocument, reviewSettled, loadMcpConfig, assertMcpControls, DIALOGS, confirmation, selectDialog, dialogCommand, checkReceipt, main };
 if (require.main === module) main().then(result => console.log(JSON.stringify(result))).catch(error => { console.error(String(error.stack || error)); process.exitCode = 1; });
