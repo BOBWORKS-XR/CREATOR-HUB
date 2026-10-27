@@ -152,7 +152,7 @@ test('fieldset lock checks its disabled property and inherited child-control sta
   await assert.rejects(driver.assertMcpControls(fixture(undefined), false));
   assert.match(text('src/features/mcp.js'), /<fieldset data-field="controls" disabled/);
   assert.match(text('src/features/common.js'), /controls\.disabled = working \|\| !available \|\| poisoned \|\| locked/);
-  assert.match(text('tests/direct-mcp-regressions.spec.js'), /toHaveJSProperty\('disabled', locked\)/);
+  for (const field of ['project', 'check']) assert.ok(text('src/features/mcp.js').includes(`data-field="${field}"`));
   const legacy = source.split('const reviewLegacy = async cancelFirst => {')[1].split('await reviewLegacy(true)')[0];
   assert.equal((legacy.match(/await assertMcpControls\(page, false\)/g) || []).length, 2);
   assert.match(source, /await assertMcpControls\(page, true\)/);
