@@ -10,6 +10,7 @@ const noticeKey = 'creator-works-mcp.ai-usage-notice-hidden.v1';
 export function mount(root, api) {
   root.innerHTML = `
     <div class="feature-heading"><h2>Creator Works MCP</h2><span data-field="status" role="status">Checking availability</span></div>
+    <section data-field="route-update" hidden></section>
     <p data-field="error" class="feature-error" role="alert" hidden></p><button data-field="retry" class="text-button" type="button" hidden>Check connection again</button>
     <section data-field="product-panel" class="feature-section" aria-label="Saved MCP settings review" hidden>
       <h3>Saved MCP settings</h3><p data-field="product-status" role="status">Checking retained settings</p>
@@ -53,6 +54,8 @@ export function mount(root, api) {
     </fieldset>
     <dialog data-field="guide-dialog" class="feature-dialog" aria-labelledby="feature-mcp-guide-title"><h3 id="feature-mcp-guide-title">Connect your AI to Unity</h3><p>Project Setup creates a Unity project. MCP connects an AI client to it; it is not the AI model.</p><ol data-field="guide-steps"></ol><p data-field="guide-error" class="feature-error" role="alert" hidden></p><div class="feature-actions"><button data-field="guide-help" class="text-button" type="button">Help &amp; troubleshooting</button><button data-field="guide-skip" class="text-button" type="button">Use existing controls</button><button data-field="guide-start" class="primary-button" type="button">Set up a connection</button></div></dialog>`;
   const page = controller(root, api, 'mcp'); const $ = page.field;
+  const disposeRouteNotice = window.CreatorMcpRouteUpdate.mount($('route-update'), api.mcpRouteUpdate?.(), { mcpPage: true });
+  const disposePage = page.dispose;
   let config = null;
   let onboarding = null;
   let chosen = false;
@@ -526,6 +529,7 @@ export function mount(root, api) {
   });
   try { $('notice').hidden = localStorage.getItem(noticeKey) === 'true'; } catch { /* Keep warning visible. */ }
   return Object.assign(page, {
+    dispose() { if (page.busy()) return false; disposeRouteNotice(); return disposePage(); },
     async initialize() {
       page.lock(true);
       let loaded = false;

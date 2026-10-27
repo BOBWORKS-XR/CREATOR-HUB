@@ -10,10 +10,12 @@
   let latestStatus = { integrated: false, features: [] };
   let generation = 0;
   let canLoad = true;
+  let mcpRouteUpdate = null;
   const changed = () => window.dispatchEvent(new Event('creator-feature-state'));
   const api = {
     invoke: (...args) => (native?.invoke || window.CreatorHubNative.invoke)(...args),
     changed,
+    mcpRouteUpdate: () => mcpRouteUpdate,
     retry(feature) { const page = pages.get(feature); if (canLoad && page && !page.busy()) { page.attempted = false; page.initialized = false; } return window.CreatorFeaturePages.show(feature); },
   };
   async function subscribe() {
@@ -51,6 +53,10 @@
     help(selected);
   }
   window.CreatorFeaturePages = Object.freeze({
+    configureMcpRouteUpdate(value) {
+      if (mcpRouteUpdate || !value?.state?.subscribe || typeof value.recheck !== 'function' || typeof value.openMcp !== 'function') throw new Error('Root route status callbacks are unavailable.');
+      mcpRouteUpdate = value;
+    },
     configure(value) {
       if (pages.size || subscription) throw new Error('Configure feature API before opening a page.');
       if (typeof value?.invoke !== 'function' || typeof value.listen !== 'function') throw new Error('Feature invoke/listen API required.');
