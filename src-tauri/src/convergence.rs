@@ -742,10 +742,13 @@ fn merge_project_settings(current: &[u8], legacy: &[u8]) -> Result<ProjectImport
     use std::collections::HashSet;
     stores::validate(stores::Store::McpCurrent, current)?;
     stores::validate(stores::Store::McpLegacy, legacy)?;
-    let mut result: Value =
-        serde_json::from_slice(current).map_err(|_| "Cannot read current MCP settings.")?;
-    let earlier: Value =
-        serde_json::from_slice(legacy).map_err(|_| "Cannot read earlier MCP settings.")?;
+    // Reject ambiguous unknown fields even when no project needs importing.
+    let mut result = settings_json::parse_unambiguous(
+        std::str::from_utf8(current).map_err(|_| "Cannot read current MCP settings.")?,
+    )?;
+    let earlier = settings_json::parse_unambiguous(
+        std::str::from_utf8(legacy).map_err(|_| "Cannot read earlier MCP settings.")?,
+    )?;
     let channels = result["channels"]
         .as_array_mut()
         .ok_or("Cannot read current MCP projects.")?;

@@ -289,8 +289,116 @@ test('preferences use Home and the actual update-settings summary, with visible 
   assert.match(html, /<details id="update-settings"><summary>Update settings<\/summary>/);
   const source = fs.readFileSync(path.join(__dirname, '../artifacts/menu-merge-20261027/outgoing/driver.cjs'), 'utf8');
   assert.match(source, /await setUpdatePreferences\(page, restore\)/);
-  assert.match(source, /saved\.restoreHostedViews, restore/);
+  assert.match(source, /assertSavedPreferences\(JSON\.parse\(fs\.readFileSync\(prefPath\)\), restore\)/);
   assert.doesNotMatch(driver.setUpdatePreferences.toString(), /suite-trigger|suite-menu|\.evaluate\(|force:/);
+});
+
+test('disk preference fixtures use the actual Rust serialization keys, rejecting missing, renamed or wrong values', () => {
+  const driver = require('../artifacts/menu-merge-20261027/outgoing/driver.cjs');
+  const rust = fs.readFileSync(path.join(__dirname, '../src-tauri/src/preferences.rs'), 'utf8');
+  const flags = rust.match(/serde_json::to_value\(Flags::default\(\)\)\.unwrap\(\),\s*serde_json::json!\((\{[^\r\n]+\})\)/);
+  const schema = rust.match(/assert_eq!\(record\["([^"]+)"\], (\d+)\)/);
+  assert.ok(flags, 'Product Rust serialized Flags fixture is required');
+  assert.ok(schema, 'Product Rust serialized record schema fixture is required');
+  assert.match(rust, /#\[serde\(rename_all = "camelCase", deny_unknown_fields\)\]\s*struct Record/);
+  const productFlags = JSON.parse(flags[1]);
+  const fixture = { [schema[1]]: Number(schema[2]), ...Object.fromEntries(Object.keys(productFlags).map(key => [key, false])) };
+  for (const restore of [false, true]) {
+    const saved = { ...fixture, restoreHostedViews: restore };
+    driver.assertSavedPreferences(saved, restore);
+    for (const key of Object.keys(saved)) {
+      const missing = { ...saved }; delete missing[key];
+      assert.throws(() => driver.assertSavedPreferences(missing, restore), key);
+      const wrong = { ...saved, [key]: typeof saved[key] === 'boolean' ? !saved[key] : 2 };
+      assert.throws(() => driver.assertSavedPreferences(wrong, restore), key);
+    }
+    for (const alias of ['previewChannel', 'includePrereleases']) {
+      const wrong = { ...saved, [alias]: saved.preview }; delete wrong.preview;
+      assert.throws(() => driver.assertSavedPreferences(wrong, restore), alias);
+    }
+    assert.throws(() => driver.assertSavedPreferences({ ...saved, autoDownloadVerified: false }, restore));
+    assert.throws(() => driver.assertSavedPreferences({ ...saved, autoDownload: 'false' }, restore));
+    assert.throws(() => driver.assertSavedPreferences({ ...saved, preview: null }, restore));
+  }
+  const source = fs.readFileSync(path.join(__dirname, '../artifacts/menu-merge-20261027/outgoing/driver.cjs'), 'utf8');
+  assert.doesNotMatch(source, /previewChannel|includePrereleases|autoDownloadVerified/);
+  assert.match(source, /assert\.deepEqual\(await preferences\(\), preferencesBefore\)/);
+  assert.match(source, /protectedFiles\.push\(\{ file: prefPath, sha256: hashFile\(prefPath\) \}\)/);
+});
+
+test('the visible MCP guide uses only the no-write guide-start action after restoration proof', async () => {
+  const driver = require('../artifacts/menu-merge-20261027/outgoing/driver.cjs');
+  const guide = '#feature-mcp [data-field="guide-dialog"]';
+  const start = '#feature-mcp [data-field="guide-start"]';
+  for (const visible of [false, true]) {
+    const events = [];
+    const page = { locator: selector => {
+      assert.ok([guide, start].includes(selector), 'No convergence or unrelated dialog interactions');
+      return {
+        isVisible: async () => { assert.equal(selector, guide); events.push('visible'); return visible; },
+        click: async (...args) => { assert.equal(selector, start); assert.deepEqual(args, []); events.push('guide-start'); },
+        waitFor: async options => { assert.equal(selector, guide); assert.deepEqual(options, { state: 'hidden' }); events.push('hidden'); },
+      };
+    } };
+    await driver.continueMcpGuide(page);
+    assert.deepEqual(events, visible ? ['visible', 'guide-start', 'hidden'] : ['visible']);
+  }
+  const mcp = fs.readFileSync(path.join(__dirname, '../src/features/mcp.js'), 'utf8');
+  assert.ok(mcp.includes("page.on($('guide-start'), 'click', () => { $('guide-dialog').close(); $('project').focus(); });"));
+  assert.doesNotMatch(driver.continueMcpGuide.toString(), /guide-skip|convergence|\.evaluate\(|save_config|setItem|force:/);
+  const source = fs.readFileSync(path.join(__dirname, '../artifacts/menu-merge-20261027/outgoing/driver.cjs'), 'utf8');
+  const restored = source.slice(source.indexOf('if (restore) {'), source.indexOf('report.restoredLastTool ='));
+  assert.ok(restored.indexOf('assertTicket(observedTicket') < restored.indexOf("if (lastTool === 'mcp') await continueMcpGuide(page)"));
+  assert.ok(restored.indexOf('direct.checkRestored(page)') < restored.indexOf("if (lastTool === 'mcp') await continueMcpGuide(page)"));
+  assert.ok(restored.indexOf('isVisible(), true') < restored.indexOf("if (lastTool === 'mcp') await continueMcpGuide(page)"));
+  assert.ok(source.includes("if (feature === 'mcp') await continueMcpGuide(page)"));
+});
+
+test('cold and cached updates both cancel and prove preservation before native approval', async () => {
+  const source = fs.readFileSync(path.join(__dirname, '../artifacts/menu-merge-20261027/outgoing/driver.cjs'), 'utf8');
+  const start = source.indexOf('    const status = await page.evaluate');
+  const end = source.indexOf('    await retry(() => assert.equal(child.exitCode, 0)', start);
+  assert.ok(start >= 0 && end > start);
+  const sequence = source.slice(start, end);
+  assert.doesNotMatch(sequence, /status\.downloaded|download_hub_update|s\.downloaded/);
+  const rust = fs.readFileSync(path.join(__dirname, '../src-tauri/src/self_update.rs'), 'utf8');
+  const install = rust.slice(rust.indexOf('pub async fn install_hub_update('));
+  const cancelled = install.indexOf('if !approved { return Ok("Hub update cancelled. Nothing was installed.".into()); }');
+  assert.ok(cancelled > install.indexOf('OkCancelCustom("Update Hub".into(), "Not now".into())'));
+  assert.ok(install.indexOf('let installer = download(&handle, &release)?;') > cancelled);
+  assert.match(rust, /fn download\([\s\S]*?if cached\(release\) \{\s*return Ok\(path\);/);
+  assert.ok(fs.readFileSync(path.join(__dirname, '../src/app.js'), 'utf8')
+    .includes("byId('hub-update-button').addEventListener('click', () => hubAction('install_hub_update'))"));
+  for (const downloaded of [false, true]) {
+    const events = [], report = {};
+    let clicks = 0;
+    const page = {
+      evaluate: async () => ({ currentVersion: '0.1.16', availableVersion: '0.1.17', installBlocked: null, downloaded }),
+      locator: selector => {
+        assert.ok(['#hub-update-button', '#feature-setup [data-field="name"]'].includes(selector));
+        return {
+          click: async () => { assert.equal(selector, '#hub-update-button'); clicks++; events.push('click-update'); },
+          isEnabled: async () => true,
+          inputValue: async () => 'unchanged-draft',
+        };
+      },
+    };
+    const context = { assert, page, report, retry: async read => read(),
+      button: action => {
+        assert.equal(action, clicks === 1 ? 'Not now' : 'Update Hub');
+        if (action === 'Update Hub') assert.equal(report.cancelPreserved, true);
+        events.push(action);
+      },
+      sameProcess: () => { events.push('same-process'); }, rootRecord: {},
+      hashFile: () => 'baseline-hash', hub: 'test.exe', config: { baseline: { exe: 'baseline-hash' } },
+      preserved: async () => { assert.equal(clicks, 1); events.push('preserved'); },
+      draft: 'unchanged-draft', ticket: 'test-ticket', fs: { existsSync: () => false },
+      setInterval: () => { assert.equal(report.cancelPreserved, true); events.push('watch-ticket'); return 1; },
+    };
+    await require('node:vm').runInNewContext(`(async () => { let watch, observedTicket; ${sequence} })()`, context);
+    assert.deepEqual(events, ['click-update', 'Not now', 'same-process', 'preserved', 'watch-ticket', 'click-update', 'Update Hub']);
+    assert.equal(report.cancelPreserved, true);
+  }
 });
 
 test('all inline PowerShell blocks parse without executing their contents', () => {

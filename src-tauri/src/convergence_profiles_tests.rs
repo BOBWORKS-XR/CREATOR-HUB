@@ -623,6 +623,55 @@ mod settings_profiles {
     }
 
     #[test]
+    fn duplicate_nested_unknown_keys_refuse_merge_before_writes_in_either_store() {
+        let mut accepted = Vec::new();
+        for missing in 0..=1 {
+            for index in 0..2 {
+                for (label, duplicate) in [
+                    ("literal", r#"{"mode":"keep","mode":"other"}"#),
+                    ("escaped", r#"{"mode":"keep","\u006dode":"other"}"#),
+                ] {
+                    let (temp, base, mut plan) = fixture_plan();
+                    let profiles: Vec<Vec<u8>> = (0..2)
+                        .map(|store| {
+                            let channels = if store == 1 && missing == 1 {
+                                vec![project("earlier", &base.local_data.join("missing"))]
+                            } else {
+                                vec![]
+                            };
+                            let unknown = if store == index {
+                                duplicate
+                            } else {
+                                r#"{"mode":"keep"}"#
+                            };
+                            format!(
+                                r#"{{"channels":{},"auto_start":false,"active_channel_id":null,"future":{{"nested":{unknown}}}}}"#,
+                                serde_json::to_string(&channels).unwrap()
+                            )
+                            .into_bytes()
+                        })
+                        .collect();
+                    install_profiles(&base, &mut plan, [Some(&profiles[0]), Some(&profiles[1])]);
+                    plan.report.required = false;
+                    assert!(plan.report.settings_import_available);
+                    let before = files_at(temp.path());
+                    match merge_project_settings(&profiles[0], &profiles[1]) {
+                        Err(error) => assert!(error.contains("Duplicate"), "{error}"),
+                        Ok(import) => accepted.push(format!(
+                            "store={index}, keys={label}, missing={missing}, added={}",
+                            import.added
+                        )),
+                    }
+                    assert_eq!(files_at(temp.path()), before);
+                    assert!(plan.retained_images.is_empty());
+                    assert!(!journal(&base).exists());
+                }
+            }
+        }
+        assert!(accepted.is_empty(), "Ambiguous merges accepted: {accepted:?}");
+    }
+
+    #[test]
     fn malformed_profiles_fail_before_backup_or_publication_in_either_store() {
         let malformed = [
             "{",

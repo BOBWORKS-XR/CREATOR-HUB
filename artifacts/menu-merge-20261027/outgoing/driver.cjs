@@ -52,6 +52,16 @@ async function setUpdatePreferences(page, restore) {
   }
   await page.locator('#update-settings > summary').click();
 }
+function assertSavedPreferences(saved, restore) {
+  assert.deepEqual(saved, { schemaVersion: 1, preview: false, autoDownload: false, restoreHostedViews: restore });
+}
+async function continueMcpGuide(page) {
+  const guide = page.locator('#feature-mcp [data-field="guide-dialog"]');
+  if (await guide.isVisible()) {
+    await page.locator('#feature-mcp [data-field="guide-start"]').click();
+    await guide.waitFor({ state: 'hidden' });
+  }
+}
 async function main() {
   target.assertAdmission(); // Must precede config/profile reads, installers, policy and native probes.
   const config = target.readConfig(process.env.CREATOR_SELF_UPDATE_LAB_CONFIG);
@@ -194,18 +204,14 @@ async function main() {
     await show(lastTool); await direct.showHome(page);
     settingsBefore = direct.settingsSnapshot(roaming, local); preferencesBefore = await preferences();
     const prefPath = path.join(local, 'CreatorHub/preferences/hub-preferences.json');
-    await retry(() => { const saved = JSON.parse(fs.readFileSync(prefPath)); assert.equal(saved.restoreHostedViews, restore); assert.equal(saved.autoDownload, false); assert.equal(saved.previewChannel, false); });
+    await retry(() => assertSavedPreferences(JSON.parse(fs.readFileSync(prefPath)), restore));
     protectedFiles.push({ file: prefPath, sha256: hashFile(prefPath) });
     const draft = await page.locator('#feature-setup [data-field="name"]').inputValue();
     await page.evaluate(() => localStorage.setItem('outgoing-preserved', 'direct16-to17'));
     await retry(async () => assert.equal(await page.locator('#hub-update-button').isEnabled(), true), 90);
     const status = await page.evaluate(() => window.CreatorHubNative.invoke('hub_update_status', { online: false, preview: false }));
     assert.equal(status.currentVersion, '0.1.16'); assert.equal(status.availableVersion, '0.1.17'); assert.equal(status.installBlocked, null);
-    // Auto-download is off: first click downloads, next invokes the native approval.
-    if (!status.downloaded) {
-      await page.locator('#hub-update-button').click();
-      await retry(async () => { const s = await page.evaluate(() => window.CreatorHubNative.invoke('hub_update_status', { online: false, preview: false })); assert.equal(s.downloaded, true); }, 120);
-    }
+    // The native prompt precedes download/cache reuse. Cancel must preserve both states.
     await page.locator('#hub-update-button').click(); await retry(() => button('Not now'));
     await retry(async () => assert.equal(await page.locator('#hub-update-button').isEnabled(), true));
     sameProcess(rootRecord); assert.equal(hashFile(hub), config.baseline.exe); await preserved();
@@ -225,6 +231,7 @@ async function main() {
       assertTicket(observedTicket, lastTool, hub); await direct.checkRestored(page);
       await page.waitForFunction(feature => document.querySelector(`#feature-${feature} [data-field="status"]`)?.textContent === 'Ready', lastTool);
       assert.equal(await page.locator(`#feature-${lastTool}`).isVisible(), true);
+      if (lastTool === 'mcp') await continueMcpGuide(page);
     } else { assert.equal(observedTicket, undefined); await direct.checkHome(page); }
     assert.equal(fs.existsSync(ticket), false);
     assert.equal(await page.evaluate(() => localStorage.getItem('outgoing-preserved')), 'direct16-to17');
@@ -234,6 +241,7 @@ async function main() {
     for (const feature of ['setup', 'mcp']) {
       await show(feature);
       await page.waitForFunction(name => document.querySelector(`#feature-${name} [data-field="status"]`)?.textContent === 'Ready', feature);
+      if (feature === 'mcp') await continueMcpGuide(page);
       const service = await page.evaluate(name => window.CreatorHubNative.invoke('feature_call', {
         feature: name, command: name === 'mcp' ? 'get_onboarding_status' : 'probe_environment',
         args: name === 'mcp' ? { unityProjectPath: null } : {},
@@ -278,5 +286,5 @@ async function main() {
     console.log(JSON.stringify({ out, passed: report.passed, releaseReady: false }));
   }
 }
-module.exports = { assertProtocol, assertTicket, completeStartup, setUpdatePreferences, main };
+module.exports = { assertProtocol, assertTicket, completeStartup, setUpdatePreferences, assertSavedPreferences, continueMcpGuide, main };
 if (require.main === module) main().catch(error => { console.error(String(error.message).slice(0, 1200)); process.exitCode = 1; });

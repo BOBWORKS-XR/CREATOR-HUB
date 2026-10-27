@@ -53,10 +53,10 @@ test('data-only file and directory forms resolve only the exact canonical instal
 });
 
 test('exact frozen installer and installer-extracted EXE pins remain independent of optional signed input files', () => {
-  assert.equal(driver.TARGET.installer, 'c7885a1e898a4dcc887ca275cf9483c0067002f9157bcc1dbc443b2e060ff1bc');
-  assert.equal(driver.TARGET.exe, 'f562192cc4d530993c565e12c0c2059a1011c3f2b329b91902fb3ff115660f7c');
-  assert.equal(driver.TARGET.productSource, '2a80935315bd6fae5d305e387ce38ac6bb37c32e');
-  assert.equal(driver.TARGET.bytes, 38224253);
+  assert.equal(driver.TARGET.installer, '35c9b066ecab363bf6151e00ab97b1da46ca07c6fa9c2e28453f8990d5b63a66');
+  assert.equal(driver.TARGET.exe, 'd6b851e9f2d4ed1db0f881d9d867b1c0554263833d779ab38b8aedea79c1c461');
+  assert.equal(driver.TARGET.productSource, '7f007549f37fc5346df1e5309e098d92c8a6cfef');
+  assert.equal(driver.TARGET.bytes, 38207720);
   assert.strictEqual(driver.TARGET, require('./windows-incoming-016.cjs').TARGET);
   assert.equal(driver.TARGET.asset, 'Creator.Hub_0.1.16_x64-setup.exe');
   assert.equal(Object.isFrozen(driver.TARGET), true);

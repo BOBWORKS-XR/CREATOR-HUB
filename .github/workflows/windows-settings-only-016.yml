@@ -1,0 +1,93 @@
+name: Windows candidate settings-only and legacy-only acceptance (not release)
+on:
+  push:
+    branches: [validation/windows-menu-merge-20261027]
+  workflow_dispatch:
+    inputs:
+      artifact_run:
+        description: Explicit successful reviewed windows-016-input stager run for this candidate
+        type: string
+        required: true
+      artifact_id:
+        type: string
+        required: true
+      archive_sha256:
+        description: Independently verified artifact archive SHA256; installer must also match candidate.TARGET
+        type: string
+        required: true
+permissions:
+  contents: read
+  actions: read
+jobs:
+  acceptance:
+    if: github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/validation/windows-menu-merge-20261027'
+    runs-on: windows-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        case: [current-legacy, legacy-only]
+    env:
+      CREATOR_SETTINGS_CASE: ${{ matrix.case }}
+      INPUT_RUN: ${{ inputs.artifact_run }}
+      INPUT_ARTIFACT: ${{ inputs.artifact_id }}
+      INPUT_SHA256: ${{ inputs.archive_sha256 }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - name: Pure source, fixture, refusal and native parser checks before inputs or installation
+        run: node --test --test-concurrency=1 scripts/native-windows-016-settings-only.test.cjs
+      - name: Bind the exact same-repository successful data artifact
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ($env:INPUT_RUN -cnotmatch '^[1-9][0-9]*$' -or $env:INPUT_ARTIFACT -cnotmatch '^[1-9][0-9]*$' -or $env:INPUT_SHA256 -cnotmatch '^[a-f0-9]{64}$') { throw 'Invalid input identity.' }
+          New-Item -ItemType Directory -Path artifacts/settings-only-016-control | Out-Null
+          gh api --method GET "repos/BOBWORKS-XR/CREATOR-HUB/actions/runs/$env:INPUT_RUN" | Set-Content artifacts/settings-only-016-control/stager-run.json -Encoding utf8NoBOM
+          if ($LASTEXITCODE -ne 0) { throw 'Stager API read failed.' }
+          gh api --method GET "repos/BOBWORKS-XR/CREATOR-HUB/actions/artifacts/$env:INPUT_ARTIFACT" | Set-Content artifacts/settings-only-016-control/artifact.json -Encoding utf8NoBOM
+          if ($LASTEXITCODE -ne 0) { throw 'Artifact API read failed.' }
+          node scripts/native-windows-016-settings-only.cjs bind
+          if ($LASTEXITCODE -ne 0) { throw 'Input provenance refused.' }
+      - uses: actions/download-artifact@v4
+        with:
+          artifact-ids: ${{ inputs.artifact_id }}
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.artifact_run }}
+          path: artifacts/settings-only-016-data
+          merge-multiple: true
+      - name: Admit only flat data and the current exact candidate installer
+        shell: pwsh
+        run: |
+          $directory = (Get-Item -LiteralPath artifacts/settings-only-016-data).FullName
+          $allowed = @('Creator.Hub_0.1.16_x64-setup.exe','creator-hub-windows-x86_64.json','creator-hub-windows-x86_64.json.minisig','latest.json')
+          foreach ($file in Get-ChildItem -LiteralPath $directory -Recurse -Force) {
+            if ($file.Attributes -band [IO.FileAttributes]::ReparsePoint -or $file.PSIsContainer -or $file.Name -cnotin $allowed -or $file.DirectoryName -cne $directory) { throw 'Only flat reviewed data files are admitted.' }
+          }
+          node scripts/windows-incoming-016.cjs inspect-installer $directory
+          if ($LASTEXITCODE -ne 0) { throw 'Candidate installer hash refused; no native action started.' }
+      - run: npm ci
+      - name: Native isolated settings case on exact installed candidate
+        shell: pwsh
+        run: |
+          node scripts/native-windows-016-settings-only.cjs "${{ github.workspace }}/artifacts/settings-only-016-data/Creator.Hub_0.1.16_x64-setup.exe"
+          if ($LASTEXITCODE -ne 0) { throw 'Native settings case failed; preserve the failed evidence.' }
+          $reports = @(Get-ChildItem -LiteralPath artifacts -Directory -Filter 'native-suite-*' | ForEach-Object { Get-ChildItem -LiteralPath $_.FullName -File -Filter settings-only-016-report.json })
+          if ($reports.Count -ne 1) { throw 'Expected exactly one native settings receipt.' }
+          node scripts/native-windows-016-settings-only.cjs receipt $reports[0].FullName
+          if ($LASTEXITCODE -ne 0) { throw 'Settings receipt refused.' }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-settings-only-016-${{ matrix.case }}-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            artifacts/settings-only-016-control/*.json
+            artifacts/native-suite-*/*.json
+            artifacts/native-suite-*/*.png

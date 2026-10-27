@@ -42,7 +42,7 @@ test('local and foreign-proxy refusal precedes configuration, installer or crede
   assert.doesNotMatch(result.stderr, /ENOENT|MUST-NOT-INSPECT/);
 });
 
-const candidatePath = [path.join(root, 'artifacts/menu-merge-20261027/settings-build-v3', incoming.TARGET.asset),
+const candidatePath = [path.join(root, 'artifacts/menu-merge-20261027/settings-build-v4', incoming.TARGET.asset),
   path.join(root, 'artifacts/incoming-016/candidate', incoming.TARGET.asset)].find(file => fs.existsSync(file));
 test('actual pinned NSIS binds the new public14 five-route contract, not source-only or synthetic installer bytes', { skip: !candidatePath }, () => {
   incoming.installer(candidatePath);
@@ -224,14 +224,16 @@ test('fresh restart repeats exact-image and CDP ownership checks before semantic
 });
 
 test('current finite target binds dirty build inputs separately from associated snapshot and rejects old16', () => {
-  assert.equal(incoming.TARGET.productSource, '2a80935315bd6fae5d305e387ce38ac6bb37c32e');
-  assert.equal(incoming.TARGET.bytes, 38224253);
+  assert.equal(incoming.TARGET.productSource, '7f007549f37fc5346df1e5309e098d92c8a6cfef');
+  assert.equal(incoming.TARGET.bytes, 38207720);
   assert.equal(incoming.BUILD_INPUT.builtFromDirtyWorktree, true);
   assert.equal(incoming.BUILD_INPUT.sourceSnapshotBuilt, false);
   assert.equal(incoming.BUILD_INPUT.buildSourceBase, 'cf6c2db2a4260e02206c91133878ff82bf3bb084');
-  assert.equal(incoming.BUILD_INPUT.buildInputDigest, '874a1ca81bbbc22363705122ae9ba456c0d8c707f75bdc84d697e4c1acb4da58');
+  assert.equal(incoming.BUILD_INPUT.buildInputDigest, 'ef441cb45490c509d82f775d19adfe4c7f0b49394e62db0ef34d39352c2fdd2b');
   assert.equal(incoming.BUILD_INPUT.buildSourceFileCount, 781);
   assert.deepEqual(incoming.BUILD_INPUT.sourceSnapshotTestOnlyDifferences, []);
+  assert.throws(() => incoming.validatePins({ ...pins(), installer: 'c7885a1e898a4dcc887ca275cf9483c0067002f9157bcc1dbc443b2e060ff1bc',
+    executable: 'f562192cc4d530993c565e12c0c2059a1011c3f2b329b91902fb3ff115660f7c' }));
   assert.throws(() => incoming.validatePins({ ...pins(), installer: '390b63dee018c8b9aa0b0039d086c2f697df69ddd68d3ebf96359b4d40bae075',
     executable: 'a0953a166b2544ea0137bf93a5674db08a298e5412f17eb852111e1623fa602c' }));
   assert.throws(() => incoming.validatePins({ ...pins(), installer: 'f0092e056f7b4245d10350b7954c3dbe5e5356f2e340143d0aefb80078672bc7',
@@ -304,19 +306,22 @@ test('current navigation uses semantic Open menu and text-only Home/MCP/Setup ro
   await assert.rejects(incoming.showPage({}, 'plugins'));
 });
 
-test('local frozen v3 inventory, source association, manifest and extracted payload match the reviewed binding when present', { skip: !candidatePath?.includes('settings-build-v3') }, () => {
+test('local frozen v4 inventory, source association, manifest and extracted payload match the reviewed binding when present', { skip: !candidatePath?.includes('settings-build-v4') }, () => {
   const directory = path.dirname(candidatePath), before = JSON.parse(fs.readFileSync(path.join(directory, 'before.json')));
   assert.equal(incoming.hash(Buffer.from(JSON.stringify(before.sources))), incoming.BUILD_INPUT.buildInputDigest);
   assert.equal(before.sources.length, incoming.BUILD_INPUT.buildSourceFileCount); assert.equal(before.source, incoming.BUILD_INPUT.buildSourceBase);
   assert.equal(incoming.hash(fs.readFileSync(path.join(directory, 'app/creator-hub.exe'))), incoming.TARGET.exe);
   const snapshot = JSON.parse(fs.readFileSync(path.join(directory, 'product-snapshot.json')));
   assert.equal(snapshot.sourceSnapshot, incoming.TARGET.productSource);
-  assert.equal(snapshot.tree, '9200b9fee8300061859a5068cdb0a45e5f96252a');
+  assert.equal(snapshot.tree, '089db5b4e16ca32bad02f00cb31682886770eb5c');
   assert.equal(snapshot.buildInputManifestSha256, incoming.BUILD_INPUT.buildInputDigest);
   assert.equal(snapshot.builtFromDirtyWorktree, true); assert.equal(snapshot.snapshotBuilt, false);
   assert.deepEqual(snapshot.testOnlyDifferences, incoming.BUILD_INPUT.sourceSnapshotTestOnlyDifferences);
   const receipt = JSON.parse(fs.readFileSync(path.join(directory, 'build-receipt.json')));
-  const manifestBytes = fs.readFileSync(path.join(directory, 'stage/builtin-manifest.json'));
+  // Root-only V4 deliberately retains the exact V3 module/runtime stage.
+  const retainedStage = path.join(root, 'artifacts/menu-merge-20261027/settings-build-v3/stage');
+  assert.equal(path.resolve(receipt.reusedStage), retainedStage);
+  const manifestBytes = fs.readFileSync(path.join(retainedStage, 'builtin-manifest.json'));
   assert.equal(receipt.payloadManifestSha256, '5edce3753928cce0dfaaa5a42e87d4af9c0231469ae0845925f55942d5b3b472');
   assert.equal(incoming.hash(manifestBytes), receipt.payloadManifestSha256);
   const manifest = JSON.parse(manifestBytes);
