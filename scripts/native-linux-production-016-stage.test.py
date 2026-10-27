@@ -25,7 +25,8 @@ HERE = Path(__file__).resolve().parent
 spec = importlib.util.spec_from_file_location("production_stage", HERE / "native-linux-production-016-stage.py")
 P = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(P)
-PRODUCTION_PRIVATE = {"sourceCommit": "a89ed2b90278b33bebd0b4ba29d87904d2fe683b", "runId": 40400463940, "runAttempt": 1}
+PRODUCTION_PRIVATE = {"sourceCommit": "085131ba6f3050a795fd513139a34975658ba321", "runId": 40538427509, "runAttempt": 1}
+PREVIOUS_PRODUCTION_PRIVATE = {"sourceCommit": "a89ed2b90278b33bebd0b4ba29d87904d2fe683b", "runId": 40400463940, "runAttempt": 1}
 FORMER_PRIVATE = {"sourceCommit": "52e3a537c9d323c81ab259cb82b44bbe0828b414", "runId": 39326776585, "runAttempt": 1}
 
 
@@ -175,8 +176,11 @@ class ProductionStageTests(unittest.TestCase):
         self.assertEqual(P.PRIVATE, PRODUCTION_PRIVATE)
         self.assertEqual(P.S.PRIVATE_SOURCE, FORMER_PRIVATE["sourceCommit"])
 
-    def test_former_private_payload_and_wrong_attempt_api_evidence_refuse_before_staging(self):
-        for identity in (FORMER_PRIVATE, {**PRODUCTION_PRIVATE, "sourceCommit": FORMER_PRIVATE["sourceCommit"]},
+    def test_former_mixed_private_payload_and_wrong_attempt_api_evidence_refuse_before_staging(self):
+        for identity in (PREVIOUS_PRODUCTION_PRIVATE,
+                         {**PRODUCTION_PRIVATE, "sourceCommit": PREVIOUS_PRODUCTION_PRIVATE["sourceCommit"]},
+                         {**PRODUCTION_PRIVATE, "runId": PREVIOUS_PRODUCTION_PRIVATE["runId"]},
+                         FORMER_PRIVATE, {**PRODUCTION_PRIVATE, "sourceCommit": FORMER_PRIVATE["sourceCommit"]},
                          {**PRODUCTION_PRIVATE, "runId": FORMER_PRIVATE["runId"]}, {**PRODUCTION_PRIVATE, "runAttempt": 2}):
             with self.subTest(identity=identity):
                 f = self.fixture()
@@ -186,8 +190,11 @@ class ProductionStageTests(unittest.TestCase):
                         f.inspect()
                     inspect.assert_not_called()
 
-    def test_former_private_receipt_and_wrong_attempt_refuse_with_current_api_evidence(self):
-        for identity in (FORMER_PRIVATE, {**PRODUCTION_PRIVATE, "runAttempt": 2}):
+    def test_former_mixed_private_receipt_and_wrong_attempt_refuse_with_current_api_evidence(self):
+        for identity in (PREVIOUS_PRODUCTION_PRIVATE,
+                         {**PRODUCTION_PRIVATE, "sourceCommit": PREVIOUS_PRODUCTION_PRIVATE["sourceCommit"]},
+                         {**PRODUCTION_PRIVATE, "runId": PREVIOUS_PRODUCTION_PRIVATE["runId"]},
+                         FORMER_PRIVATE, {**PRODUCTION_PRIVATE, "runAttempt": 2}):
             with self.subTest(identity=identity):
                 f = self.fixture()
                 f.receipt["privateSource"] = dict(identity)

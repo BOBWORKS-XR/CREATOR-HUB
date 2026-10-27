@@ -8,7 +8,8 @@ const crypto = require('node:crypto');
 const L = require('./native-linux-production-016-input.cjs');
 const old = require('./native-linux-016-input.cjs');
 const retirement = require('./linux-retirement-package.cjs');
-const PRODUCTION_PRIVATE = { sourceCommit: 'a89ed2b90278b33bebd0b4ba29d87904d2fe683b', runId: 40400463940, runAttempt: 1 };
+const PRODUCTION_PRIVATE = { sourceCommit: '085131ba6f3050a795fd513139a34975658ba321', runId: 40538427509, runAttempt: 1 };
+const PREVIOUS_PRODUCTION_PRIVATE = { sourceCommit: 'a89ed2b90278b33bebd0b4ba29d87904d2fe683b', runId: 40400463940, runAttempt: 1 };
 const clone = x => JSON.parse(JSON.stringify(x));
 const hash = b => crypto.createHash('sha256').update(b).digest('hex');
 const pin = b => ({ size: b.length, sha256: hash(b) });
@@ -46,16 +47,22 @@ test('production pins its own private payload and rejects the former payload rec
   assert.deepEqual(old.PRIVATE, { sourceCommit: '52e3a537c9d323c81ab259cb82b44bbe0828b414', runId: 39326776585, runAttempt: 1 });
   const { p, receipt } = fixture();
   L.proofs(receipt, p);
-  for (const privateSource of [old.PRIVATE, { ...PRODUCTION_PRIVATE, sourceCommit: old.PRIVATE.sourceCommit },
+  for (const privateSource of [PREVIOUS_PRODUCTION_PRIVATE,
+    { ...PRODUCTION_PRIVATE, sourceCommit: PREVIOUS_PRODUCTION_PRIVATE.sourceCommit },
+    { ...PRODUCTION_PRIVATE, runId: PREVIOUS_PRODUCTION_PRIVATE.runId },
+    old.PRIVATE, { ...PRODUCTION_PRIVATE, sourceCommit: old.PRIVATE.sourceCommit },
     { ...PRODUCTION_PRIVATE, runId: old.PRIVATE.runId }, { ...PRODUCTION_PRIVATE, runAttempt: 2 }]) {
     assert.throws(() => L.proofs({ ...receipt, privateSource }, p), { code: 'ERR_ASSERTION' });
   }
 });
-test('production requests the new producer and rejects former or wrong-attempt API evidence before assembly access', async () => {
+test('production rejects former, mixed or wrong-attempt producer API evidence before assembly access or download', async () => {
   const { c, env } = context(), p = fixture().p;
   const boundary = new Error('Private producer accepted; stop before assembly access');
-  for (const identity of [PRODUCTION_PRIVATE, old.PRIVATE, { ...PRODUCTION_PRIVATE, runAttempt: 2 }]) {
-    const calls = [];
+  for (const identity of [PRODUCTION_PRIVATE, PREVIOUS_PRODUCTION_PRIVATE,
+    { ...PRODUCTION_PRIVATE, sourceCommit: PREVIOUS_PRODUCTION_PRIVATE.sourceCommit },
+    { ...PRODUCTION_PRIVATE, runId: PREVIOUS_PRODUCTION_PRIVATE.runId },
+    old.PRIVATE, { ...PRODUCTION_PRIVATE, runAttempt: 2 }]) {
+    const calls = [], downloads = [];
     const repository = { id: 1364807512, full_name: 'BOBWORKS-XR/CREATOR-HUB' };
     const github = { rest: { actions: { async getWorkflowRun({ run_id }) {
       calls.push(run_id);
@@ -63,6 +70,8 @@ test('production requests the new producer and rejects former or wrong-attempt A
       return { data: { id: identity.runId, head_sha: identity.sourceCommit, run_attempt: identity.runAttempt,
         status: 'completed', conclusion: 'success', path: '.github/workflows/unix-managed-payload.yml',
         head_branch: 'validation/unix-payload-016', event: 'push', repository, head_repository: repository } };
+    }, async downloadArtifact(args) {
+      downloads.push(args); throw Error('Producer refusal must precede download');
     } } } };
     const result = L.run({ github, context: c, env, profile: JSON.stringify(p) });
     if (identity === PRODUCTION_PRIVATE) {
@@ -72,6 +81,7 @@ test('production requests the new producer and rejects former or wrong-attempt A
       await assert.rejects(result, { code: 'ERR_ASSERTION' });
       assert.deepEqual(calls, [PRODUCTION_PRIVATE.runId]);
     }
+    assert.deepEqual(downloads, []);
   }
 });
 test('production schema is distinct, bounded and documents every exact pin', () => {

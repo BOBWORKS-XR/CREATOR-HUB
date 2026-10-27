@@ -10,7 +10,7 @@ const retirement = require('./linux-retirement-package.cjs');
 const { verifyLinuxHub } = require('./unix-package-payload.cjs');
 const COHORT = 'production-migration-016';
 const REF = 'refs/heads/validation/native-linux-production-016';
-const PRIVATE = Object.freeze({ sourceCommit: 'a89ed2b90278b33bebd0b4ba29d87904d2fe683b', runId: 40400463940, runAttempt: 1 });
+const PRIVATE = Object.freeze({ sourceCommit: '085131ba6f3050a795fd513139a34975658ba321', runId: 40538427509, runAttempt: 1 });
 const FEATURES = Object.freeze(['integrated-features', 'experimental-flatpak-host',
   'linux-production-migration', 'experimental-linux-portable-update']);
 const PINS = Object.freeze([...neutral.PINS, 'rawHub']);
