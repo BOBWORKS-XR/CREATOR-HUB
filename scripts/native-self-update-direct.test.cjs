@@ -5,6 +5,7 @@ const os = require('node:os');
 const path = require('node:path');
 const vm = require('node:vm');
 const { EventEmitter } = require('node:events');
+const { spawnSync } = require('node:child_process');
 const direct = require('./native-self-update-direct.cjs');
 
 const root = path.resolve(__dirname, '..');
@@ -394,3 +395,90 @@ test('baseline Apps navigation, direct Home admission and historical layout chec
   assert.match(menuBlock, /\} else \{\s+await page\.locator\('#suite-trigger'\)\.click\(\);/);
   assert.match(menuBlock, /menuLayout\.every\(row => row\.titleFits && row\.statusBelow && row\.fits\)/);
 });
+
+test('native close admits only historical titles and the exact v3/17 titles while retaining ownership guards', { skip: process.platform !== 'win32' }, () => {
+  const source = fs.readFileSync(path.join(__dirname, 'native-window.ps1'), 'utf8');
+  const identity = source.slice(source.indexOf('$process = Get-Process'), source.indexOf('Add-Type -AssemblyName'));
+  const selection = source.slice(source.indexOf('$handles = [NativeTestWindows]::ForProcess'),
+    source.indexOf('    if (-not [NativeTestWindows]::PostMessage')) + '\n}';
+  assert.match(identity, /Get-Process -Id \$TargetPid -ErrorAction Stop/);
+  assert.match(identity, /GetFullPath\(\$process.Path\) -ine \[IO.Path\]::GetFullPath\(\$ExpectedExecutable\)/);
+  assert.match(source, /if\(owner == pid\) result.Add\(h\)/);
+  assert.match(selection, /Class\(\$_\) -eq 'Tauri Window'/);
+  assert.match(selection, /\$closeHandles.Count -ne 1/);
+  assert.match(source, /PostMessage\(\$closeHandles\[0\], 0x10, \[IntPtr\]::Zero, \[IntPtr\]::Zero\)/);
+  assert.doesNotMatch(selection, /-like|-match|StartsWith|Contains/);
+  const titles = ['Creator Hub - Development Preview', 'Creator Project Setup', 'Creator Works MCP',
+    'Creator Hub 0.1.16 - Settings Upgrade Test 2026-10-27', 'Creator Hub 0.1.17 - Settings Upgrade Test 2026-10-27'];
+  const row = (title, changes = {}) => ({ title, className: 'Tauri Window', pid: 123, ...changes });
+  const cases = titles.map(title => ({ rows: [row(title)], expected: true }));
+  for (const title of ['Unrelated app', 'Creator Hub', `${titles[3]} extra`, titles[3].replace('2026-10-27', '2026-10-28'),
+    titles[3].replace('0.1.16', '0.1.18')]) cases.push({ rows: [row(title)], expected: false });
+  cases.push({ rows: [row(titles[3], { className: '#32770' })], expected: false },
+    { rows: [row(titles[4], { className: 'Other Window' })], expected: false },
+    { rows: [row(titles[3], { pid: 124 })], expected: false },
+    { rows: [row(titles[3]), row(titles[4])], expected: false },
+    { rows: [], expected: false }, { rows: [row(titles[3])], wrongPath: true, expected: false },
+    { rows: [row(titles[3]), row(titles[4], { pid: 124 })], expected: true });
+  // Execute only the real identity/selection guards with an in-memory window
+  // inventory. No UIAutomation, native API imports, or WM_CLOSE can run here.
+  const script = `
+$ErrorActionPreference = 'Stop'
+Add-Type -TypeDefinition @'
+public static class NativeTestWindows {
+  public static string[] Titles, Classes;
+  public static int[] Owners;
+  public static int[] ForProcess(int owner) {
+    var result = new System.Collections.Generic.List<int>();
+    for (int i = 0; i < Owners.Length; i++) if (Owners[i] == owner) result.Add(i);
+    return result.ToArray();
+  }
+  public static string Class(int handle) { return Classes[handle]; }
+  public static string Text(int handle) { return Titles[handle]; }
+}
+'@
+function Get-Process { param($Id, $ErrorAction) if ($Id -ne 123) { throw 'Unexpected process' }; return @{ Path = $script:actualPath } }
+$cases = '${JSON.stringify(cases).replaceAll("'", "''")}' | ConvertFrom-Json
+$results = @()
+foreach ($case in $cases) {
+  [NativeTestWindows]::Titles = @($case.rows | ForEach-Object { $_.title })
+  [NativeTestWindows]::Classes = @($case.rows | ForEach-Object { $_.className })
+  [NativeTestWindows]::Owners = @($case.rows | ForEach-Object { $_.pid })
+  $TargetPid = 123; $ExpectedExecutable = 'C:\\fixture\\creator-hub.exe'; $Action = 'close'
+  $script:actualPath = if ($case.wrongPath) { 'C:\\foreign\\creator-hub.exe' } else { $ExpectedExecutable }
+  try {
+${identity}
+${selection}
+    $results += $true
+  } catch { $results += $false }
+}
+ConvertTo-Json -InputObject $results -Compress
+`;
+  const result = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script],
+    { encoding: 'utf8', windowsHide: true, timeout: 15000 });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout.trim()), cases.map(item => item.expected));
+});
+
+const localBuildReceipt = path.join(root, 'artifacts/menu-merge-20261027/settings-build-v3/build-receipt.json');
+test('local v3 build receipt title and outgoing version replacement satisfy the actual close title predicate',
+  { skip: process.platform !== 'win32' || !fs.existsSync(localBuildReceipt) }, () => {
+    const receipt = JSON.parse(fs.readFileSync(localBuildReceipt));
+    assert.equal(receipt.version, '0.1.16');
+    assert.equal(typeof receipt.title, 'string'); assert.ok(receipt.title.includes('0.1.16'));
+    const titles = [receipt.title, receipt.title.replaceAll('0.1.16', '0.1.17')];
+    const source = fs.readFileSync(path.join(__dirname, 'native-window.ps1'), 'utf8');
+    const close = source.slice(source.indexOf("if ($Action -eq 'close')"), source.indexOf("if ($Action -eq 'file')"));
+    const predicate = close.match(/\[NativeTestWindows\]::Text\(\$_\) (-in @\([^)]*\))/)?.[1];
+    assert.ok(predicate, 'Expected the finite native close title predicate');
+    // Supply real receipt titles to the unchanged membership expression only;
+    // no window inventory, native API, or synthetic successful match is used.
+    const script = `$ErrorActionPreference='Stop'
+$titles = '${JSON.stringify(titles).replaceAll("'", "''")}' | ConvertFrom-Json
+$accepted = @($titles | ForEach-Object { $_ ${predicate} })
+ConvertTo-Json -InputObject $accepted -Compress`;
+    const result = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script],
+      { encoding: 'utf8', windowsHide: true, timeout: 15000 });
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(JSON.parse(result.stdout.trim()), [true, true], `Built titles are not admitted: ${titles.join('; ')}`);
+  });

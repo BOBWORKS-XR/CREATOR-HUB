@@ -45,7 +45,8 @@ $handles = [NativeTestWindows]::ForProcess($TargetPid)
 if ($Action -eq 'close') {
     $closeHandles = @($handles | Where-Object {
         [NativeTestWindows]::Class($_) -eq 'Tauri Window' -and
-        [NativeTestWindows]::Text($_) -in @('Creator Hub - Development Preview', 'Creator Project Setup', 'Creator Works MCP')
+        [NativeTestWindows]::Text($_) -in @('Creator Hub - Development Preview', 'Creator Project Setup', 'Creator Works MCP',
+            'Creator Hub 0.1.16 - Settings Upgrade Test 2026-10-27', 'Creator Hub 0.1.17 - Settings Upgrade Test 2026-10-27')
     })
     if ($closeHandles.Count -ne 1) { throw 'Expected exactly one owned Creator Suite app window to close.' }
     if (-not [NativeTestWindows]::PostMessage($closeHandles[0], 0x10, [IntPtr]::Zero, [IntPtr]::Zero)) { throw "Could not post the owned close request: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())." }
