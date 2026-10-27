@@ -6,29 +6,7 @@ use crate::{
 use flate2::{write::GzEncoder, Compression};
 use std::{cell::Cell, collections::BTreeMap, io::Write};
 
-#[test]
-fn workflow_runner_temp_is_scoped_to_each_cargo_step_not_job_environment() {
-    let workflow = include_str!("../../../.github/workflows/linux-portable-deployment.yml")
-        .replace("\r\n", "\n");
-    let step_environment = concat!(
-        "        env:\n",
-        "          CARGO_TARGET_DIR: ${{ runner.temp }}/linux-portable-deployment-target\n",
-        "        run: |\n",
-        "          set -euo pipefail\n",
-    );
-    assert!(
-        !workflow.contains("\n    env:"),
-        "runner context is not available in job-level env"
-    );
-    assert_eq!(workflow.matches("runner.temp").count(), 2);
-    assert_eq!(workflow.matches(step_environment).count(), 2);
-    for first_command in [
-        "cargo fmt --manifest-path",
-        "cargo test --locked --manifest-path",
-    ] {
-        assert!(workflow.contains(&format!("{step_environment}          {first_command}")));
-    }
-}
+// Workflow environment scopes use the YAML parser in linux-portable-signed-controls.test.cjs.
 
 pub(super) fn test_verify(bytes: &[u8], signature: &[u8]) -> Result<()> {
     require(

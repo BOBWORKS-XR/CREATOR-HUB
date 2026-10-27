@@ -47,9 +47,6 @@
     current = 'projects';
     document.body.classList.add('integrated-home');
     byId('restore-hosted-views').closest('label').lastChild.textContent = ' Return to last tool after updating';
-    menu.querySelector('[data-view="hub"] small').textContent = 'Projects';
-    menu.setAttribute('aria-label', 'Creator tools');
-    trigger.title = 'Creator tools';
     const updater = document.querySelector('.hub-update');
     updater.querySelector('.page-heading').insertBefore(byId('check-updates'), byId('hub-update-button'));
     byId('update-settings').append(document.querySelector('#view-hub > .update-preferences'));
@@ -116,7 +113,8 @@
     menu.inert = true;
     menu.setAttribute('aria-hidden', 'true');
     trigger.setAttribute('aria-expanded', 'false');
-    trigger.setAttribute('aria-label', directFeatures ? 'Open Creator tools' : 'Open Creator apps');
+    trigger.setAttribute('aria-label', 'Open menu');
+    trigger.title = 'Open menu';
   }
   function show(view, preserveError = false) {
     if (!['hub', 'projects'].includes(view) && !Object.hasOwn(tools, view)) return;
@@ -137,7 +135,6 @@
     }
     if (view === 'projects') window.CreatorProjects.show();
     shell.querySelector('.suite-brand').innerHTML = '<span>CREATOR</span> <strong>HUB</strong>';
-    trigger.replaceChildren(menu.querySelector('[data-view="hub"] .suite-mark').cloneNode(true));
     for (const item of menu.querySelectorAll('[data-view]')) {
       const selected = item.dataset.view === (view === 'projects' ? 'hub' : view);
       item.classList.toggle('current', selected);
@@ -211,7 +208,8 @@
     menu.inert = false;
     menu.setAttribute('aria-hidden', 'false');
     trigger.setAttribute('aria-expanded', 'true');
-    trigger.setAttribute('aria-label', directFeatures ? 'Close Creator tools' : 'Close Creator apps');
+    trigger.setAttribute('aria-label', 'Close menu');
+    trigger.title = 'Close menu';
     menu.querySelector(`[data-view="${current === 'projects' ? 'hub' : current}"]`).focus({ preventScroll: true });
   });
   document.addEventListener('keydown', event => {
@@ -311,6 +309,7 @@
       status.classList.toggle('unverified', label.startsWith('Installed') && !state?.trusted);
       byId(`menu-status-${id}`).textContent = directFeatures ? label : inventory?.supported === false ? 'Not supported'
         : inventoryError ? 'Check failed' : !inventory && busy ? 'Checking' : appStatus(state);
+      byId(`menu-status-${id}`).hidden = directFeatures && !state?.issue;
       const menuDownload = byId(`menu-download-${id}`);
       const canDownload = Boolean(!directFeatures && inventory?.supported && !inventoryError && state && !state.builtIn
         && (!state.installed || state.updateAvailable) && !state.downloaded && !state.issue && !state.installBlocked);

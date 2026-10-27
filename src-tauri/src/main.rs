@@ -303,6 +303,8 @@ fn resource_url(resource: &str) -> Option<&'static str> {
         "github" => Some("https://github.com/BOBWORKS-XR/CREATOR-HUB"),
         "sdk-source" => Some("https://greenfield-registry.sdq.st/-/web/detail/com.sidequest.creator-sdk"),
         "unity-cli-docs" => Some("https://docs.unity.com/en-us/unity-cli/unity-pipeline/unity-pipeline-package"),
+        "defender-detections" => Some("https://learn.microsoft.com/en-us/defender-endpoint/defender-endpoint-false-positives-negatives"),
+        "windows-security" => Some("https://support.microsoft.com/en-us/windows/security/threat-malware-protection/virus-and-threat-protection-in-the-windows-security-app"),
         _ => None,
     }
 }
@@ -612,6 +614,19 @@ mod tests {
             ))
         );
         assert!(!script.contains("__CREATOR_HUB_UPDATE_RECOVERY_PROTOCOL__"));
+    }
+
+    #[test]
+    fn defender_help_resources_are_exact_official_urls() {
+        for (id, url) in [
+            ("defender-detections", "https://learn.microsoft.com/en-us/defender-endpoint/defender-endpoint-false-positives-negatives"),
+            ("windows-security", "https://support.microsoft.com/en-us/windows/security/threat-malware-protection/virus-and-threat-protection-in-the-windows-security-app"),
+        ] {
+            assert_eq!(resource_url(id), Some(url));
+            assert_eq!(resource_url(url), None);
+            assert_eq!(resource_url(&format!("{id} --allow")), None);
+            assert_eq!(resource_url(&id.to_uppercase()), None);
+        }
     }
 
     #[test]

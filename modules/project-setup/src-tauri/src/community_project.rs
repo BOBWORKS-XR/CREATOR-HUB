@@ -268,26 +268,53 @@ fn helper_contents(destination: &Path, allow_unity_metadata: bool) -> Result<&'s
     }
     Ok(if current { "installed" } else { "outdated" })
 }
-#[cfg(any(windows, test))]
-fn editor_lock_open_result(opened: std::io::Result<fs::File>) -> bool {
-    match opened {
-        Ok(file) => !file.metadata().is_ok_and(|info| info.is_file()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-        Err(_) => true,
+#[derive(Debug)]
+pub(crate) enum EditorLockState {
+    NotHeld,
+    #[cfg(any(windows, test))]
+    Held,
+    Unverified(String),
+}
+
+impl EditorLockState {
+    pub(crate) fn blocks(&self) -> bool {
+        !matches!(self, Self::NotHeld)
     }
+}
+
+#[cfg(any(windows, test))]
+fn editor_lock_open_result(opened: std::io::Result<fs::File>) -> EditorLockState {
+    #[cfg(windows)]
+    use windows_sys::Win32::Foundation::{ERROR_LOCK_VIOLATION, ERROR_SHARING_VIOLATION};
+    match opened {
+        Ok(file) => match file.metadata() {
+            Ok(info) if info.is_file() => EditorLockState::NotHeld,
+            Ok(_) => EditorLockState::Unverified("Unity lock marker is not an ordinary file.".into()),
+            Err(error) => EditorLockState::Unverified(error.to_string()),
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => EditorLockState::NotHeld,
+        #[cfg(windows)]
+        Err(error) if matches!(error.raw_os_error(), Some(code) if code == ERROR_SHARING_VIOLATION as i32 || code == ERROR_LOCK_VIOLATION as i32) => EditorLockState::Held,
+        Err(error) => EditorLockState::Unverified(error.to_string()),
+    }
+}
+
+#[cfg(windows)]
+pub(crate) fn editor_lock_state(path: &Path) -> Result<EditorLockState, String> {
+    use std::os::windows::fs::OpenOptionsExt;
+    reject_links(path)?;
+    Ok(editor_lock_open_result(fs::OpenOptions::new().read(true).share_mode(0).open(path)))
 }
 
 pub(crate) fn editor_open(root: &Path) -> Result<bool, String> {
     let path = root.join("Temp/UnityLockfile");
+    #[cfg(not(windows))]
     reject_links(&path)?;
     #[cfg(windows)]
     {
-        use std::os::windows::fs::OpenOptionsExt;
         // Unity denies sharing while the Editor owns this file. A stale,
         // unlocked file is not evidence of a running Editor. Never delete it.
-        Ok(editor_lock_open_result(
-            fs::OpenOptions::new().read(true).share_mode(0).open(path),
-        ))
+        editor_lock_state(&path).map(|state| state.blocks())
     }
     #[cfg(unix)]
     {
@@ -1130,11 +1157,39 @@ mod tests {
             assert!(editor_lock_open_result(Err(std::io::Error::new(
                 kind,
                 "fixture refusal"
-            ))));
+            )))
+            .blocks());
         }
         assert!(!editor_lock_open_result(Err(std::io::Error::from(
             std::io::ErrorKind::NotFound,
-        ))));
+        )))
+        .blocks());
+    }
+
+    #[test]
+    fn diagnostic_editor_lock_errors_retain_uncertainty_and_stay_blocked() {
+        for kind in [std::io::ErrorKind::PermissionDenied, std::io::ErrorKind::Other] {
+            let state = editor_lock_open_result(Err(std::io::Error::new(kind, "fixture refusal")));
+            assert!(state.blocks());
+            assert!(matches!(state, EditorLockState::Unverified(ref reason) if reason.contains("fixture refusal")));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn diagnostic_editor_lock_sharing_conflict_remains_distinct_from_access_denial() {
+        for code in [32, 33] {
+            assert!(matches!(
+                editor_lock_open_result(Err(std::io::Error::from_raw_os_error(code))),
+                EditorLockState::Held
+            ));
+        }
+        let denied = std::io::Error::from_raw_os_error(5);
+        let detail = denied.to_string();
+        assert!(matches!(
+            editor_lock_open_result(Err(denied)),
+            EditorLockState::Unverified(reason) if reason == detail
+        ));
     }
 
     #[test]

@@ -24,6 +24,17 @@ use logic::{CreateRequest, CreationResult, EnvironmentReport, Recipe};
 use tauri::{Emitter, Manager};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
+fn setup_operation(
+    mutex: &std::sync::Mutex<()>,
+) -> Result<std::sync::MutexGuard<'_, ()>, String> {
+    mutex.try_lock().map_err(|error| match error {
+        std::sync::TryLockError::WouldBlock =>
+            "Another project setup operation is running. Wait for it to finish.".into(),
+        std::sync::TryLockError::Poisoned(_) =>
+            "Project setup operation state is unavailable after an earlier failure. Review retained project logs and restart the app before retrying.".into(),
+    })
+}
+
 #[tauri::command]
 fn get_recipe() -> Result<Recipe, String> {
     let _operation = lifecycle::LIFECYCLE.command()?;
@@ -54,9 +65,7 @@ async fn create_project(
     let operation = lifecycle::LIFECYCLE.command()?;
     tauri::async_runtime::spawn_blocking(move || {
         let _operation = operation;
-        let _exclusive = bootstrap::OPERATION
-            .try_lock()
-            .map_err(|_| "Another project setup operation is running. Wait for it to finish.")?;
+        let _exclusive = setup_operation(&bootstrap::OPERATION)?;
         bootstrap::ensure(
             &request,
             |plan| approve_installation(&app, plan),
@@ -154,15 +163,46 @@ async fn run_existing_project(
     let operation = lifecycle::LIFECYCLE.command()?;
     tauri::async_runtime::spawn_blocking(move || {
         let _operation = operation;
-        let _exclusive = bootstrap::OPERATION
-            .try_lock()
-            .map_err(|_| "Another project setup operation is running. Wait for it to finish.")?;
+        let _exclusive = setup_operation(&bootstrap::OPERATION)?;
         repair::run(request, |progress| {
             hosted::emit(&app, "existing-progress", progress);
         })
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+#[cfg(test)]
+mod operation_diagnostics_tests {
+    use super::*;
+
+    #[test]
+    fn diagnostic_mutex_contention_remains_refused_until_release() {
+        let mutex = std::sync::Mutex::new(());
+        let held = setup_operation(&mutex).unwrap();
+        assert_eq!(
+            setup_operation(&mutex).unwrap_err(),
+            "Another project setup operation is running. Wait for it to finish."
+        );
+        drop(held);
+        assert!(setup_operation(&mutex).is_ok());
+    }
+
+    #[test]
+    fn diagnostic_mutex_poisoning_is_not_reported_as_contention_or_recovered() {
+        let mutex = std::sync::Mutex::new(());
+        assert!(std::panic::catch_unwind(|| {
+            let _held = mutex.lock().unwrap();
+            panic!("local test mutex only");
+        })
+        .is_err());
+        for _ in 0..2 {
+            let error = setup_operation(&mutex).unwrap_err();
+            assert!(error.contains("state is unavailable after an earlier failure"), "{error}");
+            assert!(!error.contains("operation is running"));
+            assert!(mutex.is_poisoned());
+        }
+    }
 }
 
 #[tauri::command]

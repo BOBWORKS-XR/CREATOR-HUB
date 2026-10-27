@@ -8,6 +8,8 @@
     "build": "tauri build",
     "build:unified": "node scripts/build-unified.cjs",
     "test:ui": "playwright test",
+    "test:integration:ui": "playwright test tests/native-pages.spec.js tests/direct-setup-regressions.spec.js tests/direct-mcp-regressions.spec.js tests/convergence.spec.js tests/projects-home.spec.js tests/projects.spec.js --workers=2",
+    "test:integration:native": "cargo test --release --locked --manifest-path src-tauri/Cargo.toml --features integrated-features -- --test-threads=1",
     "check:sources": "node scripts/check-unified-sources.cjs",
     "test:modules": "npm --prefix modules/mcp test && npm --prefix modules/mcp run check:version && npm --prefix modules/project-setup run test:scripts",
     "test:scripts": "node --test scripts/*.test.cjs scripts/release-checksums.test.mjs",

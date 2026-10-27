@@ -13,6 +13,8 @@ export const ALWAYS_AVAILABLE_TOOLS = new Set([
 export const TOOL_GROUP_MEMBERSHIP: Readonly<Record<ToolGroupName, ReadonlySet<string>>> = {
   core: new Set([
     "project_feedback",
+    "get_mcp_reference",
+    "lookup_creator_docs",
     "query_project_state",
     "check_import_status",
     "wait_for_unity_compile",
@@ -36,6 +38,7 @@ export const TOOL_GROUP_MEMBERSHIP: Readonly<Record<ToolGroupName, ReadonlySet<s
   ]),
   read: new Set([
     "get_mcp_reference",
+    "lookup_creator_docs",
     "validate_vs_graph",
     "validate_vs_graph_in_unity",
     "validate_banter_visual_scripting",
@@ -59,6 +62,7 @@ export const TOOL_GROUP_MEMBERSHIP: Readonly<Record<ToolGroupName, ReadonlySet<s
   ]),
   author: new Set([
     "get_mcp_reference",
+    "lookup_creator_docs",
     "validate_vs_graph",
     "get_banter_sdk_info",
     "search_sidequest_vs_nodes",
@@ -105,6 +109,7 @@ export const TOOL_GROUP_MEMBERSHIP: Readonly<Record<ToolGroupName, ReadonlySet<s
   ]),
   banter: new Set([
     "get_mcp_reference",
+    "lookup_creator_docs",
     "search_sidequest_vs_nodes",
     "validate_vs_graph",
     "generate_vs_graph",

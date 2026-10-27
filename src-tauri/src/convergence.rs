@@ -25,6 +25,7 @@ struct LegacyApp {
 pub struct Report {
     streamlined: bool,
     move_available: bool,
+    settings_import_available: bool,
     enabled: bool,
     required: bool,
     stage: &'static str,
@@ -55,10 +56,91 @@ struct Plan {
     retained_images: Vec<stores::Backup>,
     report: Report,
     retry_allowed: bool,
+    settings_import_recovery: Option<SettingsImportRecovery>,
     #[cfg(windows)]
     retirement_dependencies: Option<crate::convergence_dependencies::GuiRetirementSnapshot>,
     #[cfg(all(target_os = "linux", feature = "experimental-linux-migration"))]
     retirement_linux: Option<crate::convergence_linux::Plan>,
+}
+
+#[derive(Clone)]
+enum SettingsImportRecovery {
+    Unconfirmed(PathBuf),
+    Transaction(PathBuf),
+}
+
+fn mark_settings_import_recovery(plan: &mut Plan, evidence: SettingsImportRecovery) {
+    let location = match &evidence {
+        SettingsImportRecovery::Unconfirmed(root) => format!(
+            "No settings transaction record has been confirmed. Preparation may have stopped before a record was created or left incomplete evidence. Settings recovery directory: {}",
+            root.display()
+        ),
+        SettingsImportRecovery::Transaction(path) => {
+            format!("Retained settings transaction: {}", path.display())
+        }
+    };
+    plan.retry_allowed = false;
+    plan.settings_import_recovery = Some(evidence);
+    plan.report.required = true;
+    plan.report.move_available = false;
+    plan.report.settings_import_available = false;
+    plan.report.retirement_available = false;
+    // A reminder for the pre-import snapshot is not a recovery decision.
+    plan.report.review_key = None;
+    plan.report.message = "Saved MCP project import needs recovery review. Keep current settings and original backups; no automatic retry was started.".into();
+    plan.report.recovery_help = Some(format!(
+        "Saved MCP project import needs review.\n{location}\n\nIn MCP, open Saved MCP settings and review the retained settings evidence. Resume only a change explicitly marked eligible. After recovery completes, restart Hub to check the saved outcome. If no eligible record is available, have support review this directory; do not delete records or overwrite newer settings with a backup. Choose Not now to keep using Hub. No import, client migration or app removal has been retried."
+    ));
+}
+
+fn preserve_settings_import_recovery(fresh: &mut Plan, prior: Option<&Plan>) -> bool {
+    if let Some(prior) = prior {
+        if let Some(evidence) = &prior.settings_import_recovery {
+            if fresh.settings_import_recovery.is_none() {
+                mark_settings_import_recovery(fresh, evidence.clone());
+            }
+            fresh.report.backups = prior.report.backups.clone();
+        }
+    }
+    fresh.settings_import_recovery.is_some()
+}
+
+fn restore_settings_import_recovery(plan: &mut Plan, base: &stores::Roots) -> Result<(), String> {
+    let current = stores::Store::McpCurrent.path(base)?;
+    let legacy = stores::Store::McpLegacy.path(base)?;
+    let root = current.parent().unwrap().join(".creator-hub-product-settings");
+    let evidence = (|| -> Result<Option<SettingsImportRecovery>, String> {
+        stores::storage::reject_links(&root)?;
+        let entries = match fs::read_dir(&root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(_) => return Err("Cannot inspect settings recovery.".into()),
+        };
+        let allowed = [current, legacy];
+        let mut count = 0;
+        for entry in entries {
+            let path = entry.map_err(|_| "Cannot inspect settings evidence.")?.path();
+            if path.file_name().is_some_and(|name| name == "hub.lock") {
+                continue;
+            }
+            count += 1;
+            if count > 32 {
+                return Err("Settings recovery history exceeds its review bound.".into());
+            }
+            let report = crate::convergence_recovery::Transaction::open_allowlisted(&path, &allowed)?
+                .inspect()?;
+            if !report.completed && !report.historical_completed {
+                return Ok(Some(SettingsImportRecovery::Transaction(report.journal)));
+            }
+        }
+        Ok(None)
+    })();
+    match evidence {
+        Ok(Some(evidence)) => mark_settings_import_recovery(plan, evidence),
+        Err(_) => mark_settings_import_recovery(plan, SettingsImportRecovery::Unconfirmed(root)),
+        Ok(None) => {}
+    }
+    Ok(())
 }
 
 #[derive(Default)]
@@ -307,10 +389,13 @@ fn inspect() -> Result<Plan, String> {
         already_reviewed || already_using_hub,
         pending_retirement,
     );
-    Ok(Plan {
+    let settings_import_available =
+        settings_import_available(&snapshots, "review", !uncertain_batch);
+    let mut plan = Plan {
         stores: snapshots,
         retained_images: Vec::new(),
         retry_allowed: !uncertain_batch,
+        settings_import_recovery: None,
         #[cfg(windows)]
         retirement_dependencies: None,
         #[cfg(all(target_os = "linux", feature = "experimental-linux-migration"))]
@@ -318,6 +403,7 @@ fn inspect() -> Result<Plan, String> {
         report: Report {
             streamlined: cfg!(feature = "integrated-features"),
             move_available: !uncertain_batch,
+            settings_import_available,
             enabled: true,
             required,
             stage: "review",
@@ -342,7 +428,9 @@ fn inspect() -> Result<Plan, String> {
                 "Hub can take over your existing settings without moving your Unity projects. Old apps stay installed until connection and retirement checks pass."
             }.into(),
         },
-    })
+    };
+    restore_settings_import_recovery(&mut plan, &base)?;
+    Ok(plan)
 }
 
 fn prompt_review_key(
@@ -385,6 +473,18 @@ fn settings_need_review(snapshots: &[stores::Snapshot]) -> bool {
             .find(|saved| saved.store() == stores::Store::McpLegacy)
             .and_then(stores::Snapshot::bytes)
             .is_some_and(|legacy| current.is_some_and(|current| legacy != current))
+}
+
+fn settings_import_available(
+    snapshots: &[stores::Snapshot],
+    stage: &str,
+    retry_allowed: bool,
+) -> bool {
+    // Settings-only review does not grant route migration or app retirement.
+    stage == "review"
+        && retry_allowed
+        && !snapshots.iter().any(stores::Snapshot::needs_outcome_review)
+        && settings_need_review(snapshots)
 }
 
 fn settings_use_verified_runtime(
@@ -518,13 +618,23 @@ fn require_builtin() -> Result<(), String> {
     if !builtin::enabled() {
         return Err("Convergence is only available in a verified built-in Hub.".into());
     }
-    if crate::hosted::preview_mode(AppId::Mcp) != Some("writable") {
+    require_mcp_migration_mode(crate::hosted::preview_mode(AppId::Mcp))?;
+    if !crate::usage_terms::usage_terms_status()? {
+        return Err("Review Hub's terms before migrating existing apps.".into());
+    }
+    Ok(())
+}
+
+fn require_mcp_migration_mode(hosted_mode: Option<&str>) -> Result<(), String> {
+    // The internal service owns write admission; the legacy flag only gates hosted apps.
+    let integrated_service = cfg!(all(
+        feature = "integrated-features",
+        any(windows, target_os = "linux")
+    ));
+    if !integrated_service && hosted_mode != Some("writable") {
         return Err(
             "This Hub cannot take over writable MCP settings yet. Old apps were kept.".into(),
         );
-    }
-    if !crate::usage_terms::usage_terms_status()? {
-        return Err("Review Hub's terms before migrating existing apps.".into());
     }
     Ok(())
 }
@@ -791,13 +901,10 @@ fn import_reviewed_projects(
         }
     }
     let journal = check_settings_recovery(base)?;
-    plan.retry_allowed = false;
+    let original_report = plan.report.clone();
+    mark_settings_import_recovery(plan, SettingsImportRecovery::Unconfirmed(journal.clone()));
     let transaction = Transaction::prepare(&journal, writes)?;
-    recheck(plan)?;
-    let outcome = transaction.resume(|_| true)?;
-    if !outcome.completed {
-        return Err(format!("Project import needs recovery review at {}. Both originals are backed up; no automatic retry was started.", outcome.journal.display()));
-    }
+    resume_project_import(plan, &transaction)?;
     let mut renewed = Vec::new();
     for (index, previous) in plan.stores.iter().enumerate() {
         let fresh = stores::Snapshot::inspect(previous.store(), base)?;
@@ -815,7 +922,26 @@ fn import_reviewed_projects(
     }
     plan.stores = renewed;
     plan.retry_allowed = true;
+    plan.settings_import_recovery = None;
+    plan.report = original_report;
+    plan.report.settings_import_available = false;
     Ok(import.added)
+}
+
+fn resume_project_import(
+    plan: &mut Plan,
+    transaction: &crate::convergence_recovery::Transaction,
+) -> Result<(), String> {
+    mark_settings_import_recovery(
+        plan,
+        SettingsImportRecovery::Transaction(transaction.inspect()?.journal),
+    );
+    recheck(plan)?;
+    let outcome = transaction.resume(|_| true)?;
+    if !outcome.completed {
+        return Err(format!("Project import needs recovery review at {}. Both originals are backed up; no automatic retry was started.", outcome.journal.display()));
+    }
+    Ok(())
 }
 
 fn refresh_finished_outcome_journal(plan: &mut Plan, base: &stores::Roots) -> Result<(), String> {
@@ -965,8 +1091,11 @@ pub async fn inspect_convergence_outcome(handle: tauri::AppHandle) -> Result<Rep
         let mut fresh = inspect()?;
         let record = read_batch_at(&batch_path()?)?;
         let prior_blocked = saved.as_ref().is_some_and(|plan| !plan.retry_allowed);
-        if !inspection_can_admit(prior_blocked, record.as_ref()) {
+        // An unrelated completed Move to Hub record cannot clear an import failure.
+        let import_needs_review = preserve_settings_import_recovery(&mut fresh, saved.as_ref());
+        if !import_needs_review && !inspection_can_admit(prior_blocked, record.as_ref()) {
             fresh.retry_allowed = false;
+            fresh.report.settings_import_available = false;
             fresh.report.move_available = false;
             fresh.report.required = true;
             fresh.report.message = "Retained state was inspected without changing it. A partial or uncertain native outcome still needs explicit recovery review. No transaction was retried.".into();
@@ -982,6 +1111,33 @@ fn inspection_can_admit(prior_blocked: bool, record: Option<&BatchRecord>) -> bo
     match record {
         Some(record) => !batch_needs_review(record),
         None => !prior_blocked,
+    }
+}
+
+fn prepare_confirmation(
+    settings_only: bool,
+    import: Option<&ProjectImport>,
+) -> (&'static str, &'static str, String) {
+    let import_message = import.map(|proposal| format!(
+        "\n\nMissing projects to import: {}. Earlier entries already listed: {}. Projects are matched by folder and will not be duplicated. Current preferences, selected project and existing project entries are kept. Both original configurations are backed up first, then both active settings files receive the combined project list with current preferences. Older preferences remain in their backup.",
+        proposal.added, proposal.already_present
+    )).unwrap_or_default();
+    if settings_only {
+        (
+            "Import saved MCP projects",
+            "Back up and import projects",
+            format!(
+                "Import saved MCP projects into your current settings?{import_message}\n\nHub will ask any verified idle standalone app windows to close normally before keeping exact local backups. Busy or unverified apps are not force-closed. AI clients, Unity and Node connections stay open.\n\nOnly the reviewed MCP settings are updated. AI-client settings, Project Setup settings and installed apps are not changed. Project folders are not moved or edited. No client migration or app removal is performed. Cancel leaves the current setup unchanged."
+            ),
+        )
+    } else {
+        (
+            "Move to unified Creator Hub",
+            "Back up and continue",
+            format!(
+                "Let Creator Hub use your existing MCP and Project Setup settings?{import_message}\n\nHub will ask verified idle standalone app windows to close normally, then keep exact local backups. Busy or unverified apps are not force-closed. AI clients, Unity and Node connections stay open.\n\nSettings remain in their current locations; Unity projects are not moved or edited. Existing AI connections are reviewed separately before changing them. No standalone installation is removed by this step. Cancel leaves the current setup unchanged."
+            ),
+        )
     }
 }
 
@@ -1001,15 +1157,10 @@ pub async fn prepare_convergence(handle: tauri::AppHandle) -> Result<Report, Str
         let import = if settings_conflict(plan) {
             Some(merge_project_settings(plan.stores[0].bytes().unwrap(), plan.stores[1].bytes().unwrap())?)
         } else { None };
-        let import_message = import.as_ref().map(|proposal| format!(
-            "\n\nMissing projects to import: {}. Earlier entries already listed: {}. Projects are matched by folder and will not be duplicated. Current preferences, selected project and existing project entries are kept. Both original configurations are backed up first, then both active settings files receive the combined project list with current preferences. Older preferences remain in their backup.",
-            proposal.added, proposal.already_present
-        )).unwrap_or_default();
-        let message = format!(
-            "Let Creator Hub use your existing MCP and Project Setup settings?{import_message}\n\nHub will ask verified idle standalone app windows to close normally, then keep exact local backups. Busy or unverified apps are not force-closed. AI clients, Unity and Node connections stay open.\n\nSettings remain in their current locations; Unity projects are not moved or edited. Existing AI connections are reviewed separately before changing them. No standalone installation is removed by this step. Cancel leaves the current setup unchanged."
-        );
-        let approved = handle.dialog().message(message).title("Move to unified Creator Hub").kind(MessageDialogKind::Info)
-            .buttons(MessageDialogButtons::OkCancelCustom("Back up and continue".into(), "Keep existing".into())).blocking_show();
+        let settings_only = !plan.report.required && import.is_some();
+        let (title, action, message) = prepare_confirmation(settings_only, import.as_ref());
+        let approved = handle.dialog().message(message).title(title).kind(MessageDialogKind::Info)
+            .buttons(MessageDialogButtons::OkCancelCustom(action.into(), "Keep existing".into())).blocking_show();
         if !approved {
             return Err("Migration was cancelled. Existing apps and settings were kept.".into());
         }
@@ -1036,7 +1187,9 @@ pub async fn prepare_convergence(handle: tauri::AppHandle) -> Result<Report, Str
         let imported = if import.is_some() { Some(import_missing_projects(plan, &roots()?)?) } else { None };
         can_retain(plan)?;
         plan.report.stage = "backed-up";
+        plan.report.settings_import_available = false;
         plan.report.message = match imported {
+            Some(count) if settings_only => format!("Exact backups of both configurations are verified. Imported {count} missing project(s) without duplicates; current preferences, selected project and existing project entries were kept. AI-client settings, Project Setup settings and installed apps were not changed."),
             Some(count) => format!("Exact backups of both configurations are verified. Imported {count} missing project(s) without duplicates; current preferences and existing project entries were kept. Next, review existing AI connections. Old apps have not been removed."),
             None => "Exact settings backups are verified. Next, review existing AI connections. Old apps have not been removed.".into(),
         };
@@ -1484,6 +1637,7 @@ fn retain_after_close(
     }
     can_retain(plan)?;
     plan.report.stage = "backed-up";
+    plan.report.settings_import_available = false;
     Ok(())
 }
 
@@ -1892,10 +2046,13 @@ pub async fn move_to_hub(handle: tauri::AppHandle) -> Result<MoveOutcome, String
             }
         }
         if outcome != "cancelled" { plan.report.message = message.clone(); }
-        if !plan.retry_allowed {
+        if !plan.retry_allowed && plan.settings_import_recovery.is_none() {
             plan.report.recovery_help = Some(recovery_help(Some(phase), &journal.path));
         }
         plan.report.move_available = plan.retry_allowed && plan.report.stage == "review";
+        plan.report.settings_import_available = settings_import_available(
+            &plan.stores, plan.report.stage, plan.retry_allowed,
+        );
         Ok(MoveOutcome { outcome, phase, report: plan.report.clone(), message })
     }).await.map_err(|_| "Migration outcome is unknown. Keep retained files and review recovery; do not repeat the move.")?
 }
@@ -2093,6 +2250,22 @@ pub async fn retire_convergence_apps(handle: tauri::AppHandle) -> Result<Report,
 #[cfg(test)]
 mod tests {
     use super::*;
+    include!("convergence_profiles_tests.rs");
+
+    #[test]
+    fn migration_write_admission_matches_the_current_presentation() {
+        assert!(require_mcp_migration_mode(Some("writable")).is_ok());
+        for mode in [None, Some("read-only"), Some("unknown")] {
+            assert_eq!(
+                require_mcp_migration_mode(mode).is_ok(),
+                cfg!(all(
+                    feature = "integrated-features",
+                    any(windows, target_os = "linux")
+                )),
+                "Native service admission must not depend on the legacy hosted flag; legacy presentation must keep its write restriction"
+            );
+        }
+    }
 
     #[test]
     fn uncertain_migration_handoff_names_the_retained_record_without_replaying() {
@@ -3102,6 +3275,7 @@ mod tests {
                 .collect(),
             retained_images: Vec::new(),
             retry_allowed: true,
+            settings_import_recovery: None,
             #[cfg(windows)]
             retirement_dependencies: None,
             #[cfg(all(target_os = "linux", feature = "experimental-linux-migration"))]
@@ -3109,6 +3283,7 @@ mod tests {
             report: Report {
                 streamlined: cfg!(feature = "integrated-features"),
                 move_available: true,
+                settings_import_available: false,
                 enabled: true,
                 required: true,
                 stage: "backed-up",
