@@ -45,7 +45,7 @@ def api():
                                   path=".github/workflows/native-linux-production-016.yml", event="workflow_dispatch",
                                   repository=dict(id=1364807512), status="completed", conclusion="success"),
                 inspectionJob=dict(id=p.INSPECTION["job"], run_id=p.INSPECTION["run"], run_attempt=1, status="completed", conclusion="success"),
-                inspectionArtifact=dict(id=p.INSPECTION["artifact"], name="native-linux-production-016-inspection-40405503488-1",
+                inspectionArtifact=dict(id=p.INSPECTION["artifact"], name="native-linux-production-016-inspection-40548456750-1",
                                         size_in_bytes=p.INSPECTION["size"], digest="sha256:" + p.INSPECTION["sha256"], expired=False,
                                         workflow_run=dict(id=p.INSPECTION["run"], head_sha=p.INSPECTION["source"],
                                                           repository_id=1364807512, head_repository_id=1364807512)),
@@ -368,8 +368,8 @@ class Admission(unittest.TestCase):
                 p.validate_api(changed)
 
     def test_fixed_distinct_inspection_and_product_sources_are_not_interchangeable(self):
-        product = "a89ed2b90278b33bebd0b4ba29d87904d2fe683b"
-        inspection = "69ff07d93bbd65fa5d3e82e63dbf62e02c043c58"
+        product = "085131ba6f3050a795fd513139a34975658ba321"
+        inspection = "e2883539eee7e05219444530108cb9acca147a3a"
         self.assertEqual(p.PROFILE["assembly"]["sourceCommit"], product)
         self.assertEqual(p.INSPECTION["source"], inspection)
         self.assertNotEqual(product, inspection)
@@ -391,25 +391,71 @@ class Admission(unittest.TestCase):
 
     def test_reviewed_product_and_inspection_identities_are_fixed(self):
         self.assertEqual(p.PROFILE["assembly"], {
-            "sourceCommit": "a89ed2b90278b33bebd0b4ba29d87904d2fe683b",
-            "sourceTree": "afa55697087e3d5d0916c3f06a75d2bab258789d", "runId": 40403377032,
-            "runAttempt": 1, "jobId": 121854945353, "artifactId": 12691700373, "zipBytes": 183728136,
-            "zipSha256": "4226e62399d7fb11d51abdb802acbf7f87455d9a6b1d10f456a34b167454fe5c"})
+            "sourceCommit": "085131ba6f3050a795fd513139a34975658ba321",
+            "sourceTree": "feccbd2ca251f75f95bca1730e458605f1b3558c", "runId": 40541756470,
+            "runAttempt": 1, "jobId": 122321845237, "artifactId": 12752093788, "zipBytes": 183883289,
+            "zipSha256": "6a49f7f7af28bb5c962042008c5fcbf17b8cbf856d59d05571745efa98564719"})
         self.assertEqual(p.PROFILE["pins"], {
-            "rawHub": {"size": 28829744, "sha256": "5a8d01fb4a223ca192a8ac6050be65b7c3b96b6a056c61c319cb9d517450f598"},
-            "deb": {"size": 64379148, "sha256": "a07cf7bc62044dde7c923fa4507f58a61fa0491a8cc187fa4c317ec0cf6dc53d"},
-            "hub": {"size": 28829744, "sha256": "ac6e53ca75ef7d12d641f602ed77309bf386b1a070c338c7bb813b2dd74e1f06"},
-            "manifest": {"size": 3663, "sha256": "75404884b30272286c4210b1520fe6a4f059e182674fa7b63efe4527609b1fad"},
-            "modulesArchive": {"size": 55576564, "sha256": "a64faef7c7ad830558c9db85c83baf1ff64fb462510292af4c0c718794515e64"},
-            "assemblyReceipt": {"size": 3547, "sha256": "690f838aca5519247f7cdb0c5e4ef0ba9852af62eb599a150175a58e2e122c3a"},
-            "packageIntegrity": {"size": 2151, "sha256": "a6e7d2e61b78371178d831f4488b74155bd8244b78bf01b4f678ca666e2570ca"},
+            "rawHub": {"size": 28906816, "sha256": "c524bc6ffdc7f7786e4125853a99b195ffce7f2f360b8c2a456947e1e8f3e167"},
+            "deb": {"size": 64457392, "sha256": "a4e209c08cadab7ed03cf73dda1c58720989b75b2e451f4fdc14435e2ef0c998"},
+            "hub": {"size": 28906816, "sha256": "ef839e04f04dcb5e2fc513ce8a84dea5f7f5b98b0cd0269761145f9bed2f2cee"},
+            "manifest": {"size": 3663, "sha256": "d510446b1280151e7e43a9fc3641492d979346c880b9346f82efe30dfdd227be"},
+            "modulesArchive": {"size": 55576690, "sha256": "36b250f9e6e9e6c7dbd4278d6ab6d7bec69c77894f690673ae137e669479ea82"},
+            "assemblyReceipt": {"size": 3547, "sha256": "ef1c4610d2e3f430bc24d949ce23414a1f14e4dd74e8403f1aa5aa96e10b3cdb"},
+            "packageIntegrity": {"size": 2151, "sha256": "64380f3cd2efe5adb0f5d87964731ceca2efe8d149620f8390bb5ad7724ae9d7"},
             "helper": {"size": 1168536, "sha256": "7f22822e50ee8b96829c64c95da9e1b098c3e080a1370f577ae2b69055eed94a"},
             "policy": {"size": 878, "sha256": "f4819f08e0a96e98d10a449a82a26b4f59d69714460eb9082387f746e1889bb4"},
             "service": {"size": 92, "sha256": "9a270a39c219b4f2d294cfaa2a849db84b1e1883fa532d2c90d7f95625780340"}})
-        self.assertEqual(p.INSPECTION, {"run": 40405503488, "job": 121862099500, "workflow": 389992948,
-            "artifact": 12691197198, "size": 5428,
-            "sha256": "0ad92b325c9767f179c358609f07968ffdde2b9da6efc9ae81cb6a4f3a95eb14",
-            "source": "69ff07d93bbd65fa5d3e82e63dbf62e02c043c58"})
+        self.assertEqual(p.INSPECTION, {"run": 40548456750, "job": 122345376607, "workflow": 389992948,
+            "artifact": 12754511103, "size": 5419,
+            "sha256": "dfaf171ba491f61f5b8d3b643a9912ddff9c0d7c151820f7562e4297aaae6fa2",
+            "source": "e2883539eee7e05219444530108cb9acca147a3a"})
+
+    def test_previous_a89_inspection_and_mixed_api_evidence_are_rejected(self):
+        former = api()
+        former["inspectionRun"].update(id=40405503488, head_sha="69ff07d93bbd65fa5d3e82e63dbf62e02c043c58")
+        former["inspectionJob"].update(id=121862099500, run_id=40405503488)
+        former["inspectionArtifact"].update(id=12691197198, name="native-linux-production-016-inspection-40405503488-1",
+            size_in_bytes=5428, digest="sha256:0ad92b325c9767f179c358609f07968ffdde2b9da6efc9ae81cb6a4f3a95eb14")
+        former["inspectionArtifact"]["workflow_run"].update(id=40405503488, head_sha="69ff07d93bbd65fa5d3e82e63dbf62e02c043c58")
+        with self.assertRaises(REFUSAL):
+            p.validate_api(former)
+        for section in ("inspectionRun", "inspectionJob", "inspectionArtifact"):
+            for field, value in former[section].items():
+                if value == api()[section][field]:
+                    continue
+                changed = api()
+                changed[section][field] = copy.deepcopy(value)
+                with self.subTest(section=section, field=field), self.assertRaises(REFUSAL):
+                    p.validate_api(changed)
+
+    def test_previous_a89_root_and_mixed_profiles_are_rejected(self):
+        former = {"sourceCommit": "a89ed2b90278b33bebd0b4ba29d87904d2fe683b",
+                  "sourceTree": "afa55697087e3d5d0916c3f06a75d2bab258789d", "runId": 40403377032,
+                  "runAttempt": 1, "jobId": 121854945353, "artifactId": 12691700373, "zipBytes": 183728136,
+                  "zipSha256": "4226e62399d7fb11d51abdb802acbf7f87455d9a6b1d10f456a34b167454fe5c"}
+        changed = binding()
+        changed["profile"]["assembly"] = copy.deepcopy(former)
+        changed["api"]["assembly"] = copy.deepcopy(former)
+        for field in ("sourceCommit", "sourceTree"):
+            changed["productionProof"][field] = former[field]
+        with self.assertRaises(REFUSAL):
+            p.validate_binding(changed, environment())
+        for field, value in former.items():
+            if value == p.PROFILE["assembly"][field]:
+                continue
+            changed = binding()
+            changed["profile"]["assembly"][field] = value
+            with self.subTest(field=field), self.assertRaises(REFUSAL):
+                p.validate_binding(changed, environment())
+
+    def test_new_staging_must_bind_the_incoming_run_not_the_prior_inspection_or_product_source(self):
+        p.validate_binding(binding(), environment())
+        for source in (p.INSPECTION["source"], p.PROFILE["assembly"]["sourceCommit"]):
+            changed = binding()
+            changed["api"]["harnessSource"] = source
+            with self.subTest(source=source), self.assertRaises(REFUSAL):
+                p.validate_binding(changed, environment())
 
     def test_public012_baseline_remains_exact_and_unchanged(self):
         self.assertEqual(p.BASELINE, {"releaseId": 402585934, "assetId": 608099582,
