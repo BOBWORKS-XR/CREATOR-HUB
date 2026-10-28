@@ -4482,5 +4482,228 @@ class WindowManagerExclusiveLeafTests(unittest.TestCase):
         self.assert_racing_leaf_refused(0o755)
 
 
+class RuntimeModeDiagnosticTests(unittest.TestCase):
+    @contextmanager
+    def status_fixture(self, raw=b"Umask:\t0077\nGid:\t21314\t21314\t21314\t21314\n"):
+        process = {"pid": 101, "parentPid": 100, "startTime": "1234", "uids": [M.UID] * 4,
+                   "kernelImageSha256": "a" * 64, "executable": "/verified/image"}
+        info = SimpleNamespace(st_dev=1, st_ino=2, st_mode=stat.S_IFREG | 0o444, st_uid=M.UID,
+                               st_gid=M.UID, st_size=0, st_mtime_ns=1, st_ctime_ns=1)
+        native = SimpleNamespace(native_process=Mock(return_value=process))
+        with ExitStack() as stack:
+            for name in ("O_NOFOLLOW", "O_NONBLOCK", "O_CLOEXEC"):
+                if not hasattr(M.os, name): stack.enter_context(patch.object(M.os, name, 0, create=True))
+            stack.enter_context(patch.object(Path, "lstat", return_value=info))
+            opened = stack.enter_context(patch.object(M.os, "open", return_value=99))
+            stack.enter_context(patch.object(M.os, "fstat", return_value=info))
+            reader = stack.enter_context(patch.object(M.os, "read", side_effect=[raw, b""]))
+            closed = stack.enter_context(patch.object(M.os, "close"))
+            for name in ("umask", "chmod", "chown"):
+                stack.enter_context(patch.object(M.os, name, side_effect=AssertionError("No mutation"), create=True))
+            yield SimpleNamespace(process=process, native=native, info=info, opened=opened, reader=reader, closed=closed)
+
+    def capture(self, f, evidence=None):
+        evidence = {} if evidence is None else evidence
+        value = M.runtime_mode_capture(evidence, "root-bound", "root", f.process, f.native, None)
+        return evidence, value
+
+    def test_strict_status_parser_identity_sandwich_and_no_probe(self):
+        with self.status_fixture() as f:
+            evidence, value = self.capture(f)
+            self.assertEqual(value["umask"], "0077")
+            self.assertEqual(value["gids"], [M.UID] * 4)
+            self.assertEqual(f.native.native_process.call_count, 2)
+            self.assertEqual(f.reader.call_args_list[0].args, (99, 16385))
+            f.closed.assert_called_once_with(99)
+            self.assertFalse(value["authorityGranted"]); self.assertFalse(value["inputPermitted"])
+            self.assertNotIn("raw", value); self.assertLess(len(json.dumps(evidence)), 2048)
+
+    def test_missing_malformed_duplicate_and_oversized_status_are_unavailable(self):
+        raws = [b"Name:\tfixture\n", b"Umask: 077\n", b"Umask: 0088\n", b"Umask: 0077\r\n",
+                b"Umask: 0077\nUmask: 0022\n", b"x" * 16385,
+                b"Umask: 0077\nGid: 0 0 0 0\n"]
+        for raw in raws:
+            with self.subTest(raw=raw[:40]), self.status_fixture(raw) as f:
+                evidence, value = self.capture(f)
+                self.assertIn("unavailable", value); self.assertNotIn("umask", value)
+                self.assertNotIn("firstFailure", evidence)
+                f.closed.assert_called_once_with(99)
+
+    def test_exit_drift_missing_status_and_link_status_are_unavailable(self):
+        for fault in ("exit-before", "exit-after", "drift-before", "drift-after", "missing", "link"):
+            with self.subTest(fault=fault), self.status_fixture() as f:
+                different = {**f.process, "startTime": "9999"}
+                if fault == "exit-before": f.native.native_process.side_effect = FileNotFoundError()
+                if fault == "exit-after": f.native.native_process.side_effect = [f.process, FileNotFoundError()]
+                if fault == "drift-before": f.native.native_process.return_value = different
+                if fault == "drift-after": f.native.native_process.side_effect = [f.process, different]
+                if fault == "link": f.info.st_mode = stat.S_IFLNK | 0o777
+                with patch.object(Path, "lstat", side_effect=FileNotFoundError()) if fault == "missing" else ExitStack():
+                    _, value = self.capture(f)
+                self.assertIn("unavailable", value); self.assertNotIn("umask", value)
+
+    def test_finite_roles_duplicates_and_existing_first_failure_preserved(self):
+        with self.status_fixture() as f:
+            original = {"type": "RuntimeError", "message": "original refusal"}
+            evidence = {"firstFailure": original, "scenarioPassed": False}
+            self.capture(f, evidence); self.capture(f, evidence)
+            self.assertEqual(len(evidence["runtimeModes"]), 1)
+            f.native.native_process.assert_called_with(101, None)
+            rejected = M.runtime_mode_capture(evidence, "arbitrary", "foreign", f.process, f.native, None)
+            self.assertIn("unavailable", rejected)
+            self.assertIs(evidence["firstFailure"], original); self.assertFalse(evidence["scenarioPassed"])
+
+    def test_original_close_guard_exception_is_not_replaced_or_bypassed(self):
+        session = M.Session.__new__(M.Session); session.checkpoint = Mock()
+        error = RuntimeError("original first refusal")
+        session.guard = Mock(side_effect=error)
+        with patch.object(M, "runtime_close_modes") as modes, patch.object(M, "runtime_directory_capture") as directories:
+            with self.assertRaises(RuntimeError) as raised: session.close()
+            self.assertIs(raised.exception, error); modes.assert_not_called(); directories.assert_not_called()
+
+    def test_production_directory_wrapper_fixes_home_uid_and_never_overwrites_failure(self):
+        original = {"type": "RuntimeError", "message": "original refusal"}
+        evidence = {"normalCloseObserved": True, "firstFailure": original}
+        value = {"diagnosticOnly": True, "entries": [], "authorityGranted": False}
+        with patch.object(M, "runtime_directory_metadata", return_value=value) as metadata, \
+                patch.object(M, "runtime_open_directory", side_effect=FileNotFoundError()):
+            M.runtime_directory_capture(evidence)
+            metadata.assert_called_once_with(M.BASE / "result/home", M.UID)
+            self.assertEqual([row["role"] for row in value["wmCaches"]], ["migration", "migrated", "changed-mcp"])
+            M.runtime_directory_capture(evidence)
+            self.assertEqual(metadata.call_count, 1)
+            M.runtime_directory_capture({"normalCloseObserved": False})
+            self.assertEqual(metadata.call_count, 1)
+        self.assertIs(evidence["firstFailure"], original)
+        evidence = {"normalCloseObserved": True, "firstFailure": original}
+        with patch.object(M, "runtime_directory_metadata", side_effect=RuntimeError("diagnostic failed")):
+            M.runtime_directory_capture(evidence)
+        self.assertTrue(evidence["runtimeDirectoryMetadataUnavailable"])
+        self.assertIs(evidence["firstFailure"], original)
+
+    def test_source_edges_are_after_owned_boundaries_and_normal_close(self):
+        tree = ast.parse(Path(M.__file__).read_bytes())
+        session = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "Session")
+        functions = {n.name: n for n in session.body if isinstance(n, ast.FunctionDef)}
+        start = ast.unparse(functions["start"]); close = ast.unparse(functions["close"])
+        for field, boundary in (("driver", "driver-bound"), ("backend", "backend-bound"), ("root", "root-bound")):
+            self.assertLess(start.index("self.evidence['" + field + "'] ="), start.index("'" + boundary + "'"))
+        self.assertLess(close.index("self.guard()"), close.index("runtime_close_modes(self)"))
+        self.assertLess(close.index("self.evidence['normalCloseObserved'] = True"), close.index("runtime_directory_capture"))
+        self.assertLess(close.index("self.dispose_tools"), close.index("runtime_directory_capture"))
+        run = ast.unparse(next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "run_session"))
+        self.assertLess(run.index("os.umask(63)"), run.index("'before-gdk'"))
+        self.assertLess(run.index("'before-gdk'"), run.index("Gdk.init([])"))
+        self.assertLess(run.index("Gdk.init([])"), run.index("'after-gdk'"))
+        diagnostics = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name.startswith("runtime_")]
+        text = "\n".join(ast.unparse(n) for n in diagnostics)
+        for forbidden in ("os.umask(", "chmod(", "chown(", "Popen(", "os.kill(", "getxattr(fd, 'user."):
+            self.assertNotIn(forbidden, text)
+
+
+@unittest.skipUnless(os.name == "posix", "Real descriptor/proc fixtures require Linux")
+class RuntimeDirectoryDiagnosticTests(unittest.TestCase):
+    @contextmanager
+    def fixture(self):
+        with tempfile.TemporaryDirectory(prefix="creator-mode-metadata-", dir="/tmp") as temporary:
+            root = Path(temporary).resolve(); home = root / "home"; home.mkdir(mode=0o700)
+            yield root, home
+
+    def snapshot(self, root):
+        return {str(p.relative_to(root)): (p.lstat().st_ino, p.lstat().st_mode, p.lstat().st_uid,
+                p.lstat().st_gid, p.lstat().st_mtime_ns, p.lstat().st_ctime_ns) for p in (root, *root.rglob("*"))}
+
+    def test_unsafe_foreign_symlink_and_special_boundaries_no_contents_or_mutation(self):
+        with self.fixture() as (root, home):
+            for name in ("safe", "unsafe", "foreign"):
+                directory = home / name; directory.mkdir(mode=0o700); (directory / "sentinel").write_bytes(b"do not read")
+            (home / "unsafe").chmod(0o777)
+            outside = root / "outside"; outside.mkdir(mode=0o700); (outside / "secret").write_bytes(b"outside")
+            (home / "alias").symlink_to(outside, target_is_directory=True); os.mkfifo(home / "pipe", mode=0o600)
+            original, real_stat, real_scan = self.snapshot(root), os.stat, os.scandir
+            scanned = []
+            def observe(fd):
+                scanned.append(os.fstat(fd).st_ino); return real_scan(fd)
+            def foreign(name, *args, **kwargs):
+                value = real_stat(name, *args, **kwargs)
+                if name == "foreign":
+                    return SimpleNamespace(**{key: (value.st_uid + 1 if key == "st_uid" else getattr(value, key))
+                        for key in ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_size", "st_mtime_ns", "st_ctime_ns")})
+                return value
+            with patch.object(M.os, "stat", side_effect=foreign), patch.object(M.os, "scandir", side_effect=observe), \
+                    patch.object(M.os, "chmod", side_effect=AssertionError("No repair")), \
+                    patch.object(M.os, "chown", side_effect=AssertionError("No repair")), \
+                    patch.object(M.os, "umask", side_effect=AssertionError("No probe")), \
+                    patch.object(Path, "read_bytes", side_effect=AssertionError("No content reads")):
+                result = M.runtime_directory_metadata(home, os.geteuid())
+            self.assertNotIn("unavailable", result)
+            rows = {row["relativePath"]: row for row in result["entries"]}
+            for name in ("unsafe", "foreign", "alias", "pipe"):
+                self.assertIn("notDescended", rows[name])
+                self.assertNotIn((home / name).lstat().st_ino, scanned)
+            self.assertNotIn("sentinel", json.dumps(result)); self.assertNotIn("secret", json.dumps(result))
+            self.assertEqual(original, self.snapshot(root))
+
+    def test_default_acl_presence_hash_only_absent_and_unavailable(self):
+        with self.fixture() as (_, home):
+            for raw in (b"bounded synthetic ACL", OSError(61, "absent"), OSError(95, "unsupported")):
+                with patch.object(M.os, "getxattr", side_effect=raw if isinstance(raw, OSError) else None,
+                                  return_value=raw if isinstance(raw, bytes) else None):
+                    result = M.runtime_directory_metadata(home, os.geteuid())
+                acl = result["entries"][0]["defaultAcl"]
+                if isinstance(raw, bytes):
+                    self.assertEqual(acl, {"present": True, "size": len(raw), "sha256": M.digest(raw)})
+                    self.assertNotIn(raw.decode(), json.dumps(result))
+                elif raw.errno == 61: self.assertEqual(acl, {"present": False})
+                else: self.assertEqual(acl["errno"], 95); self.assertNotIn("present", acl)
+
+    def test_entry_time_depth_and_byte_limits_are_explicit(self):
+        for limit in ("entries", "time", "depth", "bytes"):
+            with self.subTest(limit=limit), self.fixture() as (_, home):
+                if limit == "entries":
+                    for i in range(257): (home / str(i)).touch()
+                if limit == "depth":
+                    path = home
+                    for _ in range(10): path = path / "d"; path.mkdir(mode=0o700)
+                if limit == "bytes":
+                    for i in range(100): (home / (str(i).zfill(3) + "x" * 200)).mkdir(mode=0o700)
+                with patch.object(M.time, "monotonic", side_effect=[0, 1]) if limit == "time" else ExitStack():
+                    if limit == "time": (home / "entry").touch()
+                    result = M.runtime_directory_metadata(home, os.geteuid())
+                self.assertTrue(result["truncated"]); self.assertEqual(result["truncationReason"], limit)
+                self.assertLessEqual(result["visited"], 256); self.assertLess(len(json.dumps(result)), 32768)
+
+    def test_root_mode_link_and_identity_drift_refuse_without_authority(self):
+        with self.fixture() as (root, home):
+            home.chmod(0o755)
+            self.assertIn("unavailable", M.runtime_directory_metadata(home, os.geteuid()))
+            home.chmod(0o700); link = root / "alias"; link.symlink_to(home, target_is_directory=True)
+            self.assertIn("unavailable", M.runtime_directory_metadata(link, os.geteuid()))
+            with patch.object(Path, "lstat", side_effect=FileNotFoundError()):
+                result = M.runtime_directory_metadata(home, os.geteuid())
+            self.assertIn("unavailable", result); self.assertFalse(result["authorityGranted"])
+
+    def test_real_linux_owned_status_and_parent_identity(self):
+        native, helper = M.load("native-linux-root-probe"), M.load("native-unix-window")
+        owned = native.native_process(os.getpid(), helper)
+        evidence = {}
+        with patch.object(M, "UID", os.geteuid()), patch.object(M.os, "umask", side_effect=AssertionError("No probe")):
+            value = M.runtime_mode_capture(evidence, "before-gdk", "parent", owned, native, helper)
+        self.assertNotIn("unavailable", value); self.assertRegex(value["umask"], r"^[0-7]{4}$")
+        self.assertEqual(value["pid"], os.getpid())
+
+    def test_cached_first_directory_refusal_is_unchanged_after_metadata_only_capture(self):
+        controller = M.load("native-linux-migrated-update")
+        with self.fixture() as (_, home):
+            bad = home / "data"; bad.mkdir(mode=0o700); bad.chmod(0o777)
+            before = self.snapshot(home)
+            with self.assertRaises(RuntimeError) as first: controller.tree(home, os.geteuid())
+            diagnostics = M.runtime_directory_metadata(home, os.geteuid())
+            with self.assertRaises(RuntimeError) as second: controller.tree(home, os.geteuid())
+            self.assertEqual(str(first.exception), "Owned canonical directory required")
+            self.assertEqual(str(first.exception), str(second.exception))
+            self.assertEqual(before, self.snapshot(home)); self.assertFalse(diagnostics["inputPermitted"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

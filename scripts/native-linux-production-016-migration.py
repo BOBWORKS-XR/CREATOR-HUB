@@ -1131,6 +1131,208 @@ def ax_graph(atspi, helper, native, refs, owner, frame, *, protected=None, obser
     return rows, nodes
 
 
+def runtime_mode_capture(evidence, boundary, role, process, native, helper):
+    # U.owned_process_umask's bounded parser contract, with M's UID/native identity shape.
+    entry = {"boundary": boundary, "role": role, "diagnosticOnly": True, "readOnly": True,
+             "authorityGranted": False, "inputPermitted": False, "releaseReady": False}
+    try:
+        allowed = {("before-gdk", "parent"), ("after-gdk", "parent"), ("before-driver", "parent"),
+                   ("driver-bound", "driver"), ("backend-bound", "backend"), ("root-bound", "root"),
+                   *(("before-close", name) for name in ("parent", "driver", "backend", "root"))}
+        require((boundary, role) in allowed, "Finite runtime mode boundary required")
+        rows = evidence.setdefault("runtimeModes", [])
+        require(type(rows) is list and len(rows) < 10, "Runtime mode record bound exceeded")
+        if any((row["boundary"], row["role"]) == (boundary, role) for row in rows): return
+        rows.append(entry)
+        if role == "parent" and process is None:
+            process = native.native_process(os.getpid(), helper)
+        require(type(process) is dict and type(process.get("pid")) is int and 1 < process["pid"] <= 2147483647
+                and type(process.get("parentPid")) is int and 0 <= process["parentPid"] <= 2147483647
+                and process.get("uids") == [UID] * 4 and type(process.get("startTime")) is str
+                and re.fullmatch(r"[0-9]{1,20}", process["startTime"])
+                and re.fullmatch(r"[0-9a-f]{64}", process.get("kernelImageSha256", ""))
+                and (role != "parent" or process["pid"] == os.getpid()), "Owned diagnostic process required")
+        require(native.native_process(process["pid"], helper) == process, "Diagnostic process identity changed")
+        path = Path(f'/proc/{process["pid"]}/status')
+        before = path.lstat(); require(stat.S_ISREG(before.st_mode), "Ordinary process status required")
+        stamp = lambda info: tuple(getattr(info, key) for key in
+            ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_size", "st_mtime_ns", "st_ctime_ns"))
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+        try:
+            require(stamp(os.fstat(fd)) == stamp(before), "Status identity changed during open")
+            raw = bytearray()
+            while len(raw) <= 16384:
+                part = os.read(fd, 16385 - len(raw))
+                if not part: break
+                raw.extend(part)
+            require(len(raw) <= 16384 and stamp(os.fstat(fd)) == stamp(before)
+                    and stamp(path.lstat()) == stamp(before), "Status changed or oversized")
+        finally:
+            os.close(fd)
+        values = re.findall(rb"^Umask:[ \t]+([0-7]{4})$", raw, re.M)
+        gids = re.findall(rb"^Gid:[ \t]+(\d+)[ \t]+(\d+)[ \t]+(\d+)[ \t]+(\d+)[ \t]*$", raw, re.M)
+        require(len(values) == len(gids) == 1 and [int(value) for value in gids[0]] == [UID] * 4
+                and native.native_process(process["pid"], helper) == process,
+                "Owned process umask unavailable or changed")
+        entry.update(pid=process["pid"], parentPid=process["parentPid"], startTime=process["startTime"],
+                     uids=list(process["uids"]), gids=[int(value) for value in gids[0]],
+                     kernelImageSha256=process["kernelImageSha256"],
+                     umask=values[0].decode("ascii"), sampledMonotonicNs=time.monotonic_ns())
+    except Exception as error:
+        entry["unavailable"] = type(error).__name__[:80]
+    return entry
+
+
+def runtime_open_directory(path):
+    require(path.is_absolute() and len(path.parts) <= 32 and ".." not in path.parts
+            and len(str(path).encode()) <= 512, "Bounded absolute diagnostic directory required")
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
+    fd = os.open(path.anchor, flags)
+    try:
+        for part in path.parts[1:]:
+            child = os.open(part, flags, dir_fd=fd)
+            os.close(fd); fd = child
+        return fd
+    except Exception:
+        os.close(fd)
+        raise
+
+
+def runtime_directory_metadata(home, uid):
+    """Metadata only; stop at unsafe boundaries. Never a preservation guard."""
+    result = {"schemaVersion": 1, "diagnosticOnly": True, "readOnly": True, "authorityGranted": False,
+              "inputPermitted": False, "releaseReady": False, "entries": [], "truncated": False,
+              "limits": {"entries": 256, "depth": 8, "bytes": 24576, "seconds": 0.5}, "visited": 0}
+    started, used = time.monotonic(), 0
+    stamp = lambda info: tuple(getattr(info, key) for key in
+        ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_size", "st_mtime_ns", "st_ctime_ns"))
+
+    def stop(reason):
+        result["truncated"] = True; result.setdefault("truncationReason", reason)
+
+    def budget():
+        if time.monotonic() - started >= 0.5: stop("time"); return False
+        if result["visited"] >= 256: stop("entries"); return False
+        return True
+
+    def append(row):
+        nonlocal used
+        size = len(json.dumps(row, ensure_ascii=True, allow_nan=False).encode()) + 2
+        if used + size > 24576: stop("bytes"); return False
+        result["entries"].append(row); used += size
+        return True
+
+    def metadata(name, info):
+        return {"relativePath": name, "dev": info.st_dev, "ino": info.st_ino, "uid": info.st_uid,
+                "gid": info.st_gid, "mode": info.st_mode, "mtimeNs": info.st_mtime_ns, "ctimeNs": info.st_ctime_ns}
+
+    def safe(info):
+        return stat.S_ISDIR(info.st_mode) and info.st_uid == info.st_gid == uid and not info.st_mode & 0o022
+
+    def acl(fd):
+        try:
+            raw = os.getxattr(fd, "system.posix_acl_default")
+            require(len(raw) <= 65536, "Default ACL exceeds bound")
+            return {"present": True, "size": len(raw), "sha256": digest(raw)}
+        except OSError as error:
+            if error.errno == 61: return {"present": False}  # Linux ENODATA, not unsupported/unreadable.
+            return {"unavailable": type(error).__name__, "errno": error.errno}
+        except Exception as error:
+            return {"unavailable": type(error).__name__[:80]}
+
+    def walk(fd, relative, depth):
+        parent = os.fstat(fd)
+        with os.scandir(fd) as entries:
+            for item in entries:
+                if not budget(): return
+                result["visited"] += 1
+                name = item.name if relative == "." else relative + "/" + item.name
+                if len(name.encode("utf-8")) > 512 or item.name in (".", "..") or "/" in item.name or "\\" in item.name:
+                    stop("path"); return
+                info = os.stat(item.name, dir_fd=fd, follow_symlinks=False)
+                if stat.S_ISREG(info.st_mode): continue
+                row = metadata(name, info)
+                row["kind"] = "directory" if stat.S_ISDIR(info.st_mode) else "link-or-special"
+                if not safe(info):
+                    row["notDescended"] = "unsafe-foreign-or-link"
+                    if not append(row): return
+                    continue
+                if depth >= 8:
+                    row["notDescended"] = "depth"; stop("depth")
+                    if not append(row): return
+                    continue
+                child = os.open(item.name, flags, dir_fd=fd)
+                try:
+                    require(stamp(os.fstat(child)) == stamp(info), "Diagnostic directory changed during open")
+                    row["defaultAcl"] = acl(child)
+                    if not append(row): return
+                    walk(child, name, depth + 1)
+                    require(stamp(os.fstat(child)) == stamp(info)
+                            and stamp(os.stat(item.name, dir_fd=fd, follow_symlinks=False)) == stamp(info),
+                            "Diagnostic directory changed during inventory")
+                finally:
+                    os.close(child)
+                if result["truncated"] and result.get("truncationReason") != "depth": return
+        require(stamp(os.fstat(fd)) == stamp(parent), "Diagnostic parent changed during inventory")
+
+    fd = None
+    try:
+        require(os.name == "posix" and home.is_absolute() and len(home.parts) <= 32
+                and ".." not in home.parts and len(str(home).encode()) <= 512, "Fixed bounded HOME required")
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
+        fd = runtime_open_directory(home)
+        before = os.fstat(fd)
+        require(safe(before) and stat.S_IMODE(before.st_mode) == 0o700, "Owned exact-0700 HOME required")
+        root = metadata(".", before); root["kind"] = "directory"; root["defaultAcl"] = acl(fd)
+        append(root); walk(fd, ".", 0)
+        require(stamp(os.fstat(fd)) == stamp(before) and stamp(home.lstat()) == stamp(before), "HOME identity changed")
+    except Exception as error:
+        result["unavailable"] = type(error).__name__[:80]
+    finally:
+        if fd is not None: os.close(fd)
+    return result
+
+
+def runtime_directory_capture(evidence):
+    try:
+        require(evidence.get("normalCloseObserved") is True, "Normal close precedes metadata audit")
+        if "runtimeDirectoryMetadata" in evidence: return
+        result = runtime_directory_metadata(BASE / "result/home", UID)
+        result["wmCaches"] = []
+        for role in ("migration", "migrated", "changed-mcp"):
+            parent = BASE / ("result/tmp" if role == "migration" else "result/migrated-update/tmp")
+            fd = None
+            try:
+                fd = runtime_open_directory(parent)
+                before = os.fstat(fd)
+                require(before.st_uid == before.st_gid == UID and stat.S_IMODE(before.st_mode) == 0o700,
+                        "Owned exact-0700 WM parent required")
+                leaf = "openbox-" + role + "-cache"
+                info = os.stat(leaf, dir_fd=fd, follow_symlinks=False)
+                row = {"role": role, "mode": info.st_mode, "uid": info.st_uid, "gid": info.st_gid,
+                       "dev": info.st_dev, "ino": info.st_ino, "notDescended": True}
+                require(os.fstat(fd) == before and parent.lstat() == before
+                        and os.stat(leaf, dir_fd=fd, follow_symlinks=False) == info, "WM metadata changed")
+            except Exception as error:
+                row = {"role": role, "unavailable": type(error).__name__[:80]}
+            finally:
+                if fd is not None: os.close(fd)
+            result["wmCaches"].append(row)
+        require(len(json.dumps(result, ensure_ascii=True, allow_nan=False).encode()) <= 32768, "Metadata audit exceeds bound")
+        evidence["runtimeDirectoryMetadata"] = result
+    except Exception:
+        evidence.setdefault("runtimeDirectoryMetadataUnavailable", True)
+
+
+def runtime_close_modes(session):
+    try:
+        for role, process in (("parent", None), ("driver", getattr(session, "driver_identity", None)),
+                              ("backend", getattr(session, "backend", None)), ("root", getattr(session, "owned", None))):
+            runtime_mode_capture(session.evidence, "before-close", role, process, session.native, session.helper)
+    except Exception:
+        session.evidence.setdefault("runtimeModeCaptureUnavailable", True)
+
+
 class Session:
     PROGRESS_BOUNDARIES = ("startup", "tooling", "driver-spawn", "listeners-ready", "status-ready",
         "session-create", "session-created", "root-bound", "window-wait", "window-bound", "startup-ready",
@@ -1301,12 +1503,14 @@ class Session:
         driver = BASE / "bin/tauri-driver"
         pin = P.parse(read_file(BASE / "driver.json", uid=0, mode=0o644))
         self.pages.pinned(driver, pin, 0, 0o755)
+        runtime_mode_capture(self.evidence, "before-driver", "parent", None, self.native, self.helper)
         self.checkpoint("driver-spawn")
         self.child = subprocess.Popen([str(driver), "--native-driver", "/usr/bin/WebKitWebDriver"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         self.logs = self.native.Capture(self.child, root, "driver")
         self.driver_identity = self.native.native_process(self.child.pid, self.helper)
         require(self.driver_identity["kernelImageSha256"] == pin["sha256"], "Running test driver differs")
         self.evidence["driver"] = self.driver_identity
+        runtime_mode_capture(self.evidence, "driver-bound", "driver", self.driver_identity, self.native, self.helper)
         def bootstrap_guard():
             self.checkpoint(guard=("bootstrap", "entered"))
             self.logs.pump()
@@ -1335,6 +1539,7 @@ class Session:
         self.pages.wait(sockets_ready)
         self.backend = backend
         self.evidence["backend"] = self.backend
+        runtime_mode_capture(self.evidence, "backend-bound", "backend", self.backend, self.native, self.helper)
         self.checkpoint("listeners-ready")
         def bound_driver_guard():
             self.checkpoint(guard=("driver", "entered"))
@@ -1356,6 +1561,7 @@ class Session:
         require(self.owned["kernelImageSha256"] == binding["profile"]["pins"]["hub"]["sha256"]
                 and self.owned["parentPid"] == self.backend["pid"], "Actual 016 kernel image/parent differs")
         self.evidence["root"] = self.owned
+        runtime_mode_capture(self.evidence, "root-bound", "root", self.owned, self.native, self.helper)
         self.checkpoint("root-bound")
         self.pidfd = os.pidfd_open(self.owned["pid"])
         def mapped():
@@ -1539,6 +1745,7 @@ class Session:
     def close(self):
         self.checkpoint("close")
         self.guard()
+        runtime_close_modes(self)
         backend_fd = os.pidfd_open(self.backend["pid"])
         try:
             self.backend_guard()
@@ -1548,6 +1755,7 @@ class Session:
             self.dispose_tools(backend_fd)
         finally:
             os.close(backend_fd)
+        runtime_directory_capture(self.evidence)
         self.logs.pump()
         self.evidence["logs"] = self.logs.metadata()
         require(not any(row["truncated"] for row in self.logs.metadata().values()), "Driver log overflow")
@@ -3275,11 +3483,14 @@ def run_session(env):
     os.umask(0o077)
     secret = None
     pages, helper, native, polkit = neutral()
+    runtime_modes = {}
+    runtime_mode_capture(runtime_modes, "before-gdk", "parent", None, native, helper)
     import gi
     gi.require_version("Gdk", "3.0"); gi.require_version("Atspi", "2.0")
     from gi.repository import Gdk, Atspi, Gio, GLib
     Gdk.init([]); Atspi.set_timeout(1500, 1500)
     parent = native.native_process(os.getpid(), helper)
+    runtime_mode_capture(runtime_modes, "after-gdk", "parent", parent, native, helper)
     system = Gio.bus_get_sync(Gio.BusType.SYSTEM, None)
     session_identity = polkit.session(system, os.getpid(), GLib)
     agent = subprocess.Popen([polkit.AGENT], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -3306,6 +3517,7 @@ def run_session(env):
                "PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C", "UNITY_PROJECT_PATH": str(home / "current-project"), "CREATOR_WORKS_TOOL_GROUPS": "none"}
     report = {"scenario": scenario, "harnessSource": env["GITHUB_SHA"], "bindingSha256": digest(binding_raw),
               "scenarioPassed": False, "normalReopenObserved": False, **FLAGS}
+    report.update(runtime_modes)
     session = old_sdk = None
     try:
         if scenario in SCENARIOS[2:]:
