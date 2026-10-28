@@ -1599,13 +1599,15 @@ class BoundedStderrTests(unittest.TestCase):
             "refusal": {"type": "RuntimeError", "message": "\ufffd" * 1000},
             "cleanupRefusal": {"type": "RuntimeError", "message": "\ufffd" * 1000},
             "startupDiagnostic": {"pid": 999999999, "returnCodeBeforeCleanup": None, "elapsedSeconds": 5,
-                "stderr": snapshot, "stderrAfterCleanup": snapshot}, "stderrReaderClosed": False}
+                "stderr": snapshot, "stderrAfterCleanup": snapshot,
+                "lateDisplayFd": {"stderr": snapshot, "bytesHex": "ff" * 16, "status": "deadline"}}, "stderrReaderClosed": False}
         raw = bounded_observer_receipt(result)
         self.assertLessEqual(len(raw.encode()), 16384)
         receipt = json.loads(raw)
         self.assertEqual(receipt["refusal"], result["refusal"])
         self.assertEqual(receipt["cleanupRefusal"], result["cleanupRefusal"])
         self.assertTrue(receipt["startupDiagnosticTruncated"])
+        self.assertEqual(receipt["lateDisplayFdSummary"]["status"], "deadline")
 
     def test_drains_more_than_pipe_capacity_but_keeps_only_bounded_prefix(self):
         child = subprocess.Popen([sys.executable, "-c", "import sys; sys.stderr.write('x' * 200000)"],
@@ -1639,10 +1641,70 @@ class BoundedStderrTests(unittest.TestCase):
             child.stderr.close()
 
 
+def observe_late_xvfb_acknowledgement(read_fd, child, capture):
+    """Evidence after timeout only; never returns an acknowledgement for use."""
+    import select
+    diagnostic = {"diagnosticOnly": True, "timeoutLatched": True, "authorityGranted": False,
+        "inputPermitted": False, "readinessAccepted": False, "deadlineSeconds": 5,
+        "byteLimit": 16, "pid": child.pid, "status": "unavailable", "acknowledgementPrefixValid": False}
+    raw, blocking, began = bytearray(), None, time.monotonic()
+    deadline = began + 5
+    try:
+        blocking = os.get_blocking(read_fd)
+        os.set_blocking(read_fd, False)
+        # A finite iteration cap also bounds interrupted/spurious readiness events.
+        for _ in range(128):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                diagnostic["status"] = "deadline"
+                break
+            ready = select.select([read_fd], [], [], min(0.05, remaining))[0]
+            if time.monotonic() >= deadline:
+                diagnostic["status"] = "deadline"
+                break
+            if read_fd in ready:
+                try:
+                    chunk = os.read(read_fd, 16 - len(raw))
+                except BlockingIOError:
+                    chunk = None
+                if chunk == b"":
+                    diagnostic["status"] = "eof"
+                    break
+                if chunk:
+                    raw.extend(chunk)
+                    if re.fullmatch(rb"[0-9]{1,5}\n", raw):
+                        diagnostic.update(status="late-acknowledgement-prefix", acknowledgementPrefixValid=True)
+                        break
+                    if not re.fullmatch(rb"[0-9]{1,5}", raw):
+                        diagnostic["status"] = "malformed-or-oversized"
+                        break
+            if child.poll() is not None:
+                diagnostic["status"] = "child-exited"
+                break
+        else:
+            diagnostic["status"] = "iteration-limit"
+    except Exception as error:
+        diagnostic.update(status="observation-error", errorType=type(error).__name__[:80])
+    finally:
+        if blocking is not None:
+            try: os.set_blocking(read_fd, blocking)
+            except Exception: diagnostic["descriptorRestoreUnavailable"] = True
+        diagnostic["bytesHex"] = bytes(raw[:16]).hex()
+        try: diagnostic["elapsedSeconds"] = round(max(0, time.monotonic() - began), 3)
+        except Exception: diagnostic["timingUnavailable"] = True
+        try: diagnostic["returnCode"] = child.poll()
+        except Exception: diagnostic["processStatusUnavailable"] = True
+        try: diagnostic["stderr"] = capture.snapshot()
+        except Exception: diagnostic["stderrUnavailable"] = True
+    return diagnostic
+
+
 def owned_xvfb_acknowledgement(read_fd, child, capture, result, started):
     import select
+    timed_out = False
     try:
-        p.require(select.select([read_fd], [], [], 5)[0] == [read_fd], "Owned Xvfb readiness deadline")
+        timed_out = select.select([read_fd], [], [], 5)[0] != [read_fd]
+        p.require(not timed_out, "Owned Xvfb readiness deadline")
         acknowledgement = os.read(read_fd, 16)
         p.require(re.fullmatch(rb"[0-9]{1,5}\n", acknowledgement), "Exact Xvfb display-fd acknowledgement required")
         return acknowledgement
@@ -1652,6 +1714,12 @@ def owned_xvfb_acknowledgement(read_fd, child, capture, result, started):
                 "elapsedSeconds": round(time.monotonic() - started, 3), "stderr": capture.snapshot()}
         except Exception:
             result["startupDiagnosticUnavailable"] = True
+        if timed_out:
+            try:
+                result.setdefault("startupDiagnostic", {})["lateDisplayFd"] = observe_late_xvfb_acknowledgement(
+                    read_fd, child, capture)
+            except Exception:
+                result["lateDisplayFdUnavailable"] = True
         raise
 
 
@@ -1678,11 +1746,95 @@ def bounded_observer_receipt(receipt):
     raw = json.dumps(receipt)
     if len(raw.encode()) > 16384 and "startupDiagnostic" in receipt:
         receipt = copy.deepcopy(receipt)
+        late = receipt["startupDiagnostic"].get("lateDisplayFd", {})
+        if type(late) is dict:
+            status, data = late.get("status"), late.get("bytesHex")
+            if type(status) is str and len(status) <= 40 and type(data) is str and re.fullmatch(r"[a-f0-9]{0,32}", data):
+                receipt["lateDisplayFdSummary"] = {"status": status, "bytesHex": data}
         receipt.pop("startupDiagnostic")
         receipt["startupDiagnosticTruncated"] = True
         raw = json.dumps(receipt)
     p.require(len(raw.encode()) <= 16384, "Native observer receipt exceeds bound")
     return raw
+
+
+@unittest.skipUnless(sys.platform.startswith("linux"), "Linux pipe readiness only")
+class LateXvfbObservationTests(unittest.TestCase):
+    def test_partial_late_acknowledgement_is_evidence_only(self):
+        read_fd, write_fd = os.pipe()
+        child = mock.Mock(pid=42); child.poll.return_value = None
+        capture = mock.Mock(); capture.snapshot.return_value = {"complete": False}
+        def writer():
+            os.write(write_fd, b"12")
+            threading.Event().wait(0.02)
+            os.write(write_fd, b"3\n")
+        thread = threading.Thread(target=writer); thread.start()
+        try:
+            result = observe_late_xvfb_acknowledgement(read_fd, child, capture)
+            self.assertEqual(result["status"], "late-acknowledgement-prefix")
+            self.assertEqual(result["bytesHex"], b"123\n".hex())
+            self.assertTrue(result["acknowledgementPrefixValid"])
+            self.assertFalse(result["readinessAccepted"]); self.assertFalse(result["authorityGranted"])
+            self.assertTrue(os.get_blocking(read_fd))
+        finally:
+            thread.join(timeout=2); os.close(read_fd); os.close(write_fd)
+
+    def test_eof_and_malformed_data_never_grant_authority(self):
+        for value, expected in ((b"", "eof"), (b"bad\n", "malformed-or-oversized"),
+                                (b"12345678901234567", "malformed-or-oversized")):
+            with self.subTest(expected=expected):
+                read_fd, write_fd = os.pipe()
+                child = mock.Mock(pid=42); child.poll.return_value = None
+                try:
+                    if value: os.write(write_fd, value)
+                    os.close(write_fd); write_fd = None
+                    result = observe_late_xvfb_acknowledgement(read_fd, child, mock.Mock())
+                    self.assertEqual(result["status"], expected)
+                    self.assertLessEqual(len(bytes.fromhex(result["bytesHex"])), 16)
+                    self.assertFalse(result["readinessAccepted"])
+                finally:
+                    os.close(read_fd)
+                    if write_fd is not None: os.close(write_fd)
+
+    def test_child_exit_and_observation_failure_are_bounded(self):
+        read_fd, write_fd = os.pipe()
+        child = mock.Mock(pid=42); child.poll.return_value = 1
+        try:
+            result = observe_late_xvfb_acknowledgement(read_fd, child, mock.Mock())
+            self.assertEqual(result["status"], "child-exited")
+            self.assertFalse(result["authorityGranted"])
+            with mock.patch("select.select", side_effect=OSError("synthetic")):
+                failed = observe_late_xvfb_acknowledgement(read_fd, child, mock.Mock())
+            self.assertEqual(failed["status"], "observation-error")
+            self.assertTrue(os.get_blocking(read_fd))
+        finally:
+            os.close(read_fd); os.close(write_fd)
+
+    def test_deadline_does_not_reset_after_partial_data(self):
+        read_fd, write_fd = os.pipe()
+        child = mock.Mock(pid=42); child.poll.return_value = None
+        try:
+            os.write(write_fd, b"1")
+            with mock.patch.object(time, "monotonic", side_effect=[0, 1, 1, 6, 6]), \
+                    mock.patch("select.select", return_value=([read_fd], [], [])):
+                result = observe_late_xvfb_acknowledgement(read_fd, child, mock.Mock())
+            self.assertEqual(result["status"], "deadline")
+            self.assertEqual(result["bytesHex"], b"1".hex())
+            self.assertFalse(result["readinessAccepted"])
+        finally:
+            os.close(read_fd); os.close(write_fd)
+
+    def test_simultaneous_exit_and_ack_is_diagnostic_only(self):
+        read_fd, write_fd = os.pipe()
+        child = mock.Mock(pid=42); child.poll.return_value = 1
+        try:
+            os.write(write_fd, b"9\n")
+            result = observe_late_xvfb_acknowledgement(read_fd, child, mock.Mock())
+            self.assertEqual(result["status"], "late-acknowledgement-prefix")
+            self.assertEqual(result["returnCode"], 1)
+            self.assertFalse(result["readinessAccepted"])
+        finally:
+            os.close(read_fd); os.close(write_fd)
 
 
 class XvfbAcknowledgementTests(unittest.TestCase):
@@ -1691,12 +1843,14 @@ class XvfbAcknowledgementTests(unittest.TestCase):
         capture = mock.Mock(); capture.snapshot.return_value = {"prefix": "not ready", "complete": False,
             "readerError": False, "truncated": False}
         result = {}
-        with mock.patch("select.select", return_value=([], [], [])), mock.patch.object(time, "monotonic", return_value=15):
+        late = {"diagnosticOnly": True, "authorityGranted": False}
+        with mock.patch("select.select", return_value=([], [], [])), mock.patch.object(time, "monotonic", return_value=15), \
+                mock.patch.object(sys.modules[__name__], "observe_late_xvfb_acknowledgement", return_value=late):
             with self.assertRaisesRegex(RuntimeError, "Owned Xvfb readiness deadline"):
                 owned_xvfb_acknowledgement(7, child, capture, result, 10)
         self.assertEqual(result["startupDiagnostic"], {"pid": 42, "returnCodeBeforeCleanup": None,
             "elapsedSeconds": 5, "stderr": {"prefix": "not ready", "complete": False,
-                "readerError": False, "truncated": False}})
+                "readerError": False, "truncated": False}, "lateDisplayFd": late})
 
     def test_early_exit_malformed_ack_and_diagnostic_failure_preserve_refusal(self):
         child = mock.Mock(pid=42); child.poll.return_value = 1
