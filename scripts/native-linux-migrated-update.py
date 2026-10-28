@@ -2398,7 +2398,9 @@ def changed_broker(env):
     relock, failure = False, None
     try:
         sealed = changed_adopt(env, original)
-        require(M.native_process_inventory(native, helper) == {"processes": [], "terminalProcesses": []}, "Original fixture processes remain; never adopt or signal")
+        initial_uid_inventory = M.native_process_inventory(native, helper)
+        record["initialUidInventory"] = initial_uid_inventory
+        require(initial_uid_inventory == {"processes": [], "terminalProcesses": []}, "Original fixture processes remain; never adopt or signal")
         scripts = CONTROL / "scripts"; scripts.mkdir(mode=0o755)
         for name, expected in original["sources"].items(): U.write(scripts / name, U.bound(HERE / name, expected, 2 * 1024**2), 0o444)
         verifier_file, qualification = U.offline_verifier(env)

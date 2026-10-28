@@ -2810,5 +2810,60 @@ class ChangedWindowManagerCacheTests(unittest.TestCase):
         with self.assertRaises(AssertionError):check(changed)
 
 
+class CachedInitialInventoryTests(unittest.TestCase):
+    def statements(self):
+        tree = ast.parse(Path(C.__file__).read_bytes())
+        broker = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "changed_broker")
+        body = next(node for node in broker.body if isinstance(node, ast.Try)).body
+        index = next(i for i, node in enumerate(body) if isinstance(node, ast.Assign)
+                     and any(isinstance(target, ast.Name) and target.id == "initial_uid_inventory" for target in node.targets))
+        statements = copy.deepcopy(body[index:index + 3])
+        expected = ast.parse('require(initial_uid_inventory == {"processes": [], "terminalProcesses": []}, '
+                             '"Original fixture processes remain; never adopt or signal")').body[0]
+        self.assertEqual(ast.dump(statements[2]), ast.dump(expected))
+        return compile(ast.fix_missing_locations(ast.Module(body=statements, type_ignores=[])), "actual-cached-inventory-guard", "exec")
+
+    def namespace(self, inventory):
+        capture = Mock(return_value=inventory)
+        return {"M": SimpleNamespace(native_process_inventory=capture), "native": object(), "helper": object(),
+                "record": {}, "require": C.require}, capture
+
+    def test_empty_inventory_is_captured_once_and_passes_original_guard(self):
+        value = {"processes": [], "terminalProcesses": []}
+        namespace, capture = self.namespace(value)
+        exec(self.statements(), namespace)
+        capture.assert_called_once_with(namespace["native"], namespace["helper"])
+        self.assertIs(namespace["record"]["initialUidInventory"], value)
+        self.assertEqual(set(namespace["record"]), {"initialUidInventory"})
+
+    def test_live_inventory_is_retained_unfiltered_and_original_refusal_is_kept(self):
+        value = {"processes": [{"pid": 42, "startTime": "123", "executable": "/usr/lib/systemd/systemd",
+                               "argvSha256": "a" * 64, "legacyBackend": False}], "terminalProcesses": []}
+        namespace, capture = self.namespace(value)
+        with self.assertRaisesRegex(RuntimeError, "^Original fixture processes remain; never adopt or signal$"):
+            exec(self.statements(), namespace)
+        capture.assert_called_once()
+        self.assertIs(namespace["record"]["initialUidInventory"], value)
+        self.assertEqual(set(namespace["record"]), {"initialUidInventory"})
+
+    def test_terminal_inventory_is_retained_and_not_ignored(self):
+        value = {"processes": [], "terminalProcesses": [{"pid": 42, "state": "Z", "startTime": "123"}]}
+        namespace, capture = self.namespace(value)
+        with self.assertRaisesRegex(RuntimeError, "^Original fixture processes remain; never adopt or signal$"):
+            exec(self.statements(), namespace)
+        capture.assert_called_once()
+        self.assertIs(namespace["record"]["initialUidInventory"], value)
+
+    def test_inventory_failure_remains_the_same_first_exception_without_extra_queries(self):
+        namespace, capture = self.namespace(None)
+        original = RuntimeError("original inventory failure")
+        capture.side_effect = original
+        with self.assertRaises(RuntimeError) as caught:
+            exec(self.statements(), namespace)
+        self.assertIs(caught.exception, original)
+        capture.assert_called_once()
+        self.assertEqual(namespace["record"], {})
+
+
 if __name__ == "__main__":
     unittest.main()
