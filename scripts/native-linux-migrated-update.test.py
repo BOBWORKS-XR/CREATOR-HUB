@@ -594,7 +594,7 @@ class TransitionCompositionTests(unittest.TestCase):
             "broker": "254824158ff3b04595c879e1a89600795a5e647f073daeb410fd0015868751b0",
             "main": "14e5672d720e9629731549ced856680b7724a70d3c827e8554829dff871645a9",
             "admission": "d66104f08132ae0df06d1b49a0c1e239961f42fad2acfee66a0febc5c171b107"}.items():
-            self.assertEqual(digest([functions[name]]), expected, name)
+            self.assertEqual(digest([historical_wm_inverse(functions[name]) if name == "native_session" else functions[name]]), expected, name)
 
 
 class SuccessorStateTests(unittest.TestCase):
@@ -2744,6 +2744,70 @@ class HomeDirectoryDiagnosticTests(unittest.TestCase):
             self.assertEqual(len(retained),1);self.assertEqual(retained[0]["source"],str(file))
             self.assertEqual((folder/retained[0]["member"]).read_bytes(),raw)
             self.assertLessEqual(len(raw),8192)
+
+
+def historical_wm_inverse(value):
+    value=copy.deepcopy(value)
+    assert isinstance(value,ast.FunctionDef) and value.name=="native_session"
+    assignments=[n for n in ast.walk(value)if isinstance(n,ast.Assign)and any(isinstance(t,ast.Name)and t.id=="wm_env"for t in n.targets)]
+    assert len(assignments)==1
+    assert ast.unparse(assignments[0].value)=="M.window_manager_environment(dict(os.environ), 'migrated')"
+    calls=[n for n in ast.walk(value)if isinstance(n,ast.Call)and n.args and isinstance(n.args[0],ast.List)and n.args[0].elts and isinstance(n.args[0].elts[0],ast.Constant)and n.args[0].elts[0].value=="/usr/bin/openbox"]
+    assert len(calls)==2 and assignments[0].lineno+1==min(n.lineno for n in calls)
+    removed=0
+    for node in ast.walk(value):
+        for key in("body","orelse","finalbody"):
+            block=getattr(node,key,None)
+            if type(block)is list and assignments[0]in block:block.remove(assignments[0]);removed+=1
+    assert removed==1
+    for call in calls:
+        env=[k for k in call.keywords if k.arg=="env"]
+        assert len(env)==1 and ast.unparse(env[0].value)=="wm_env"
+        call.keywords.remove(env[0])
+    return value
+
+
+class ChangedWindowManagerCacheTests(unittest.TestCase):
+    def test_both_c_cases_actual_wm_start_exit_use_same_fixed_helper_env(self):
+        functions={n.name:n for n in ast.parse(Path(C.__file__).read_bytes()).body if isinstance(n,ast.FunctionDef)}
+        for function,role in(("native_session","migrated"),("changed_session","changed-mcp")):
+            with self.subTest(function=function):self.check_actual_wm(functions[function],role)
+
+    def check_actual_wm(self,run,role):
+        assignment=next(n for n in ast.walk(run)if isinstance(n,ast.Assign)and any(isinstance(t,ast.Name)and t.id=="wm_env"for t in n.targets))
+        spawn=next(n for n in ast.walk(run)if isinstance(n,ast.Assign)and any(isinstance(t,ast.Name)and t.id=="wm"for t in n.targets))
+        stop=next(n for n in ast.walk(run)if isinstance(n,ast.Expr)and isinstance(n.value,ast.Call)and ast.unparse(n.value.func)=="subprocess.run"and n.value.args and ast.literal_eval(n.value.args[0])==["/usr/bin/openbox","--exit"])
+        with tempfile.TemporaryDirectory()as folder:
+            base=Path(folder).resolve();(base/"result/migrated-update/tmp").mkdir(parents=True,mode=0o700);(base/"result/home").mkdir(mode=0o700)
+            env={"HOME":str(base/"result/home"),"XDG_CACHE_HOME":str(base/"result/home/cache"),"TMPDIR":str(base/"result/migrated-update/tmp"),"DISPLAY":":99"}
+            namespace=dict(vars(C))
+            with patch.object(C.M,"BASE",base),patch.dict(os.environ,env,clear=True),patch.object(C.subprocess,"Popen")as popen,patch.object(C.subprocess,"run")as exit:
+                exec(compile(ast.fix_missing_locations(ast.Module(body=copy.deepcopy([assignment,spawn,stop]),type_ignores=[])),"actual-changed-wm-statements","exec"),namespace)
+                self.assertEqual(popen.call_args.kwargs["env"],namespace["wm_env"])
+                self.assertEqual(exit.call_args.kwargs["env"],namespace["wm_env"])
+                self.assertEqual(namespace["wm_env"]["XDG_CACHE_HOME"],str(base/"result/migrated-update/tmp"/("openbox-"+role+"-cache")))
+                self.assertEqual(os.environ["XDG_CACHE_HOME"],env["XDG_CACHE_HOME"])
+
+    def test_every_openbox_invocation_in_m_and_c_has_fixed_private_environment(self):
+        for file,expected in((Path(C.__file__),4),(Path(C.M.__file__),2)):
+            calls=[n for n in ast.walk(ast.parse(file.read_bytes()))if isinstance(n,ast.Call)and n.args and isinstance(n.args[0],ast.List)
+                and n.args[0].elts and isinstance(n.args[0].elts[0],ast.Constant)and n.args[0].elts[0].value=="/usr/bin/openbox"]
+            self.assertEqual(len(calls),expected)
+            for call in calls:self.assertIn(("env","wm_env"),[(k.arg,ast.unparse(k.value))for k in call.keywords])
+
+    def test_historical_wm_only_inverse_retains_old_exact_hash_and_refuses_other_edits(self):
+        native=next(n for n in ast.parse(Path(C.__file__).read_bytes()).body if isinstance(n,ast.FunctionDef)and n.name=="native_session")
+        def check(value):
+            value=historical_wm_inverse(value)
+            digest=hashlib.sha256(ast.dump(ast.Module(body=[value],type_ignores=[]),include_attributes=False).encode()).hexdigest()
+            self.assertEqual(digest,"668324417896fae68b96cb399e2b8a44f6038bbf13a3958702f9b61b17a428b7")
+        check(native)
+        wrong=copy.deepcopy(native)
+        assignment=next(n for n in ast.walk(wrong)if isinstance(n,ast.Assign)and any(isinstance(t,ast.Name)and t.id=="wm_env"for t in n.targets))
+        assignment.value.args[-1]=ast.Constant(value="migration")
+        with self.assertRaises(AssertionError):check(wrong)
+        changed=copy.deepcopy(native);changed.body.append(ast.Pass())
+        with self.assertRaises(AssertionError):check(changed)
 
 
 if __name__ == "__main__":

@@ -4351,5 +4351,136 @@ class FixtureDirectoryModeTests(unittest.TestCase):
         self.assertIn("fixture_parent(home, Path(name).parent)",fixture)
 
 
+class WindowManagerCacheTests(unittest.TestCase):
+    @contextmanager
+    def fixture(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base=Path(temporary).resolve();result=base/"result";result.mkdir(mode=0o700)
+            (result/"tmp").mkdir(mode=0o700);(result/"home").mkdir(mode=0o700)
+            (result/"migrated-update").mkdir(mode=0o700);(result/"migrated-update/tmp").mkdir(mode=0o700)
+            environment={"HOME":str(result/"home"),"XDG_CACHE_HOME":str(result/"home/cache"),"TMPDIR":str(result/"tmp"),"DISPLAY":":99","KEEP":"original"}
+            with patch.object(M,"BASE",base):yield base,environment
+
+    def test_exact_private_wm_only_environment_preserves_app_ai_and_global_environment(self):
+        with self.fixture() as(base,env):
+            original=dict(env);global_before=dict(os.environ)
+            wm=M.window_manager_environment(env,"migration")
+            self.assertEqual(wm,{**original,"XDG_CACHE_HOME":str(base/"result/tmp/openbox-migration-cache")})
+            self.assertEqual(env,original);self.assertEqual(dict(os.environ),global_before)
+            self.assertTrue(Path(wm["XDG_CACHE_HOME"]).is_dir())
+            self.assertFalse(Path(wm["XDG_CACHE_HOME"]).is_relative_to(base/"result/home"))
+            self.assertFalse((base/"result/home/cache").exists())
+            for role in ("migrated","changed-mcp"):
+                changed_env={**env,"TMPDIR":str(base/"result/migrated-update/tmp")}
+                changed=M.window_manager_environment(changed_env,role)
+                self.assertEqual(changed["XDG_CACHE_HOME"],str(base/"result/migrated-update/tmp"/("openbox-"+role+"-cache")))
+
+    @unittest.skipUnless(os.name=="posix","Actual private support cache mode requires Linux")
+    def test_real_linux_cache_created_private_before_any_support_process(self):
+        with self.fixture()as(base,env):
+            for role in("migration","migrated","changed-mcp"):
+                original=dict(env)
+                if role!="migration":original["TMPDIR"]=str(base/"result/migrated-update/tmp")
+                with patch.object(M.subprocess,"Popen",side_effect=AssertionError("No process needed")),patch.object(M.os,"chmod",side_effect=AssertionError("No repair")):
+                    value=M.window_manager_environment(original,role)
+                cache=Path(value["XDG_CACHE_HOME"]);info=cache.lstat()
+                self.assertEqual(stat.S_IMODE(info.st_mode),0o700)
+                self.assertEqual((info.st_uid,info.st_gid),(os.geteuid(),os.getegid()))
+                self.assertEqual(cache.parent,Path(original["TMPDIR"]))
+                self.assertFalse(cache.is_relative_to(base/"result/home"))
+                self.assertEqual({k:v for k,v in value.items()if k!="XDG_CACHE_HOME"},{k:v for k,v in original.items()if k!="XDG_CACHE_HOME"})
+
+    def test_private_cache_is_exclusive_no_adoption_or_permission_repair(self):
+        with self.fixture() as(base,env):
+            cache=base/"result/tmp/openbox-migration-cache";cache.mkdir(mode=0o700)
+            info=cache.lstat()
+            with patch.object(M.os,"chmod",side_effect=AssertionError("No repair")),self.assertRaises(RuntimeError):
+                M.window_manager_environment(env,"migration")
+            after=cache.lstat();self.assertEqual((info.st_dev,info.st_ino,info.st_mode),(after.st_dev,after.st_ino,after.st_mode))
+
+    def test_wrong_role_home_or_tmp_cannot_redirect_support_cache(self):
+        for key,value in (("role","arbitrary"),("HOME","/outside"),("TMPDIR","/outside"),("XDG_CACHE_HOME","/outside")):
+            with self.subTest(key=key),self.fixture() as(base,env):
+                role="migration"
+                if key=="role":role=value
+                else:env[key]=value
+                with self.assertRaises(RuntimeError):M.window_manager_environment(env,role)
+                self.assertFalse((base/"result/tmp/openbox-migration-cache").exists())
+
+    def test_actual_m_wm_start_and_exit_receive_same_private_env_only(self):
+        tree=ast.parse(Path(M.__file__).read_bytes());run=next(n for n in tree.body if isinstance(n,ast.FunctionDef)and n.name=="run_session")
+        assignment=next(n for n in run.body if isinstance(n,ast.Assign)and any(isinstance(t,ast.Name)and t.id=="wm_env"for t in n.targets))
+        spawn=next(n for n in run.body if isinstance(n,ast.Assign)and any(isinstance(t,ast.Name)and t.id=="wm"for t in n.targets))
+        stop=next(n for n in ast.walk(run)if isinstance(n,ast.Expr)and isinstance(n.value,ast.Call)and ast.unparse(n.value.func)=="subprocess.run"and n.value.args and ast.literal_eval(n.value.args[0])==["/usr/bin/openbox","--exit"])
+        namespace=dict(vars(M))
+        with self.fixture()as(base,env),patch.dict(os.environ,env,clear=True),patch.object(M.subprocess,"Popen")as popen,patch.object(M.subprocess,"run")as exit:
+            exec(compile(ast.fix_missing_locations(ast.Module(body=[copy.deepcopy(assignment),copy.deepcopy(spawn),copy.deepcopy(stop)],type_ignores=[])),"actual-m-wm-statements","exec"),namespace)
+            self.assertEqual(popen.call_args.args[0],["/usr/bin/openbox","--sm-disable"])
+            self.assertEqual(exit.call_args.args[0],["/usr/bin/openbox","--exit"])
+            self.assertEqual(popen.call_args.kwargs["env"],namespace["wm_env"])
+            self.assertEqual(exit.call_args.kwargs["env"],namespace["wm_env"])
+            self.assertEqual(namespace["wm_env"]["XDG_CACHE_HOME"],str(base/"result/tmp/openbox-migration-cache"))
+            self.assertEqual(os.environ["XDG_CACHE_HOME"],env["XDG_CACHE_HOME"])
+
+
+class WindowManagerExclusiveLeafTests(unittest.TestCase):
+    fixture = WindowManagerCacheTests.fixture
+
+    def assert_racing_leaf_refused(self, mode):
+        source = Path(M.__file__)
+        for role, file, function in (
+            ("migration", source, "run_session"),
+            ("migrated", source.with_name("native-linux-migrated-update.py"), "native_session"),
+            ("changed-mcp", source.with_name("native-linux-migrated-update.py"), "changed_session"),
+        ):
+            with self.subTest(role=role, mode=oct(mode)), self.fixture() as (base, environment):
+                if role != "migration":
+                    environment["TMPDIR"] = str(base / "result/migrated-update/tmp")
+                cache = Path(environment["TMPDIR"]) / ("openbox-" + role + "-cache")
+                original_lexists = os.path.lexists
+                captured = []
+
+                def create_after_absence_probe(path):
+                    absent = not original_lexists(path)
+                    if Path(path) == cache and absent:
+                        previous_umask = os.umask(0)
+                        try:
+                            cache.mkdir(mode=mode)
+                        finally:
+                            os.umask(previous_umask)
+                        (cache / "sentinel").write_bytes(b"same-uid racing leaf; do not adopt or repair")
+                        captured.append(cache.lstat())
+                    return not absent
+
+                tree = ast.parse(file.read_bytes())
+                run = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == function)
+                statements = [next(node for node in ast.walk(run) if isinstance(node, ast.Assign)
+                                   and any(isinstance(target, ast.Name) and target.id == name for target in node.targets))
+                              for name in ("wm_env", "wm")]
+                namespace = {**vars(M), "M": M}
+                with patch.dict(os.environ, environment, clear=True), \
+                        patch.object(M.os.path, "lexists", side_effect=create_after_absence_probe), \
+                        patch.object(M.os, "chmod", side_effect=AssertionError("No permission repair")), \
+                        patch.object(M.subprocess, "Popen") as popen, self.assertRaises(FileExistsError):
+                    exec(compile(ast.fix_missing_locations(ast.Module(body=copy.deepcopy(statements), type_ignores=[])),
+                                 "actual-wm-fresh-leaf-statements", "exec"), namespace)
+                popen.assert_not_called()
+                self.assertEqual(len(captured), 1)
+                before, after = captured[0], cache.lstat()
+                self.assertEqual((before.st_dev, before.st_ino, before.st_uid, before.st_gid, before.st_mode),
+                                 (after.st_dev, after.st_ino, after.st_uid, after.st_gid, after.st_mode))
+                if os.name == "posix":
+                    self.assertEqual(stat.S_IMODE(after.st_mode), mode)
+                    self.assertEqual((after.st_uid, after.st_gid), (os.geteuid(), os.getegid()))
+                self.assertEqual(list(cache.iterdir()), [cache / "sentinel"])
+                self.assertEqual((cache / "sentinel").read_bytes(), b"same-uid racing leaf; do not adopt or repair")
+
+    def test_same_uid_0700_leaf_created_after_absence_probe_is_not_adopted(self):
+        self.assert_racing_leaf_refused(0o700)
+
+    def test_same_uid_0755_leaf_created_after_absence_probe_is_not_adopted(self):
+        self.assert_racing_leaf_refused(0o755)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

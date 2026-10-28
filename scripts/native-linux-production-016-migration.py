@@ -738,6 +738,27 @@ def fixture_parent(home, relative):
     return current
 
 
+def window_manager_environment(environment, role):
+    require(type(environment) is dict and type(role) is str and role in ("migration", "migrated", "changed-mcp"),
+            "One fixed support window-manager role required")
+    home = BASE / "result/home"
+    temporary = BASE / ("result/tmp" if role == "migration" else "result/migrated-update/tmp")
+    require(environment.get("HOME") == str(home) and environment.get("TMPDIR") == str(temporary)
+            and environment.get("XDG_CACHE_HOME") == str(home / "cache"), "Original app HOME/cache/tmp context required")
+    leaf = "openbox-" + role + "-cache"
+    cache = temporary / leaf
+    fixture_parent(temporary, Path())
+    require(not os.path.lexists(cache), "Fresh private support cache required; no adoption or repair")
+    cache.mkdir(mode=0o700)
+    info = cache.lstat()
+    require(stat.S_ISDIR(info.st_mode) and cache.resolve(strict=True) == cache,
+            "Nonlinked private support cache required")
+    if os.name != "nt":
+        require(info.st_uid == os.geteuid() and info.st_gid == os.getegid()
+                and stat.S_IMODE(info.st_mode) == 0o700, "Owned exact-0700 private support cache required")
+    return {**environment, "XDG_CACHE_HOME": str(cache)}
+
+
 def fixture(root):
     home = root / "home"
     for part in ("home", "home/config", "home/data", "home/cache", "runtime", "tmp"):
@@ -3272,7 +3293,8 @@ def run_session(env):
         return endpoint is not None
     pages.wait(agent_ready)
     require(polkit.session(system, agent.pid, GLib)["object"] == session_identity["object"], "Agent logind session differs")
-    wm = subprocess.Popen(["/usr/bin/openbox", "--sm-disable"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    wm_env = window_manager_environment(dict(os.environ), "migration")
+    wm = subprocess.Popen(["/usr/bin/openbox", "--sm-disable"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=wm_env)
     wm_identity = native.native_process(wm.pid, helper)
     display = helper.X11()
     def wm_ready():
@@ -3394,7 +3416,7 @@ def run_session(env):
         if report["scenarioPassed"]:
             polkit.own_agent(agent, agent_identity, parent, helper)
             agent.terminate(); agent.wait(timeout=10)
-            subprocess.run(["/usr/bin/openbox", "--exit"], stdin=subprocess.DEVNULL, check=True)
+            subprocess.run(["/usr/bin/openbox", "--exit"], stdin=subprocess.DEVNULL, check=True, env=wm_env)
             wm.wait(timeout=10)
 
 

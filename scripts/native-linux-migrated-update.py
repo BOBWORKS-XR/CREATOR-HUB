@@ -1012,7 +1012,8 @@ def native_session(env):
     failure = None
     try:
         x11 = helper.X11()
-        wm = subprocess.Popen(["/usr/bin/openbox", "--sm-disable"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        wm_env = M.window_manager_environment(dict(os.environ), "migrated")
+        wm = subprocess.Popen(["/usr/bin/openbox", "--sm-disable"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=wm_env)
         wm_identity = U.kernel_record(wm.pid, native, helper)
         U.wait(lambda: x11.property(x11.x.XDefaultRootWindow(x11.display), "_NET_SUPPORTING_WM_CHECK"))
         require(U.windows(x11) == [], "Private display is not empty")
@@ -1107,7 +1108,7 @@ def native_session(env):
         report.update(settingsPreserved=True, homePreserved=True, journalPrefixPreserved=True, migrationEvidencePreserved=True)
         polkit.own_agent(agent, agent_record, parent, helper)
         agent.terminate(); agent.wait(timeout=10)
-        subprocess.run(["/usr/bin/openbox", "--exit"], stdin=subprocess.DEVNULL, check=True)
+        subprocess.run(["/usr/bin/openbox", "--exit"], stdin=subprocess.DEVNULL, check=True, env=wm_env)
         wm.wait(timeout=10)
         report["scenarioPassed"] = continuation_outcome(report)
     except Exception as error:
@@ -2166,7 +2167,8 @@ def changed_session(env):
     failure = None
     try:
         x11 = helper.X11()
-        wm = subprocess.Popen(["/usr/bin/openbox", "--sm-disable"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        wm_env = M.window_manager_environment(dict(os.environ), "changed-mcp")
+        wm = subprocess.Popen(["/usr/bin/openbox", "--sm-disable"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=wm_env)
         wm_identity = U.kernel_record(wm.pid, native, helper)
         U.wait(lambda: x11.property(x11.x.XDefaultRootWindow(x11.display), "_NET_SUPPORTING_WM_CHECK"))
         require(U.windows(x11) == [], "Private display must be empty")
@@ -2312,7 +2314,7 @@ def changed_session(env):
         require(U.windows(x11) == [] and U.kernel_record(wm.pid, native, helper) == wm_identity, "Final visible process/WM identity differs")
         polkit.own_agent(agent, agent_record, parent, helper)
         agent.terminate(); agent.wait(timeout=10)
-        subprocess.run(["/usr/bin/openbox", "--exit"], stdin=subprocess.DEVNULL, check=True); wm.wait(timeout=10)
+        subprocess.run(["/usr/bin/openbox", "--exit"], stdin=subprocess.DEVNULL, check=True, env=wm_env); wm.wait(timeout=10)
         U.actual017_verify_installed(reviewed)
         report["scenarioPassed"] = changed_outcome(report, inventories, verifier, CHANGED_PROTECTED)
     except Exception as error:
