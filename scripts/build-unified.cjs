@@ -337,7 +337,9 @@ function linuxRootCacheTarget(root, output, signedUnixInput) {
           dev: info.dev, ino: info.ino, size: info.size,
           inodeNumbers: 'reported JavaScript numbers; not lossless kernel values',
         };
-        throw Error(`Linux Root cache contains a redirected, linked or nonregular entry. Preserve it and omit --linux-root-cache. ${JSON.stringify(details)}`);
+        const error = Error(`Linux Root cache contains a redirected, linked or nonregular entry. Preserve it and omit --linux-root-cache. ${JSON.stringify(details)}`);
+        if (info.isFile() && info.nlink > 1) error.code = 'ERR_LINUX_ROOT_CACHE_LINKED_FILE';
+        throw error;
       }
       if (info.isDirectory()) inspect(file);
     }
