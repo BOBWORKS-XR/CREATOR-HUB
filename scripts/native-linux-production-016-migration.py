@@ -1171,7 +1171,62 @@ class Session:
                 self._progress_blocked = True
 
     def retain_failure(self, error):
+        first = "firstFailure" not in self.evidence
         self.evidence.setdefault("firstFailure", {"type": type(error).__name__[:100], "message": str(error)[:1000]})
+        if first:
+            try:
+                origin = getattr(getattr(self, "helper", None), "_VISIBILITY_DIAGNOSTIC_ORIGIN", None)
+                raw = getattr(error, "window_visibility_refusal", None)
+                if (origin is not None and getattr(error, "_visibility_diagnostic_origin", None) is origin
+                        and type(error) is RuntimeError and str(error) == "Owned X window is not a managed visible window"
+                        and type(raw) is dict and set(raw) == {"window", "map_state", "override_redirect", "class"}
+                        and type(raw["window"]) is int and 0 <= raw["window"] < 2**32
+                        and all(type(raw[key]) is int and -(2**31) <= raw[key] < 2**31
+                                for key in ("map_state", "override_redirect", "class"))
+                        and not (raw["map_state"] == 2 and not raw["override_redirect"])):
+                    # Cached exception/bindings only: no X/process observation, recovery or input authority.
+                    value = {"schemaVersion": 1, "scope": "cached-native-window-visibility-refusal", "diagnosticOnly": True,
+                        "readOnly": True, "cachedBindingsOnly": True, "authorityGranted": False, "inputPermitted": False,
+                        "releaseReady": False, "ownershipVerifiedAtFailure": False, "attributes": dict(raw)}
+                    xid = lambda item: type(item) is int and 0 < item < 2**32
+                    pid = lambda item: type(item) is int and 1 < item <= 2147483647
+                    main = getattr(self, "window", None)
+                    if xid(main): value["cachedMainWindow"] = main
+                    root = getattr(self, "owned", None)
+                    if type(root) is dict and pid(root.get("pid")): value["cachedRootPid"] = root["pid"]
+                    dialogs = getattr(self, "dialogs", None)
+                    if type(dialogs) is set and len(dialogs) <= 4 and all(type(row) is tuple and len(row) == 2
+                            and pid(row[0]) and type(row[1]) is str and row[1] in ("Move to Hub", CONNECTION_REVIEW_TITLE, "Authenticate") for row in dialogs):
+                        value["cachedDialogOwners"] = [{"pid": owner, "title": title} for owner, title in sorted(dialogs)]
+                    review = self.evidence.get("connectionReview", {})
+                    dismissal = review.get("nativeDismissal", {}) if type(review) is dict else {}
+                    if type(dismissal) is dict and xid(dismissal.get("target")): value["cachedReviewDialog"] = dismissal["target"]
+                    progress = self.evidence.get("progress", {})
+                    if type(progress) is dict and progress.get("boundary") in self.PROGRESS_BOUNDARIES:
+                        value["cachedBoundary"] = progress["boundary"]
+                    request = getattr(getattr(self, "d", None), "last_request", None)
+                    if (type(request) is dict and set(request) == {"method", "route", "phase"}
+                            and request["method"] in ("GET", "POST", "DELETE") and type(request["route"]) is str
+                            and len(request["route"]) <= 512 and re.fullmatch(r"/[A-Za-z0-9_./-]+", request["route"])
+                            and ".." not in request["route"]
+                            and request["phase"] in ("entered", "before-guard", "http", "after-guard", "returned")):
+                        value["cachedLastRequest"] = dict(request)
+                    fixed = {str(HERE / name): name for name in (Path(__file__).name, "native-unix-window.py",
+                        "native-linux-polkit-probe.py", "native-linux-integrated-pages.py", "native-linux-root-probe.py")}
+                    frames, current = [], error.__traceback__
+                    for _ in range(64):
+                        if current is None: break
+                        code = current.tb_frame.f_code
+                        if (code.co_filename in fixed and re.fullmatch(r"[A-Za-z0-9_.<>]{1,128}", code.co_name)
+                                and type(current.tb_lineno) is int and 0 < current.tb_lineno <= 2147483647):
+                            frames.append({"source": fixed[code.co_filename], "function": code.co_name, "line": current.tb_lineno})
+                        current = current.tb_next
+                    value["trace"], value["traceTruncated"] = frames[-16:], current is not None or len(frames) > 16
+                    encoded = json.dumps(value, allow_nan=False)
+                    require(len(encoded.encode()) <= 8192, "Cached visibility diagnostic exceeds bound")
+                    self.evidence.setdefault("windowVisibilityRefusal", json.loads(encoded))
+            except Exception:
+                self.evidence.setdefault("windowVisibilityDiagnosticUnavailable", True)
         self.checkpoint()
 
     def observe_request(self, request):

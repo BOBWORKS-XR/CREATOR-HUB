@@ -4106,5 +4106,166 @@ class CombinedInventoryContract(unittest.TestCase):
             if name != 'update': self.assertNotIn('portable-flatpak-approve', values)
 
 
+class CachedVisibilityFailureTests(unittest.TestCase):
+    @contextmanager
+    def fixture(self):
+        with SessionProgressTests().fixture() as (session, file):
+            helper = M.load("native-unix-window")
+            session.helper = helper
+            session.window, session.owned = 40, {"pid": 321}
+            session.dialogs = {(999, "Authenticate")}
+            session.evidence["connectionReview"] = {"nativeDismissal": {"target": 456, "absent": True}}
+            session.checkpoint("startup-ready", guard=("window", "entered"))
+            session.d.last_request = {"method":"GET", "route":"/session/owned/element/node/text", "phase":"before-guard"}
+            forbidden = Mock(side_effect=AssertionError("Diagnostic must not query X/process state"))
+            session.process_guard = forbidden
+            session.x11 = SimpleNamespace(inspect=forbidden, property=forbidden, error_diagnostic=forbidden, sync=forbidden)
+            session.native = SimpleNamespace(native_process=forbidden, client_ids=forbidden)
+            yield SimpleNamespace(session=session, file=file, helper=helper, forbidden=forbidden)
+            forbidden.assert_not_called()
+
+    def native_error(self, f, *, window=789, map_state=0, override=0, kind=1):
+        x = object.__new__(f.helper.X11); x.display = 1; queries = []
+        def attrs(display, target, pointer):
+            queries.append(target)
+            value = f.helper.C.cast(pointer, f.helper.C.POINTER(f.helper.WindowAttributes)).contents
+            value.map_state, value.override_redirect, value.class_ = map_state, override, kind
+            return 1
+        x.x = SimpleNamespace(XGetWindowAttributes=attrs); x.sync = lambda: None
+        x.res = SimpleNamespace(XResQueryClientIds=f.forbidden); x.property = f.forbidden
+        try: x.inspect(window)
+        except RuntimeError as error:
+            self.assertEqual(queries, [window]); return error
+        self.fail("Actual helper visibility refusal required")
+
+    def retained(self, f):
+        return json.loads(f.file.read_bytes())
+
+    def test_same_native_exception_preserved_with_authenticated_cached_tuple_and_ids(self):
+        with self.fixture() as f:
+            original = self.native_error(f)
+            request = Mock(side_effect=original)
+            with self.assertRaises(RuntimeError) as raised:
+                f.session.observe_request(request)("GET", "/status")
+            self.assertIs(raised.exception, original); request.assert_called_once()
+            report = self.retained(f)
+            self.assertEqual(report["firstFailure"], {"type":"RuntimeError", "message":str(original)})
+            value = report["windowVisibilityRefusal"]
+            self.assertEqual(value["attributes"], {"window":789,"map_state":0,"override_redirect":0,"class":1})
+            self.assertEqual(value["cachedMainWindow"], 40); self.assertEqual(value["cachedRootPid"], 321)
+            self.assertEqual(value["cachedReviewDialog"], 456)
+            self.assertEqual(value["cachedDialogOwners"], [{"pid":999,"title":"Authenticate"}])
+            self.assertTrue(value["cachedBindingsOnly"]); self.assertTrue(value["diagnosticOnly"])
+            for key in ("authorityGranted","inputPermitted","releaseReady","ownershipVerifiedAtFailure"):
+                self.assertIs(value[key], False)
+            self.assertEqual(value["cachedBoundary"], "startup-ready")
+            self.assertEqual(value["cachedLastRequest"]["phase"], "before-guard")
+
+    def test_original_state_tuple_is_not_normalized_into_pending_or_success(self):
+        for state, override, kind in ((0,0,1),(1,0,1),(2,1,1),(0,1,2)):
+            with self.subTest(state=state,override=override), self.fixture() as f:
+                error = self.native_error(f,map_state=state,override=override,kind=kind)
+                f.session.retain_failure(error)
+                self.assertEqual(self.retained(f)["windowVisibilityRefusal"]["attributes"],
+                    {"window":789,"map_state":state,"override_redirect":override,"class":kind})
+                self.assertFalse(f.session.evidence["normalCloseObserved"])
+
+    def test_forged_or_missing_origin_wrong_type_and_message_do_not_capture_attributes(self):
+        class ForeignRuntime(RuntimeError): pass
+        for defect in ("missing", "foreign", "none", "type", "message"):
+            with self.subTest(defect=defect), self.fixture() as f:
+                error = self.native_error(f)
+                if defect == "missing": del error._visibility_diagnostic_origin
+                elif defect == "foreign": error._visibility_diagnostic_origin = object()
+                elif defect == "none": error._visibility_diagnostic_origin = None
+                elif defect == "type":
+                    foreign = ForeignRuntime(str(error)); foreign.__dict__.update(error.__dict__); error = foreign
+                else: error.args = ("Different refusal",)
+                f.session.retain_failure(error)
+                self.assertNotIn("windowVisibilityRefusal", self.retained(f))
+                self.assertEqual(f.session.evidence["firstFailure"]["message"], str(error))
+
+    def test_malformed_or_contradictory_numeric_tuple_is_not_copied(self):
+        for change in ({"window":True},{"window":-1},{"window":2**32},{"map_state":False},
+                       {"override_redirect":"private"},{"class":2**31},{"map_state":2,"override_redirect":0},
+                       {"extra":"not retained"}, None):
+            with self.subTest(change=change), self.fixture() as f:
+                error = self.native_error(f)
+                error.window_visibility_refusal = None if change is None else {**error.window_visibility_refusal, **change}
+                f.session.retain_failure(error)
+                self.assertNotIn("windowVisibilityRefusal", self.retained(f))
+
+    def test_first_failure_and_cached_snapshot_are_not_overwritten_by_later_diagnostics(self):
+        with self.fixture() as f:
+            original = self.native_error(f); f.session.retain_failure(original)
+            captured = copy.deepcopy(self.retained(f)["windowVisibilityRefusal"])
+            original.window_visibility_refusal["window"] = 111
+            f.session.window = 222; f.session.dialogs.clear(); f.session.checkpoint("finish-ui")
+            f.session.retain_failure(self.native_error(f,window=333))
+            value = self.retained(f)
+            self.assertEqual(value["windowVisibilityRefusal"], captured)
+            self.assertEqual(value["firstFailure"], {"type":"RuntimeError","message":str(original)})
+        with self.fixture() as f:
+            f.session.retain_failure(ValueError("first unrelated refusal"))
+            f.session.retain_failure(self.native_error(f))
+            self.assertNotIn("windowVisibilityRefusal", self.retained(f))
+
+    def test_capture_failure_never_masks_original_exception_or_retries_request(self):
+        with self.fixture() as f:
+            original = self.native_error(f); request = Mock(side_effect=original)
+            dumps = M.json.dumps
+            def failed(value,*args,**kwargs):
+                if type(value) is dict and value.get("scope") == "cached-native-window-visibility-refusal":
+                    raise OSError("Diagnostic storage preparation failed")
+                return dumps(value,*args,**kwargs)
+            with patch.object(M.json,"dumps",side_effect=failed), self.assertRaises(RuntimeError) as raised:
+                f.session.observe_request(request)("GET","/status")
+            self.assertIs(raised.exception,original); request.assert_called_once()
+            self.assertEqual(self.retained(f)["firstFailure"], {"type":"RuntimeError","message":str(original)})
+            self.assertTrue(self.retained(f)["windowVisibilityDiagnosticUnavailable"])
+        with self.fixture() as f:
+            original = self.native_error(f); request = Mock(side_effect=original)
+            with patch.object(f.session,"persist_evidence",side_effect=OSError("Snapshot write failed")), self.assertRaises(RuntimeError) as raised:
+                f.session.observe_request(request)("GET","/status")
+            self.assertIs(raised.exception,original); request.assert_called_once()
+            self.assertEqual(f.session.evidence["firstFailure"]["message"],str(original))
+
+    def test_trace_is_finite_fixed_source_metadata_only_and_existing_export_is_sufficient(self):
+        with self.fixture() as f:
+            original = self.native_error(f)
+            namespace = {"error": original}
+            exec(compile("def foreign_frame(*args, **kwargs):\n raise error\n", "/private/not-reviewed-secret.py", "exec"), namespace)
+            with self.assertRaises(RuntimeError) as raised:
+                f.session.observe_request(namespace["foreign_frame"])("GET","/status")
+            self.assertIs(raised.exception, original)
+            value = self.retained(f)["windowVisibilityRefusal"]
+            self.assertTrue(value["trace"]); self.assertLessEqual(len(value["trace"]),16)
+            for frame in value["trace"]:
+                self.assertEqual(set(frame),{"source","function","line"})
+                self.assertIn(frame["source"],("native-linux-production-016-migration.py","native-unix-window.py",
+                    "native-linux-polkit-probe.py","native-linux-integrated-pages.py","native-linux-root-probe.py"))
+                self.assertIs(type(frame["line"]),int)
+            self.assertNotIn("not-reviewed-secret",json.dumps(value))
+            self.assertLessEqual(len(json.dumps(value).encode()),8192)
+            self.assertLessEqual(f.file.stat().st_size,1048576)
+            tree = ast.parse((HERE / "native-linux-migrated-update.py").read_bytes())
+            reports = next(n for n in tree.body if isinstance(n,ast.Assign) and any(isinstance(t,ast.Name) and t.id=="REPORTS" for t in n.targets))
+            self.assertIn("result/first/session.json",ast.literal_eval(reports.value))
+
+    def test_malformed_or_oversized_cached_context_is_omitted_without_trusting_it(self):
+        with self.fixture() as f:
+            f.session.window = True; f.session.owned = {"pid":"not a pid"}
+            f.session.dialogs = {(i,"Authenticate") for i in range(100)}
+            f.session.d.last_request = {"method":"GET","route":"/" + "x" * 10000,"phase":"before-guard"}
+            f.session.evidence["connectionReview"]["nativeDismissal"]["target"] = -1
+            f.session.retain_failure(self.native_error(f))
+            value = f.session.evidence["windowVisibilityRefusal"]
+            for key in ("cachedMainWindow","cachedRootPid","cachedDialogOwners","cachedLastRequest","cachedReviewDialog"):
+                self.assertNotIn(key,value)
+            self.assertLessEqual(len(json.dumps(value).encode()),8192)
+            self.assertTrue(f.session.evidence["progressCaptureUnavailable"])
+            self.assertEqual(f.session.evidence["firstFailure"]["message"], "Owned X window is not a managed visible window")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
