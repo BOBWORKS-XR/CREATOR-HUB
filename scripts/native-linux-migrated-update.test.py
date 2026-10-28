@@ -241,6 +241,86 @@ class FixtureQuiescenceTests(unittest.TestCase):
         self.assertFalse(evidence["fixtureQuiescence"]["authorityGranted"])
 
     @unittest.skipUnless(hasattr(C.select, "poll") and hasattr(os, "pidfd_open"), "Linux pidfd only")
+    def test_absent_actor_requires_held_pidfd_exit_and_fresh_empty_inventory(self):
+        unit = {"Id": "user@21314.service", "LoadState": "loaded", "User": "21314", "PAMName": "systemd-user",
+            "MainPID": "1000", "InvocationID": "c" * 32, "ControlGroup": "/user.slice/user-21314.slice/user@21314.service",
+            "ActiveState": "active", "SubState": "running"}
+        user = {"UID": "21314", "Linger": "no", "Sessions": "", "State": "closing"}
+        snapshots = {pid: {"pid": pid, "startTime": str(pid + 1), "parentPid": 1 if pid == 1000 else 1000,
+            "state": "S", "Uid": [M.UID] * 4, "Gid": [M.UID] * 4, "procDirectory": {"ino": pid}}
+            for pid in (1000, 1001)}
+        zombie = {**snapshots[1001], "parentPid": 1, "state": "Z"}
+        terminal = {"pid": 1001, "classification": "terminal", "origin": zombie, "before": zombie, "after": zombie}
+        poller = Mock(); poller.poll.side_effect = [[(71, C.select.POLLIN)], [(72, C.select.POLLIN)], [], [], []]
+        evidence = {}
+        with patch.object(C, "_fixture_quiescence_properties", side_effect=[unit, user, unit]), \
+                patch.object(Path, "lstat", return_value=SimpleNamespace(st_uid=0, st_gid=0, st_mode=stat.S_IFREG | 0o755)), \
+                patch.object(M, "read_file", return_value=b"protected"), patch.object(C.os, "pidfd_open", side_effect=[71, 72]), \
+                patch.object(C.os, "open", side_effect=[81, 82]), patch.object(C.os, "close"), \
+                patch.object(C, "_fixture_quiescence_actor", side_effect=lambda row, *_: snapshots[row["pid"]]), \
+                patch.object(M, "native_process_inventory", side_effect=[self.empty, {"processes": [], "terminalProcesses": [terminal]}, self.empty]) as inventory, \
+                patch.object(M, "inventory_terminal_record", return_value=terminal), patch.object(C.select, "poll", return_value=poller):
+            final = C.fixture_quiescence(self.initial, self.prior, Mock(), Mock(), evidence=evidence)
+        self.assertEqual(final, self.empty); self.assertEqual(inventory.call_count, 3)
+        events = [row["event"] for row in evidence["fixtureQuiescence"]["events"]]
+        self.assertIn("inventory-gap", events); self.assertEqual(events.count("pidfd-exit"), 2)
+        self.assertLess(events.index("inventory-gap"), events.index("complete"))
+
+    @unittest.skipUnless(hasattr(C.select, "poll") and hasattr(os, "pidfd_open"), "Linux pidfd only")
+    def test_missing_actor_without_exit_proof_times_out_even_if_inventory_is_empty(self):
+        unit = {"Id": "user@21314.service", "LoadState": "loaded", "User": "21314", "PAMName": "systemd-user",
+            "MainPID": "1000", "InvocationID": "c" * 32, "ControlGroup": "/user.slice/user-21314.slice/user@21314.service",
+            "ActiveState": "active", "SubState": "running"}
+        user = {"UID": "21314", "Linger": "no", "Sessions": "", "State": "closing"}
+        snapshots = {pid: {"pid": pid, "startTime": str(pid + 1), "parentPid": 1 if pid == 1000 else 1000,
+            "state": "S", "Uid": [M.UID] * 4, "Gid": [M.UID] * 4, "procDirectory": {"ino": pid}}
+            for pid in (1000, 1001)}
+        clock, first = [0], [True]
+        def poll(milliseconds):
+            if milliseconds: clock[0] += 10
+            if first[0] and not milliseconds:
+                first[0] = False
+                return [(71, C.select.POLLIN)]
+            return []
+        poller = Mock(); poller.poll.side_effect = poll
+        evidence = {}
+        with patch.object(C, "_fixture_quiescence_properties", side_effect=[unit, user, unit]), \
+                patch.object(Path, "lstat", return_value=SimpleNamespace(st_uid=0, st_gid=0, st_mode=stat.S_IFREG | 0o755)), \
+                patch.object(M, "read_file", return_value=b"protected"), patch.object(C.os, "pidfd_open", side_effect=[71, 72]), \
+                patch.object(C.os, "open", side_effect=[81, 82]), patch.object(C.os, "close") as close, \
+                patch.object(C, "_fixture_quiescence_actor", side_effect=lambda row, *_: snapshots[row["pid"]]), \
+                patch.object(M, "native_process_inventory", return_value=self.empty), \
+                patch.object(C.select, "poll", return_value=poller), patch.object(C.time, "monotonic", side_effect=lambda: clock[0]):
+            with self.assertRaisesRegex(RuntimeError, "Fixture quiescence deadline"):
+                C.fixture_quiescence(self.initial, self.prior, Mock(), Mock(), evidence=evidence)
+        self.assertEqual(close.call_count, 4)
+        self.assertEqual(evidence["fixtureQuiescence"]["status"], "refused")
+        self.assertFalse(evidence["fixtureQuiescence"]["authorityGranted"])
+
+    @unittest.skipUnless(hasattr(C.select, "poll") and hasattr(os, "pidfd_open"), "Linux pidfd only")
+    def test_empty_scan_before_last_exit_is_repeated_after_exit(self):
+        unit = {"Id": "user@21314.service", "LoadState": "loaded", "User": "21314", "PAMName": "systemd-user",
+            "MainPID": "1000", "InvocationID": "c" * 32, "ControlGroup": "/user.slice/user-21314.slice/user@21314.service",
+            "ActiveState": "active", "SubState": "running"}
+        user = {"UID": "21314", "Linger": "no", "Sessions": "", "State": "closing"}
+        snapshots = {pid: {"pid": pid, "startTime": str(pid + 1), "parentPid": 1 if pid == 1000 else 1000,
+            "state": "S", "Uid": [M.UID] * 4, "Gid": [M.UID] * 4, "procDirectory": {"ino": pid}}
+            for pid in (1000, 1001)}
+        poller = Mock(); poller.poll.side_effect = [[(71, C.select.POLLIN), (72, C.select.POLLIN)], []]
+        evidence = {}
+        with patch.object(C, "_fixture_quiescence_properties", side_effect=[unit, user, unit]), \
+                patch.object(Path, "lstat", return_value=SimpleNamespace(st_uid=0, st_gid=0, st_mode=stat.S_IFREG | 0o755)), \
+                patch.object(M, "read_file", return_value=b"protected"), patch.object(C.os, "pidfd_open", side_effect=[71, 72]), \
+                patch.object(C.os, "open", side_effect=[81, 82]), patch.object(C.os, "close"), \
+                patch.object(C, "_fixture_quiescence_actor", side_effect=lambda row, *_: snapshots[row["pid"]]), \
+                patch.object(M, "native_process_inventory", side_effect=[self.empty, self.empty]) as inventory, \
+                patch.object(C.select, "poll", return_value=poller):
+            final = C.fixture_quiescence(self.initial, self.prior, Mock(), Mock(), evidence=evidence)
+        self.assertEqual(final, self.empty); self.assertEqual(inventory.call_count, 2)
+        events = evidence["fixtureQuiescence"]["events"]
+        self.assertTrue(all(row["sample"] == 2 for row in events if row["event"] == "reaped"))
+
+    @unittest.skipUnless(hasattr(C.select, "poll") and hasattr(os, "pidfd_open"), "Linux pidfd only")
     def test_partial_pidfd_failure_closes_bound_handles_and_refuses(self):
         unit = {"Id": "user@21314.service", "LoadState": "loaded", "User": "21314", "PAMName": "systemd-user",
             "MainPID": "1000", "InvocationID": "c" * 32, "ControlGroup": "/user.slice/user-21314.slice/user@21314.service",

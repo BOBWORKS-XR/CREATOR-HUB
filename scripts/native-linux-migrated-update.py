@@ -2557,7 +2557,7 @@ def fixture_quiescence(initial, prior, native, helper, *, evidence=None):
     def note(event, pid=None):
         try:
             require(event in ("eligible", "empty", "properties-bound", "actor-bound", "binding-complete",
-                    "pidfd-exit", "pam-reparented", "terminal-observed", "reaped", "complete", "refusal", "cleanup-refusal"),
+                    "pidfd-exit", "pam-reparented", "terminal-observed", "inventory-gap", "reaped", "complete", "refusal", "cleanup-refusal"),
                     "Fixed quiescence diagnostic event required")
             if len(diagnostic["events"]) >= 24:
                 diagnostic["truncated"] = True
@@ -2626,10 +2626,11 @@ def fixture_quiescence(initial, prior, native, helper, *, evidence=None):
                 exited.add(pid); poller.unregister(fd)
                 note("pidfd-exit", pid)
 
-        pam_reparented, terminal_seen, reaped_seen = False, set(), set()
+        pam_reparented, terminal_seen, reaped_seen, gap_seen = False, set(), set(), set()
         for _ in range(600):
             diagnostic["stage"] = "inventory"
             require(time.monotonic() < deadline, "Fixture quiescence deadline; no signal or retry")
+            exited_before_scan = set(exited)
             current = M.native_process_inventory(native, helper)
             diagnostic["samples"] += 1
             events(0)
@@ -2684,10 +2685,18 @@ def fixture_quiescence(initial, prior, native, helper, *, evidence=None):
                             "Terminal fixture identity changed")
                 if pid not in terminal_seen:
                     note("terminal-observed", pid); terminal_seen.add(pid)
-            require(set(eligible) - seen <= exited, "Fixture actor disappeared without pidfd exit proof")
-            for pid in sorted(set(eligible) - seen - reaped_seen):
+            missing_without_exit = set(eligible) - seen - exited
+            if missing_without_exit:
+                for pid in sorted(missing_without_exit - gap_seen): note("inventory-gap", pid)
+                gap_seen.update(missing_without_exit)
+                diagnostic["stage"] = "inventory-gap-wait"
+                events(min(50, max(1, math.ceil((deadline - time.monotonic()) * 1000))))
+                continue
+            for pid in sorted((set(eligible) - seen - reaped_seen) & exited_before_scan):
                 note("reaped", pid); reaped_seen.add(pid)
             if current == {"processes": [], "terminalProcesses": []}:
+                if exited_before_scan != set(eligible):
+                    continue
                 require(time.monotonic() < deadline, "Fixture quiescence deadline")
                 diagnostic.update(status="complete", stage="empty-inventory")
                 note("complete")
