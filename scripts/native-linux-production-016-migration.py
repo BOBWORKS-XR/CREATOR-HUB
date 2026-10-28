@@ -1839,11 +1839,42 @@ def startup_inventory(value):
     return value[2]
 
 
+_INVENTORY_ARGUMENTS_MARKER = object()
+
+
 def no_legacy_backend(identity, command):
-    require(type(command) is bytes and 0 < len(command) <= 8192 and command.endswith(b"\0"), "Bounded native process arguments required")
+    try:
+        require(type(command) is bytes and 0 < len(command) <= 8192 and command.endswith(b"\0"), "Bounded native process arguments required")
+    except RuntimeError as error:
+        try:
+            if (type(command) is bytes and len(command) <= 8192 and type(identity.get("pid")) is int
+                    and 0 < identity["pid"] <= 2147483647 and re.fullmatch(r"[0-9]{1,20}", identity.get("startTime", ""))):
+                error._inventory_arguments = (_INVENTORY_ARGUMENTS_MARKER, {
+                    "pid": identity["pid"], "startTime": identity["startTime"], "argumentBytes": len(command),
+                    "nulTerminated": command.endswith(b"\0"), "sha256": digest(command),
+                    "readOnly": True, "validationAuthority": False, "releaseReady": False})
+        except Exception:
+            pass
+        raise
     image = Path(identity["executable"].removesuffix(" (deleted)")).name.removeprefix("memfd:")
     require(image not in ("creator-works-mcp", "creator-works-mcp-launcher", "creator-project-setup")
             and b"--creator-hub-host" not in command.split(b"\0"), "A separate MCP/Setup GUI or legacy host backend started")
+
+
+def cached_inventory_arguments(error):
+    value = getattr(error, "_inventory_arguments", None)
+    if type(value) is not tuple or len(value) != 2 or value[0] is not _INVENTORY_ARGUMENTS_MARKER:
+        return None
+    row = value[1]
+    keys(row, ("pid", "startTime", "argumentBytes", "nulTerminated", "sha256", "readOnly", "validationAuthority", "releaseReady"))
+    require(type(row["pid"]) is int and 0 < row["pid"] <= 2147483647
+            and type(row["startTime"]) is str and re.fullmatch(r"[0-9]{1,20}", row["startTime"])
+            and type(row["argumentBytes"]) is int and 0 <= row["argumentBytes"] <= 8192
+            and type(row["nulTerminated"]) is bool and (row["argumentBytes"] == 0 or not row["nulTerminated"])
+            and type(row["sha256"]) is str and re.fullmatch(r"[0-9a-f]{64}", row["sha256"])
+            and row["readOnly"] is True and row["validationAuthority"] is False and row["releaseReady"] is False,
+            "Invalid cached argument observation")
+    return dict(row)
 
 
 class InventoryDirectoryRefusal(RuntimeError):
@@ -1946,6 +1977,14 @@ def native_process_inventory(native, helper):
                             and native.native_process(pid, helper, False) == identity, "Mixed-UID inventory process changed")
                     continue  # Setuid authorization stays separately bound; this is not a terminal/legacy-free claim.
                 command = proc_bytes(file / "cmdline", 8192)
+                if command == b"":
+                    try:
+                        terminal_candidate = inventory_process_snapshot(directory, file, pid, helper)
+                        if terminal_candidate["state"] in ("Z", "X"):
+                            classify(terminal_candidate)
+                            continue
+                    except (FileNotFoundError, ProcessLookupError):
+                        no_legacy_backend(identity, command)
                 no_legacy_backend(identity, command)
                 require(native.native_process(pid, helper, False) == identity, "Native process changed during inventory")
             except RuntimeError as error:
@@ -2105,6 +2144,12 @@ def serve_inventory(state, record, harness, scenario, native, helper, *, cohort=
         return True
     except Exception as error:
         record["inventoryRefusal"] = {"sequence": sequence, "type": type(error).__name__, "message": str(error)[:1000]}
+        try:
+            arguments = cached_inventory_arguments(error)
+            if arguments is not None:
+                record["inventoryRefusal"]["processArguments"] = arguments
+        except Exception as capture_error:
+            record["inventoryRefusal"]["argumentsUnavailable"] = type(capture_error).__name__[:80]
         if isinstance(error, PermissionError):
             try:
                 record["inventoryRefusal"]["processInventoryRefusal"] = inventory_permission_capture(error, helper)

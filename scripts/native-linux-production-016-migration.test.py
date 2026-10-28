@@ -4834,5 +4834,155 @@ class FreshFixtureAclTests(unittest.TestCase):
             self.assertEqual(os.getxattr(root / "home", "system.posix_acl_default"), self.acl())
 
 
+class EmptyCommandExitTests(unittest.TestCase):
+    def test_empty_command_transition_requires_matching_two_terminal_observations(self):
+        for state in ("Z", "X"):
+            observations = {7000: [{"state": "S"}]}
+            with self.subTest(state=state), global_inventory_fixture({7000: (M.OLD_NODE, b"")}, observations=observations) as g, \
+                    inventory_rpc_fixture() as f:
+                original = M.proc_bytes
+                def read(file, limit):
+                    raw = original(file, limit)
+                    observations[7000] = [{"state": state}]
+                    return raw
+                f.inventory.side_effect = lambda *_: g.sample()
+                with patch.object(M, "proc_bytes", side_effect=read):
+                    answer = f.client.sample(f.wait)
+                self.assertEqual(answer["processes"], [])
+                terminal = answer["terminalProcesses"][0]
+                self.assertEqual(terminal["origin"]["state"], "S")
+                self.assertEqual(terminal["before"]["state"], state)
+                self.assertEqual(terminal["before"], terminal["after"])
+                self.assertNotIn("legacyBackend", json.dumps(terminal))
+                self.assertEqual(g.calls, [7000])
+                self.assertEqual(g.reads.count((7000, "cmdline")), 1)
+
+    def test_live_empty_and_unterminated_commands_still_refuse(self):
+        for raw in (b"", b"unterminated"):
+            with self.subTest(raw=raw), global_inventory_fixture({7000: (M.OLD_NODE, raw)}) as g, inventory_rpc_fixture() as f:
+                f.inventory.side_effect = lambda *_: g.sample()
+                with self.assertRaisesRegex(RuntimeError, "^Bounded native process arguments required$"):
+                    f.client.sample(f.wait)
+                self.assertFalse((f.root / "inventory-response-1.json").exists())
+                self.assertEqual(g.reads.count((7000, "cmdline")), 1)
+                metadata = f.record["inventoryRefusal"]["processArguments"]
+                self.assertEqual(metadata["pid"], 7000)
+                self.assertEqual(metadata["argumentBytes"], len(raw))
+                self.assertFalse(metadata["nulTerminated"])
+                self.assertEqual(metadata["sha256"], M.digest(raw))
+                self.assertTrue(metadata["readOnly"])
+                self.assertFalse(metadata["validationAuthority"])
+                self.assertFalse(metadata["releaseReady"])
+                self.assertNotIn(raw.decode(), json.dumps(metadata)) if raw else None
+
+    def test_forged_or_malformed_cached_metadata_never_grants_authority(self):
+        foreign = RuntimeError("Bounded native process arguments required")
+        foreign._inventory_arguments = (object(), {"secret": "must-not-be-exported"})
+        self.assertIsNone(M.cached_inventory_arguments(foreign))
+        invalid = RuntimeError("Bounded native process arguments required")
+        invalid._inventory_arguments = (M._INVENTORY_ARGUMENTS_MARKER, {"secret": "must-not-be-exported"})
+        with self.assertRaises(RuntimeError):
+            M.cached_inventory_arguments(invalid)
+
+    def test_empty_exit_cannot_change_identity_credentials_or_terminal_state(self):
+        cases = ([{"state": "Z", "startTime": "999"}], [{"state": "Z", "inode": 999}],
+                 [{"state": "Z", "parentPid": 222}], [{"state": "Z", "uid": 0}],
+                 [{"state": "Z", "gid": 0}], [{"state": "Z", "uids": [M.UID, 0, 0, 0]}],
+                 [{"state": "Z"}, {"state": "Z"}, {"state": "S"}])
+        for changed in cases:
+            observations = {7000: [{"state": "S"}]}
+            with self.subTest(changed=changed), global_inventory_fixture({7000: (M.OLD_NODE, b"")}, observations=observations) as g, \
+                    inventory_rpc_fixture() as f:
+                original = M.proc_bytes
+                def read(file, limit):
+                    raw = original(file, limit)
+                    observations[7000] = changed
+                    return raw
+                f.inventory.side_effect = lambda *_: g.sample()
+                with patch.object(M, "proc_bytes", side_effect=read), self.assertRaises(RuntimeError):
+                    f.client.sample(f.wait)
+                self.assertFalse((f.root / "inventory-response-1.json").exists())
+
+    def test_empty_then_disappeared_without_terminal_proof_keeps_original_refusal(self):
+        with global_inventory_fixture({7000: (M.OLD_NODE, b"")}) as g, inventory_rpc_fixture() as f:
+            snapshot, calls = M.inventory_process_snapshot, []
+            def observe(*args):
+                calls.append(1)
+                if len(calls) > 1:
+                    raise FileNotFoundError("unproven terminal state")
+                return snapshot(*args)
+            f.inventory.side_effect = lambda *_: g.sample()
+            with patch.object(M, "inventory_process_snapshot", side_effect=observe), \
+                    self.assertRaisesRegex(RuntimeError, "^Bounded native process arguments required$"):
+                f.client.sample(f.wait)
+            self.assertEqual(len(calls), 2)
+            self.assertFalse((f.root / "inventory-response-1.json").exists())
+
+    def test_terminal_confirmation_disappears_without_proof_keeps_original_refusal(self):
+        observations = {7000: [{"state": "S"}]}
+        with global_inventory_fixture({7000: (M.OLD_NODE, b"")}, observations=observations) as g, inventory_rpc_fixture() as f:
+            snapshot, original_read, calls = M.inventory_process_snapshot, M.proc_bytes, []
+            def observe(*args):
+                calls.append(1)
+                if len(calls) == 3:
+                    raise ProcessLookupError("terminal confirmation disappeared")
+                return snapshot(*args)
+            def read(file, limit):
+                raw = original_read(file, limit)
+                observations[7000] = [{"state": "Z"}]
+                return raw
+            f.inventory.side_effect = lambda *_: g.sample()
+            with patch.object(M, "inventory_process_snapshot", side_effect=observe), \
+                    patch.object(M, "proc_bytes", side_effect=read), \
+                    self.assertRaisesRegex(RuntimeError, "^Bounded native process arguments required$"):
+                f.client.sample(f.wait)
+            self.assertEqual(len(calls), 3)
+            self.assertFalse((f.root / "inventory-response-1.json").exists())
+
+    @unittest.skipUnless(sys.platform == "linux", "Real pidfd/normal EOF exit requires Linux")
+    def test_actual_owned_child_eof_exit_across_empty_command_read(self):
+        native, helper = M.load("native-linux-root-probe"), M.load("native-unix-window")
+        child = subprocess.Popen([sys.executable, "-I", "-S", "-B", "-c",
+                                  'import sys; print("ready", flush=True); sys.stdin.buffer.read(1)'],
+                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        fd, observed = None, []
+        try:
+            self.assertTrue(M.select.select([child.stdout], [], [], 5)[0])
+            self.assertEqual(child.stdout.readline(16), b"ready\n")
+            fd = os.pidfd_open(child.pid)
+            target = Path(f"/proc/{child.pid}")
+            original_read, original_iter = M.proc_bytes, Path.iterdir
+            def read(file, limit):
+                if file == target / "cmdline":
+                    self.assertFalse(observed)
+                    child.stdin.close()
+                    self.assertTrue(M.select.select([fd], [], [], 5)[0])
+                    raw = original_read(file, limit)
+                    self.assertEqual(raw, b"")
+                    observed.append(True)
+                    return raw
+                return original_read(file, limit)
+            def selected(path):
+                return iter([target]) if path == Path("/proc") else original_iter(path)
+            with patch.object(M, "UID", os.getuid()), patch.object(M, "proc_bytes", side_effect=read), \
+                    patch.object(Path, "iterdir", selected):
+                result = M.native_process_inventory(native, helper)
+            self.assertEqual(result["processes"], [])
+            proof = result["terminalProcesses"][0]
+            self.assertEqual(proof["pid"], child.pid)
+            self.assertEqual(proof["origin"]["state"], "S")
+            self.assertEqual(proof["before"]["state"], "Z")
+            self.assertEqual(proof["before"], proof["after"])
+            self.assertEqual(observed, [True])
+        finally:
+            if child.stdin and not child.stdin.closed:
+                child.stdin.close()
+            status = child.wait(timeout=5)
+            if fd is not None:
+                os.close(fd)
+            child.stdout.close(); child.stderr.close()
+        self.assertEqual(status, 0)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
