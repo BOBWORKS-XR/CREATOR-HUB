@@ -101,6 +101,53 @@ test('Linux root cache refuses file ancestors and hardlinks instead of modifying
   assert.equal(fs.readFileSync(original, 'utf8'), 'preserved');
 });
 
+for (const kind of ['hardlink', 'symlink']) test(`Linux root cache refusal diagnostics describe a real ${kind} from the same lstat`, t => {
+  const f = rootCacheFixture(t), outside = path.join(f.root, 'protected');
+  fs.mkdirSync(outside);
+  const marker = path.join(outside, 'marker'), contents = 'protected contents must not appear in the diagnostic';
+  fs.writeFileSync(marker, contents);
+  const parts = kind === 'hardlink' ? Array.from({ length: 8 }, (_, i) => `${i}-${'x'.repeat(70)}`) : ['nested'];
+  const name = kind === 'hardlink' ? 'linked' : process.platform === 'win32' ? 'deps[json]' : 'deps"\n\u001b';
+  const file = path.join(f.target, ...parts, name);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  if (kind === 'hardlink') fs.linkSync(marker, file);
+  else fs.symlinkSync(outside, file, process.platform === 'win32' ? 'junction' : 'dir');
+  const lstat = fs.lstatSync;
+  let observed, calls = 0, refusal;
+  const capture = t.mock.method(fs, 'lstatSync', (name, ...args) => {
+    const info = lstat(name, ...args);
+    if (name === file) { calls++; observed = info; }
+    return info;
+  });
+  try {
+    assert.throws(f.admit, error => {
+      refusal = error;
+      return /redirected, linked or nonregular/.test(error.message);
+    });
+  } finally { capture.mock.restore(); }
+  assert.equal(calls, 1, 'diagnostics must reuse the refusing lstat, not reread or retry');
+  const prefix = 'Linux Root cache contains a redirected, linked or nonregular entry. Preserve it and omit --linux-root-cache. ';
+  assert.ok(refusal.message.startsWith(prefix), 'the original refusal must retain its message and append JSON');
+  const details = JSON.parse(refusal.message.slice(prefix.length)), relative = path.relative(f.target, file);
+  assert.deepEqual(details, {
+    path: relative.slice(0, 512), pathTruncated: relative.length > 512,
+    type: kind === 'symlink' ? 'symlink' : 'file',
+    mode: observed.mode, nlink: observed.nlink, uid: observed.uid, gid: observed.gid,
+    dev: observed.dev, ino: observed.ino, size: observed.size,
+    inodeNumbers: 'reported JavaScript numbers; not lossless kernel values',
+  });
+  assert.equal(details.pathTruncated, kind === 'hardlink');
+  assert.ok(Buffer.byteLength(refusal.message) <= 4096);
+  assert.doesNotMatch(refusal.message, /[\r\n\u001b]/);
+  assert.equal(refusal.message.includes(f.target), false);
+  assert.equal(refusal.message.includes(contents), false);
+  assert.ok(refusal.message.endsWith(JSON.stringify(details)));
+  assert.equal(fs.readFileSync(marker, 'utf8'), contents);
+  const after = lstat(file);
+  for (const field of ['mode', 'nlink', 'uid', 'gid', 'dev', 'ino', 'size', 'mtimeMs']) assert.equal(after[field], observed[field]);
+  assert.equal(fs.existsSync(f.output), false);
+});
+
 test('signed Linux root compilation reaches the cached target while assembly and package receipts stay fresh', t => {
   const b = require('./build-unified.cjs'), archive = require('./module-archive.cjs');
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'creator-root-cache-')));
