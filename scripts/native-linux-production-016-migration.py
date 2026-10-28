@@ -759,9 +759,46 @@ def window_manager_environment(environment, role):
     return {**environment, "XDG_CACHE_HOME": str(cache)}
 
 
-def fixture(root):
+def create_fixture_home(root):
     home = root / "home"
-    for part in ("home", "home/config", "home/data", "home/cache", "runtime", "tmp"):
+    home.mkdir(mode=0o700)
+    if sys.platform != "linux":
+        return home
+    original = home.lstat()
+    identity = lambda info: (info.st_dev, info.st_ino, info.st_uid, info.st_gid, info.st_mode)
+    require(home.resolve(strict=True) == home and stat.S_ISDIR(original.st_mode)
+            and original.st_uid == os.geteuid() and original.st_gid == os.getegid()
+            and stat.S_IMODE(original.st_mode) == 0o700, "Fresh owned private fixture HOME required")
+    fd = os.open(home, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        require(identity(os.fstat(fd)) == identity(original) and not os.listdir(fd), "Empty new fixture HOME required")
+        try:
+            inherited = os.getxattr(fd, "system.posix_acl_default")
+        except OSError as error:
+            if error.errno != 61:  # Linux ENODATA; other failures do not establish absence.
+                raise
+        else:
+            require(0 < len(inherited) <= 65536 and identity(home.lstat()) == identity(original)
+                    and identity(os.fstat(fd)) == identity(original) and not os.listdir(fd), "Fresh ACL target changed")
+            # Only the exclusively created, still-empty test HOME is normalized.
+            os.removexattr(fd, "system.posix_acl_default")
+        try:
+            os.getxattr(fd, "system.posix_acl_default")
+        except OSError as error:
+            if error.errno != 61:
+                raise
+        else:
+            raise RuntimeError("Fixture HOME default ACL must be absent before seeding")
+        require(identity(os.fstat(fd)) == identity(original) and identity(home.lstat()) == identity(original)
+                and not os.listdir(fd), "Fixture HOME identity or empty state changed")
+    finally:
+        os.close(fd)
+    return home
+
+
+def fixture(root):
+    home = create_fixture_home(root)
+    for part in ("home/config", "home/data", "home/cache", "runtime", "tmp"):
         (root / part).mkdir(mode=0o700)
     project = home / "current-project"
     current = {"channels": [{"id": "current", "name": "Current retained project", "unity_project_path": str(project), "scene_path": None,

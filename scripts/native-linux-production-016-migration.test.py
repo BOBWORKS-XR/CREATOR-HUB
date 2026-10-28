@@ -4705,5 +4705,134 @@ class RuntimeDirectoryDiagnosticTests(unittest.TestCase):
             self.assertEqual(before, self.snapshot(home)); self.assertFalse(diagnostics["inputPermitted"])
 
 
+@unittest.skipUnless(sys.platform == "linux", "Real inherited default ACL requires Linux")
+class FreshFixtureAclTests(unittest.TestCase):
+    @staticmethod
+    def acl():
+        rows = ((1, 7, 0xffffffff), (2, 7, 1001), (4, 7, 0xffffffff), (16, 7, 0xffffffff), (32, 7, 0xffffffff))
+        raw = (2).to_bytes(4, "little") + b"".join(tag.to_bytes(2, "little") + mode.to_bytes(2, "little")
+                + uid.to_bytes(4, "little") for tag, mode, uid in rows)
+        assert M.digest(raw) == "ab93799aeaba2b0cf6f6e4a059b93930ac75d3d0452103c295737a79c6094ff3"
+        return raw
+
+    def test_captured_acl_removed_only_from_exclusive_empty_home_before_seeding(self):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name).resolve()
+            raw = self.acl()
+            os.setxattr(root, "system.posix_acl_default", raw)
+            parent = root.stat()
+            previous = os.umask(0o077)
+            try:
+                initialize = M.create_fixture_home
+                def create_home(parent):
+                    with patch.object(M.os, "chmod", side_effect=AssertionError("No mode repair")), \
+                            patch.object(M.os, "umask", side_effect=AssertionError("No umask override")):
+                        return initialize(parent)
+                with patch.object(M, "create_fixture_home", side_effect=create_home):
+                    before = M.fixture(root)
+                home = root / "home"
+                with self.assertRaises(OSError) as missing:
+                    os.getxattr(home, "system.posix_acl_default")
+                self.assertEqual(missing.exception.errno, 61)
+                (home / "normal-app-created-directory").mkdir(mode=0o777)
+                self.assertEqual(stat.S_IMODE((home / "normal-app-created-directory").stat().st_mode), 0o700)
+                for folder in [home, *(p for p in home.rglob("*") if p.is_dir())]:
+                    self.assertEqual(stat.S_IMODE(folder.stat().st_mode), 0o700)
+                for relative, body in before.items():
+                    self.assertEqual((home / relative).read_bytes(), body)
+            finally:
+                os.umask(previous)
+            self.assertEqual(os.getxattr(root, "system.posix_acl_default"), raw)
+            after = root.stat()
+            self.assertEqual((parent.st_dev, parent.st_ino, parent.st_uid, parent.st_gid, parent.st_mode),
+                             (after.st_dev, after.st_ino, after.st_uid, after.st_gid, after.st_mode))
+
+    def test_existing_profile_and_acl_are_never_adopted_or_changed(self):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name).resolve()
+            home = root / "home"
+            home.mkdir(mode=0o700)
+            os.setxattr(home, "system.posix_acl_default", self.acl())
+            sentinel = home / "keep-settings"
+            sentinel.write_bytes(b"keep exact settings")
+            original = home.stat()
+            with patch.object(M.os, "removexattr", side_effect=AssertionError("Existing profile ACL must stay")) as remove, \
+                    self.assertRaises(FileExistsError):
+                M.create_fixture_home(root)
+            remove.assert_not_called()
+            self.assertEqual(home.stat(), original)
+            self.assertEqual(sentinel.read_bytes(), b"keep exact settings")
+            self.assertEqual(os.getxattr(home, "system.posix_acl_default"), self.acl())
+
+    def test_acl_observation_failure_stops_before_removal_or_seeding(self):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name).resolve()
+            os.setxattr(root, "system.posix_acl_default", self.acl())
+            with patch.object(M.os, "getxattr", side_effect=PermissionError(13, "fixture diagnostic refusal")), \
+                    patch.object(M.os, "removexattr") as remove, self.assertRaises(PermissionError):
+                M.fixture(root)
+            remove.assert_not_called()
+            home = root / "home"
+            self.assertEqual(list(home.iterdir()), [])
+            self.assertEqual(os.getxattr(home, "system.posix_acl_default"), self.acl())
+
+    def test_held_directory_identity_drift_refuses_before_acl_removal_and_closes_fd(self):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name).resolve()
+            os.setxattr(root, "system.posix_acl_default", self.acl())
+            fstat, close = os.fstat, os.close
+            def drift(fd):
+                info = fstat(fd)
+                values = {key: getattr(info, key) for key in ("st_dev", "st_ino", "st_uid", "st_gid", "st_mode")}
+                values["st_ino"] += 1
+                return SimpleNamespace(**values)
+            with patch.object(M.os, "fstat", side_effect=drift), patch.object(M.os, "close", wraps=close) as closed, \
+                    patch.object(M.os, "removexattr") as remove, self.assertRaises(RuntimeError):
+                M.fixture(root)
+            closed.assert_called_once()
+            remove.assert_not_called()
+            home = root / "home"
+            self.assertEqual(list(home.iterdir()), [])
+            self.assertEqual(os.getxattr(home, "system.posix_acl_default"), self.acl())
+
+    def test_access_acl_is_byte_preserved_when_only_new_home_default_acl_is_removed(self):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name).resolve()
+            os.setxattr(root, "system.posix_acl_default", self.acl())
+            remove, get = os.removexattr, os.getxattr
+            observed = []
+            def default_only(fd, attribute):
+                self.assertEqual(attribute, "system.posix_acl_default")
+                access = get(fd, "system.posix_acl_access")
+                remove(fd, attribute)
+                self.assertEqual(get(fd, "system.posix_acl_access"), access)
+                observed.append(access)
+            with patch.object(M.os, "removexattr", side_effect=default_only):
+                home = M.create_fixture_home(root)
+            self.assertEqual(len(observed), 1)
+            self.assertEqual(os.getxattr(home, "system.posix_acl_access"), observed[0])
+
+    def test_acl_removal_failure_stops_before_seeding_and_leaves_inherited_acl(self):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name).resolve()
+            os.setxattr(root, "system.posix_acl_default", self.acl())
+            with patch.object(M.os, "removexattr", side_effect=PermissionError(13, "fixture removal refused")) as remove, \
+                    self.assertRaises(PermissionError):
+                M.fixture(root)
+            remove.assert_called_once()
+            self.assertEqual(list((root / "home").iterdir()), [])
+            self.assertEqual(os.getxattr(root / "home", "system.posix_acl_default"), self.acl())
+
+    def test_failed_acl_absence_readback_is_not_retried_or_seeded(self):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name).resolve()
+            os.setxattr(root, "system.posix_acl_default", self.acl())
+            with patch.object(M.os, "removexattr") as remove, self.assertRaises(RuntimeError):
+                M.fixture(root)
+            remove.assert_called_once()
+            self.assertEqual(list((root / "home").iterdir()), [])
+            self.assertEqual(os.getxattr(root / "home", "system.posix_acl_default"), self.acl())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
