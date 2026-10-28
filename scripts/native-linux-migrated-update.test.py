@@ -39,6 +39,70 @@ T = module("native-linux-production-016-update.test")
 U, M = C.U, C.M
 
 
+@unittest.skipUnless(hasattr(C.select, "poll") and hasattr(os, "pidfd_open"), "Linux pidfd only")
+class RefusedProcessObservationTests(unittest.TestCase):
+    def setUp(self):
+        self.first = {"processes": [{"pid": 2000000000, "startTime": "10"}, {"pid": 2000000001, "startTime": "11"}],
+            "terminalProcesses": []}
+
+    def test_observes_bound_exits_without_authorizing_anything(self):
+        poller = Mock(); poller.poll.side_effect = [[(71, C.select.POLLIN)], [(72, C.select.POLLIN)]]
+        empty = {"processes": [], "terminalProcesses": []}
+        with patch.object(M, "native_process_inventory", side_effect=[self.first, self.first, empty]), \
+                patch.object(C.os, "pidfd_open", side_effect=[71, 72]), patch.object(C.os, "close") as close, \
+                patch.object(C.select, "poll", return_value=poller), patch.object(U, "run_tool", return_value=b"State=inactive\n"):
+            result = C.observe_refused_fixture_processes(self.first, Mock(), Mock())
+        self.assertEqual(result["observedExit"], [{"pid": 2000000000, "startTime": "10"}, {"pid": 2000000001, "startTime": "11"}])
+        self.assertEqual(result["finalInventory"], empty)
+        self.assertFalse(result["authorityGranted"]); self.assertFalse(result["inputPermitted"])
+        self.assertFalse(result["pidfdExitIsNormalExit"]); self.assertEqual(close.call_count, 2)
+
+    def test_inventory_drift_refuses_and_closes_bound_fds(self):
+        changed = {"processes": [{"pid": 2000000000, "startTime": "different"}], "terminalProcesses": []}
+        with patch.object(M, "native_process_inventory", side_effect=[self.first, changed]), \
+                patch.object(C.os, "pidfd_open", side_effect=[71, 72]), patch.object(C.os, "close") as close, \
+                patch.object(U, "run_tool") as run:
+            result = C.observe_refused_fixture_processes(self.first, Mock(), Mock())
+        self.assertEqual(result["unavailable"]["type"], "RuntimeError")
+        self.assertEqual(close.call_count, 2); run.assert_not_called()
+        self.assertFalse(result["authorityGranted"])
+
+    def test_deadline_keeps_original_processes_pending(self):
+        poller = Mock(); poller.poll.return_value = []
+        with patch.object(M, "native_process_inventory", return_value=self.first), \
+                patch.object(C.os, "pidfd_open", side_effect=[71, 72]), patch.object(C.os, "close"), \
+                patch.object(C.select, "poll", return_value=poller), patch.object(U, "run_tool", return_value=b""):
+            result = C.observe_refused_fixture_processes(self.first, Mock(), Mock())
+        self.assertEqual(len(result["pendingAtDeadline"]), 2)
+        self.assertEqual(result["observedExit"], []); self.assertFalse(result["authorityGranted"])
+
+    def test_real_owned_child_exits_on_eof_and_is_observed_without_signalling(self):
+        child = C.subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.buffer.read()"],
+            stdin=C.subprocess.PIPE, stdout=C.subprocess.DEVNULL, stderr=C.subprocess.DEVNULL)
+        native, helper = U.load("native-linux-root-probe"), U.load("native-unix-window")
+        identity = native.native_process(child.pid, helper)
+        first = {"processes": [{"pid": child.pid, "startTime": identity["startTime"],
+            "executable": identity["executable"]}], "terminalProcesses": []}
+        def metadata(*_args, **_kwargs):
+            if not child.stdin.closed: child.stdin.close()
+            return b""
+        try:
+            with patch.object(M, "UID", os.getuid()), patch.object(M, "native_process_inventory", return_value=first), \
+                    patch.object(U, "run_tool", side_effect=metadata):
+                result = C.observe_refused_fixture_processes(first, native, helper)
+            self.assertEqual(result["observedExit"], [{"pid": child.pid, "startTime": identity["startTime"]}])
+            actor = result["actorEvidence"][0]
+            self.assertEqual(actor["uid"], [os.getuid()] * 4); self.assertEqual(actor["gid"], [os.getgid()] * 4)
+            self.assertTrue(actor["cgroup"]); self.assertEqual(actor["kernelImageSha256"], identity["kernelImageSha256"])
+            self.assertEqual(child.wait(timeout=5), 0)
+            self.assertFalse(result["authorityGranted"])
+        finally:
+            if not child.stdin.closed: child.stdin.close()
+            if child.poll() is None:
+                child.terminate()
+                child.wait(timeout=5)
+
+
 class WatcherKernel:
     """Only the Linux notification/FD boundary is replaced on Windows."""
     def __init__(self, parent):

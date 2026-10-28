@@ -2381,6 +2381,89 @@ def changed_retain_directory_refusal(record, error):
         record.setdefault("directoryRefusalUnavailable", True)
 
 
+def observe_refused_fixture_processes(initial, native, helper):
+    """Read-only evidence after refusal; never grants continuation authority."""
+    result = {"diagnosticOnly": True, "authorityGranted": False, "inputPermitted": False,
+              "releaseReady": False, "observedExit": [], "pidfdExitIsNormalExit": False}
+    fds = []
+    try:
+        require(type(initial) is dict and set(initial) == {"processes", "terminalProcesses"}
+                and not initial["terminalProcesses"] and 0 < len(initial["processes"]) <= 8,
+                "Bounded original live inventory required")
+        require(M.native_process_inventory(native, helper) == initial, "Original inventory changed before observation")
+        for row in initial["processes"]:
+            fd = os.pidfd_open(row["pid"], 0)
+            fds.append((fd, row["pid"], row["startTime"]))
+        require(M.native_process_inventory(native, helper) == initial, "Original inventory changed during pidfd binding")
+        result["actorEvidence"] = []
+        for row in initial["processes"]:
+            actor = {"pid": row["pid"], "startTime": row["startTime"]}
+            procfd = None
+            try:
+                path = Path("/proc") / str(row["pid"])
+                procfd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+                before = M.inventory_process_snapshot(procfd, path, row["pid"], helper)
+                require(before["startTime"] == row["startTime"] and before["Uid"] == before["Gid"] == [M.UID] * 4,
+                        "Observed actor identity differs")
+                with os.fdopen(os.open("cgroup", os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=procfd), "rb") as stream:
+                    raw = stream.read(4097)
+                require(len(raw) <= 4096, "Observed actor cgroup exceeds bound")
+                image = native.native_process(row["pid"], helper)
+                after = M.inventory_process_snapshot(procfd, path, row["pid"], helper)
+                require(before == after and image["startTime"] == row["startTime"] and image["executable"] == row["executable"],
+                        "Observed actor changed during capture")
+                actor.update(parentPid=before["parentPid"], uid=before["Uid"], gid=before["Gid"],
+                    state=before["state"], cgroup=raw.decode("utf-8", errors="replace"),
+                    kernelImageSha256=image["kernelImageSha256"])
+            except Exception as error:
+                actor["unavailable"] = type(error).__name__
+            finally:
+                if procfd is not None: os.close(procfd)
+            result["actorEvidence"].append(actor)
+        commands = {
+            "unitBefore": ["/usr/bin/systemctl", "show", "user@" + str(M.UID) + ".service",
+                "--property=MainPID,InvocationID,ControlGroup,ActiveState,SubState,Result,ExecMainCode,ExecMainStatus"],
+            "userBefore": ["/usr/bin/loginctl", "show-user", str(M.UID), "--property=UID,State,Sessions,Linger"],
+        }
+        for label, command in commands.items():
+            try:
+                result[label] = U.run_tool(command, timeout=5, limit=8192).decode("utf-8", errors="replace")
+            except Exception as error:
+                result[label + "Unavailable"] = type(error).__name__
+        poller = select.poll()
+        pending = {fd: (pid, start) for fd, pid, start in fds}
+        for fd in pending: poller.register(fd, select.POLLIN)
+        deadline = time.monotonic() + 25
+        while pending:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0: break
+            events = poller.poll(max(1, math.ceil(remaining * 1000)))
+            if not events: break
+            for fd, flags in events:
+                require(fd in pending and flags & select.POLLIN and not flags & (select.POLLERR | select.POLLNVAL),
+                        "Uncertain pidfd event")
+                pid, start = pending.pop(fd)
+                poller.unregister(fd)
+                result["observedExit"].append({"pid": pid, "startTime": start})
+        result["pendingAtDeadline"] = [{"pid": pid, "startTime": start} for pid, start in pending.values()]
+        try:
+            result["finalInventory"] = M.native_process_inventory(native, helper)
+        except Exception as error:
+            result["finalInventoryUnavailable"] = type(error).__name__
+        for label, command in commands.items():
+            try:
+                result[label.replace("Before", "After")] = U.run_tool(command, timeout=5, limit=8192).decode("utf-8", errors="replace")
+            except Exception as error:
+                result[label.replace("Before", "After") + "Unavailable"] = type(error).__name__
+    except Exception as error:
+        result["unavailable"] = {"type": type(error).__name__, "message": str(error)[:300]}
+    finally:
+        for fd, _, _ in fds:
+            try: os.close(fd)
+            except OSError: result["fdCloseUnavailable"] = True
+    return result
+
+
 def changed_broker(env):
     changed_admission(env)
     original = changed_intent(env)
@@ -2488,6 +2571,11 @@ def changed_broker(env):
     except Exception as error:
         failure = error; record["refusal"] = {"type": type(error).__name__, "message": str(error)[:1000]}
         changed_retain_directory_refusal(record, error)
+        if str(error) == "Original fixture processes remain; never adopt or signal" and "initialUidInventory" in record:
+            try:
+                record["refusedProcessObservation"] = observe_refused_fixture_processes(record["initialUidInventory"], native, helper)
+            except Exception:
+                record["refusedProcessObservationUnavailable"] = True
     finally:
         M.wipe(secret); M.wipe(payload)
         if watcher is not None:
