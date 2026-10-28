@@ -15,6 +15,8 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
+import time
 import types
 import unittest
 from unittest import mock
@@ -1560,8 +1562,199 @@ def native_exact_target_admission(env, system, machine):
               "Injected native fixture runtime refused")
 
 
-def native_exact_target_fixture():
+class BoundedStderr:
+    """Drain the owned child continuously while retaining only a bounded prefix."""
+    def __init__(self, stream, limit=512):
+        self.stream, self.limit, self.data = stream, limit, bytearray()
+        self.complete = self.error = self.truncated = False
+        self.thread = threading.Thread(target=self._drain, daemon=True)
+        self.thread.start()
+
+    def _drain(self):
+        try:
+            while True:
+                chunk = os.read(self.stream.fileno(), 4096)
+                if not chunk:
+                    self.complete = True
+                    return
+                remaining = max(0, self.limit - len(self.data))
+                self.data.extend(chunk[:remaining])
+                self.truncated |= len(chunk) > remaining
+        except Exception:
+            self.error = True
+
+    def snapshot(self):
+        return {"prefix": bytes(self.data).decode("utf-8", errors="replace"), "complete": self.complete,
+            "readerError": self.error, "truncated": self.truncated}
+
+
+class BoundedStderrTests(unittest.TestCase):
+    def test_worst_case_prefix_does_not_exceed_receipt_budget(self):
+        snapshot = {"prefix": "\ufffd" * 512, "complete": False, "readerError": True, "truncated": True}
+        result = {"schemaVersion": 1, "scope": "disposable-native-exact-target-observer",
+            "harnessSource": "a" * 40, "runId": 99999999999999999999, "runAttempt": 99999999999999999999,
+            "fixtureSha256": "b" * 64, "probeSha256": "c" * 64, "rootHelperSha256": "d" * 64,
+            "windowHelperSha256": "e" * 64, "observerContractPassed": False, "candidateExecuted": False,
+            "inputPermitted": False, "migrationAccepted": False, "releaseReady": False, "cases": [],
+            "refusal": {"type": "RuntimeError", "message": "\ufffd" * 1000},
+            "cleanupRefusal": {"type": "RuntimeError", "message": "\ufffd" * 1000},
+            "startupDiagnostic": {"pid": 999999999, "returnCodeBeforeCleanup": None, "elapsedSeconds": 5,
+                "stderr": snapshot, "stderrAfterCleanup": snapshot}, "stderrReaderClosed": False}
+        raw = bounded_observer_receipt(result)
+        self.assertLessEqual(len(raw.encode()), 16384)
+        receipt = json.loads(raw)
+        self.assertEqual(receipt["refusal"], result["refusal"])
+        self.assertEqual(receipt["cleanupRefusal"], result["cleanupRefusal"])
+        self.assertTrue(receipt["startupDiagnosticTruncated"])
+
+    def test_drains_more_than_pipe_capacity_but_keeps_only_bounded_prefix(self):
+        child = subprocess.Popen([sys.executable, "-c", "import sys; sys.stderr.write('x' * 200000)"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        capture = BoundedStderr(child.stderr, limit=128)
+        try:
+            self.assertEqual(child.wait(timeout=10), 0)
+            capture.thread.join(timeout=2)
+            self.assertFalse(capture.thread.is_alive())
+            self.assertEqual(capture.snapshot(), {"prefix": "x" * 128, "complete": True,
+                "readerError": False, "truncated": True})
+        finally:
+            if child.poll() is None:
+                child.terminate()
+                child.wait(timeout=5)
+            child.stderr.close()
+
+    def test_invalid_utf8_is_reported_without_raising(self):
+        child = subprocess.Popen([sys.executable, "-c", "import os; os.write(2, bytes([255]))"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        capture = BoundedStderr(child.stderr)
+        try:
+            self.assertEqual(child.wait(timeout=10), 0)
+            capture.thread.join(timeout=2)
+            self.assertEqual(capture.snapshot(), {"prefix": "\ufffd", "complete": True,
+                "readerError": False, "truncated": False})
+        finally:
+            if child.poll() is None:
+                child.terminate()
+                child.wait(timeout=5)
+            child.stderr.close()
+
+
+def owned_xvfb_acknowledgement(read_fd, child, capture, result, started):
     import select
+    try:
+        p.require(select.select([read_fd], [], [], 5)[0] == [read_fd], "Owned Xvfb readiness deadline")
+        acknowledgement = os.read(read_fd, 16)
+        p.require(re.fullmatch(rb"[0-9]{1,5}\n", acknowledgement), "Exact Xvfb display-fd acknowledgement required")
+        return acknowledgement
+    except Exception:
+        try:
+            result["startupDiagnostic"] = {"pid": child.pid, "returnCodeBeforeCleanup": child.poll(),
+                "elapsedSeconds": round(time.monotonic() - started, 3), "stderr": capture.snapshot()}
+        except Exception:
+            result["startupDiagnosticUnavailable"] = True
+        raise
+
+
+def finish_stderr_capture(child, capture, result):
+    try:
+        if capture is None:
+            if child is not None and child.stderr is not None:
+                child.stderr.close()
+            return
+        capture.thread.join(timeout=1)
+        result["stderrReaderClosed"] = not capture.thread.is_alive()
+        if result["stderrReaderClosed"]:
+            child.stderr.close()
+        else:
+            result["observerContractPassed"] = False
+        if "startupDiagnostic" in result:
+            result["startupDiagnostic"]["stderrAfterCleanup"] = capture.snapshot()
+    except Exception:
+        result["observerContractPassed"] = False
+        result["stderrCleanupUnavailable"] = True
+
+
+def bounded_observer_receipt(receipt):
+    raw = json.dumps(receipt)
+    if len(raw.encode()) > 16384 and "startupDiagnostic" in receipt:
+        receipt = copy.deepcopy(receipt)
+        receipt.pop("startupDiagnostic")
+        receipt["startupDiagnosticTruncated"] = True
+        raw = json.dumps(receipt)
+    p.require(len(raw.encode()) <= 16384, "Native observer receipt exceeds bound")
+    return raw
+
+
+class XvfbAcknowledgementTests(unittest.TestCase):
+    def test_timeout_preserves_refusal_and_records_precleanup_status(self):
+        child = mock.Mock(pid=42); child.poll.return_value = None
+        capture = mock.Mock(); capture.snapshot.return_value = {"prefix": "not ready", "complete": False,
+            "readerError": False, "truncated": False}
+        result = {}
+        with mock.patch("select.select", return_value=([], [], [])), mock.patch.object(time, "monotonic", return_value=15):
+            with self.assertRaisesRegex(RuntimeError, "Owned Xvfb readiness deadline"):
+                owned_xvfb_acknowledgement(7, child, capture, result, 10)
+        self.assertEqual(result["startupDiagnostic"], {"pid": 42, "returnCodeBeforeCleanup": None,
+            "elapsedSeconds": 5, "stderr": {"prefix": "not ready", "complete": False,
+                "readerError": False, "truncated": False}})
+
+    def test_early_exit_malformed_ack_and_diagnostic_failure_preserve_refusal(self):
+        child = mock.Mock(pid=42); child.poll.return_value = 1
+        capture = mock.Mock(); capture.snapshot.side_effect = ValueError("diagnostic")
+        result = {}
+        with mock.patch("select.select", return_value=([7], [], [])), mock.patch.object(os, "read", return_value=b""):
+            with self.assertRaisesRegex(RuntimeError, "Exact Xvfb display-fd acknowledgement required"):
+                owned_xvfb_acknowledgement(7, child, capture, result, time.monotonic())
+        self.assertEqual(result, {"startupDiagnosticUnavailable": True})
+
+    def test_early_exit_is_reported_without_changing_malformed_ack_refusal(self):
+        child = mock.Mock(pid=42); child.poll.return_value = 1
+        capture = mock.Mock(); capture.snapshot.return_value = {"prefix": "failed", "complete": True,
+            "readerError": False, "truncated": False}
+        result = {}
+        with mock.patch("select.select", return_value=([7], [], [])), mock.patch.object(os, "read", return_value=b""):
+            with self.assertRaisesRegex(RuntimeError, "Exact Xvfb display-fd acknowledgement required"):
+                owned_xvfb_acknowledgement(7, child, capture, result, time.monotonic())
+        self.assertEqual(result["startupDiagnostic"]["returnCodeBeforeCleanup"], 1)
+
+    def test_valid_acknowledgement_does_not_collect_diagnostics(self):
+        result = {}; child = mock.Mock(); capture = mock.Mock()
+        with mock.patch("select.select", return_value=([7], [], [])), mock.patch.object(os, "read", return_value=b"99\n"):
+            self.assertEqual(owned_xvfb_acknowledgement(7, child, capture, result, time.monotonic()), b"99\n")
+        self.assertEqual(result, {}); child.poll.assert_not_called(); capture.snapshot.assert_not_called()
+
+    def test_capture_start_failure_closes_pipe(self):
+        child = mock.Mock(); result = {"refusal": {"message": "original"}}
+        with mock.patch.object(threading.Thread, "start", side_effect=RuntimeError("thread start")):
+            with self.assertRaisesRegex(RuntimeError, "thread start"):
+                BoundedStderr(child.stderr)
+        finish_stderr_capture(child, None, result)
+        child.stderr.close.assert_called_once()
+        self.assertEqual(result["refusal"]["message"], "original")
+
+    def test_reader_still_alive_fails_closed_without_closing_its_pipe(self):
+        child = mock.Mock(); capture = mock.Mock(); capture.thread.is_alive.return_value = True
+        result = {"observerContractPassed": True, "refusal": {"message": "original"}}
+        finish_stderr_capture(child, capture, result)
+        child.stderr.close.assert_not_called()
+        self.assertFalse(result["stderrReaderClosed"])
+        self.assertFalse(result["observerContractPassed"])
+        self.assertEqual(result["refusal"]["message"], "original")
+
+    def test_capture_cleanup_errors_preserve_original_refusal(self):
+        for operation in ("join", "is_alive", "close", "snapshot"):
+            with self.subTest(operation=operation):
+                child = mock.Mock(); capture = mock.Mock(); capture.thread.is_alive.return_value = False
+                target = child.stderr if operation == "close" else capture if operation == "snapshot" else capture.thread
+                getattr(target, operation).side_effect = OSError("failure")
+                result = {"refusal": {"message": "original"}, "startupDiagnostic": {}}
+                finish_stderr_capture(child, capture, result)
+                self.assertEqual(result["refusal"]["message"], "original")
+                self.assertFalse(result["observerContractPassed"])
+                self.assertTrue(result["stderrCleanupUnavailable"])
+
+
+def native_exact_target_fixture():
     import socket
     import struct
     native_exact_target_admission(os.environ, sys.platform, p.platform.machine())
@@ -1578,16 +1771,16 @@ def native_exact_target_fixture():
         "rootHelperSha256": p.HELPERS["native-linux-root-probe.py"], "windowHelperSha256": p.HELPERS["native-unix-window.py"],
         "observerContractPassed": False, "candidateExecuted": False, "inputPermitted": False,
         "migrationAccepted": False, "releaseReady": False, "cases": []}
-    child = x11 = creator = server_identity = None
+    child = x11 = creator = server_identity = stderr_capture = None
     read_fd, write_fd = os.pipe()
+    started = time.monotonic()
     try:
         child = subprocess.Popen([str(binary), "-displayfd", str(write_fd), "-nolisten", "tcp", "-noreset",
             "-screen", "0", "640x480x24", "-screen", "1", "640x480x24"], pass_fds=(write_fd,),
-            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        stderr_capture = BoundedStderr(child.stderr)
         os.close(write_fd); write_fd = None
-        p.require(select.select([read_fd], [], [], 5)[0] == [read_fd], "Owned Xvfb readiness deadline")
-        display_number = os.read(read_fd, 16)
-        p.require(re.fullmatch(rb"[0-9]{1,5}\n", display_number), "Exact Xvfb display-fd acknowledgement required")
+        display_number = owned_xvfb_acknowledgement(read_fd, child, stderr_capture, result, started)
         server_identity = b.native_process(child.pid, helper)
         p.require(server_identity["parentPid"] == os.getpid() and server_identity["uids"] == [os.getuid()] * 4
             and server_identity["executable"] == str(binary) and server_identity["kernelImageSha256"] == image["sha256"]
@@ -1673,6 +1866,8 @@ def native_exact_target_fixture():
         except Exception as error:
             result["observerContractPassed"] = False
             result["cleanupRefusal"] = {"type": type(error).__name__, "message": str(error)[:1000]}
+        finally:
+            finish_stderr_capture(child, stderr_capture, result)
         os.close(read_fd)
         if write_fd is not None: os.close(write_fd)
     return result
@@ -1885,8 +2080,7 @@ if __name__ == "__main__":
             receipt = {"schemaVersion": 1, "scope": "disposable-native-exact-target-observer", "observerContractPassed": False,
                 "candidateExecuted": False, "inputPermitted": False, "migrationAccepted": False, "releaseReady": False,
                 "refusal": {"type": type(error).__name__, "message": str(error)[:1000]}}
-        raw = json.dumps(receipt)
-        p.require(len(raw.encode()) <= 16384, "Native observer receipt exceeds bound")
+        raw = bounded_observer_receipt(receipt)
         print(raw)
         p.require(receipt["observerContractPassed"] is True and receipt.get("ownedServerClosed") is True,
                   "Native exact-target observer fixture refused")
