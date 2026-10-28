@@ -2340,7 +2340,7 @@ class ChangedCaseExportTests(unittest.TestCase):
             (tool / "private-deb017-dea67").write_bytes(b"must not export ELF")
             folder, rows = self.export(runner)
             sources = {row["source"]: row for row in rows if row["source"].startswith(str(tool))}
-            exact = {str(tool / "logs" / (label + "." + suffix)) for label in labels for suffix in ("stdout", "stderr", "json")} | {str(tool / "receipt.json")}
+            exact = {str(tool / "logs" / (label + "." + suffix)) for label in labels for suffix in ("stdout", "stderr", "json")} | {str(tool / "receipt.json"), str(tool / "logs/cargo-output.json")}
             self.assertEqual(set(sources), exact)
             for source in exact:
                 row = sources[source]
@@ -2381,6 +2381,194 @@ class ChangedCaseExportTests(unittest.TestCase):
                     else: os.link(file, tool / "not-exported-link")
                     with self.assertRaisesRegex(RuntimeError, "Bounded owned nonlinked"):
                         self.export(runner)
+
+
+class ChangedCargoCopyTests(unittest.TestCase):
+    @contextmanager
+    def fixture(self, *, linked=True):
+        with tempfile.TemporaryDirectory() as folder, ExitStack() as stack:
+            temporary = Path(folder).resolve(); workspace = temporary / "workspace"; workspace.mkdir()
+            runner = temporary / "runner"; runner.mkdir()
+            root = runner / "native-linux-production-016-actual017-verifier"; root.mkdir(); (root / "logs").mkdir()
+            file = workspace / "src-tauri/target/release/examples/private-deb017-dea67"; file.parent.mkdir(parents=True)
+            raw = bytearray(64); raw[:7] = b"\x7fELF\x02\x01\x01"; raw[18:20] = b"\x3e\x00"; raw = bytes(raw)
+            file.write_bytes(raw)
+            if linked: os.link(file, file.with_name("private-deb017-dea67-hashed"))
+            state = SimpleNamespace(env={"GITHUB_WORKSPACE": str(workspace), "RUNNER_TEMP": str(runner)}, file=file,
+                workspace=workspace, runner=runner, root=root, copied=root / "private-deb017-dea67", raw=raw,
+                modes={}, owners={}, kinds={}, opened=[], fds={})
+            lstat, fstat, opened, closed = Path.lstat, os.fstat, os.open, os.close
+            def modeled(path, info):
+                values = {n: getattr(info, n) for n in dir(info) if n.startswith("st_")}
+                mode = 0o700 if path in (root, root / "logs") else 0o755 if stat.S_ISDIR(info.st_mode) or path in (file, state.copied) else stat.S_IMODE(info.st_mode)
+                values.update(st_uid=state.owners.get(path, 1001), st_gid=1001,
+                    st_mode=state.kinds.get(path, stat.S_IFMT(info.st_mode)) | state.modes.get(path, mode))
+                return SimpleNamespace(**values)
+            def open_file(path, *args, **kwargs):
+                fd = opened(path, *args, **kwargs); state.fds[fd] = Path(path); state.opened.append(Path(path)); return fd
+            def close_file(fd):
+                try: return closed(fd)
+                finally: state.fds.pop(fd, None)
+            stack.enter_context(patch.multiple(C.os, getuid=lambda:1001, geteuid=lambda:1001, create=True))
+            stack.enter_context(patch.object(Path, "lstat", lambda path: modeled(path, lstat(path))))
+            stack.enter_context(patch.object(C.os, "fstat", lambda fd: modeled(state.fds[fd], fstat(fd))))
+            stack.enter_context(patch.object(C.os, "open", side_effect=open_file))
+            stack.enter_context(patch.object(C.os, "close", side_effect=close_file))
+            yield state
+            self.assertFalse(state.fds, "Owned file descriptors must close on success and refusal")
+
+    def test_linked_cargo_output_is_copied_to_exclusive_single_link_elf(self):
+        with self.fixture() as f:
+            self.assertEqual(f.file.lstat().st_nlink, 2)
+            with self.assertRaisesRegex(RuntimeError, "Bounded owned nonlinked"):
+                U.read(f.file, 64 * 1024**2, uid=1001, mode=0o755)
+            opening = C.os.open
+            def observed(path, *args, **kwargs):
+                if Path(path) == f.file:
+                    diagnostic = f.root / "logs/cargo-output.json"
+                    self.assertTrue(diagnostic.exists(), "Stat diagnostic must precede source open")
+                return opening(path, *args, **kwargs)
+            with patch.object(C.os, "open", side_effect=observed):
+                copied, raw = C.changed_copy_cargo_verifier(f.env)
+            self.assertEqual(copied, f.copied); self.assertEqual(raw, f.raw)
+            self.assertEqual(U.read(copied, 64 * 1024**2, uid=1001, mode=0o755), f.raw)
+            self.assertEqual(copied.lstat().st_nlink, 1); self.assertEqual(f.file.lstat().st_nlink, 2)
+            diagnostic = f.root / "logs/cargo-output.json"
+            value = json.loads(diagnostic.read_bytes())
+            self.assertEqual(set(value), {"path", "kind", "mode", "uid", "gid", "nlink", "size", "stamp"})
+            self.assertEqual({k:v for k,v in value.items() if k != "stamp"},
+                dict(path=str(f.file), kind="regular", mode=0o755, uid=1001, gid=1001, nlink=2, size=len(f.raw)))
+            self.assertEqual(stat.S_IMODE(diagnostic.lstat().st_mode), 0o444)
+
+    def test_single_link_cargo_output_also_copies_without_relaxing_global_reader(self):
+        with self.fixture(linked=False) as f:
+            self.assertEqual(C.changed_copy_cargo_verifier(f.env), (f.copied, f.raw))
+            os.link(f.copied, f.root / "private-hardlink")
+            with self.assertRaisesRegex(RuntimeError, "Bounded owned nonlinked"):
+                U.read(f.copied, uid=1001, mode=0o755)
+
+    def test_copy_refuses_foreign_output_or_ancestry_owner(self):
+        for role in ("file", "parent", "workspace", "private", "runner"):
+            with self.subTest(role=role), self.fixture() as f:
+                path = {"file":f.file, "parent":f.file.parent, "workspace":f.workspace, "private":f.root, "runner":f.runner}[role]
+                f.owners[path] = 9999
+                with self.assertRaises(RuntimeError): C.changed_copy_cargo_verifier(f.env)
+                self.assertFalse(f.copied.exists()); self.assertNotIn(f.file, f.opened)
+
+    def test_copy_refuses_source_mode_and_nonprivate_root_and_nonregular_output(self):
+        for defect in ("mode", "private-mode", "directory", "symlink"):
+            with self.subTest(defect=defect), self.fixture() as f:
+                if defect == "mode": f.modes[f.file] = 0o644
+                elif defect == "private-mode": f.modes[f.root] = 0o755
+                elif defect == "directory": f.kinds[f.file] = stat.S_IFDIR
+                else: f.kinds[f.file] = stat.S_IFLNK
+                with self.assertRaises(RuntimeError): C.changed_copy_cargo_verifier(f.env)
+                self.assertFalse(f.copied.exists()); self.assertNotIn(f.file, f.opened)
+
+    def test_copy_refuses_noncanonical_source_root_or_destination_ancestor(self):
+        for key in ("GITHUB_WORKSPACE", "RUNNER_TEMP"):
+            with self.subTest(key=key), self.fixture() as f:
+                original = Path(f.env[key]); f.env[key] = str(original / ".." / original.name)
+                with self.assertRaises(RuntimeError): C.changed_copy_cargo_verifier(f.env)
+                self.assertNotIn(f.file, f.opened)
+        with self.fixture() as f:
+            f.kinds[f.file.parent] = stat.S_IFLNK
+            with self.assertRaises(RuntimeError): C.changed_copy_cargo_verifier(f.env)
+            self.assertNotIn(f.file, f.opened)
+
+    def test_copy_refuses_preexisting_private_output_without_overwrite(self):
+        with self.fixture() as f:
+            f.copied.write_bytes(b"owned but already spent")
+            with self.assertRaises(RuntimeError): C.changed_copy_cargo_verifier(f.env)
+            self.assertEqual(f.copied.read_bytes(), b"owned but already spent")
+
+    def test_copy_refuses_zero_or_overflow_before_source_open(self):
+        for size in (0, 64 * 1024**2 + 1):
+            with self.subTest(size=size), self.fixture() as f:
+                with f.file.open("wb") as stream: stream.truncate(size)
+                with self.assertRaises(RuntimeError): C.changed_copy_cargo_verifier(f.env)
+                self.assertNotIn(f.file, f.opened); self.assertFalse(f.copied.exists())
+
+    def test_copy_refuses_held_descriptor_drift_and_named_file_replacement(self):
+        for defect in ("held", "named"):
+            with self.subTest(defect=defect), self.fixture() as f:
+                original_open, original_lstat = C.os.open, Path.lstat
+                replaced = False
+                def info(path):
+                    value = original_lstat(path)
+                    if path == f.file and replaced:
+                        return SimpleNamespace(**{**vars(value), "st_ino": value.st_ino + 1})
+                    return value
+                def open_file(path, *args, **kwargs):
+                    nonlocal replaced
+                    fd = original_open(path, *args, **kwargs)
+                    if Path(path) == f.file:
+                        if defect == "held": os.link(f.file, f.file.with_name("new-hardlink"))
+                        elif os.name == "nt":
+                            # Windows disallows rename over the open source; model only the named inode boundary.
+                            replaced = True
+                        else:
+                            replacement = f.file.with_name("replacement"); replacement.write_bytes(f.raw); os.replace(replacement, f.file)
+                    return fd
+                with patch.object(Path, "lstat", info), patch.object(C.os, "open", side_effect=open_file), self.assertRaises(RuntimeError):
+                    C.changed_copy_cargo_verifier(f.env)
+                self.assertFalse(f.copied.exists())
+
+    def test_copy_rechecks_source_nlink_and_private_single_link_after_write(self):
+        for defect in ("source-link", "private-link", "parent-drift"):
+            with self.subTest(defect=defect), self.fixture() as f:
+                original_write = U.write
+                def write(path, raw, mode=0o600):
+                    original_write(path, raw, mode)
+                    if path == f.copied:
+                        if defect == "source-link": os.link(f.file, f.file.with_name("new-link"))
+                        elif defect == "private-link": os.link(f.copied, f.root / "new-link")
+                        else: f.modes[f.file.parent] = 0o700
+                with patch.object(U, "write", side_effect=write), self.assertRaises(RuntimeError):
+                    C.changed_copy_cargo_verifier(f.env)
+
+    def test_copy_refuses_short_or_overlong_capture(self):
+        for raw in (b"short", b"x" * 65):
+            with self.subTest(size=len(raw)), self.fixture() as f:
+                with patch.object(C.os, "read", side_effect=[raw, b""]), self.assertRaises(RuntimeError):
+                    C.changed_copy_cargo_verifier(f.env)
+                self.assertFalse(f.copied.exists())
+
+    def test_copy_refuses_non_elf_or_wrong_architecture_before_private_publish(self):
+        for defect in ("format", "architecture"):
+            with self.subTest(defect=defect), self.fixture() as f:
+                raw = bytearray(f.raw)
+                if defect == "format": raw[:2] = b"MZ"
+                else: raw[18:20] = b"\xb7\x00"
+                f.file.write_bytes(raw)
+                with self.assertRaisesRegex(RuntimeError, "ELF"): C.changed_copy_cargo_verifier(f.env)
+                self.assertFalse(f.copied.exists())
+
+    def test_copy_nonroot_role_and_fixed_no_path_callback_api(self):
+        import inspect
+        self.assertEqual(list(inspect.signature(C.changed_copy_cargo_verifier).parameters), ["env"])
+        with patch.multiple(C.os, getuid=lambda:0, geteuid=lambda:0, create=True), patch.object(U, "save") as save:
+            with self.assertRaisesRegex(RuntimeError, "Nonroot"): C.changed_copy_cargo_verifier({})
+            save.assert_not_called()
+
+    def test_builder_keeps_oracles_and_uses_private_copy_only_after_exact_qualification(self):
+        functions = {n.name:n for n in ast.parse(Path(C.__file__).read_bytes()).body if isinstance(n, ast.FunctionDef)}
+        source = ast.unparse(functions["changed_build_installer_verifier"])
+        self.assertIn("((unit, 23), (guards, 6))", source)
+        self.assertLess(source.index("((unit, 23), (guards, 6))"), source.index("changed_copy_cargo_verifier(env)"))
+        self.assertLess(source.index("changed_copy_cargo_verifier(env)"), source.index("command('inspect'"))
+        self.assertNotIn("U.read(built", source); self.assertNotIn("U.write(tool, body", source)
+
+    def test_fixed_runner_cargo_stat_diagnostic_is_exported_without_extra_paths(self):
+        export = ChangedCaseExportTests(methodName="runTest")
+        with export.fixture() as (runner, _, _, tool, _):
+            file = tool / "logs/cargo-output.json"; raw = b'{"path":"fixed-cargo-output","nlink":2}'
+            file.write_bytes(raw); file.chmod(0o444)
+            (tool / "logs/cargo-other.json").write_bytes(b"not admitted")
+            folder, rows = export.export(runner)
+            retained = [row for row in rows if "member" in row]
+            self.assertEqual(len(retained), 1); self.assertEqual(retained[0]["source"], str(file))
+            self.assertEqual((folder / retained[0]["member"]).read_bytes(), raw)
 
 
 class ChangedCaseTransportTests(unittest.TestCase):

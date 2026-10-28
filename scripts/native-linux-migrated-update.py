@@ -1657,6 +1657,62 @@ def changed_verify_inputs(env, original):
     return value, reviewed, transition, donor_review
 
 
+def changed_copy_cargo_verifier(env):
+    """Only the fixed owned Cargo output may have multiple links; the private copy may not."""
+    require(os.getuid() == os.geteuid() and os.getuid() > 0, "Nonroot owned Cargo output copy required")
+    uid = os.getuid()
+    workspace, temporary = Path(env["GITHUB_WORKSPACE"]), Path(env["RUNNER_TEMP"])
+    root = temporary / "native-linux-production-016-actual017-verifier"
+    require(workspace.is_absolute() and temporary.is_absolute() and workspace.resolve(strict=True) == workspace
+            and temporary.resolve(strict=True) == temporary and root.resolve(strict=True) == root,
+            "Canonical fixed Cargo workspace/private verifier root required")
+    file = workspace / "src-tauri/target/release/examples/private-deb017-dea67"
+    copied = root / "private-deb017-dea67"
+    directories = {}
+    for start, bound in ((file.parent, workspace), (root / "logs", temporary)):
+        for parent in (start, *start.parents):
+            info = parent.lstat()
+            require(stat.S_ISDIR(info.st_mode) and not parent.is_symlink() and info.st_uid == uid,
+                    "Owned canonical Cargo/private output ancestry required")
+            if parent == root: require(stat.S_IMODE(info.st_mode) == 0o700, "Private verifier root700 required")
+            directories[parent] = (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid)
+            if parent == bound: break
+        else: raise RuntimeError("Fixed Cargo/private ancestry boundary missing")
+    before = file.lstat()
+    kind = "regular" if stat.S_ISREG(before.st_mode) else "directory" if stat.S_ISDIR(before.st_mode) else "symlink" if stat.S_ISLNK(before.st_mode) else "other"
+    U.save(root / "logs/cargo-output.json", {"path": str(file), "kind": kind, "mode": stat.S_IMODE(before.st_mode),
+        "uid": before.st_uid, "gid": before.st_gid, "nlink": before.st_nlink, "size": before.st_size, "stamp": list(U.stamp(before))}, 0o444)
+    require(stat.S_ISREG(before.st_mode) and not file.is_symlink() and before.st_uid == uid
+            and before.st_nlink >= 1 and stat.S_IMODE(before.st_mode) == 0o755
+            and 0 < before.st_size <= 64 * 1024**2, "Owned bounded Cargo executable required")
+    require(not os.path.lexists(copied), "Exclusive private verifier output required")
+    # Cargo can hardlink the named example to its hashed output. No other reader is relaxed.
+    identity = lambda info: (U.stamp(info), info.st_nlink)
+    fd = os.open(file, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+    try:
+        require(identity(os.fstat(fd)) == identity(before), "Cargo executable changed during open")
+        chunks, total = [], 0
+        while total <= before.st_size:
+            part = os.read(fd, min(1024 * 1024, before.st_size + 1 - total))
+            if not part: break
+            chunks.append(part); total += len(part)
+        require(total == before.st_size and identity(os.fstat(fd)) == identity(before)
+                and identity(file.lstat()) == identity(before), "Cargo executable changed during capture")
+        body = b"".join(chunks)
+        require(body[:7] == b"\x7fELF\x02\x01\x01" and body[18:20] == b"\x3e\x00", "Compiled Linux x86_64 ELF required, not Windows PE")
+        U.write(copied, body, 0o755)
+        require(U.read(copied, 64 * 1024**2, uid=uid, mode=0o755) == body
+                and identity(os.fstat(fd)) == identity(before) and identity(file.lstat()) == identity(before),
+                "Fresh single-link verifier copy or Cargo executable changed")
+        for parent, expected in directories.items():
+            info = parent.lstat()
+            require((info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid) == expected,
+                    "Cargo/private output ancestry changed during copy")
+        return copied, body
+    finally:
+        os.close(fd)
+
+
 def changed_build_installer_verifier(env):
     """Nonroot fixed-example tooling only; never builds or launches the Hub binary."""
     changed_admission(env)
@@ -1730,10 +1786,7 @@ def changed_build_installer_verifier(env):
     guards = command("guards", [compilers["cargo"]["path"], "test", *common, "--example", "private-deb017-dea67-guards", "actual_b017_guard_regressions"], guard_env)
     for raw, count in ((unit, 23), (guards, 6)):
         require(re.search(rb"test result: ok\. " + str(count).encode() + rb" passed; 0 failed; 0 ignored;", raw), "Exact Linux fixture unit/guard test evidence required")
-    built = workspace / "src-tauri/target/release/examples/private-deb017-dea67"
-    body = U.read(built, 64 * 1024**2, mode=0o755)
-    require(body[:7] == b"\x7fELF\x02\x01\x01" and body[18:20] == b"\x3e\x00", "Compiled Linux ELF required, not Windows PE")
-    tool = root / "private-deb017-dea67"; U.write(tool, body, 0o755)
+    tool, body = changed_copy_cargo_verifier(env)
     inspected = changed_fixture_report(command("inspect", [str(tool), "inspect", *arguments], compile_env), "inspect")
     verified = changed_fixture_report(command("verify", [str(tool), "verify", *arguments, str(signed_root)], compile_env), "verify")
     changed_source_receipt(env)
@@ -2438,6 +2491,7 @@ def changed_export(env):
         for label in ("rustup", "cargo-path", "cargo-version", "rustc-path", "rustc-version", "build", "unit", "guards", "inspect", "verify")
         for suffix in ("stdout", "stderr", "json")]
     tool_files.append(tool / "receipt.json")
+    tool_files.append(tool / "logs/cargo-output.json")
     files.extend(tool_files)
     inventory = []
     for index, file in enumerate(files):
