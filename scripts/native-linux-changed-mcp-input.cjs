@@ -57,14 +57,17 @@ function stamp(st) {
   return [st.dev, st.ino, st.mode, st.nlink, st.uid, st.gid, st.size, st.mtimeMs, st.ctimeMs];
 }
 
-function regular(file, limit, { empty = false, owned = false } = {}) {
+function regular(file, limit, { empty = false, owned = false, publicArtifact = false } = {}) {
+  assert.equal(typeof publicArtifact, 'boolean');
+  if (publicArtifact) assert.equal(owned, true);
   assert.equal(fs.realpathSync(file), file);
   const before = fs.lstatSync(file);
   assert.ok(before.isFile() && !before.isSymbolicLink() && before.nlink === 1);
   assert.ok(before.size >= (empty ? 0 : 1) && before.size <= limit);
   if (owned) {
     assert.equal(before.uid, process.getuid());
-    assert.equal(before.mode & 0o7777, 0o600);
+    const mode = before.mode & 0o7777;
+    assert.ok(mode === 0o600 || (publicArtifact && mode === 0o644), 'Exact private or public-artifact mode required');
   }
   const fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
   try {
@@ -142,6 +145,63 @@ function delivery(release, asset, listing, expected) {
     size: expected.zip.size, state: 'uploaded', digest: 'sha256:' + expected.zip.sha256 })) assert.equal(asset[key], value);
 }
 
+function deliveryAPI(raw, p, context, env) {
+  assert.ok(Buffer.isBuffer(raw) && raw.length > 0 && raw.length <= 2 * 1024 * 1024);
+  const value = JSON.parse(raw);
+  assert.ok(value && typeof value === 'object' && !Array.isArray(value));
+  assert.ok(canonical(value).equals(raw), 'Canonical unambiguous delivery API required');
+  assert.deepEqual(Object.keys(value).sort(), ['schemaVersion', 'source', 'run', 'attempt', 'profileSha256',
+    'release', 'asset', 'listing', 'dataOnly', ...Object.keys(FALSE)].sort());
+  assert.equal(value.schemaVersion, 1); assert.equal(value.source, context.sha);
+  assert.ok(Number.isSafeInteger(value.run) && value.run > 0); assert.equal(value.run, context.runId);
+  assert.ok(Number.isSafeInteger(value.attempt) && value.attempt > 0); assert.equal(value.attempt, Number(env.GITHUB_RUN_ATTEMPT));
+  assert.equal(value.profileSha256, PROFILE_SHA); assert.equal(value.dataOnly, true);
+  for (const key of Object.keys(FALSE)) assert.equal(value[key], false);
+  delivery(value.release, value.asset, value.listing, p.deliveries.signedDeb17);
+  return value;
+}
+
+function deliveryArtifact(value, id, context, env) {
+  assert.ok(Number.isSafeInteger(id) && id > 0);
+  assert.equal(value.id, id); assert.equal(value.name, `changed-mcp-delivery-${context.runId}-${env.GITHUB_RUN_ATTEMPT}`);
+  assert.equal(value.expired, false);
+  assert.ok(Number.isSafeInteger(value.size_in_bytes) && value.size_in_bytes > 0 && value.size_in_bytes <= 768 * 1024 * 1024);
+  assert.match(value.digest || '', /^sha256:[a-f0-9]{64}$/);
+  for (const [key, expected] of Object.entries({ id: context.runId, head_sha: context.sha,
+    head_branch: REF.slice('refs/heads/'.length), repository_id: 1364807512, head_repository_id: 1364807512 })) {
+    assert.equal(value.workflow_run[key], expected);
+  }
+}
+
+async function collectDelivery({ github, context, raw, env = process.env }) {
+  admission(context, env);
+  const p = profile(raw);
+  const workspace = fs.realpathSync(env.GITHUB_WORKSPACE);
+  const sourceRaw = canonical(sourceReceipt(workspace, context.sha));
+  assert.equal(hash(sourceRaw), env.CREATOR_CHANGED_MCP_SOURCE_RECEIPT_SHA256, 'Independently reviewed source receipt required');
+  const harnessRun = (await github.rest.actions.getWorkflowRun({ ...REPO, run_id: context.runId })).data;
+  harness(harnessRun, context, env);
+  const release = (await github.rest.repos.getRelease({ ...REPO, release_id: 411494394 })).data;
+  const listing = (await github.rest.repos.listReleaseAssets({ ...REPO, release_id: 411494394, per_page: 100, page: 1 })).data;
+  const expected = p.deliveries.signedDeb17;
+  const asset = (await github.rest.repos.getReleaseAsset({ ...REPO, asset_id: expected.asset })).data;
+  delivery(release, asset, listing, expected);
+  const response = await github.rest.repos.getReleaseAsset({ ...REPO, asset_id: expected.asset,
+    headers: { accept: 'application/octet-stream' } });
+  assert.ok(Buffer.isBuffer(response.data) || response.data instanceof ArrayBuffer);
+  const bytes = Buffer.from(response.data);
+  assert.equal(bytes.length, expected.zip.size); assert.equal(hash(bytes), expected.zip.sha256);
+  const apiRaw = canonical({ schemaVersion: 1, source: context.sha, run: context.runId,
+    attempt: Number(env.GITHUB_RUN_ATTEMPT), profileSha256: PROFILE_SHA,
+    release, asset, listing, dataOnly: true, ...FALSE });
+  deliveryAPI(apiRaw, p, context, env);
+  const output = path.join(fs.realpathSync(env.RUNNER_TEMP), 'native-linux-changed-mcp-delivery');
+  fs.mkdirSync(output, { mode: 0o700 });
+  fs.writeFileSync(path.join(output, 'signedDeb17.zip'), bytes, { flag: 'wx', mode: 0o600 });
+  fs.writeFileSync(path.join(output, 'delivery-api.json'), apiRaw, { flag: 'wx', mode: 0o600 });
+  return { schemaVersion: 1, profileSha256: PROFILE_SHA, dataOnly: true, ...FALSE };
+}
+
 async function run({ github, context, raw, env = process.env }) {
   admission(context, env);
   const p = profile(raw);
@@ -149,7 +209,26 @@ async function run({ github, context, raw, env = process.env }) {
   const source = sourceReceipt(workspace, context.sha);
   const sourceRaw = canonical(source);
   assert.equal(hash(sourceRaw), env.CREATOR_CHANGED_MCP_SOURCE_RECEIPT_SHA256, 'Independently reviewed source receipt required');
+  assert.match(env.CREATOR_CHANGED_MCP_DELIVERY_ARTIFACT || '', /^[1-9][0-9]*$/);
+  const artifactId = Number(env.CREATOR_CHANGED_MCP_DELIVERY_ARTIFACT);
+  assert.ok(Number.isSafeInteger(artifactId));
+  const harnessRun = (await github.rest.actions.getWorkflowRun({ ...REPO, run_id: context.runId })).data;
+  harness(harnessRun, context, env);
+  const transfer = (await github.rest.actions.getArtifact({ ...REPO, artifact_id: artifactId })).data;
+  deliveryArtifact(transfer, artifactId, context, env);
   const temp = fs.realpathSync(env.RUNNER_TEMP);
+  const staged = path.join(temp, 'native-linux-changed-mcp-delivery');
+  assert.equal(fs.realpathSync(staged), staged);
+  const directory = fs.lstatSync(staged);
+  assert.ok(directory.isDirectory() && !directory.isSymbolicLink() && !(directory.mode & 0o022));
+  assert.equal(directory.uid, process.getuid());
+  assert.deepEqual(fs.readdirSync(staged).sort(), ['delivery-api.json', 'signedDeb17.zip']);
+  const observed = deliveryAPI(regular(path.join(staged, 'delivery-api.json'), 2 * 1024 * 1024,
+    { owned: true, publicArtifact: true }), p, context, env);
+  const delivered = regular(path.join(staged, 'signedDeb17.zip'), p.deliveries.signedDeb17.zip.size,
+    { owned: true, publicArtifact: true });
+  assert.equal(delivered.length, p.deliveries.signedDeb17.zip.size);
+  assert.equal(hash(delivered), p.deliveries.signedDeb17.zip.sha256);
   const incoming = path.join(temp, 'native-linux-production-016-input');
   assert.equal(hash(regular(path.join(incoming, 'profile.json'), 16384, { owned: true })), INCOMING_SHA);
   const original = regular(path.join(incoming, 'assembly.zip'), p.artifacts.assembly16.zip.size, { owned: true });
@@ -166,34 +245,25 @@ async function run({ github, context, raw, env = process.env }) {
     };
     producer(proof[role], e);
   }
-  const harnessRun = (await github.rest.actions.getWorkflowRun({ ...REPO, run_id: context.runId })).data;
-  harness(harnessRun, context, env);
-  const release = (await github.rest.repos.getRelease({ ...REPO, release_id: 411494394 })).data;
-  const listing = (await github.rest.repos.listReleaseAssets({ ...REPO, release_id: 411494394, per_page: 100, page: 1 })).data;
-  const e = p.deliveries.signedDeb17;
-  const asset = (await github.rest.repos.getReleaseAsset({ ...REPO, asset_id: e.asset })).data;
-  delivery(release, asset, listing, e);
   const output = path.join(temp, 'native-linux-migrated-update-input');
   fs.mkdirSync(output, { mode: 0o700 });
   const write = (name, bytes) => fs.writeFileSync(path.join(output, name), bytes, { flag: 'wx', mode: 0o600 });
-  for (const role of ['assembly17', 'signedDeb17']) {
-    const expected = role === 'assembly17' ? p.artifacts[role] : e;
-    const response = role === 'assembly17'
-      ? await github.rest.actions.downloadArtifact({ ...REPO, artifact_id: expected.artifact, archive_format: 'zip' })
-      : await github.rest.repos.getReleaseAsset({ ...REPO, asset_id: e.asset, headers: { accept: 'application/octet-stream' } });
-    assert.ok(Buffer.isBuffer(response.data) || response.data instanceof ArrayBuffer);
-    const bytes = Buffer.from(response.data);
-    assert.equal(bytes.length, expected.zip.size); assert.equal(hash(bytes), expected.zip.sha256);
-    write(role + '.zip', bytes);
-  }
+  const expected = p.artifacts.assembly17;
+  const response = await github.rest.actions.downloadArtifact({ ...REPO, artifact_id: expected.artifact, archive_format: 'zip' });
+  assert.ok(Buffer.isBuffer(response.data) || response.data instanceof ArrayBuffer);
+  const bytes = Buffer.from(response.data);
+  assert.equal(bytes.length, expected.zip.size); assert.equal(hash(bytes), expected.zip.sha256);
+  write('assembly17.zip', bytes); write('signedDeb17.zip', delivered);
   write('profile.json', raw); write('source-receipt.json', sourceRaw);
   const acquisition = { schemaVersion: 1, source: context.sha, run: context.runId,
     attempt: Number(env.GITHUB_RUN_ATTEMPT), profileSha256: PROFILE_SHA,
-    sourceReceiptSha256: hash(sourceRaw), harnessRun, proof, release, asset, dataOnly: true, ...FALSE };
+    sourceReceiptSha256: hash(sourceRaw), harnessRun, proof, release: observed.release, asset: observed.asset, dataOnly: true, ...FALSE };
   write('acquisition.json', canonical(acquisition));
   return { schemaVersion: 1, profileSha256: PROFILE_SHA, sourceReceiptSha256: hash(sourceRaw),
-    originalAssembly16Reused: true, downloadedRoles: ['assembly17', 'signedDeb17'], dataOnly: true, ...FALSE };
+    originalAssembly16Reused: true, downloadedRoles: ['assembly17'], stagedDeliveryReused: true,
+    deliveryArtifact: { id: transfer.id, name: transfer.name, size_in_bytes: transfer.size_in_bytes,
+      digest: transfer.digest, workflow_run: transfer.workflow_run }, dataOnly: true, ...FALSE };
 }
 
 module.exports = { PROFILE_SHA, INCOMING_SHA, FALSE, hash, canonical, profile, admission,
-  regular, sourceReceipt, producer, harness, delivery, run };
+  regular, sourceReceipt, producer, harness, delivery, deliveryAPI, deliveryArtifact, collectDelivery, run };

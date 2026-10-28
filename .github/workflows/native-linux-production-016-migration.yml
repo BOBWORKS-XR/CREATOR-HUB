@@ -181,14 +181,19 @@ jobs:
             ${{ runner.temp }}/polkit-stock-policy-preflight.json
             ${{ runner.temp }}/native-exact-target-observer.json
             ${{ runner.temp }}/native-linux-production-016-migration-result/
-  changed_mcp:
+  changed_delivery:
     if: >-
       github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.repository_id == '1364807512' &&
       github.ref == 'refs/heads/validation/native-linux-production-016' && github.event_name == 'workflow_dispatch' &&
       github.workflow_ref == 'BOBWORKS-XR/CREATOR-HUB/.github/workflows/native-linux-production-016-migration.yml@refs/heads/validation/native-linux-production-016' &&
       inputs.execute_migration == true && inputs.continue_changed_mcp == true && inputs.scenario == 'migration-approve'
     runs-on: ubuntu-22.04
-    timeout-minutes: 45
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      actions: read
+    outputs:
+      artifact: ${{ steps.upload.outputs.artifact-id }}
     env:
       CREATOR_NATIVE_LINUX_PRODUCTION_016: '1'
       CREATOR_MIGRATION_016_EXECUTE: ${{ inputs.execute_migration }}
@@ -205,6 +210,68 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: 24.17.0
+      - name: Check exact source before the private data-only request
+        run: |
+          node - <<'JS'
+          const assert = require('node:assert/strict'), fs = require('node:fs');
+          const c = require('./scripts/native-linux-changed-mcp-input.cjs');
+          c.admission({sha:process.env.GITHUB_SHA,runId:Number(process.env.GITHUB_RUN_ID)}, process.env);
+          const receipt = c.canonical(c.sourceReceipt(fs.realpathSync(process.env.GITHUB_WORKSPACE), process.env.GITHUB_SHA));
+          assert.equal(c.hash(receipt), process.env.CREATOR_CHANGED_MCP_SOURCE_RECEIPT_SHA256);
+          JS
+      - name: Test data-only acquisition guards without executing any package
+        run: node --test scripts/native-linux-changed-mcp-input.test.cjs
+      - name: Read the exact private draft carrier; no extraction or native authority
+        uses: actions/github-script@v8
+        with:
+          retries: 0
+          script: |
+            const fs = require('node:fs'), path = require('node:path');
+            const lane = require(path.join(process.env.GITHUB_WORKSPACE, 'scripts/native-linux-changed-mcp-input.cjs'));
+            const raw = fs.readFileSync(path.join(process.env.GITHUB_WORKSPACE, 'scripts/fixtures/native-linux-changed-mcp-profile.json'));
+            await lane.collectDelivery({github, context, raw});
+            core.info(JSON.stringify({dataOnly:true,profileSha256:lane.PROFILE_SHA}));
+      - uses: actions/upload-artifact@v4
+        id: upload
+        with:
+          name: changed-mcp-delivery-${{ github.run_id }}-${{ github.run_attempt }}
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
+          path: |
+            ${{ runner.temp }}/native-linux-changed-mcp-delivery/signedDeb17.zip
+            ${{ runner.temp }}/native-linux-changed-mcp-delivery/delivery-api.json
+  changed_mcp:
+    needs: changed_delivery
+    if: >-
+      github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.repository_id == '1364807512' &&
+      github.ref == 'refs/heads/validation/native-linux-production-016' && github.event_name == 'workflow_dispatch' &&
+      github.workflow_ref == 'BOBWORKS-XR/CREATOR-HUB/.github/workflows/native-linux-production-016-migration.yml@refs/heads/validation/native-linux-production-016' &&
+      inputs.execute_migration == true && inputs.continue_changed_mcp == true && inputs.scenario == 'migration-approve'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      actions: read
+    env:
+      CREATOR_NATIVE_LINUX_PRODUCTION_016: '1'
+      CREATOR_MIGRATION_016_EXECUTE: ${{ inputs.execute_migration }}
+      CREATOR_MIGRATION_016_SCENARIO: ${{ inputs.scenario }}
+      CREATOR_MIGRATED_UPDATE_EXECUTE: ${{ inputs.continue_changed_mcp }}
+      CREATOR_CHANGED_MCP_SOURCE_RECEIPT_SHA256: ${{ inputs.source_receipt_sha256 }}
+      CREATOR_CHANGED_MCP_DELIVERY_ARTIFACT: ${{ needs.changed_delivery.outputs.artifact }}
+      UPDATE_EXECUTE: ${{ inputs.continue_changed_mcp }}
+      UPDATE_SCENARIO: deb-approve
+      UPDATE_PROFILE_SHA256: 1fd56c76f100422e2c380e19cfc5dfb9da4ecf05a6348efdba99bbaebb5cd792
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24.17.0
+      - name: Bind exact controller Node before any fallible preflight or acquisition
+        run: printf 'CONTROLLER_NODE=%s\n' "$(realpath "$(command -v node)")" >> "$GITHUB_ENV"
       - name: Reject a changed checkout before downloads or provisioning
         run: |
           node - <<'JS'
@@ -234,6 +301,12 @@ jobs:
           "$PREFLIGHT_PYTHON" -I -S -B scripts/native-linux-production-016-update.test.py
           "$PREFLIGHT_PYTHON" -I -S -B scripts/native-linux-migrated-update.test.py
           node --test scripts/linux-update-lab-feed.test.cjs scripts/linux-update-lab-feed-changed-mcp.test.cjs
+      - name: Download only this run's verified private delivery data
+        uses: actions/download-artifact@v5
+        with:
+          artifact-ids: ${{ needs.changed_delivery.outputs.artifact }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/native-linux-changed-mcp-delivery
       - name: Acquire original migration inputs once through unchanged admission
         uses: actions/github-script@v8
         env:
@@ -260,8 +333,6 @@ jobs:
         run: |
           python3 -B scripts/native-linux-production-016-stage.py
           python3 -B scripts/native-linux-production-016-migration.py
-      - name: Bind exact controller Node for the continuation
-        run: printf 'CONTROLLER_NODE=%s\n' "$(realpath "$(command -v node)")" >> "$GITHUB_ENV"
       - name: Install only disposable native runtime and test-tool build dependencies
         run: |
           sudo apt-get update
@@ -287,8 +358,12 @@ jobs:
         with:
           workspaces: src-tauri
           shared-key: native-linux-test-tools
+          cache-on-failure: true
       - name: Build locked WebDriver tooling, never the product
         run: cargo install tauri-driver --version 2.1.0 --locked --root "$RUNNER_TEMP/native-linux-production-016-driver"
+      - name: Prepare only the reviewed verifier test binaries for bounded qualification
+        timeout-minutes: 15
+        run: cargo test --release --locked --no-default-features --jobs 2 --manifest-path src-tauri/Cargo.toml --target-dir src-tauri/target --example private-deb017-dea67 --example private-deb017-dea67-guards --no-run
       - name: Qualify metadata and whole-installer verifiers before native intent
         run: |
           /usr/bin/python3 -I -S -B - <<'PY'

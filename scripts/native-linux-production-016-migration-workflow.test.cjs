@@ -15,7 +15,7 @@ test('exact validation-branch push registers the workflow but execution remains 
   assert.deepEqual(Object.keys(workflow.on).sort(), ['push', 'workflow_dispatch']);
   assert.deepEqual(workflow.on.push, { branches: ['validation/native-linux-production-016'] });
   assert.deepEqual(workflow.permissions, { contents: 'read', actions: 'read' });
-  assert.deepEqual(Object.keys(workflow.jobs), ['migration', 'changed_mcp']);
+  assert.deepEqual(Object.keys(workflow.jobs), ['migration', 'changed_delivery', 'changed_mcp']);
   const inputs = workflow.on.workflow_dispatch.inputs;
   assert.deepEqual(Object.keys(inputs), ['profile', 'scenario', 'execute_migration', 'continue_changed_mcp', 'source_receipt_sha256']);
   assert.equal(inputs.execute_migration.type, 'boolean');
@@ -149,7 +149,8 @@ test('unchanged production API/offline gate precedes any candidate execution or 
   assert.ok(index('sudo apt-get') < index("str(source), 'broker'"));
   assert.match(source, /npm ci --prefix modules\/mcp --ignore-scripts/);
   assert.match(source, /cargo install tauri-driver --version 2\.1\.0 --locked/);
-  assert.doesNotMatch(source, /build:unified|cargo (?:build|run)|gh release|contents: write|actions: write|continue-on-error|flatpak install/);
+  assert.equal(workflow.jobs.migration.permissions, undefined);
+  assert.doesNotMatch(JSON.stringify(workflow.jobs.migration), /build:unified|cargo (?:build|run)|gh release|actions: write|continue-on-error|flatpak install/);
 });
 
 test('inline Python and Bash parse and artifact exports have an explicit bounded safe list', () => {
@@ -206,16 +207,19 @@ test('changed-payload job has only the exact opted-in conjunction and excludes r
   assert.equal(accepts({ ...github, event_name: 'push' }, input), false);
   assert.equal(job['runs-on'], 'ubuntu-22.04'); assert.equal(job.strategy, undefined);
   assert.equal(job.env.CREATOR_CHANGED_MCP_SOURCE_RECEIPT_SHA256, '${{ inputs.source_receipt_sha256 }}');
+  assert.equal(job.needs, 'changed_delivery');
+  assert.deepEqual(job.permissions, { contents: 'read', actions: 'read' });
+  assert.equal(job.env.CREATOR_CHANGED_MCP_DELIVERY_ARTIFACT, '${{ needs.changed_delivery.outputs.artifact }}');
   assert.equal(job.env.UPDATE_PROFILE_SHA256, '1fd56c76f100422e2c380e19cfc5dfb9da4ecf05a6348efdba99bbaebb5cd792');
 });
 
 test('changed-payload source, input, fixture, verifiers, migration and continuation are ordered', () => {
   const steps = workflow.jobs.changed_mcp.steps;
   const named = prefix => steps.findIndex(step => step.name?.startsWith(prefix));
-  const order = ['Reject a changed', 'Complete affected', 'Acquire original migration',
+  const order = ['Bind exact controller', 'Reject a changed', 'Complete affected', 'Download only this run', 'Acquire original migration',
     'Acquire only original successor', 'Inspect original migration', 'Install only disposable',
     'Native exact-target', 'Install only the locked SDK', 'Build locked WebDriver',
-    'Qualify metadata', 'Check stock policy', 'Seal continuation intent', 'Run the original migration',
+    'Prepare only the reviewed verifier', 'Qualify metadata', 'Check stock policy', 'Seal continuation intent', 'Run the original migration',
     'Signed changed-payload', 'Export bounded evidence', 'Preserve original failures'];
   let prior = -1;
   for (const name of order) { const next = named(name); assert.ok(next > prior, name); prior = next; }
@@ -232,6 +236,9 @@ test('changed-payload source, input, fixture, verifiers, migration and continuat
   assert.match(acquire[0].with.script, /8f3b6a07c0e7a93213a95782e9d5fac0a20026813faf493b033d8cbab72fcbc4/);
   assert.ok(acquire[0].with.script.indexOf('assert.equal(incoming.length') < acquire[0].with.script.indexOf('await lane.run'));
   assert.match(acquire[1].with.script, /native-linux-changed-mcp-input\.cjs/);
+  const downloaded = steps.find(step => step.uses === 'actions/download-artifact@v5');
+  assert.deepEqual(downloaded.with, { 'artifact-ids': '${{ needs.changed_delivery.outputs.artifact }}',
+    'merge-multiple': true, path: '${{ runner.temp }}/native-linux-changed-mcp-delivery' });
   assert.match(steps[named('Qualify metadata')].run, /m\.U\.build_offline_verifier\(os\.environ\)/);
   assert.match(steps[named('Qualify metadata')].run, /m\.changed_build_installer_verifier\(os\.environ\)/);
   const fixture = steps[named('Native exact-target')];
@@ -240,6 +247,10 @@ test('changed-payload source, input, fixture, verifiers, migration and continuat
   const cache = steps.find(step => step.uses === 'Swatinem/rust-cache@v2');
   assert.equal(cache.with.workspaces, 'src-tauri');
   assert.equal(cache.with['shared-key'], 'native-linux-test-tools');
+  assert.equal(cache.with['cache-on-failure'], true);
+  const prepared = steps[named('Prepare only the reviewed verifier')];
+  assert.equal(prepared['timeout-minutes'], 15);
+  assert.equal(prepared.run.trim(), 'cargo test --release --locked --no-default-features --jobs 2 --manifest-path src-tauri/Cargo.toml --target-dir src-tauri/target --example private-deb017-dea67 --example private-deb017-dea67-guards --no-run');
   assert.doesNotMatch(steps.map(step => step.run || '').join('\n'), /cargo (?:build|run)|build:unified|gh release|flatpak install|\|\||set \+e/);
 });
 
@@ -277,5 +288,43 @@ test('changed-payload evidence retains failures without publishing or uploading 
   assert.match(upload.with.path, /source-receipt\.json/);
   assert.match(upload.with.path, /acquisition\.json/);
   assert.doesNotMatch(upload.with.path, /assembly\d*\.zip|signedDeb17\.zip|\.deb|auth\.json|catalog\.key/);
-  assert.doesNotMatch(source, /contents: write|actions: write|gh release|publish-hub|continue-on-error|secrets\./);
+  assert.doesNotMatch(JSON.stringify(workflow.jobs.changed_mcp), /actions: write|gh release|publish-hub|continue-on-error|secrets\./);
+  assert.deepEqual(Object.entries(workflow.jobs).filter(([, job]) => job.permissions?.contents === 'write').map(([name]) => name), ['changed_delivery']);
+});
+
+test('draft access is confined to a separate data-only job with no package execution', () => {
+  const job = workflow.jobs.changed_delivery;
+  assert.equal(job.if.trim(), workflow.jobs.changed_mcp.if.trim());
+  assert.deepEqual(job.permissions, { contents: 'write', actions: 'read' });
+  assert.equal(job['runs-on'], 'ubuntu-22.04'); assert.equal(job['timeout-minutes'], 10);
+  assert.equal(job.outputs.artifact, '${{ steps.upload.outputs.artifact-id }}');
+  assert.equal(job.env.CREATOR_CHANGED_MCP_SOURCE_RECEIPT_SHA256, '${{ inputs.source_receipt_sha256 }}');
+  assert.equal(job.env.CREATOR_CHANGED_MCP_DELIVERY_ARTIFACT, undefined);
+  assert.equal(job.steps.length, 6);
+  assert.equal(job.steps[0].uses, 'actions/checkout@v6');
+  assert.equal(job.steps[0].with['persist-credentials'], false);
+  assert.match(job.steps[2].run, /c\.sourceReceipt\(/);
+  assert.match(job.steps[3].run, /^node --test scripts\/native-linux-changed-mcp-input\.test\.cjs$/);
+  const api = job.steps[4];
+  assert.equal(api.uses, 'actions/github-script@v8'); assert.equal(api.with.retries, 0);
+  assert.match(api.with.script, /await lane\.collectDelivery\(\{github, context, raw\}\)/);
+  assert.doesNotMatch(api.with.script, /lane\.run\(|post|createRelease|updateRelease|deleteRelease|uploadRelease/);
+  const uploader = job.steps[5]; assert.equal(uploader.uses, 'actions/upload-artifact@v4');
+  assert.equal(uploader.with.name, 'changed-mcp-delivery-${{ github.run_id }}-${{ github.run_attempt }}');
+  assert.equal(uploader.with['compression-level'], 0); assert.equal(uploader.with['if-no-files-found'], 'error');
+  assert.deepEqual(uploader.with.path.trim().split('\n'), [
+    '${{ runner.temp }}/native-linux-changed-mcp-delivery/signedDeb17.zip',
+    '${{ runner.temp }}/native-linux-changed-mcp-delivery/delivery-api.json',
+  ]);
+  for (const step of job.steps) {
+    assert.doesNotMatch(step.run || '', /sudo|cargo|npm|python|\.deb|unzip|tar |chmod|chown|GITHUB_ENV|GITHUB_PATH/);
+    assert.equal(step['continue-on-error'], undefined);
+    if (step.run) {
+      assert.ok(!step.run.includes('${{'));
+      cp.execFileSync(process.platform === 'win32' ? 'C:/Program Files/Git/bin/bash.exe' : '/bin/bash', ['-n'],
+        { input: step.run, encoding: 'utf8', timeout: 10000, maxBuffer: 65536 });
+    }
+  }
+  const { Script } = require('node:vm'); new Script('(async () => {\n' + api.with.script + '\n})');
+  assert.equal(workflow.permissions.contents, 'read');
 });
