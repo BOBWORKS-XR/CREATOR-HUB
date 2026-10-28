@@ -136,6 +136,77 @@ test('query prefers a relevant section and exact path continuation preserves eve
   assert.equal(collected, normalized);
 });
 
+test('query excerpt includes a sole term beyond the initial escaped-byte budget', async () => {
+  const text = '# API Reference\n' + 'Unrelated introduction. '.repeat(200) +
+    '\nSetSpaceState is the requested method.\n' + 'Quoted "text", \\ escapes and \u{1f600}.\n'.repeat(300);
+  const { state, lookup } = fixture({ pages: { 'reference/state-api.md': text }, sidebar: '- [SetSpaceState](/reference/state-api.md)' });
+  const result = await lookup({ query: 'SetSpaceState', limit: 1 });
+  assert.equal(result.success, true);
+  const entry = result.entries[0];
+  assert.match(entry.text, /SetSpaceState/);
+  assert.ok(entry.startOffset > 0);
+  assert.ok(entry.startOffset <= text.indexOf('SetSpaceState'));
+  assert.ok(entry.startOffset + entry.text.length >= text.indexOf('SetSpaceState') + 'SetSpaceState'.length);
+  assert.equal(entry.text, text.slice(entry.startOffset, entry.startOffset + entry.text.length));
+  assert.equal(entry.nextOffset, entry.startOffset + entry.text.length);
+  assert.equal(entry.contentHash, hash(text));
+  assert.ok(Buffer.byteLength(JSON.stringify(entry.text)) <= 2048);
+  assert.ok(Buffer.byteLength(JSON.stringify(result)) <= REFERENCE_RESPONSE_MAX_BYTES);
+  assert.equal(state.requests.length, 3);
+});
+
+test('query excerpt preserves the existing excerpt when it already contains a term', async () => {
+  const text = '# API Reference\nSetSpaceState is documented here.\n' + 'More context. '.repeat(400);
+  const { state, lookup } = fixture({ pages: { 'reference/state-api.md': text }, sidebar: '- [SetSpaceState](/reference/state-api.md)' });
+  const original = (await lookup({ path: 'reference/state-api.md' })).entries[0];
+  const result = await lookup({ query: 'SetSpaceState', limit: 1 });
+  assert.equal(result.success, true);
+  assert.equal(result.entries[0].startOffset, original.startOffset);
+  assert.equal(result.entries[0].text, original.text);
+  assert.equal(result.entries[0].nextOffset, original.nextOffset);
+  assert.equal(result.entries[0].contentHash, original.contentHash);
+  assert.equal(result.networkRequests, 0);
+  assert.equal(state.requests.length, 3);
+});
+
+test('query excerpt retains Unicode boundaries, selected section and exact continuation', async () => {
+  const prefix = '# API Reference\n' + '"\\'.repeat(1800) + '\n';
+  const context = '\u{1f600}' + '"\\'.repeat(63) + 'x';
+  const normalized = prefix + context + 'SetSpaceState is here.\nSmall tail.\n## Following\n' +
+    'Quoted "text", \\ escapes and \u{1f600}.\n'.repeat(350);
+  const raw = normalized.replace(/\n/g, '\r\n');
+  const { state, lookup } = fixture({ pages: { 'reference/state-api.md': raw }, sidebar: '- [SetSpaceState](/reference/state-api.md)' });
+  const result = await lookup({ query: 'SetSpaceState', limit: 1 });
+  assert.equal(result.success, true);
+  const first = result.entries[0];
+  // A 128-character lookbehind lands on the low surrogate; keep the pair.
+  assert.equal(first.startOffset, prefix.length);
+  assert.match(first.text, /^\u{1f600}/u);
+  assert.match(first.text, /SetSpaceState/);
+  assert.equal(first.nextOffset, normalized.indexOf('\n## Following'));
+  assert.equal(first.text.includes('## Following'), false);
+  assert.equal(first.contentHash, hash(raw));
+  let collected = first.text, offset = first.nextOffset;
+  for (let n = 0; offset !== null; n++) {
+    assert.ok(n < 30);
+    const continued = await lookup({ path: first.path, revision: result.revision, contentHash: first.contentHash, startOffset: offset });
+    assert.equal(continued.success, true, continued.error);
+    const entry = continued.entries[0];
+    assert.equal(entry.startOffset, offset);
+    assert.equal(entry.text, normalized.slice(offset, offset + entry.text.length));
+    assert.doesNotMatch(entry.text, /^[\uDC00-\uDFFF]|[\uD800-\uDBFF]$/);
+    assert.ok(Buffer.byteLength(JSON.stringify(entry.text)) <= 2048);
+    assert.ok(Buffer.byteLength(JSON.stringify(continued)) <= REFERENCE_RESPONSE_MAX_BYTES);
+    assert.equal(continued.revision, result.revision);
+    assert.equal(entry.contentHash, first.contentHash);
+    assert.equal(continued.networkRequests, 0);
+    collected += entry.text;
+    offset = entry.nextOffset;
+  }
+  assert.equal(collected, normalized.slice(first.startOffset));
+  assert.equal(state.requests.length, 3);
+});
+
 test('stale revisions and wrong hashes refuse continuation, never substitute offline text', async () => {
   const { state, lookup } = fixture();
   const initial = await lookup({ path: 'reference/session-relay.md' });
