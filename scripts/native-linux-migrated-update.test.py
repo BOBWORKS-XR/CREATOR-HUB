@@ -103,6 +103,205 @@ class RefusedProcessObservationTests(unittest.TestCase):
                 child.wait(timeout=5)
 
 
+@unittest.skipUnless(hasattr(C.select, "poll") and hasattr(os, "pidfd_open"), "Linux pidfd only")
+class FixtureReapingKernelTests(unittest.TestCase):
+    def test_exit_notification_does_not_imply_reaping(self):
+        child = C.subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.buffer.read()"],
+            stdin=C.subprocess.PIPE, stdout=C.subprocess.DEVNULL, stderr=C.subprocess.DEVNULL)
+        procfd = pidfd = None
+        try:
+            helper = U.load("native-unix-window")
+            path = Path("/proc") / str(child.pid)
+            procfd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+            pidfd = os.pidfd_open(child.pid, 0)
+            with patch.object(M, "UID", os.getuid()):
+                origin = M.inventory_process_snapshot(procfd, path, child.pid, helper)
+                child.stdin.close()
+                poller = C.select.poll(); poller.register(pidfd, C.select.POLLIN)
+                self.assertTrue(poller.poll(5000))
+                first = M.inventory_process_snapshot(procfd, path, child.pid, helper)
+                second = M.inventory_process_snapshot(procfd, path, child.pid, helper)
+                proof = M.inventory_terminal_record(child.pid, origin, first, second)
+                self.assertEqual(proof["classification"], "terminal")
+                self.assertEqual(first["state"], "Z")
+            self.assertEqual(child.wait(timeout=5), 0)
+            self.assertFalse(path.exists())
+        finally:
+            if procfd is not None: os.close(procfd)
+            if pidfd is not None: os.close(pidfd)
+            if not child.stdin.closed: child.stdin.close()
+            if child.poll() is None:
+                child.terminate()
+                child.wait(timeout=5)
+
+
+class FixtureQuiescenceTests(unittest.TestCase):
+    def setUp(self):
+        self.rows = [{"pid": pid, "startTime": str(pid + 1), "executable": "/usr/lib/systemd/systemd",
+            "argvSha256": str(pid - 1000) * 64, "legacyBackend": False} for pid in (1000, 1001)]
+        self.initial = {"processes": self.rows, "terminalProcesses": []}
+        self.empty = {"processes": [], "terminalProcesses": []}
+        request = {"schemaVersion": 1, "operation": "global-uid-inventory", "harnessSource": "a" * 40,
+            "scenario": "migration-approve", "sequence": 1, "nonce": "b" * 64}
+        self.prior = {"scope": "production-016-disposable-migration", "scenario": "migration-approve",
+            "scenarioPassed": True, "fixtureRelocked": True, "harnessSource": "a" * 40,
+            "sessionWrapper": {"returnCode": 0, "deadlineExpired": False,
+                "pipes": {name: {"eof": True, "truncated": False} for name in ("stdout", "stderr")}},
+            "lastInventory": {"request": request, "ok": True, "processes": copy.deepcopy(self.rows), "terminalProcesses": []}}
+
+    def test_only_original_completed_manager_pair_is_eligible(self):
+        self.assertEqual(set(C.fixture_quiescence_validate(self.initial, self.prior)), {1000, 1001})
+        for mutation in ("new_actor", "changed_start", "unfinished_wrapper", "terminal"):
+            with self.subTest(mutation=mutation):
+                initial, prior = copy.deepcopy(self.initial), copy.deepcopy(self.prior)
+                if mutation == "new_actor": initial["processes"][0]["pid"] = 999
+                if mutation == "changed_start": initial["processes"][0]["startTime"] = "999"
+                if mutation == "unfinished_wrapper": prior["sessionWrapper"]["returnCode"] = 1
+                if mutation == "terminal": initial["terminalProcesses"] = [{}]
+                with self.assertRaises(RuntimeError): C.fixture_quiescence_validate(initial, prior)
+
+    def test_empty_inventory_needs_no_observation(self):
+        with patch.object(C, "_fixture_quiescence_properties") as properties:
+            self.assertEqual(C.fixture_quiescence(self.empty, {}, Mock(), Mock()), self.empty)
+            properties.assert_not_called()
+
+    @unittest.skipUnless(hasattr(C.select, "poll") and hasattr(os, "pidfd_open"), "Linux pidfd only")
+    def test_foreign_unit_or_live_session_refuses_before_opening_any_pidfd(self):
+        valid = {"Id": "user@21314.service", "LoadState": "loaded", "User": "21314", "PAMName": "systemd-user",
+            "MainPID": "1000", "InvocationID": "c" * 32, "ControlGroup": "/user.slice/user-21314.slice/user@21314.service",
+            "ActiveState": "active", "SubState": "running"}
+        user = {"UID": "21314", "Linger": "no", "Sessions": "", "State": "closing"}
+        for mutation in ("foreign_main", "foreign_group", "missing_invocation", "live_session", "linger"):
+            with self.subTest(mutation=mutation):
+                unit, state = copy.deepcopy(valid), copy.deepcopy(user)
+                if mutation == "foreign_main": unit["MainPID"] = "2222"
+                if mutation == "foreign_group": unit["ControlGroup"] = "/unrelated"
+                if mutation == "missing_invocation": unit["InvocationID"] = ""
+                if mutation == "live_session": state["Sessions"] = "c1"
+                if mutation == "linger": state["Linger"] = "yes"
+                with patch.object(C, "_fixture_quiescence_properties", side_effect=[unit, state]), \
+                        patch.object(C.os, "pidfd_open") as open_pid:
+                    with self.assertRaises(RuntimeError): C.fixture_quiescence(self.initial, self.prior, Mock(), Mock())
+                open_pid.assert_not_called()
+
+    @unittest.skipUnless(hasattr(C.select, "poll") and hasattr(os, "pidfd_open"), "Linux pidfd only")
+    def test_bound_exit_then_zombie_then_empty_requires_unfiltered_inventory(self):
+        unit = {"Id": "user@21314.service", "LoadState": "loaded", "User": "21314", "PAMName": "systemd-user",
+            "MainPID": "1000", "InvocationID": "c" * 32, "ControlGroup": "/user.slice/user-21314.slice/user@21314.service",
+            "ActiveState": "active", "SubState": "running"}
+        user = {"UID": "21314", "Linger": "no", "Sessions": "", "State": "closing"}
+        snapshots = {pid: {"pid": pid, "startTime": str(pid + 1), "parentPid": 1 if pid == 1000 else 1000,
+            "state": "S", "Uid": [M.UID] * 4, "Gid": [M.UID] * 4, "procDirectory": {"ino": pid}}
+            for pid in (1000, 1001)}
+        zombie = {**snapshots[1001], "parentPid": 1, "state": "Z"}
+        terminal = {"pid": 1001, "classification": "terminal", "origin": zombie, "before": zombie, "after": zombie}
+        poller = Mock(); poller.poll.side_effect = [[], [], [], [(71, C.select.POLLIN)], [], [],
+            [(72, C.select.POLLIN)], [], [], []]
+        calls = {1000: 0, 1001: 0}
+        def actor(row, *_):
+            pid = row["pid"]; calls[pid] += 1
+            value = dict(snapshots[pid])
+            if pid == 1001 and calls[pid] >= 3: value["parentPid"] = 1
+            return value
+        evidence = {}
+        with patch.object(C, "_fixture_quiescence_properties", side_effect=[unit, user, unit]), \
+                patch.object(Path, "lstat", return_value=SimpleNamespace(st_uid=0, st_gid=0, st_mode=stat.S_IFREG | 0o755)), \
+                patch.object(M, "read_file", return_value=b"protected"), patch.object(C.os, "pidfd_open", side_effect=[71, 72]), \
+                patch.object(C.os, "open", side_effect=[81, 82]), patch.object(C.os, "close") as close, \
+                patch.object(C, "_fixture_quiescence_actor", side_effect=actor), \
+                patch.object(M, "native_process_inventory", side_effect=[self.initial, {"processes": [self.rows[1]], "terminalProcesses": []},
+                    {"processes": [], "terminalProcesses": [terminal]}, self.empty]), \
+                patch.object(M, "inventory_terminal_record", return_value=terminal), patch.object(C.select, "poll", return_value=poller):
+            final = C.fixture_quiescence(self.initial, self.prior, Mock(), Mock(), evidence=evidence)
+        self.assertEqual(final, self.empty); self.assertEqual(close.call_count, 4)
+        self.assertIn("pam-reparented", [row["event"] for row in evidence["fixtureQuiescence"]["events"]])
+
+    @unittest.skipUnless(hasattr(C.select, "poll") and hasattr(os, "pidfd_open"), "Linux pidfd only")
+    def test_new_actor_refuses_and_records_reason_without_authority(self):
+        unit = {"Id": "user@21314.service", "LoadState": "loaded", "User": "21314", "PAMName": "systemd-user",
+            "MainPID": "1000", "InvocationID": "c" * 32, "ControlGroup": "/user.slice/user-21314.slice/user@21314.service",
+            "ActiveState": "active", "SubState": "running"}
+        user = {"UID": "21314", "Linger": "no", "Sessions": "", "State": "closing"}
+        snapshots = {pid: {"pid": pid, "startTime": str(pid + 1), "parentPid": 1 if pid == 1000 else 1000,
+            "state": "S", "Uid": [M.UID] * 4, "Gid": [M.UID] * 4, "procDirectory": {"ino": pid}}
+            for pid in (1000, 1001)}
+        extra = {"processes": self.rows + [{"pid": 1002}], "terminalProcesses": []}
+        poller = Mock(); poller.poll.return_value = []
+        evidence = {}
+        with patch.object(C, "_fixture_quiescence_properties", side_effect=[unit, user, unit]), \
+                patch.object(Path, "lstat", return_value=SimpleNamespace(st_uid=0, st_gid=0, st_mode=stat.S_IFREG | 0o755)), \
+                patch.object(M, "read_file", return_value=b"protected"), patch.object(C.os, "pidfd_open", side_effect=[71, 72]), \
+                patch.object(C.os, "open", side_effect=[81, 82]), patch.object(C.os, "close") as close, \
+                patch.object(C, "_fixture_quiescence_actor", side_effect=lambda row, *_: snapshots[row["pid"]]), \
+                patch.object(M, "native_process_inventory", return_value=extra), patch.object(C.select, "poll", return_value=poller):
+            with self.assertRaisesRegex(RuntimeError, "Unknown live fixture actor"):
+                C.fixture_quiescence(self.initial, self.prior, Mock(), Mock(), evidence=evidence)
+        self.assertEqual(close.call_count, 4)
+        self.assertEqual(evidence["fixtureQuiescence"]["status"], "refused")
+        self.assertFalse(evidence["fixtureQuiescence"]["authorityGranted"])
+
+    @unittest.skipUnless(hasattr(C.select, "poll") and hasattr(os, "pidfd_open"), "Linux pidfd only")
+    def test_partial_pidfd_failure_closes_bound_handles_and_refuses(self):
+        unit = {"Id": "user@21314.service", "LoadState": "loaded", "User": "21314", "PAMName": "systemd-user",
+            "MainPID": "1000", "InvocationID": "c" * 32, "ControlGroup": "/user.slice/user-21314.slice/user@21314.service",
+            "ActiveState": "active", "SubState": "running"}
+        user = {"UID": "21314", "Linger": "no", "Sessions": "", "State": "closing"}
+        snapshot = {"pid": 1000, "startTime": "1001", "parentPid": 1, "state": "S", "Uid": [M.UID] * 4,
+            "Gid": [M.UID] * 4, "procDirectory": {"ino": 1000}}
+        evidence = {}
+        with patch.object(C, "_fixture_quiescence_properties", side_effect=[unit, user]), \
+                patch.object(Path, "lstat", return_value=SimpleNamespace(st_uid=0, st_gid=0, st_mode=stat.S_IFREG | 0o755)), \
+                patch.object(M, "read_file", return_value=b"protected"), \
+                patch.object(C.os, "pidfd_open", side_effect=[71, OSError("pidfd failed")]), \
+                patch.object(C.os, "open", return_value=81), patch.object(C.os, "close") as close, \
+                patch.object(C, "_fixture_quiescence_actor", return_value=snapshot):
+            with self.assertRaisesRegex(OSError, "pidfd failed"):
+                C.fixture_quiescence(self.initial, self.prior, Mock(), Mock(), evidence=evidence)
+        self.assertEqual({call.args[0] for call in close.call_args_list}, {71, 81})
+        self.assertEqual(evidence["fixtureQuiescence"]["status"], "refused")
+        self.assertFalse(evidence["fixtureQuiescence"]["authorityGranted"])
+
+
+@unittest.skipUnless(hasattr(C.select, "poll") and Path("/usr/bin/systemctl").is_file(), "Linux systemd tool only")
+class FixturePropertyReaderTests(unittest.TestCase):
+    def run_client(self, output, stderr="", status=0):
+        spawn = C.subprocess.Popen
+        invoked, children = [], []
+        code = "import sys; sys.stdout.write(%r); sys.stderr.write(%r); sys.exit(%d)" % (output, stderr, status)
+        def substitute(command, **options):
+            invoked.append(command)
+            options["cwd"] = "/"
+            child = spawn([sys.executable, "-c", code], **options)
+            children.append(child)
+            return child
+        try:
+            with patch.object(C.subprocess, "Popen", side_effect=substitute):
+                result = C._fixture_quiescence_properties("unit", C.time.monotonic() + 10)
+        finally:
+            for child in children: child.wait(timeout=5)
+        self.assertEqual(invoked[0][0], "/usr/bin/systemctl")
+        self.assertIn("user@21314.service", invoked[0])
+        self.assertIn("--property=InvocationID", invoked[0])
+        return result
+
+    def test_parses_complete_fixed_properties(self):
+        value = "Id=user@21314.service\nLoadState=loaded\nUser=21314\nPAMName=systemd-user\nMainPID=42\n" \
+                "InvocationID=" + "a" * 32 + "\nControlGroup=/user.slice\nActiveState=active\nSubState=running\n"
+        parsed = self.run_client(value)
+        self.assertEqual(parsed["MainPID"], "42"); self.assertEqual(parsed["InvocationID"], "a" * 32)
+
+    def test_missing_duplicate_and_stderr_are_refused(self):
+        complete = "Id=user@21314.service\nLoadState=loaded\nUser=21314\nPAMName=systemd-user\nMainPID=42\n" \
+                   "InvocationID=" + "a" * 32 + "\nControlGroup=/user.slice\nActiveState=active\nSubState=running\n"
+        for output, stderr in ((complete.replace("MainPID=42\n", ""), ""),
+                               (complete + "MainPID=42\n", ""), (complete, "failure")):
+            with self.subTest(output=output, stderr=stderr):
+                with self.assertRaises((RuntimeError, AssertionError)): self.run_client(output, stderr)
+        for output, status in ((complete, 2), ("x" * 8193, 0)):
+            with self.subTest(length=len(output), status=status):
+                with self.assertRaises((RuntimeError, AssertionError)): self.run_client(output, status=status)
+
+
 class WatcherKernel:
     """Only the Linux notification/FD boundary is replaced on Windows."""
     def __init__(self, parent):
@@ -2881,16 +3080,19 @@ class CachedInitialInventoryTests(unittest.TestCase):
         body = next(node for node in broker.body if isinstance(node, ast.Try)).body
         index = next(i for i, node in enumerate(body) if isinstance(node, ast.Assign)
                      and any(isinstance(target, ast.Name) and target.id == "initial_uid_inventory" for target in node.targets))
-        statements = copy.deepcopy(body[index:index + 3])
+        statements = copy.deepcopy(body[index:index + 4])
         expected = ast.parse('require(initial_uid_inventory == {"processes": [], "terminalProcesses": []}, '
                              '"Original fixture processes remain; never adopt or signal")').body[0]
-        self.assertEqual(ast.dump(statements[2]), ast.dump(expected))
+        self.assertIsInstance(statements[2], ast.If)
+        self.assertEqual(ast.dump(statements[3]), ast.dump(expected))
         return compile(ast.fix_missing_locations(ast.Module(body=statements, type_ignores=[])), "actual-cached-inventory-guard", "exec")
 
     def namespace(self, inventory):
         capture = Mock(return_value=inventory)
         return {"M": SimpleNamespace(native_process_inventory=capture), "native": object(), "helper": object(),
-                "record": {}, "require": C.require}, capture
+                "record": {}, "require": C.require, "BASE": Path("/fixture"),
+                "U": SimpleNamespace(read=Mock(return_value=b"{}"), parse=Mock(return_value={})),
+                "fixture_quiescence": Mock(return_value=inventory)}, capture
 
     def test_empty_inventory_is_captured_once_and_passes_original_guard(self):
         value = {"processes": [], "terminalProcesses": []}

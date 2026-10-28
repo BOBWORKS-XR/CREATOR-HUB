@@ -2381,6 +2381,353 @@ def changed_retain_directory_refusal(record, error):
         record.setdefault("directoryRefusalUnavailable", True)
 
 
+def fixture_quiescence_validate(initial, prior):
+    """Pure eligibility check; prior is the validated original M broker receipt."""
+    require(type(initial) is dict and set(initial) == {"processes", "terminalProcesses"}
+            and type(initial["processes"]) is list and type(initial["terminalProcesses"]) is list,
+            "Fixture quiescence inventory shape differs")
+    if initial == {"processes": [], "terminalProcesses": []}:
+        return {}
+    require(not initial["terminalProcesses"] and len(initial["processes"]) == 2,
+            "Only the original live fixture manager pair may settle")
+    require(type(prior) is dict and prior.get("scope") == "production-016-disposable-migration"
+            and prior.get("scenario") == "migration-approve" and prior.get("scenarioPassed") is True
+            and prior.get("fixtureRelocked") is True, "Completed original fixture receipt required")
+    wrapper = prior.get("sessionWrapper", {})
+    require(type(wrapper) is dict and type(wrapper.get("returnCode")) is int
+            and wrapper["returnCode"] == 0 and wrapper.get("deadlineExpired") is False
+            and all(wrapper.get("pipes", {}).get(name, {}).get("eof") is True
+                    and wrapper["pipes"][name].get("truncated") is False for name in ("stdout", "stderr")),
+            "Original PAM wrapper must have completed with bounded EOF")
+    answer = prior.get("lastInventory", {})
+    require(type(answer) is dict and type(answer.get("request")) is dict,
+            "Original session process inventory required")
+    M.inventory_answer(answer, answer["request"])
+    require(answer["request"]["harnessSource"] == prior.get("harnessSource")
+            and answer["request"]["scenario"] == prior["scenario"], "Foreign original inventory receipt")
+    expected, previous = {}, 0
+    for row in initial["processes"]:
+        require(type(row) is dict, "Ordinary original fixture actor required")
+        U.keys(row, ("pid", "startTime", "executable", "argvSha256", "legacyBackend"))
+        require(type(row["pid"]) is int and previous < row["pid"] <= 2147483647
+                and type(row["startTime"]) is str and re.fullmatch(r"[0-9]{1,20}", row["startTime"])
+                and row["executable"] == "/usr/lib/systemd/systemd" and row["legacyBackend"] is False
+                and type(row["argvSha256"]) is str and re.fullmatch(r"[a-f0-9]{64}", row["argvSha256"])
+                and row in answer["processes"], "Unknown or changed fixture actor; never adopt")
+        expected[row["pid"]] = dict(row); previous = row["pid"]
+    return expected
+
+
+def _fixture_quiescence_properties(kind, deadline, *, evidence=None, phase=None):
+    result = {"kind": kind if kind in ("unit", "user") else "unavailable",
+              "phase": phase if phase in ("unit-before", "session-closure", "unit-after") else "unavailable",
+              "pid": None, "exitCode": None, "status": "entered", "capturedBytes": 0,
+              "stdout": {"unavailable": True}, "stderr": {"unavailable": True}}
+    budget = 0
+    try:
+        if evidence is not None and len(evidence) < 3:
+            budget = max(0, 8192 - sum(row.get("capturedBytes", 0) for row in evidence))
+            evidence.append(result)
+    except Exception:
+        pass
+    try:
+        values = _fixture_quiescence_read_properties(kind, deadline, result, budget)
+        result["status"] = "complete"
+        return values
+    except Exception as error:
+        try: result.update(status="refused", errorType=type(error).__name__[:80])
+        except Exception: pass
+        raise
+
+
+def _fixture_quiescence_read_properties(kind, deadline, result, budget):
+    """Fixed system-bus reads with bounded pipes; never signal even a diagnostic client."""
+    unit = "user@" + str(M.UID) + ".service"
+    names = {
+        "unit": ("Id", "LoadState", "User", "PAMName", "MainPID", "InvocationID", "ControlGroup", "ActiveState", "SubState"),
+        "user": ("UID", "State", "Sessions", "Linger"),
+    }
+    require(kind in names and time.monotonic() < deadline, "Fixture property observation deadline")
+    tool = Path("/usr/bin/systemctl" if kind == "unit" else "/usr/bin/loginctl")
+    for entry in (tool, *tool.parents):
+        info = entry.lstat()
+        require(info.st_uid == info.st_gid == 0 and not info.st_mode & 0o022 and not stat.S_ISLNK(info.st_mode),
+                "Protected fixture property tool required")
+    pin = U.pin(M.read_file(tool, 16 * 1024**2, uid=0, mode=0o755))
+    command = [str(tool), "--no-pager", "--no-ask-password", "--all"]
+    command += ["--system", "show", unit] if kind == "unit" else ["show-user", str(M.UID)]
+    command += ["--property=" + name for name in names[kind]]
+    child = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                             cwd=BASE, env={"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"})
+    result["pid"] = child.pid
+    streams = [child.stdout, child.stderr]
+    output = {stream: bytearray() for stream in streams}
+    until = min(deadline, time.monotonic() + 2)
+    try:
+        for stream in streams: os.set_blocking(stream.fileno(), False)
+        while streams or child.poll() is None:
+            require(time.monotonic() < until, "Fixture property client deadline; no signal or retry")
+            ready = select.select(streams, [], [], min(0.05, max(0, until - time.monotonic())))[0]
+            for stream in ready:
+                raw = os.read(stream.fileno(), min(4096, 8193 - len(output[stream])))
+                output[stream].extend(raw)
+                require(len(output[stream]) <= 8192, "Fixture property output exceeds bound")
+                if not raw: streams.remove(stream)
+        require(child.poll() == 0 and not output[child.stderr], "Fixture property client refused")
+        require(U.pin(M.read_file(tool, 16 * 1024**2, uid=0, mode=0o755)) == pin
+                and time.monotonic() < deadline, "Fixture property tool changed or deadline")
+        values = {}
+        for line in bytes(output[child.stdout]).decode("ascii").splitlines():
+            name, separator, value = line.partition("=")
+            require(separator and name in names[kind] and name not in values and len(value) <= 512
+                    and all(32 <= ord(char) < 127 for char in value), "Malformed fixture properties")
+            values[name] = value
+        U.keys(values, names[kind])
+        return values
+    finally:
+        # Only these fixed property commands may contribute raw output. Hex keeps
+        # malformed bytes exact; the shared budget is in original bytes, not text.
+        try:
+            result["exitCode"] = child.poll()
+            for name, stream in (("stdout", child.stdout), ("stderr", child.stderr)):
+                retained = bytes(output[stream][:min(8192, budget)])
+                budget -= len(retained)
+                result["capturedBytes"] += len(retained)
+                result[name] = {"encoding": "hex", "data": retained.hex(), "eof": stream not in streams,
+                                "truncated": len(retained) < len(output[stream]),
+                                "incomplete": stream in streams}
+        except Exception:
+            result["captureUnavailable"] = True
+        # A stuck read-only root client is left for disposable runner teardown, never killed.
+        pending_error, close_error = sys.exc_info()[0] is not None, None
+        for stream in (child.stdout, child.stderr):
+            try: stream.close()
+            except Exception as error: close_error = close_error or error
+        if close_error is not None and not pending_error: raise close_error
+
+
+def _fixture_quiescence_actor(row, native, helper, procfd, expected_image, deadline):
+    require(time.monotonic() < deadline, "Fixture actor observation deadline")
+    path = Path("/proc") / str(row["pid"])
+    before = M.inventory_process_snapshot(procfd, path, row["pid"], helper)
+    require(before["startTime"] == row["startTime"] and before["Uid"] == before["Gid"] == [M.UID] * 4,
+            "Original fixture identity required")
+    require(before["state"] not in ("Z", "X"), "Fixture actor exited during observation")
+    fd = os.open("cgroup", os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK, dir_fd=procfd)
+    try:
+        info = os.fstat(fd)
+        require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and 0 <= info.st_size <= 4096,
+                "Ordinary bounded fixture cgroup required")
+        raw = os.read(fd, 4097)
+        require(len(raw) <= 4096 and M.metadata_stamp(os.fstat(fd)) == M.metadata_stamp(info)
+                == M.metadata_stamp(os.stat("cgroup", dir_fd=procfd, follow_symlinks=False)), "Fixture cgroup changed")
+    finally:
+        os.close(fd)
+    cgroup = "/user.slice/user-" + str(M.UID) + ".slice/user@" + str(M.UID) + ".service/init.scope"
+    require(raw == ("0::" + cgroup + "\n").encode("ascii"), "Unknown fixture actor cgroup")
+    image = native.native_process(row["pid"], helper)
+    command = M.proc_bytes(path / "cmdline", 8192)
+    after = M.inventory_process_snapshot(procfd, path, row["pid"], helper)
+    require(after["startTime"] == row["startTime"] and after["Uid"] == after["Gid"] == [M.UID] * 4,
+            "Original fixture identity required")
+    require(after["state"] not in ("Z", "X"), "Fixture actor exited during observation")
+    require({k: v for k, v in before.items() if k != "state"} == {k: v for k, v in after.items() if k != "state"}
+            and after["state"] not in ("Z", "X") and image["pid"] == row["pid"]
+            and image["startTime"] == row["startTime"] and image["parentPid"] == before["parentPid"]
+            and image["uids"] == [M.UID] * 4 and image["executable"] == row["executable"]
+            and int(image["image"]["st_uid"]) == int(image["image"]["st_gid"]) == 0
+            and int(image["image"]["st_mode"]) == 0o100755 and image["kernelImageSha256"] == expected_image["sha256"]
+            and int(image["image"]["st_size"]) == expected_image["size"]
+            and type(command) is bytes and 0 < len(command) <= 8192 and command.endswith(b"\0")
+            and U.pin(command)["sha256"] == row["argvSha256"] and time.monotonic() < deadline,
+            "Fixture actor identity/image/arguments changed")
+    return before
+
+
+def fixture_quiescence(initial, prior, native, helper, *, evidence=None):
+    """Settle only the original manager pair; return an unfiltered final inventory."""
+    started = time.monotonic()
+    deadline = started + 30
+    diagnostic = {"schemaVersion": 1, "scope": "original-fixture-quiescence", "diagnosticOnly": True,
+                  "readOnly": True, "authorityGranted": False, "inputPermitted": False, "releaseReady": False,
+                  "deadlineSeconds": 30, "status": "entered", "stage": "eligibility", "samples": 0,
+                  "events": [], "propertyResults": [], "truncated": False}
+    eligible, fds, procfds, snapshots = {}, {}, {}, {}
+
+    def note(event, pid=None):
+        try:
+            require(event in ("eligible", "empty", "properties-bound", "actor-bound", "binding-complete",
+                    "pidfd-exit", "pam-reparented", "terminal-observed", "reaped", "complete", "refusal", "cleanup-refusal"),
+                    "Fixed quiescence diagnostic event required")
+            if len(diagnostic["events"]) >= 24:
+                diagnostic["truncated"] = True
+                return
+            row = {"event": event, "sample": diagnostic["samples"],
+                   "elapsedMs": max(0, min(86400000, int((time.monotonic() - started) * 1000)))}
+            if pid is not None:
+                require(pid in eligible, "Only original diagnostic identities allowed")
+                row.update(pid=pid, startTime=eligible[pid]["startTime"])
+            diagnostic["events"].append(row)
+        except Exception:
+            diagnostic["captureUnavailable"] = True
+
+    try:
+        eligible = fixture_quiescence_validate(initial, prior)
+        note("eligible")
+        if not eligible:
+            diagnostic["status"] = "complete"
+            note("empty")
+            return initial
+        diagnostic["stage"] = "unit-before"
+        unit = _fixture_quiescence_properties("unit", deadline, evidence=diagnostic["propertyResults"], phase="unit-before")
+        control = "/user.slice/user-" + str(M.UID) + ".slice/user@" + str(M.UID) + ".service"
+        require(unit["Id"] == "user@" + str(M.UID) + ".service" and unit["LoadState"] == "loaded"
+                and unit["User"] == str(M.UID) and unit["PAMName"] == "systemd-user"
+                and unit["ActiveState"] == "active" and unit["SubState"] == "running"
+                and re.fullmatch(r"[a-f0-9]{32}", unit["InvocationID"]) and unit["InvocationID"] != "0" * 32
+                and unit["ControlGroup"] == control and re.fullmatch(r"[1-9][0-9]{0,9}", unit["MainPID"]),
+                "Exact original fixture user-manager invocation required")
+        manager = int(unit["MainPID"])
+        require(manager in eligible, "Unbound fixture manager; never adopt")
+        pam = next(pid for pid in eligible if pid != manager)
+        diagnostic.update(managerPid=manager, pamPid=pam, invocationId=unit["InvocationID"], stage="session-closure")
+        user = _fixture_quiescence_properties("user", deadline, evidence=diagnostic["propertyResults"], phase="session-closure")
+        require(user["UID"] == str(M.UID) and user["Linger"] == "no" and user["Sessions"] == ""
+                and user["State"] == "closing", "Original fixture PAM sessions must be closed without linger")
+        note("properties-bound")
+        diagnostic["stage"] = "image"
+        binary = Path("/usr/lib/systemd/systemd")
+        for entry in (binary, *binary.parents):
+            info = entry.lstat()
+            require(info.st_uid == info.st_gid == 0 and not info.st_mode & 0o022 and not stat.S_ISLNK(info.st_mode),
+                    "Protected fixture systemd image required")
+        expected_image = U.pin(M.read_file(binary, 16 * 1024**2, uid=0, mode=0o755))
+        diagnostic["stage"] = "actor-binding"
+        for pid, row in eligible.items():
+            fds[pid] = os.pidfd_open(pid, 0)
+            procfds[pid] = os.open(Path("/proc") / str(pid), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+            snapshots[pid] = _fixture_quiescence_actor(row, native, helper, procfds[pid], expected_image, deadline)
+            note("actor-bound", pid)
+        require(snapshots[manager]["parentPid"] == 1 and snapshots[pam]["parentPid"] == manager,
+                "Original fixture manager/PAM parent relation differs")
+        diagnostic["stage"] = "unit-after"
+        require(_fixture_quiescence_properties("unit", deadline, evidence=diagnostic["propertyResults"], phase="unit-after") == unit,
+                "Fixture user-manager invocation changed during binding")
+        note("binding-complete")
+        poller, exited = select.poll(), set()
+        for fd in fds.values(): poller.register(fd, select.POLLIN)
+
+        def events(milliseconds):
+            for fd, flags in poller.poll(milliseconds):
+                require(fd in fds.values() and flags & select.POLLIN and not flags & (select.POLLERR | select.POLLNVAL),
+                        "Uncertain fixture pidfd event")
+                pid = next(pid for pid, held in fds.items() if held == fd)
+                require(pid not in exited, "Duplicate fixture exit event")
+                exited.add(pid); poller.unregister(fd)
+                note("pidfd-exit", pid)
+
+        pam_reparented, terminal_seen, reaped_seen = False, set(), set()
+        for _ in range(600):
+            diagnostic["stage"] = "inventory"
+            require(time.monotonic() < deadline, "Fixture quiescence deadline; no signal or retry")
+            current = M.native_process_inventory(native, helper)
+            diagnostic["samples"] += 1
+            events(0)
+            require(type(current) is dict and set(current) == {"processes", "terminalProcesses"}
+                    and type(current["processes"]) is list and type(current["terminalProcesses"]) is list,
+                    "Fixture inventory shape changed")
+            seen = set()
+            for row in current["processes"]:
+                pid = row.get("pid")
+                require(pid in eligible and pid not in seen and row == eligible[pid], "Unknown live fixture actor; never adopt")
+                seen.add(pid)
+                if pid in exited: continue
+                diagnostic["stage"] = "live-actor"
+                try:
+                    observed = _fixture_quiescence_actor(row, native, helper, procfds[pid], expected_image, deadline)
+                except (FileNotFoundError, ProcessLookupError):
+                    events(0)
+                    require(pid in exited, "Fixture actor disappeared without pidfd exit proof")
+                    continue
+                except RuntimeError as error:
+                    if type(error) is not RuntimeError or str(error) not in (
+                            "Fixture actor exited during observation", "Owned process is not live"):
+                        raise
+                    events(0)
+                    require(pid in exited, "Fixture actor terminal without pidfd exit proof")
+                    continue
+                events(0)
+                expected = {k: v for k, v in snapshots[pid].items() if k != "state"}
+                reparented_now = pid == pam and observed["parentPid"] == 1
+                if reparented_now:
+                    require(manager in exited, "Live fixture PAM reparenting requires the held manager exit event")
+                if pid == pam and (pam_reparented or reparented_now):
+                    expected["parentPid"] = 1
+                require({k: v for k, v in observed.items() if k != "state"}
+                        == expected, "Live fixture actor identity changed")
+                if reparented_now and not pam_reparented:
+                    pam_reparented = True
+                    note("pam-reparented", pid)
+            for row in current["terminalProcesses"]:
+                diagnostic["stage"] = "terminal-proof"
+                pid = row.get("pid")
+                require(pid in eligible and pid not in seen and pid in exited
+                        and row == M.inventory_terminal_record(pid, row["origin"], row["before"], row["after"]),
+                        "Unknown or unproven terminal fixture actor")
+                seen.add(pid)
+                for observed in (row["origin"], row["before"], row["after"]):
+                    require(observed["startTime"] == eligible[pid]["startTime"]
+                            and observed["procDirectory"] == snapshots[pid]["procDirectory"]
+                            and observed["parentPid"] in ((1,) if pid == manager else (manager, 1))
+                            and (pid == manager or observed["parentPid"] == manager or manager in exited)
+                            and (pid != pam or not pam_reparented or observed["parentPid"] == 1),
+                            "Terminal fixture identity changed")
+                if pid not in terminal_seen:
+                    note("terminal-observed", pid); terminal_seen.add(pid)
+            require(set(eligible) - seen <= exited, "Fixture actor disappeared without pidfd exit proof")
+            for pid in sorted(set(eligible) - seen - reaped_seen):
+                note("reaped", pid); reaped_seen.add(pid)
+            if current == {"processes": [], "terminalProcesses": []}:
+                require(time.monotonic() < deadline, "Fixture quiescence deadline")
+                diagnostic.update(status="complete", stage="empty-inventory")
+                note("complete")
+                return current
+            # Readable pidfds are unregistered; timed polls pace bounded reaping observations, never a blind settling sleep.
+            diagnostic["stage"] = "event-wait"
+            events(min(50, max(1, math.ceil((deadline - time.monotonic()) * 1000))))
+        raise RuntimeError("Fixture quiescence observation bound exceeded")
+    except Exception as error:
+        try:
+            diagnostic.update(status="refused", refusal={"type": type(error).__name__[:80], "message": str(error)[:300]})
+            note("refusal")
+        except Exception:
+            diagnostic["captureUnavailable"] = True
+        raise
+    finally:
+        pending_error, close_error = sys.exc_info()[0] is not None, None
+        for fd in (*procfds.values(), *fds.values()):
+            try: os.close(fd)
+            except OSError as error: close_error = close_error or error
+        if close_error is not None:
+            diagnostic.update(status="refused", cleanupUnavailable=True)
+            note("cleanup-refusal")
+        if evidence is not None:
+            try:
+                diagnostic["elapsedMs"] = max(0, min(86400000, int((time.monotonic() - started) * 1000)))
+                raw = json.dumps(diagnostic, ensure_ascii=True, allow_nan=False)
+                if len(raw.encode()) > 32768:
+                    diagnostic["events"] = []
+                    diagnostic["truncated"] = True
+                    raw = json.dumps(diagnostic, ensure_ascii=True, allow_nan=False)
+                if len(raw.encode()) <= 32768:
+                    evidence["fixtureQuiescence"] = json.loads(raw)
+                else:
+                    evidence["fixtureQuiescenceUnavailable"] = True
+            except Exception:
+                pass  # Optional evidence must not replace the original barrier result/refusal.
+        if close_error is not None and not pending_error: raise close_error
+
+
 def observe_refused_fixture_processes(initial, native, helper):
     """Read-only evidence after refusal; never grants continuation authority."""
     result = {"diagnosticOnly": True, "authorityGranted": False, "inputPermitted": False,
@@ -2483,6 +2830,9 @@ def changed_broker(env):
         sealed = changed_adopt(env, original)
         initial_uid_inventory = M.native_process_inventory(native, helper)
         record["initialUidInventory"] = initial_uid_inventory
+        if initial_uid_inventory != {"processes": [], "terminalProcesses": []}:
+            prior = U.parse(U.read(BASE / "broker.json", 1048576, uid=0, mode=0o644))
+            initial_uid_inventory = fixture_quiescence(initial_uid_inventory, prior, native, helper, evidence=record)
         require(initial_uid_inventory == {"processes": [], "terminalProcesses": []}, "Original fixture processes remain; never adopt or signal")
         scripts = CONTROL / "scripts"; scripts.mkdir(mode=0o755)
         for name, expected in original["sources"].items(): U.write(scripts / name, U.bound(HERE / name, expected, 2 * 1024**2), 0o444)
