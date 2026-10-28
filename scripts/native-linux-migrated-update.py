@@ -106,11 +106,30 @@ def sources():
     return tuple(sorted(set(M.SOURCES) | set(U.SOURCES) | {Path(__file__).name}))
 
 
+_DIRECTORY_DIAGNOSTIC_ORIGIN = object()
+
+
 def directory(path, uid):
     before = path.lstat()
-    require(path.is_absolute() and path.resolve(strict=True) == path and stat.S_ISDIR(before.st_mode)
-            and before.st_uid == before.st_gid == uid and not before.st_mode & 0o022,
-            "Owned canonical directory required")
+    try:
+        require(path.is_absolute() and path.resolve(strict=True) == path and stat.S_ISDIR(before.st_mode)
+                and before.st_uid == before.st_gid == uid and not before.st_mode & 0o022,
+                "Owned canonical directory required")
+    except RuntimeError as error:
+        try:
+            # Original lstat only; never reread, repair or reinterpret this refusal.
+            relative = path.relative_to(HOME).as_posix()
+            if (type(error) is RuntimeError and str(error) == "Owned canonical directory required"
+                    and type(uid) is int and uid == M.UID and len(relative.encode()) <= 512
+                    and "\\" not in relative and (relative == "." or all(part not in ("", ".", "..") for part in relative.split("/")))
+                    and not hasattr(error, "directory_refusal") and not hasattr(error, "_directory_diagnostic_origin")):
+                cached = {key: getattr(before, key) for key in ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid",
+                    "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns")}
+                error.directory_refusal = {"relativePath": relative, "expectedUid": uid, "lstat": cached}
+                error._directory_diagnostic_origin = _DIRECTORY_DIAGNOSTIC_ORIGIN
+        except Exception:
+            pass  # Optional metadata cannot replace the same directory failure.
+        raise
     return {"dev": before.st_dev, "ino": before.st_ino, "uid": before.st_uid,
             "gid": before.st_gid, "mode": stat.S_IMODE(before.st_mode)}
 
@@ -2332,6 +2351,34 @@ def changed_broker_outcome(record):
     return True
 
 
+def changed_retain_directory_refusal(record, error):
+    if "directoryRefusal" in record: return
+    try:
+        raw = getattr(error, "directory_refusal", None)
+        if not (type(error) is RuntimeError and str(error) == "Owned canonical directory required"
+                and getattr(error, "_directory_diagnostic_origin", None) is _DIRECTORY_DIAGNOSTIC_ORIGIN
+                and type(raw) is dict and set(raw) == {"relativePath", "expectedUid", "lstat"}
+                and type(raw["expectedUid"]) is int and raw["expectedUid"] == M.UID
+                and type(raw["relativePath"]) is str and len(raw["relativePath"].encode()) <= 512
+                and "\\" not in raw["relativePath"] and (raw["relativePath"] == "." or all(
+                    part not in ("", ".", "..") for part in raw["relativePath"].split("/")))): return
+        cached = raw["lstat"]
+        keys = ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns")
+        if not (type(cached) is dict and set(cached) == set(keys)
+                and all(type(value) is int for value in cached.values())
+                and all(0 <= cached[key] < 2**64 for key in ("st_dev", "st_ino", "st_nlink", "st_size"))
+                and all(0 <= cached[key] < 2**32 for key in ("st_mode", "st_uid", "st_gid"))
+                and all(-(2**63) <= cached[key] < 2**63 for key in ("st_mtime_ns", "st_ctime_ns"))): return
+        value = {"schemaVersion": 1, "scope": "cached-home-directory-refusal", "diagnosticOnly": True,
+            "readOnly": True, "cachedStatOnly": True, "authorityGranted": False, "inputPermitted": False,
+            "releaseReady": False, "root": "fixture-home", "canonicalResultCaptured": False, **raw}
+        encoded = json.dumps(value, allow_nan=False)
+        require(len(encoded.encode()) <= 8192, "Cached directory diagnostic exceeds bound")
+        record.setdefault("directoryRefusal", json.loads(encoded))
+    except Exception:
+        record.setdefault("directoryRefusalUnavailable", True)
+
+
 def changed_broker(env):
     changed_admission(env)
     original = changed_intent(env)
@@ -2436,6 +2483,7 @@ def changed_broker(env):
         record["transport"] = U.validate_transport_report(transport_report, pins, "deb-approve"); record["transportClosed"] = True
     except Exception as error:
         failure = error; record["refusal"] = {"type": type(error).__name__, "message": str(error)[:1000]}
+        changed_retain_directory_refusal(record, error)
     finally:
         M.wipe(secret); M.wipe(payload)
         if watcher is not None:

@@ -2587,5 +2587,164 @@ class ChangedCaseTransportTests(unittest.TestCase):
         self.assertNotIn("UNREVIEWED", context); read.assert_not_called()
 
 
+class HomeDirectoryDiagnosticTests(unittest.TestCase):
+    @contextmanager
+    def fixture(self, **changes):
+        with tempfile.TemporaryDirectory() as folder, ExitStack() as stack:
+            home = Path(folder).resolve() / "home"; home.mkdir()
+            path = home / "data/bad"; path.mkdir(parents=True)
+            actual = path.lstat(); uid = actual.st_uid
+            fields = {key:getattr(actual,key) for key in ("st_dev","st_ino","st_mode","st_uid","st_gid","st_nlink","st_size","st_mtime_ns","st_ctime_ns")}
+            fields.update(st_mode=stat.S_IFDIR | 0o775,st_uid=uid,st_gid=uid)
+            fields.update(changes); before = SimpleNamespace(**fields)
+            calls = []
+            def lstat(candidate):
+                self.assertEqual(candidate,path); calls.append(candidate)
+                self.assertEqual(len(calls),1,"Diagnostic must not replace cached stat with another query")
+                return before
+            stack.enter_context(patch.object(C,"HOME",home))
+            stack.enter_context(patch.object(C.M,"UID",uid))
+            stack.enter_context(patch.object(Path,"lstat",lstat))
+            stack.enter_context(patch.object(Path,"resolve",lambda candidate,strict=False:candidate))
+            yield SimpleNamespace(home=home,path=path,before=before,uid=uid,calls=calls,fields=fields)
+
+    def error(self, f):
+        original_require = C.require; errors = []
+        def checked(value,message):
+            try: original_require(value,message)
+            except RuntimeError as error: errors.append(error); raise
+        with patch.object(C,"require",side_effect=checked), self.assertRaisesRegex(RuntimeError,"^Owned canonical directory required$") as raised:
+            C.directory(f.path,f.uid)
+        self.assertIs(raised.exception,errors[0]); self.assertEqual(len(f.calls),1)
+        return raised.exception
+
+    def broker_handler(self, error, record):
+        tree = ast.parse(Path(C.__file__).read_bytes())
+        broker = next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=="changed_broker")
+        handler = next(n.handlers[0] for n in broker.body if isinstance(n,ast.Try) and n.handlers)
+        function = ast.FunctionDef(name="actual_broker_failure",args=ast.arguments(posonlyargs=[],args=[ast.arg(arg="error"),ast.arg(arg="record")],kwonlyargs=[],kw_defaults=[],defaults=[]),
+            body=[ast.Try(body=[ast.Raise(exc=ast.Name(id="error",ctx=ast.Load()))],handlers=[copy.deepcopy(handler)],orelse=[],finalbody=[]),
+                  ast.Return(value=ast.Name(id="failure",ctx=ast.Load()))],decorator_list=[])
+        namespace = dict(vars(C)); exec(compile(ast.fix_missing_locations(ast.Module(body=[function],type_ignores=[])),"actual-broker-error-handler","exec"),namespace)
+        return namespace["actual_broker_failure"](error,record)
+
+    def test_same_refusal_keeps_exact_cached_lstat_fixture_path_uid_and_exception(self):
+        with self.fixture() as f:
+            error = self.error(f)
+            self.assertIs(error._directory_diagnostic_origin,C._DIRECTORY_DIAGNOSTIC_ORIGIN)
+            self.assertEqual(error.directory_refusal,{"relativePath":"data/bad","expectedUid":f.uid,"lstat":f.fields})
+            record = {}; self.assertIs(self.broker_handler(error,record),error)
+            self.assertEqual(record["refusal"],{"type":"RuntimeError","message":"Owned canonical directory required"})
+            value = record["directoryRefusal"]
+            self.assertEqual(value["lstat"],f.fields); self.assertEqual(value["relativePath"],"data/bad")
+            self.assertEqual(value["expectedUid"],f.uid)
+            self.assertTrue(value["cachedStatOnly"]); self.assertTrue(value["diagnosticOnly"])
+            self.assertIs(value["authorityGranted"],False); self.assertIs(value["inputPermitted"],False)
+            self.assertIs(value["releaseReady"],False); self.assertFalse(value["canonicalResultCaptured"])
+
+    def test_consumer_performs_no_queries_and_keeps_original_snapshot_not_later_values(self):
+        with self.fixture() as f:
+            error = self.error(f); original = copy.deepcopy(error.directory_refusal)
+            f.before.st_uid = 9999; f.before.st_mode = stat.S_IFREG | 0o777
+            with patch.object(Path,"lstat",side_effect=AssertionError("No later stat")), \
+                    patch.object(Path,"resolve",side_effect=AssertionError("No later resolve")):
+                record = {}; C.changed_retain_directory_refusal(record,error)
+            self.assertEqual(record["directoryRefusal"]["lstat"],original["lstat"])
+
+    def test_missing_forged_origin_wrong_error_type_or_message_never_exports(self):
+        class Foreign(RuntimeError): pass
+        for defect in ("missing","foreign","none","type","message"):
+            with self.subTest(defect=defect), self.fixture() as f:
+                error = self.error(f)
+                if defect=="missing": del error._directory_diagnostic_origin
+                elif defect=="foreign": error._directory_diagnostic_origin=object()
+                elif defect=="none": error._directory_diagnostic_origin=None
+                elif defect=="type":
+                    other=Foreign(str(error));other.__dict__.update(error.__dict__);error=other
+                else: error.args=("Different refusal",)
+                record={};C.changed_retain_directory_refusal(record,error)
+                self.assertNotIn("directoryRefusal",record)
+
+    def test_malformed_capture_path_uid_stat_and_overflow_never_exports(self):
+        changes = [("relativePath","../outside"),("relativePath","/outside"),("relativePath","data//bad"),
+                   ("relativePath","x"*513),("expectedUid",True),("expectedUid",9876),("lstat",None),
+                   ("stat-key","private"),("st_uid",True),("st_mode",-1),("st_ino",2**128),("st_mtime_ns","later stat")]
+        for key,value in changes:
+            with self.subTest(key=key), self.fixture() as f:
+                error=self.error(f);raw=error.directory_refusal
+                if key=="stat-key":raw["lstat"][value]=123
+                elif key.startswith("st_"):raw["lstat"][key]=value
+                else:raw[key]=value
+                record={};C.changed_retain_directory_refusal(record,error)
+                self.assertNotIn("directoryRefusal",record)
+
+    def test_existing_capture_and_record_are_never_overwritten_or_reauthenticated(self):
+        with self.fixture() as f:
+            error=self.error(f);record={};C.changed_retain_directory_refusal(record,error)
+            first=copy.deepcopy(record["directoryRefusal"])
+            error.directory_refusal["lstat"]["st_uid"]=9999
+            C.changed_retain_directory_refusal(record,error)
+            self.assertEqual(record["directoryRefusal"],first)
+            before=copy.deepcopy(error.directory_refusal)
+            f.calls.clear()
+            def again(value,message):
+                if not value:raise error
+            with patch.object(C,"require",side_effect=again),self.assertRaises(RuntimeError) as raised:
+                C.directory(f.path,f.uid)
+            self.assertIs(raised.exception,error);self.assertEqual(error.directory_refusal,before)
+        with self.fixture() as f:
+            error=RuntimeError("Owned canonical directory required");error.directory_refusal={"foreign":"not sealed"}
+            def again(value,message):
+                if not value:raise error
+            with patch.object(C,"require",side_effect=again),self.assertRaises(RuntimeError):C.directory(f.path,f.uid)
+            self.assertFalse(hasattr(error,"_directory_diagnostic_origin"))
+
+    def test_capture_failures_never_mask_original_error_or_change_refusal(self):
+        with self.fixture() as f:
+            error=self.error(f);dumps=C.json.dumps
+            def failed(value,*args,**kwargs):
+                if type(value)is dict and value.get("scope")=="cached-home-directory-refusal":raise OSError("Optional diagnostic failed")
+                return dumps(value,*args,**kwargs)
+            record={}
+            with patch.object(C.json,"dumps",side_effect=failed):self.assertIs(self.broker_handler(error,record),error)
+            self.assertEqual(record["refusal"]["message"],str(error));self.assertTrue(record["directoryRefusalUnavailable"])
+        with self.fixture() as f:
+            del f.before.st_dev
+            error=self.error(f)
+            self.assertFalse(hasattr(error,"_directory_diagnostic_origin"))
+
+    def test_directory_acceptance_and_all_original_predicates_match_frozen_preimage(self):
+        original = ast.parse(Path(C.__file__).read_bytes())
+        # The original predicate is retained verbatim inside the diagnostic try.
+        function=next(n for n in original.body if isinstance(n,ast.FunctionDef)and n.name=="directory")
+        guard=next(n for n in ast.walk(function)if isinstance(n,ast.Call)and ast.unparse(n.func)=="require")
+        self.assertEqual(ast.unparse(guard.args[0]),"path.is_absolute() and path.resolve(strict=True) == path and stat.S_ISDIR(before.st_mode) and (before.st_uid == before.st_gid == uid) and (not before.st_mode & 18)")
+        for defect in (None,"uid","gid","writable","kind","canonical"):
+            with self.subTest(defect=defect),self.fixture(st_mode=stat.S_IFDIR|0o700) as f:
+                if defect=="uid":f.before.st_uid+=1
+                elif defect=="gid":f.before.st_gid+=1
+                elif defect=="writable":f.before.st_mode|=0o020
+                elif defect=="kind":f.before.st_mode=stat.S_IFREG|0o700
+                if defect=="canonical":
+                    with patch.object(Path,"resolve",return_value=f.home),self.assertRaisesRegex(RuntimeError,"Owned canonical directory required"):
+                        C.directory(f.path,f.uid)
+                elif defect is None:
+                    self.assertEqual(C.directory(f.path,f.uid),{"dev":f.before.st_dev,"ino":f.before.st_ino,"uid":f.uid,"gid":f.uid,"mode":0o700})
+                else:
+                    with self.assertRaisesRegex(RuntimeError,"Owned canonical directory required"):C.directory(f.path,f.uid)
+
+    def test_existing_finite_broker_json_export_retains_diagnostic_without_other_files(self):
+        with self.fixture() as f:
+            error=self.error(f);record={};self.broker_handler(error,record)
+        export=ChangedCaseExportTests(methodName="runTest")
+        with export.fixture() as(runner,base,_,_,_):
+            file=base/"control/broker.json";raw=json.dumps(record).encode();file.write_bytes(raw)
+            folder,rows=export.export(runner)
+            retained=[r for r in rows if"member"in r]
+            self.assertEqual(len(retained),1);self.assertEqual(retained[0]["source"],str(file))
+            self.assertEqual((folder/retained[0]["member"]).read_bytes(),raw)
+            self.assertLessEqual(len(raw),8192)
+
+
 if __name__ == "__main__":
     unittest.main()
