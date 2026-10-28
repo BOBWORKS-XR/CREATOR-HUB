@@ -710,6 +710,34 @@ def installed(binding, retained=(False, False)):
     return policy_question(read_file(Path(POLICY), 16384, uid=0, mode=0o644))
 
 
+def fixture_parent(home, relative):
+    home, relative = Path(home), Path(relative)
+    require(home.is_absolute() and not relative.anchor and ".." not in relative.parts,
+            "Fixture parent must stay within the owned HOME")
+
+    def check(path, created=False):
+        info = path.lstat()
+        require(stat.S_ISDIR(info.st_mode) and path.resolve(strict=True) == path,
+                "Nonlinked fixture directory required")
+        if os.name != "nt":
+            require(info.st_uid == os.geteuid() and info.st_gid == os.getegid() and not info.st_mode & 0o022
+                    and (not created or stat.S_IMODE(info.st_mode) == 0o700),
+                    "Owned non-foreign-writable fixture directory required")
+
+    check(home)
+    current = home
+    # parents=True sets only the leaf's mode; all fixed fixture ancestors must be private.
+    for part in relative.parts:
+        current = current / part
+        try:
+            current.mkdir(mode=0o700)
+            created = True
+        except FileExistsError:
+            created = False
+        check(current, created)
+    return current
+
+
 def fixture(root):
     home = root / "home"
     for part in ("home", "home/config", "home/data", "home/cache", "runtime", "tmp"):
@@ -738,7 +766,7 @@ def fixture(root):
     before = {}
     for name, value in values.items():
         file = home / name
-        file.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        fixture_parent(home, Path(name).parent)
         raw = value.encode() if type(value) is str else json.dumps(value).encode()
         P.write(file, raw)
         before[name] = raw

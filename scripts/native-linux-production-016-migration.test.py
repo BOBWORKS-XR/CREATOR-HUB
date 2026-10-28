@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 import struct
 import subprocess
 import sys
@@ -4265,6 +4266,89 @@ class CachedVisibilityFailureTests(unittest.TestCase):
             self.assertLessEqual(len(json.dumps(value).encode()),8192)
             self.assertTrue(f.session.evidence["progressCaptureUnavailable"])
             self.assertEqual(f.session.evidence["firstFailure"]["message"], "Owned X window is not a managed visible window")
+
+
+class FixtureDirectoryModeTests(unittest.TestCase):
+    @contextmanager
+    def native_fixture(self, mask):
+        if os.name != "posix": self.skipTest("Actual POSIX directory modes are qualified separately on Linux")
+        with tempfile.TemporaryDirectory(prefix="creator-fixture-modes-",dir="/tmp") as temporary:
+            root=Path(temporary).resolve(); original=os.umask(mask)
+            try:
+                before=M.fixture(root)
+                after=os.umask(mask)
+                self.assertEqual(after,mask,"Fixture construction must not change process umask")
+            finally:os.umask(original)
+            yield root,before
+
+    def test_fixture_all_home_ancestors_private_under_zero_umask(self):
+        with self.native_fixture(0) as(root,before):
+            home=root/"home";rows=[]
+            for directory in (home,*(p for p in home.rglob("*") if p.is_dir())):
+                info=directory.lstat();rows.append({"path":directory.relative_to(home).as_posix(),"mode":oct(stat.S_IMODE(info.st_mode)),"uid":info.st_uid,"gid":info.st_gid})
+            print(json.dumps({"scope":"actual-source-fixture-under-umask0","uid":os.getuid(),"gid":os.getgid(),"directories":sorted(rows,key=lambda r:r["path"])}))
+            self.assertFalse([r for r in rows if r["mode"]!="0o700"],"Every newly constructed ancestor must be explicit0700")
+            self.assertTrue(all(r["uid"]==os.getuid() and r["gid"]==os.getgid()for r in rows))
+            controller=M.load("native-linux-migrated-update")
+            actual=controller.tree(home,os.getuid())
+            self.assertTrue(all(actual[n]["mode"]==0o700 for n in actual if actual[n]["kind"]=="directory"))
+            self.assertEqual(len(before),14)
+
+    def test_fixture_private_under_077_umask_and_exact_original_bytes_retained(self):
+        with self.native_fixture(0o077) as(root,before):
+            for name,raw in before.items():self.assertEqual((root/"home"/name).read_bytes(),raw)
+            current=json.loads(before[M.CONFIG]);legacy=json.loads(before[M.LEGACY])
+            self.assertEqual(current["active_channel_id"],"current");self.assertFalse(current["auto_start"])
+            self.assertTrue(legacy["auto_start"]);self.assertEqual(len(legacy["channels"]),2)
+            self.assertEqual(stat.S_IMODE((root/"home/missing-project").stat().st_mode),0o700)
+
+    @unittest.skipUnless(os.name=="posix","POSIX mode/owner contract requires Linux")
+    def test_existing_unsafe_directory_is_refused_without_chmod_or_children(self):
+        with tempfile.TemporaryDirectory(prefix="creator-fixture-modes-",dir="/tmp") as temporary:
+            home=Path(temporary).resolve();parent=home/"missing-project";parent.mkdir(mode=0o700);parent.chmod(0o777)
+            before=parent.lstat()
+            with patch.object(M.os,"chmod",side_effect=AssertionError("No permission repair")),self.assertRaises(RuntimeError):
+                M.fixture_parent(home,Path("missing-project/Packages"))
+            after=parent.lstat();self.assertEqual((before.st_dev,before.st_ino,before.st_mode),(after.st_dev,after.st_ino,after.st_mode))
+            self.assertFalse((parent/"Packages").exists())
+
+    @unittest.skipUnless(os.name=="posix","POSIX mode/owner contract requires Linux")
+    def test_existing_safe_directory_keeps_identity_and_mode(self):
+        with tempfile.TemporaryDirectory(prefix="creator-fixture-modes-",dir="/tmp") as temporary:
+            home=Path(temporary).resolve();parent=home/"current-project";parent.mkdir(mode=0o755);before=parent.lstat()
+            with patch.object(M.os,"chmod",side_effect=AssertionError("No permission repair")):
+                result=M.fixture_parent(home,Path("current-project/Packages"))
+            after=parent.lstat();self.assertEqual((before.st_dev,before.st_ino,before.st_mode),(after.st_dev,after.st_ino,after.st_mode))
+            self.assertEqual(stat.S_IMODE(result.stat().st_mode),0o700)
+
+    def test_fixture_parent_refuses_escape_link_and_non_directory(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            home=Path(temporary).resolve()
+            for name in ("../outside",str(home/"absolute")):
+                with self.subTest(name=name),self.assertRaises(RuntimeError):M.fixture_parent(home,Path(name))
+            file=home/"not-directory";file.write_bytes(b"preserve")
+            with self.assertRaises(RuntimeError):M.fixture_parent(home,Path("not-directory/child"))
+            self.assertEqual(file.read_bytes(),b"preserve")
+            if os.name=="posix":
+                target=home/"target";target.mkdir(mode=0o700);(home/"alias").symlink_to(target,target_is_directory=True)
+                with self.assertRaises(RuntimeError):M.fixture_parent(home,Path("alias/child"))
+                self.assertFalse((target/"child").exists())
+
+    @unittest.skipUnless(os.name=="posix","POSIX owner contract requires Linux")
+    def test_existing_foreign_owner_refuses_before_creation_without_privileges(self):
+        with tempfile.TemporaryDirectory(prefix="creator-fixture-modes-",dir="/tmp") as temporary:
+            home=Path(temporary).resolve()
+            with patch.object(M.os,"geteuid",return_value=os.getuid()+1),self.assertRaises(RuntimeError):
+                M.fixture_parent(home,Path("child"))
+            self.assertFalse((home/"child").exists())
+
+    def test_source_uses_each_private_component_not_global_umask_or_recursive_repair(self):
+        functions={n.name:n for n in ast.parse(Path(M.__file__).read_bytes()).body if isinstance(n,ast.FunctionDef)}
+        parent=ast.unparse(functions["fixture_parent"]);fixture=ast.unparse(functions["fixture"])
+        self.assertIn("current.mkdir(mode=448)",parent)
+        self.assertNotIn("parents=True",parent);self.assertNotIn("chmod",parent);self.assertNotIn("chown",parent)
+        self.assertNotIn("umask",parent);self.assertNotIn("umask",fixture)
+        self.assertIn("fixture_parent(home, Path(name).parent)",fixture)
 
 
 if __name__ == "__main__":
