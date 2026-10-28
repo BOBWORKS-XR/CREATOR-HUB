@@ -327,7 +327,19 @@ function linuxRootCacheTarget(root, output, signedUnixInput) {
     for (const name of fs.readdirSync(directory)) {
       const file = path.join(directory, name), info = fs.lstatSync(file);
       if (info.isSymbolicLink() || !info.isDirectory() && (!info.isFile() || info.nlink !== 1)) {
-        throw Error('Linux Root cache contains a redirected, linked or nonregular entry. Preserve it and omit --linux-root-cache.');
+        const relative = path.relative(target, file);
+        const details = {
+          path: relative.slice(0, 512), pathTruncated: relative.length > 512,
+          type: info.isSymbolicLink() ? 'symlink' : info.isFile() ? 'file' : info.isDirectory() ? 'directory'
+            : info.isBlockDevice() ? 'block-device' : info.isCharacterDevice() ? 'character-device'
+              : info.isFIFO() ? 'fifo' : info.isSocket() ? 'socket' : 'unknown',
+          mode: info.mode, nlink: info.nlink, uid: info.uid, gid: info.gid,
+          dev: info.dev, ino: info.ino, size: info.size,
+          inodeNumbers: 'reported JavaScript numbers; not lossless kernel values',
+        };
+        const error = Error(`Linux Root cache contains a redirected, linked or nonregular entry. Preserve it and omit --linux-root-cache. ${JSON.stringify(details)}`);
+        if (info.isFile() && info.nlink > 1) error.code = 'ERR_LINUX_ROOT_CACHE_LINKED_FILE';
+        throw error;
       }
       if (info.isDirectory()) inspect(file);
     }

@@ -449,6 +449,15 @@ function workflowBash(t, script, retirement, integrated, overrides = {}) {
   });
 }
 
+function assemblyToolStubs(cacheOption = '--linux-root-cache', selectorStatus = 0) {
+  assert.ok(cacheOption === '--linux-root-cache' || cacheOption === '');
+  assert.ok(Number.isInteger(selectorStatus) && selectorStatus >= 0 && selectorStatus <= 255);
+  return "python3() { printf '%s\\n' '/reviewed-runner'; }\n"
+    + "node() { [[ $# == 2 && $1 == scripts/linux-root-cache-option.cjs && $2 == /reviewed-runner/signed-unix-input ]] || return 96; "
+    + `printf '%s' '${cacheOption}'; return ${selectorStatus}; }\n`
+    + "npm() { printf '%s\\n' \"$@\"; }\n";
+}
+
 test('assembly profiles default off and conflict refusal precedes every signed input download', t => {
   const workflow = assemblyYaml(t); if (!workflow) return;
   const inputs = workflow.on.workflow_dispatch.inputs;
@@ -500,7 +509,7 @@ test('portable host workflow is default-off, exact016-only and forwards the new 
     assert.equal(refused.status, 64, refused.stderr); assert.equal(refused.stdout, '');
   }
   const step = assembly.steps.find(item => item.id === 'package');
-  const stubs = "python3() { printf '%s\\n' '/reviewed-runner'; }\nnpm() { printf '%s\\n' \"$@\"; }\n";
+  const stubs = assemblyToolStubs();
   const result = workflowBash(t, stubs + step.run, '0', '1', scope); if (!result) return;
   assert.equal(result.status, 0, result.stderr);
   const options = parseBuildOptions(result.stdout.trimEnd().split(/\r?\n/).slice(4));
@@ -536,8 +545,8 @@ test('actual assembly Bash selects exactly one profile and the integrated builde
   assert.equal(assembly.env.CREATOR_LINUX_INTEGRATED_CANDIDATE, "${{ inputs.linux_integrated_candidate && '1' || '0' }}");
   const step = assembly.steps.find(item => item.id === 'package');
   assert.equal(step.shell, 'bash');
-  // Exercise argument mapping only. Neither stub executes Python, npm, a build or a candidate payload.
-  const stubs = "python3() { printf '%s\\n' '/reviewed-runner'; }\nnpm() { printf '%s\\n' \"$@\"; }\n";
+  // Exercise argument mapping without depending on the runner's real restored cache.
+  const stubs = assemblyToolStubs();
   for (const [retirement, integrated, selected] of [['0', '0', {}], ['1', '0', { linuxRetirementCandidate: true }],
     ['0', '1', { linuxIntegratedCandidate: true, integratedFeatures: true }]]) {
     const result = workflowBash(t, stubs + step.run, retirement, integrated); if (!result) return;
@@ -560,12 +569,24 @@ test('actual assembly Bash selects exactly one profile and the integrated builde
 test('assembly Bash opts only Linux into the dependency cache without running build tools', t => {
   const workflow = assemblyYaml(t); if (!workflow) return;
   const step = workflow.jobs.assembly.steps.find(item => item.id === 'package');
-  const stubs = "python3() { printf '%s\\n' '/reviewed-runner'; }\nnpm() { printf '%s\\n' \"$@\"; }\n";
-  for (const runner of ['Linux', 'macOS', 'Windows']) {
-    const result = workflowBash(t, stubs + step.run, '0', '0', { RUNNER_OS: runner }); if (!result) return;
-    assert.equal(result.status, 0, result.stderr);
-    const options = parseBuildOptions(result.stdout.trimEnd().split(/\r?\n/).slice(4));
-    assert.equal(options.linuxRootCache, runner === 'Linux' ? true : undefined);
+  for (const cacheOption of ['--linux-root-cache', '']) {
+    for (const runner of ['Linux', 'macOS', 'Windows']) {
+      const stubs = assemblyToolStubs(cacheOption);
+      const result = workflowBash(t, stubs + step.run, '0', '0', { RUNNER_OS: runner }); if (!result) return;
+      assert.equal(result.status, 0, result.stderr);
+      const options = parseBuildOptions(result.stdout.trimEnd().split(/\r?\n/).slice(4));
+      assert.equal(options.linuxRootCache, runner === 'Linux' && cacheOption ? true : undefined);
+    }
+  }
+});
+
+test('assembly Bash stops before the builder on selector failure even with valid-looking stdout', t => {
+  const workflow = assemblyYaml(t); if (!workflow) return;
+  const step = workflow.jobs.assembly.steps.find(item => item.id === 'package');
+  for (const cacheOption of ['--linux-root-cache', '']) {
+    const result = workflowBash(t, assemblyToolStubs(cacheOption, 47) + step.run, '0', '0'); if (!result) return;
+    assert.equal(result.status, 47, result.stderr);
+    assert.equal(result.stdout, '', 'Neither a warm nor cold build may follow a selector error');
   }
 });
 
@@ -598,7 +619,7 @@ test('production workflow refuses both development profiles before downloads and
     assert.equal(accepted.status, 0, accepted.stderr); assert.equal(accepted.stdout, '');
   }
   const step = workflow.jobs.assembly.steps.find(item => item.id === 'package');
-  const stubs = "python3() { printf '%s\\n' '/reviewed-runner'; }\nnpm() { printf '%s\\n' \"$@\"; }\n";
+  const stubs = assemblyToolStubs();
   for (const change of [{ CREATOR_LINUX_RETIREMENT_TEST_CANDIDATE: '1' }, { CREATOR_LINUX_INTEGRATED_CANDIDATE: '1' },
     { GITHUB_EVENT_NAME: 'push' }, { GITHUB_REF: 'refs/heads/validation/unix-assembly-014' }]) {
     for (const script of [preflight.steps[0].run, stubs + step.run]) {

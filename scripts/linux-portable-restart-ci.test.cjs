@@ -7,6 +7,48 @@ const { spawnSync } = require('node:child_process');
 const { yaml } = require('playwright-core/lib/utilsBundle');
 const root = path.resolve(__dirname, '..');
 
+function assertAssemblyPreflight(workflow) {
+  const steps = workflow.jobs.assembly.steps;
+  const gateIndex = steps.findIndex(step => step.name === 'Check the handoff and bounded native extraction contracts');
+  const gate = steps[gateIndex];
+  assert.ok(gate, 'Keep the complete native assembly preflight');
+  const suites = [
+    'scripts/assemble-unix-payload.test.cjs', 'scripts/sign-unix-payload.test.cjs',
+    'scripts/unix-managed-payload.test.cjs', 'scripts/linux-retirement-package.test.cjs',
+    'scripts/build-unified.test.cjs', 'scripts/linux-016-portable-package.test.cjs',
+    'scripts/linux-portable-signed-controls.test.cjs', 'scripts/linux-portable-restart-ci.test.cjs',
+  ];
+  const commands = gate.run.split('\n').filter(line => line.startsWith('node --test '));
+  assert.deepEqual(commands, [`node --test ${suites.join(' ')}`]);
+  assert.equal(gate.if, undefined);
+  assert.equal(gate['continue-on-error'], undefined);
+  const apt = steps.findIndex(step => step.run?.includes('python3-yaml'));
+  const build = steps.findIndex(step => step.name === 'Verify trusted handoff and compile only the outer native Hub');
+  assert.ok(apt >= 0 && apt < gateIndex && gateIndex < build);
+  assert.ok(gate.run.includes('python3 -B scripts/stage-signed-unix-handoff.test.py'));
+  assert.ok(gate.run.includes('python3 -B scripts/linux-retirement-package-verify.test.py'));
+}
+
+test('native assembly preflight keeps all inherited suites mandatory before packaging', () => {
+  const workflow = yaml.parse(fs.readFileSync(path.join(root, '.github/workflows/unix-managed-assembly.yml'), 'utf8'), { uniqueKeys: true });
+  assertAssemblyPreflight(workflow);
+});
+
+test('native assembly preflight refuses missing suites, conditional gates and missing YAML preparation', () => {
+  const original = yaml.parse(fs.readFileSync(path.join(root, '.github/workflows/unix-managed-assembly.yml'), 'utf8'), { uniqueKeys: true });
+  for (const mutation of ['signed-controls', 'restart-ci', 'conditional', 'continue', 'yaml']) {
+    const workflow = structuredClone(original);
+    const steps = workflow.jobs.assembly.steps;
+    const gate = steps.find(step => step.name === 'Check the handoff and bounded native extraction contracts');
+    if (mutation === 'signed-controls') gate.run = gate.run.replace(' scripts/linux-portable-signed-controls.test.cjs', '');
+    if (mutation === 'restart-ci') gate.run = gate.run.replace(' scripts/linux-portable-restart-ci.test.cjs', '');
+    if (mutation === 'conditional') gate.if = '${{ false }}';
+    if (mutation === 'continue') gate['continue-on-error'] = true;
+    if (mutation === 'yaml') for (const step of steps) if (step.run) step.run = step.run.replaceAll('python3-yaml', 'python3');
+    assert.throws(() => assertAssemblyPreflight(workflow), undefined, mutation);
+  }
+});
+
 for (const name of ['linux-portable-deployment.yml', 'linux-integrated-features.yml']) {
   test(`${name} tests the native restart feature without enabling packaging or publishing`, () => {
     const source = fs.readFileSync(path.join(root, '.github/workflows', name), 'utf8');

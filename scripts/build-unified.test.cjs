@@ -101,7 +101,124 @@ test('Linux root cache refuses file ancestors and hardlinks instead of modifying
   assert.equal(fs.readFileSync(original, 'utf8'), 'preserved');
 });
 
-test('signed Linux root compilation reaches the cached target while assembly and package receipts stay fresh', t => {
+for (const kind of ['hardlink', 'symlink']) test(`Linux root cache refusal diagnostics describe a real ${kind} from the same lstat`, t => {
+  const f = rootCacheFixture(t), outside = path.join(f.root, 'protected');
+  fs.mkdirSync(outside);
+  const marker = path.join(outside, 'marker'), contents = 'protected contents must not appear in the diagnostic';
+  fs.writeFileSync(marker, contents);
+  const parts = kind === 'hardlink' ? Array.from({ length: 8 }, (_, i) => `${i}-${'x'.repeat(70)}`) : ['nested'];
+  const name = kind === 'hardlink' ? 'linked' : process.platform === 'win32' ? 'deps[json]' : 'deps"\n\u001b';
+  const file = path.join(f.target, ...parts, name);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  if (kind === 'hardlink') fs.linkSync(marker, file);
+  else fs.symlinkSync(outside, file, process.platform === 'win32' ? 'junction' : 'dir');
+  const lstat = fs.lstatSync;
+  let observed, calls = 0, refusal;
+  const capture = t.mock.method(fs, 'lstatSync', (name, ...args) => {
+    const info = lstat(name, ...args);
+    if (name === file) { calls++; observed = info; }
+    return info;
+  });
+  try {
+    assert.throws(f.admit, error => {
+      refusal = error;
+      return /redirected, linked or nonregular/.test(error.message);
+    });
+  } finally { capture.mock.restore(); }
+  assert.equal(calls, 1, 'diagnostics must reuse the refusing lstat, not reread or retry');
+  const prefix = 'Linux Root cache contains a redirected, linked or nonregular entry. Preserve it and omit --linux-root-cache. ';
+  assert.ok(refusal.message.startsWith(prefix), 'the original refusal must retain its message and append JSON');
+  const details = JSON.parse(refusal.message.slice(prefix.length)), relative = path.relative(f.target, file);
+  assert.deepEqual(details, {
+    path: relative.slice(0, 512), pathTruncated: relative.length > 512,
+    type: kind === 'symlink' ? 'symlink' : 'file',
+    mode: observed.mode, nlink: observed.nlink, uid: observed.uid, gid: observed.gid,
+    dev: observed.dev, ino: observed.ino, size: observed.size,
+    inodeNumbers: 'reported JavaScript numbers; not lossless kernel values',
+  });
+  assert.equal(details.pathTruncated, kind === 'hardlink');
+  assert.ok(Buffer.byteLength(refusal.message) <= 4096);
+  assert.doesNotMatch(refusal.message, /[\r\n\u001b]/);
+  assert.equal(refusal.message.includes(f.target), false);
+  assert.equal(refusal.message.includes(contents), false);
+  assert.ok(refusal.message.endsWith(JSON.stringify(details)));
+  assert.equal(fs.readFileSync(marker, 'utf8'), contents);
+  const after = lstat(file);
+  for (const field of ['mode', 'nlink', 'uid', 'gid', 'dev', 'ino', 'size', 'mtimeMs']) assert.equal(after[field], observed[field]);
+  assert.equal(fs.existsSync(f.output), false);
+});
+
+test('optional Linux cache selection preserves a healthy hit and a miss without writes', t => {
+  const { select } = require('./linux-root-cache-option.cjs'), f = rootCacheFixture(t);
+  const warnings = [], warn = message => warnings.push(message);
+  assert.equal(select(f.root, f.output, f.input, warn), '--linux-root-cache');
+  assert.equal(fs.existsSync(path.dirname(f.target)), false);
+  fs.mkdirSync(f.target, { recursive: true });
+  const file = path.join(f.target, 'dependency'), content = 'keep cached dependency';
+  fs.writeFileSync(file, content);
+  const before = fs.lstatSync(file);
+  assert.equal(select(f.root, f.output, f.input, warn), '--linux-root-cache');
+  assert.deepEqual(fs.lstatSync(file), before);
+  assert.equal(fs.readFileSync(file, 'utf8'), content);
+  assert.deepEqual(warnings, []);
+  assert.equal(fs.existsSync(f.output), false);
+});
+
+for (const kind of ['hardlink', 'symlink', 'previous-hub', 'previous-bundle']) {
+  test(`optional Linux cache selection preserves a refused ${kind} without admitting it`, t => {
+    const { select } = require('./linux-root-cache-option.cjs'), f = rootCacheFixture(t);
+    fs.mkdirSync(f.target, { recursive: true });
+    const protectedFile = path.join(f.root, 'protected'), content = 'must stay unchanged';
+    fs.writeFileSync(protectedFile, content);
+    let entry;
+    if (kind === 'hardlink') {
+      entry = path.join(f.target, 'linked'); fs.linkSync(protectedFile, entry);
+    } else if (kind === 'symlink') {
+      const outside = path.join(f.root, 'outside'); fs.mkdirSync(outside);
+      entry = path.join(f.target, 'redirect');
+      fs.symlinkSync(outside, entry, process.platform === 'win32' ? 'junction' : 'dir');
+    } else {
+      entry = path.join(f.target, 'release', kind === 'previous-hub' ? 'creator-hub' : 'bundle');
+      fs.mkdirSync(path.dirname(entry));
+      if (kind === 'previous-hub') fs.writeFileSync(entry, 'do not reuse this image');
+      else fs.mkdirSync(entry);
+    }
+    const before = fs.lstatSync(entry), warnings = [];
+    const selection = () => select(f.root, f.output, f.input, message => warnings.push(message));
+    if (kind === 'hardlink') {
+      assert.equal(selection(), '');
+      assert.equal(warnings.length, 1);
+      assert.match(warnings[0], /Cache not reused; compiling Root in a fresh output directory/);
+      assert.doesNotMatch(warnings[0], /[\r\n\u001b]/);
+    } else {
+      assert.throws(selection, /redirected, linked or nonregular|previous Hub or bundle/);
+      assert.deepEqual(warnings, []);
+    }
+    assert.throws(f.admit, /redirected, linked or nonregular|previous Hub or bundle/);
+    assert.deepEqual(fs.lstatSync(entry), before);
+    assert.equal(fs.readFileSync(protectedFile, 'utf8'), content);
+    assert.equal(fs.existsSync(f.output), false);
+  });
+}
+
+test('optional Linux cache selection never masks argument, ancestor or IO failures', t => {
+  const { select } = require('./linux-root-cache-option.cjs'), f = rootCacheFixture(t);
+  const warn = () => assert.fail('Unexpected failures must not select a fallback');
+  assert.throws(() => select(f.root, f.target, f.input, warn), /separate from signed inputs/);
+  fs.mkdirSync(path.dirname(f.target)); fs.writeFileSync(f.target, 'not a directory');
+  assert.throws(() => select(f.root, f.output, f.input, warn), /ancestor is redirected/);
+  fs.unlinkSync(f.target);
+  const original = fs.lstatSync, denied = Object.assign(Error('permission denied'), { code: 'EACCES' });
+  const spy = t.mock.method(fs, 'lstatSync', (file, ...args) => {
+    if (file === f.target) throw denied;
+    return original(file, ...args);
+  });
+  try { assert.throws(() => select(f.root, f.output, f.input, warn), error => error === denied); }
+  finally { spy.mock.restore(); }
+  assert.equal(fs.existsSync(f.output), false);
+});
+
+for (const useCache of [true, false]) test(`signed Linux root compilation uses ${useCache ? 'admitted cache' : 'fresh output after a linked-cache refusal'} while receipts stay fresh`, t => {
   const b = require('./build-unified.cjs'), archive = require('./module-archive.cjs');
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'creator-root-cache-')));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -110,9 +227,15 @@ test('signed Linux root compilation reaches the cached target while assembly and
   };
   const target = path.join(root, 'artifacts', 'linux-root-target');
   const dependency = write(path.join(target, 'x86_64-unknown-linux-gnu', 'release', 'deps', 'libfixture.rlib'));
+  if (!useCache) fs.linkSync(dependency, path.join(target, 'linked-dependency'));
   const before = fs.readFileSync(dependency);
+  const beforeMetadata = fs.lstatSync(dependency);
+  const outputPath = path.join(root, 'artifacts', 'unified', 'cache-routing');
+  const rootTarget = useCache ? target : path.join(outputPath, 'hub-target');
+  const cacheOption = require('./linux-root-cache-option.cjs').select(root, outputPath, path.join(root, 'signed-input'), () => {});
+  assert.equal(cacheOption, useCache ? '--linux-root-cache' : '');
   const options = { installer: true, managed: true, experimentalUnix: true, experimentalWritable: true,
-    signedUnixInput: path.join(root, 'signed-input'), linuxRootCache: true };
+    signedUnixInput: path.join(root, 'signed-input'), linuxRootCache: cacheOption === '--linux-root-cache' };
   const env = { npm_execpath: write(path.join(root, 'fixture-npm.cjs')), GITHUB_SHA: 'a'.repeat(40),
     CARGO_TARGET_DIR: path.join(root, 'never-use-inherited-target') };
   write(path.join(root, 'src-tauri', 'tauri.conf.json'), JSON.stringify({ productName: 'Creator Hub' }));
@@ -136,7 +259,7 @@ test('signed Linux root compilation reaches the cached target while assembly and
   t.mock.method(archive, 'create', (_modules, _manifest, file) => { write(file); return { fixture: true }; });
   t.mock.method(archive, 'verify', () => {});
   t.mock.method(require('./unix-package-payload.cjs'), 'validatePackages', ({ output, bundleDirectory, rawHub }) => {
-    assert.equal(bundleDirectory, path.join(target, 'x86_64-unknown-linux-gnu', 'release', 'bundle'));
+    assert.equal(bundleDirectory, path.join(rootTarget, 'x86_64-unknown-linux-gnu', 'release', 'bundle'));
     assert.equal(rawHub, path.join(output, 'creator-hub'));
     assert.equal(fs.readFileSync(rawHub, 'utf8'), 'new root from explicit locked compilation');
     verified++;
@@ -149,19 +272,24 @@ test('signed Linux root compilation reaches the cached target while assembly and
     }
     assert.equal(command, process.execPath);
     assert.equal(assembled, 1, 'signed admission/extraction still precedes Root compilation');
-    assert.equal(settings.env.CARGO_TARGET_DIR, target);
+    assert.equal(settings.env.CARGO_TARGET_DIR, rootTarget);
     assert.deepEqual(args.slice(1, 6), ['build', '--target', 'x86_64-unknown-linux-gnu', '--bundles', 'appimage,deb,rpm']);
     assert.deepEqual(args.slice(-2), ['--', '--locked']);
     const output = path.join(root, 'artifacts', 'unified', 'cache-routing');
     assert.equal(settings.env.CREATOR_BUILTIN_MANIFEST, path.join(output, 'builtin-manifest.json'));
-    assert.equal(fs.existsSync(path.join(target, 'x86_64-unknown-linux-gnu', 'release', 'bundle')), false);
-    write(path.join(target, 'x86_64-unknown-linux-gnu', 'release', 'creator-hub'), 'new root from explicit locked compilation');
-    write(path.join(target, 'x86_64-unknown-linux-gnu', 'release', 'bundle', 'new.deb'));
+    assert.equal(fs.existsSync(rootTarget), useCache);
+    assert.equal(fs.existsSync(path.join(rootTarget, 'x86_64-unknown-linux-gnu', 'release', 'bundle')), false);
+    write(path.join(rootTarget, 'x86_64-unknown-linux-gnu', 'release', 'creator-hub'), 'new root from explicit locked compilation');
+    write(path.join(rootTarget, 'x86_64-unknown-linux-gnu', 'release', 'bundle', 'new.deb'));
     compiled++;
   };
   const output = b.build('cache-routing', options, { root, platform: 'linux', arch: 'x86_64', env, execute });
   assert.equal(compiled, 1); assert.equal(verified, 1);
   assert.deepEqual(fs.readFileSync(dependency), before, 'cached dependencies are preserved');
+  const afterMetadata = fs.lstatSync(dependency);
+  for (const field of ['dev', 'ino', 'mode', 'uid', 'gid', 'nlink', 'size', 'mtimeMs', 'ctimeMs']) {
+    assert.equal(afterMetadata[field], beforeMetadata[field], `cached ${field} must not change`);
+  }
   const receipt = JSON.parse(fs.readFileSync(path.join(output, 'signed-unix-assembly.json'), 'utf8'));
   assert.equal(receipt.assemblyCommit, env.GITHUB_SHA);
   assert.equal(receipt.handoffSha256, 'c'.repeat(64));
@@ -169,7 +297,7 @@ test('signed Linux root compilation reaches the cached target while assembly and
   assert.equal(receipt.privateModulesResigned, false);
   assert.equal(receipt.nativeGuiAccepted, false); assert.equal(receipt.releaseReady, false);
   assert.equal(fs.existsSync(env.CARGO_TARGET_DIR), false);
-  assert.throws(() => b.build('keep-old-cache', options, { root, platform: 'linux', arch: 'x86_64', env, execute }), /previous Hub or bundle/);
+  assert.throws(() => b.build('keep-old-cache', { ...options, linuxRootCache: true }, { root, platform: 'linux', arch: 'x86_64', env, execute }), useCache ? /previous Hub or bundle/ : /redirected, linked or nonregular/);
   assert.equal(assembled, 1, 'dirty cache refusal precedes expensive handoff tooling');
   assert.equal(fs.existsSync(path.join(root, 'artifacts', 'unified', 'keep-old-cache')), false);
 });
@@ -179,14 +307,17 @@ test('assembly workflow caches the opted-in Linux Root outside immutable output 
   const document = yaml.parseDocument(fs.readFileSync(path.join(__dirname, '../.github/workflows/unix-managed-assembly.yml'), 'utf8'), { uniqueKeys: true });
   assert.deepEqual(document.errors, []);
   const workflow = document.toJS(), steps = workflow.jobs.assembly.steps;
-  const cache = steps.find(step => step.uses === 'Swatinem/rust-cache@v2');
+  const cache = steps.find(step => step.uses === 'Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0');
   assert.match(cache.with.workspaces, /native\/unix-transfer/);
   assert.match(cache.with.workspaces, /src-tauri -> \.\.\/artifacts\/unix-verifier-target/);
   assert.match(cache.with.workspaces, /runner\.os == 'Linux'.*src-tauri -> \.\.\/artifacts\/linux-root-target/);
   assert.equal(cache.with['cache-on-failure'], true);
+  assert.equal(cache.with['save-if'], "${{ runner.os != 'Linux' || !inputs.linux_production_migration_016 }}");
   assert.equal(cache.with['cache-workspace-crates'], undefined);
   const packageStep = steps.find(step => step.id === 'package');
-  assert.match(packageStep.run, /if \[\[ "\$RUNNER_OS" == Linux \]\]; then extra\+=\(--linux-root-cache\); fi/);
+  assert.match(packageStep.run, /set -euo pipefail/);
+  assert.match(packageStep.run, /if \[\[ "\$RUNNER_OS" == Linux \]\]; then\s+cache_option=\$\(node scripts\/linux-root-cache-option\.cjs "\$temp\/signed-unix-input"\)\s+if \[\[ -n "\$cache_option" \]\]; then extra\+=\("\$cache_option"\); fi\s+fi/);
+  assert.doesNotMatch(packageStep.run, /\|\|\s*true|continue-on-error|<\(/);
   assert.doesNotMatch(cache.with.workspaces, /artifacts\/unified|hub-target/);
   assert.equal(workflow.permissions.contents, 'read');
   assert.equal(workflow.jobs.assembly.permissions, undefined);

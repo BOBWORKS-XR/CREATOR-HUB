@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "appId": "creator-hub",
+  "version": "0.1.17",
+  "platform": "linux",
+  "architecture": "x86_64",
+  "packageType": "deb",
+  "assetName": "Creator_Hub_0.1.17_amd64-acceptance-only.deb",
+  "byteLength": 64455526,
+  "sha256": "f58801c95e6932266a897a7b139c6ad3cf4fdfb22ea518398f3a91ed3829ed54",
+  "executableSha256": "1fae9d03ddd889068fdccb8416ad3644952027304c10038d0b6810f068e2a952",
+  "identityProtocol": 0,
+  "lifecycleProtocol": 0,
+  "installerProtocol": 1,
+  "minHubVersion": "0.1.16"
+}

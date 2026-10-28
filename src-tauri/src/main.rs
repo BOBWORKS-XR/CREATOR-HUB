@@ -59,6 +59,8 @@ mod linux_update;
 mod mac_update;
 mod manager;
 mod mcp_runtime;
+#[cfg(all(target_os = "linux", feature = "integrated-features"))]
+mod mcp_update_handoff;
 mod native_support;
 mod platform;
 #[path = "../../native/plugins_retirement.rs"]

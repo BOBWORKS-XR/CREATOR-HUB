@@ -156,13 +156,15 @@ jobs:
           node-version: 24.17.0
           cache: npm
       - uses: dtolnay/rust-toolchain@1.99.0
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2; reviewed post-save gate
         with:
           workspaces: |
             native/unix-transfer
             src-tauri -> ../artifacts/unix-verifier-target
             ${{ runner.os == 'Linux' && 'src-tauri -> ../artifacts/linux-root-target' || '' }}
           cache-on-failure: true
+          # Preserve a rejected Root cache: this validation lane must not run post-save cleanup.
+          save-if: ${{ runner.os != 'Linux' || !inputs.linux_production_migration_016 }}
       - name: Install native Linux prerequisites only on the disposable runner
         if: runner.os == 'Linux'
         run: |
@@ -174,7 +176,7 @@ jobs:
       - run: npm ci
       - name: Check the handoff and bounded native extraction contracts
         run: |
-          node --test scripts/assemble-unix-payload.test.cjs scripts/sign-unix-payload.test.cjs scripts/unix-managed-payload.test.cjs scripts/linux-retirement-package.test.cjs scripts/build-unified.test.cjs scripts/linux-016-portable-package.test.cjs
+          node --test scripts/assemble-unix-payload.test.cjs scripts/sign-unix-payload.test.cjs scripts/unix-managed-payload.test.cjs scripts/linux-retirement-package.test.cjs scripts/build-unified.test.cjs scripts/linux-016-portable-package.test.cjs scripts/linux-portable-signed-controls.test.cjs scripts/linux-portable-restart-ci.test.cjs
           python3 -B scripts/stage-signed-unix-handoff.test.py
           python3 -B scripts/linux-retirement-package-verify.test.py
       - name: Test Linux migration completion and real owned GUI process detection before packaging
@@ -217,7 +219,10 @@ jobs:
             exit 64
           fi
           extra=()
-          if [[ "$RUNNER_OS" == Linux ]]; then extra+=(--linux-root-cache); fi
+          if [[ "$RUNNER_OS" == Linux ]]; then
+            cache_option=$(node scripts/linux-root-cache-option.cjs "$temp/signed-unix-input")
+            if [[ -n "$cache_option" ]]; then extra+=("$cache_option"); fi
+          fi
           if [[ "$CREATOR_LINUX_RETIREMENT_TEST_CANDIDATE" == 1 ]]; then extra+=(--linux-retirement-test-candidate); fi
           if [[ "$CREATOR_LINUX_INTEGRATED_CANDIDATE" == 1 ]]; then extra+=(--linux-integrated-candidate --integrated-features); fi
           if [[ "${CREATOR_LINUX_PRODUCTION_MIGRATION_016:-0}" == 1 ]]; then extra+=(--linux-production-migration-016 --integrated-features); fi

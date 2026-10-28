@@ -47,3 +47,57 @@ The already tested Windows V5 installer is immutable and does not contain these
 later MCP changes. They require a newly source-bound server payload and Linux
 candidate, followed by platform-specific install/migration/update/restart tests.
 Published and installed Windows applications are unchanged; no Mac work.
+
+## Later Feedback Intake
+
+The separately developed optional ledge tool is not in frozen product085. Review
+found a retained-result reader that accepted missing/non-boolean `success`.
+A two-file strict-boolean follow-up reproduces six failures before the guard and
+passes 11 focused tests afterward. Its patch and source receipts are under
+`artifacts/feedback-linux-20261027/phase/ledge-retained-success-01`.
+This is a prepared next-revision correction, not an installed or native-qualified
+feature. The supplied native run also needs explicit run-to-bundle hash binding;
+matching a bundle file alone does not establish which run used it. Integrate the
+feature and correction together through normal bundle/Unity/Hub gates, not by
+patching an immutable runtime or adding it silently to the signed candidate.
+
+## Live Docs Relevance
+
+Live qualification found a matching SetSpaceState section whose excerpt ended
+before the match. A narrow source correction now relocates only non-hit-bearing
+query excerpts toward the actual term, preserving real offsets, content hashes,
+revision checks, Unicode and response limits. The two new rejection/regression
+cases failed before the change;25isolated factory and37focused checks passed
+afterward, including exact continuation. Whole MCP no-emit type checking passed.
+Captured live responses were replayed without new requests. The correction is
+source-only and is not in frozen085/dce or an installed/published application.
+
+## Device Performance And Capture Boundaries
+
+The newer Backrooms feedback reports low Quest FPS and high SDK/world logging.
+No new MCP defect was source-proven. The Editor bridge retains incoming messages
+and stacks; it cannot add missing scene/object or retry-target identities that
+the SDK did not supply. Producer-side diagnostic improvements need the exact
+emitter source, bounded summaries and tests that preserve failures.
+
+`get_console_logs` reads a retained Editor snapshot, not a Quest FPS probe or
+lossless event counter. The bridge keeps 500 entries; filtering and reply-byte
+limits do not reduce SDK log production. Retained counts cannot prove a complete
+log rate, and fewer returned bytes do not establish performance or token savings.
+
+For a separately authorized performance-sensitive repair, compare short device
+captures with the same client/world bytes, refresh mode, room/player state and
+warm-up. Record actual duration, FPS and complete-log category rates; identify
+sampling gaps and rejoin effects. Bind client build, world hash, resolved SDK
+version and candidate revision. Headset performance, one-client movement,
+multiplayer and install/update acceptance remain separate gates. No new device
+run or performance acceptance is claimed here.
+
+Use existing project-query projections and diagnostic filters where supported.
+A desktop capture whose pixels disagree with the selected target must fail
+closed before input. A Range request alone is not a download limit: a bounded
+probe must stop reading and close even if the server ignores Range. These are
+reported agent/capture boundaries, not reproduced MCP defects.
+
+Exact entry/source identities and the read-only review are retained under
+`artifacts/feedback-linux-20261027/phase/deb017-085-signer-01/backrooms-feedback-review-01`.
