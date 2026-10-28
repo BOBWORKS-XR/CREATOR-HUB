@@ -62,6 +62,16 @@ const UPDATE_DEB = Object.freeze({ size: 64455526, sha256: 'f58801c95e6932266a89
   executableSha256: '1fae9d03ddd889068fdccb8416ad3644952027304c10038d0b6810f068e2a952' });
 const UPDATE_ASSET = 'Creator_Hub_0.1.17_amd64-acceptance-only.deb';
 const UPDATE_SOURCE17 = Object.freeze({ commit: '75a99ff4a267064aaa3ac9e30039bc91dc791d89', tree: '5f62bf4bc1ba85eb293ca9a5a30330b06b6b4351' });
+// BEGIN fixed changed-MCP transport data; historical tuples remain unchanged.
+const CHANGED_MCP_PROFILE_SHA256 = '1fd56c76f100422e2c380e19cfc5dfb9da4ecf05a6348efdba99bbaebb5cd792';
+const CHANGED_MCP_IMAGE_SHA256 = 'fedc79bd67928a4e3570ca86c6157f4ecb553d046f0febe6823b3a976803a673';
+const CHANGED_MCP_FILES = Object.freeze(Object.fromEntries(Object.entries({
+  'deb17/creator-hub-linux-x86_64-deb.json': { size: 514, sha256: 'be4754284d87f067f6fa4b4f19bfc1ef29df187c76aa9e481d95535edf7391e5' },
+  'deb17/creator-hub-linux-x86_64-deb.json.minisig': { size: 311, sha256: '2467de9d43e08f56f9705e3695af6dc027682deda414c173953abd2801b4b1df' },
+  'deb17/Creator_Hub_0.1.17_amd64-acceptance-only.deb': { size: 64516566, sha256: '1bd69ef6ad81f6af396175e8d2ce74fdabc7df39c936bf8c8e3704a92260f222' },
+  'deb17/latest.json': { size: 751, sha256: '3610eab34edcf9a2c2c4ee16736ba8416e8e8dcfb0e7194a10ed2f3d0fd27787' },
+}).map(([name, pin]) => [name, Object.freeze(pin)])));
+// END fixed changed-MCP transport data.
 const contracts = new WeakMap();
 const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 
@@ -664,6 +674,94 @@ async function updateMain() {
     await proxy.close(); process.stdin.destroy(); saveLabReport(path.join(root, 'lab-transport.json'), proxy.report());
   }
 }
+// BEGIN fixed changed-MCP transport entrypoints; no historical function is replaced.
+function reviewedChangedMcpTarget(contract) {
+  assert.ok(contracts.has(contract) && contract.mode === 'deb'
+    && contract.profile === '016-deb-to-private017', 'Distinct changed-MCP DEB contract required');
+  assert.deepEqual(contract.pins, CHANGED_MCP_FILES, 'Exact actual40619538729 signed transport bodies required');
+  assert.equal(contract.executableSha256, CHANGED_MCP_IMAGE_SHA256, 'Exact installed actual017 Root required');
+}
+function loadChangedMcp016017(root) {
+  assert.ok(path.isAbsolute(root) && path.resolve(root) === root);
+  assert.deepEqual(fs.readdirSync(root).sort(), ['inputs', 'transport-pins.json']);
+  const config = updateJson(readBounded(path.join(root, 'transport-pins.json'), LIMITS.metadata)); assert.equal(config.mode, 'deb');
+  const names = updateFiles('deb');
+  assert.deepEqual(fs.readdirSync(path.join(root, 'inputs')).sort(), ['deb17']);
+  assert.deepEqual(fs.readdirSync(path.join(root, 'inputs', 'deb17')).sort(), names.map(name => name.slice('deb17/'.length)).sort());
+  keys(config.files, names, 'Exact external changed-MCP inventory');
+  assert.deepEqual(config.files, CHANGED_MCP_FILES, 'Exact changed-MCP body pins required before reads');
+  const input = {};
+  for (const name of names) {
+    const expected = config.files[name]; keys(expected, ['size', 'sha256'], 'External changed-MCP pin');
+    assert.ok(Number.isSafeInteger(expected.size) && expected.size > 0 && expected.size <= updateMaximum(name));
+    assert.match(expected.sha256, /^(?!0{64}$)[a-f0-9]{64}$/);
+    input[name] = bootstrapFile(path.join(root, 'inputs', ...name.split('/')), expected);
+  }
+  const contract = createUpdate016017(config, input); reviewedChangedMcpTarget(contract); return contract;
+}
+function assertChangedMcpRunner(env = process.env, platform = process.platform, arch = process.arch, uid = process.getuid?.(), euid = process.geteuid?.()) {
+  assert.equal(platform, 'linux'); assert.equal(arch, 'x64'); assert.equal(uid, 21314); assert.equal(euid, uid);
+  const branch = 'refs/heads/validation/native-linux-production-016';
+  const workflow = '.github/workflows/native-linux-production-016-migration.yml';
+  for (const [name, expected] of Object.entries({ GITHUB_ACTIONS: 'true', RUNNER_ENVIRONMENT: 'github-hosted', RUNNER_OS: 'Linux', RUNNER_ARCH: 'X64',
+    GITHUB_REPOSITORY: 'BOBWORKS-XR/CREATOR-HUB', GITHUB_REPOSITORY_ID: '1364807512', GITHUB_EVENT_NAME: 'workflow_dispatch',
+    GITHUB_REF: branch, GITHUB_WORKFLOW_REF: `BOBWORKS-XR/CREATOR-HUB/${workflow}@${branch}`,
+    CREATOR_NATIVE_LINUX_PRODUCTION_016: '1', CREATOR_MIGRATION_016_EXECUTE: 'true',
+    CREATOR_MIGRATION_016_SCENARIO: 'migration-approve', CREATOR_MIGRATED_UPDATE_EXECUTE: 'true',
+    UPDATE_EXECUTE: 'true', UPDATE_SCENARIO: 'deb-approve', UPDATE_PROFILE_SHA256: CHANGED_MCP_PROFILE_SHA256 })) assert.equal(env[name], expected, name);
+  assert.match(env.CREATOR_CHANGED_MCP_SOURCE_RECEIPT_SHA256 || '', /^[a-f0-9]{64}$/);
+  assert.match(env.GITHUB_SHA || '', /^[a-f0-9]{40}$/);
+  for (const name of ['GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT']) assert.match(env[name] || '', /^[1-9][0-9]*$/);
+  assert.ok(path.isAbsolute(env.RUNNER_TEMP || '') && path.resolve(env.RUNNER_TEMP) === env.RUNNER_TEMP && !env.FLATPAK_ID);
+  for (const name of Object.keys(env)) assert.ok(!/^(LD_|DYLD_|TAURI_|WEBKIT_|APPIMAGE$|APPDIR$|PYTHON|NODE_OPTIONS$|NODE_EXTRA_CA_CERTS$|NODE_TLS_REJECT_UNAUTHORIZED$|SSL_CERT_|CURL_CA_BUNDLE$|BASH_ENV$|ENV$|CREATOR_HUB_SIGNING_)/.test(name)
+    && !name.toLowerCase().endsWith('proxy'), 'Inherited update injection/trust/proxy refused');
+}
+function changedMcpReport(contract, report) {
+  reviewedChangedMcpTarget(contract);
+  return { ...report, scope: 'linux-deb-production016-to-private017-lab-transport', mode: 'deb',
+    fromVersion: '0.1.16', targetVersion: '0.1.17', publicDiscovery: false, releaseReady: false };
+}
+async function startChangedMcpProxy(contract, options, env = process.env) {
+  assertChangedMcpRunner(env); reviewedChangedMcpTarget(contract); assert.ok(!fs.existsSync('/.flatpak-info'));
+  const proxy = await startLoopbackTransport(contract, options);
+  return { ...proxy, report: () => changedMcpReport(contract, proxy.report()) };
+}
+async function changedMcpMain() {
+  assertChangedMcpRunner(); assert.equal(process.argv.length, 5); assert.equal(process.argv[3], 'deb');
+  const inspect = process.argv[2] === 'update-changed-mcp-016-017-inspect';
+  assert.ok(inspect || process.argv[2] === 'update-changed-mcp-016-017');
+  const root = path.join(process.env.RUNNER_TEMP, 'native-linux-production-016-update', 'transport'); assert.equal(process.argv[4], root);
+  const folder = fs.lstatSync(root); assert.ok(folder.isDirectory() && !folder.isSymbolicLink() && folder.uid === process.getuid() && (folder.mode & 0o7777) === 0o700);
+  const contract = loadChangedMcp016017(root);
+  if (inspect) { console.log(JSON.stringify(changedMcpReport(contract, labReport(contract, newState())))); return; }
+  assert.ok(fs.fstatSync(0).isFIFO(), 'Inherited private update pipe required');
+  const iterator = process.stdin[Symbol.asyncIterator](); let pending = Buffer.alloc(0);
+  async function line(maximum, timeout) {
+    let timer;
+    try {
+      return await Promise.race([(async () => {
+        while (!pending.includes(10)) {
+          const next = await iterator.next(); if (next.done) return null;
+          pending = Buffer.concat([pending, next.value]); assert.ok(pending.length <= maximum);
+        }
+        const at = pending.indexOf(10), result = pending.subarray(0, at); pending = pending.subarray(at + 1); return result;
+      })(), new Promise((_, reject) => { timer = setTimeout(() => reject(Error('Private update control deadline')), timeout); })]);
+    } finally { clearTimeout(timer); }
+  }
+  const control = json(bounded(await line(2 * LIMITS.tls, LIMITS.handshakeMs), 2 * LIMITS.tls, 'Update TLS control'));
+  keys(control, ['key', 'cert'], 'Ephemeral update TLS');
+  const key = canonicalBase64(control.key, LIMITS.tls), cert = canonicalBase64(control.cert, LIMITS.tls);
+  const proxy = await startChangedMcpProxy(contract, { key, cert }); key.fill(0);
+  console.log(JSON.stringify({ kind: 'update-016-017-ready', pid: process.pid, mode: 'deb', proxyUrl: proxy.proxyUrl,
+    publicDiscovery: false, nativeAcceptanceTested: false, signaturesVerifiedByHarness: false, releaseReady: false }));
+  try {
+    const closed = await Promise.race([line(32, LIMITS.durationMs), proxy.closed.then(() => null)]);
+    assert.ok((closed === null || closed.equals(Buffer.from('close'))) && pending.length === 0);
+  } finally {
+    await proxy.close(); process.stdin.destroy(); saveLabReport(path.join(root, 'lab-transport.json'), proxy.report());
+  }
+}
+// END fixed changed-MCP transport entrypoints.
 async function main() {
   assertRunner();
   assert.equal(process.argv.length, 4, 'Use CONFIG REPORT');
@@ -701,7 +799,12 @@ module.exports = { FROM, TO, BRANCH, INTEGRATED_BRANCH, INTEGRATED_TARGET, DESCR
   UPDATE_BRANCH, UPDATE_WORKFLOW, UPDATE_SCENARIOS, UPDATE_DEB, UPDATE_ASSET, UPDATE_SOURCE17,
   updateFiles, createUpdate016017, loadUpdate016017, reviewedUpdateTarget, assertUpdateRunner, startUpdate016017Proxy, updateReport,
   testing: Object.freeze({ startLoopbackTransport }) };
-if (require.main === module) (['update-016-017', 'update-016-017-inspect', 'update-migrated-016-017', 'update-migrated-016-017-inspect'].includes(process.argv[2]) ? updateMain()
+// BEGIN fixed changed-MCP exports.
+Object.assign(module.exports, { CHANGED_MCP_PROFILE_SHA256, CHANGED_MCP_IMAGE_SHA256, CHANGED_MCP_FILES,
+  reviewedChangedMcpTarget, loadChangedMcp016017, assertChangedMcpRunner, changedMcpReport, startChangedMcpProxy });
+// END fixed changed-MCP exports.
+if (require.main === module) (['update-changed-mcp-016-017', 'update-changed-mcp-016-017-inspect'].includes(process.argv[2]) ? changedMcpMain()
+  : ['update-016-017', 'update-016-017-inspect', 'update-migrated-016-017', 'update-migrated-016-017-inspect'].includes(process.argv[2]) ? updateMain()
   : ['bootstrap-016', 'bootstrap-016-inspect'].includes(process.argv[2]) ? bootstrapMain() : main()).catch(() => {
   // Never log TLS material, HTTP headers, file contents, or parser exceptions.
   console.error('Linux lab transport refused or failed; no native/public acceptance established.'); process.exitCode = 1;

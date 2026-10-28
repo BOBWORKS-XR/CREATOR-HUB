@@ -187,6 +187,203 @@ class BoundRoute:
         require(self._capture() == self.baseline, "MCP route/settings identity changed during update")
 
 
+class TransitionRoute:
+    """Read-only A->B verifier; the caller still owns source/profile/native admission."""
+    def __init__(self, before, target_source, target_resources, release_files):
+        require(type(before) is BoundRoute, "An existing bound A route is required")
+        before.recheck()
+        self.before = before
+        self.migration, self.home = before.migration, before.home
+        self.verify_signature = before.verify_signature
+        self.command, self.server, self.node = before.command, before.server, before.node
+        self.binding, self.baseline = copy.deepcopy(before.binding), copy.deepcopy(before.baseline)
+        self.a_inventory = copy.deepcopy(before.binding["resourceFiles"])
+        require(type(target_resources) is dict and set(target_resources) == set(MODULE_FILES + ROUTING_FILES)
+                and all(type(v) is str and re.fullmatch(r"[a-f0-9]{64}", v) for v in target_resources.values()),
+                "Complete independently bound B resource inventory required")
+        self.b_inventory = copy.deepcopy(target_resources)
+        require(all(self.b_inventory[n] == self.a_inventory[n]
+                    for n in ("mcp/server/runtime/node", "routing/creator-hub-mcp-router")),
+                "This finite gate requires unchanged Node/router image bytes")
+        self.source = Path(target_source)
+        require(self.source.is_absolute() and self.source.resolve(strict=True) == self.source
+                and self.source.is_dir() and not self.source.is_relative_to(self.home),
+                "Canonical independent sealed B source required")
+        self.handoff = self.home / "data/creator-hub-update-cache/deb/records/mcp-route-update.json"
+        require(not os.path.lexists(self.handoff), "Fresh transition cannot adopt an existing handoff")
+        self.active = self.home / ROUTE_BASE / "active.json"
+        self.previous = self._read_record(self.active, 16384)
+        a = self.migration.P.parse(self.previous)
+        a_descriptor = self.home / ROUTE_BASE / "descriptors" / a["descriptorSha256"] / "runtime.json"
+        self.from_version = self.migration.P.parse(self.migration.read_file(a_descriptor))["hubVersion"]
+        self.a_records = {name: copy.deepcopy(value) for name, value in before.baseline.items()
+                          if name != self.active.relative_to(self.home).as_posix()}
+        a_root = before.server.parent.parent.parent
+        for name in MODULE_FILES:
+            path = a_root / name
+            row = self._file(path, 128 * 1024**2)
+            require(row["sha256"] == self.a_inventory[name], "Original A payload differs")
+            self.a_records[path.relative_to(self.home).as_posix()] = row
+        self.inputs = {}
+        raw = {}
+        for name in MODULE_FILES + ROUTING_FILES:
+            path = self.source / name
+            row = self._file(path, 128 * 1024**2, source=True)
+            require(row["sha256"] == self.b_inventory[name], "Independently bound B input differs")
+            self.inputs[path] = row
+            if name.startswith("routing/"):
+                raw[name] = self._read_source(path, 32768)
+        require(sum(row["size"] for row in self.inputs.values()) <= 256 * 1024**2,
+                "Bounded complete target inventory required")
+        for name in ("runtime", "router"):
+            require(self.verify_signature(self.source / ("routing/" + name + ".json"),
+                                          self.source / ("routing/" + name + ".minisig")) is None,
+                    "Production-key B signature verification required, not a boolean")
+        descriptor = self.migration.P.parse(raw["routing/runtime.json"])
+        self.migration.keys(descriptor, ("schemaVersion", "product", "hubVersion", "platform", "arch", "module"))
+        module = descriptor["module"]
+        self.migration.keys(module, ("executable", "version", "files"))
+        require(type(descriptor["schemaVersion"]) is int and descriptor["schemaVersion"] == 1
+                and descriptor["product"] == "com.creatorworks.hub.mcp-runtime"
+                and descriptor["platform"] == "linux" and descriptor["arch"] == "x86_64"
+                and module["executable"] == "mcp/creator-works-mcp-launcher" and module["version"] == SERVER["version"]
+                and module["files"] == {n: self.b_inventory[n] for n in MODULE_FILES},
+                "Exact signed B runtime descriptor/inventory required")
+        canonical = json.dumps({"executable": module["executable"], "version": module["version"],
+                                "files": dict(sorted(module["files"].items()))}, separators=(",", ":"), ensure_ascii=False).encode()
+        self.target = {"descriptorSha256": hashlib.sha256(raw["routing/runtime.json"]).hexdigest(),
+                       "generation": hashlib.sha256(canonical).hexdigest()}
+        require(self.target["generation"] != a["generation"]
+                and self.b_inventory["mcp/server/creator-works-mcp.mjs"] != self.a_inventory["mcp/server/creator-works-mcp.mjs"],
+                "This finite path requires a different signed server generation")
+        require(type(release_files) is tuple and len(release_files) == 2, "Exact signed release pair required")
+        paths = tuple(Path(p) for p in release_files)
+        for path in paths:
+            require(path.is_relative_to(self.source), "Release must be in the independent sealed input directory")
+            self.inputs[path] = self._file(path, 32768, source=True)
+        self.release, self.signature = (self._read_source(p, limit) for p, limit in zip(paths, (32768, 4096)))
+        require(self.verify_signature(*paths) is None, "Production-key release verification required, not a boolean")
+        release = self.migration.P.parse(self.release)
+        require(type(release) is dict and type(release.get("schemaVersion")) is int and release["schemaVersion"] == 1
+                and release.get("appId") == "creator-hub" and release.get("platform") == "linux"
+                and release.get("architecture") == "x86_64" and release.get("packageType") == "deb"
+                and type(release.get("installerProtocol")) is int and release["installerProtocol"] == 1
+                and type(release.get("executableSha256")) is str and re.fullmatch(r"[a-f0-9]{64}", release["executableSha256"])
+                and release.get("version") == descriptor["hubVersion"], "Exact signed higher native DEB release required")
+        versions = (self.from_version, descriptor["hubVersion"])
+        require(all(type(v) is str and re.fullmatch(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", v)
+                    for v in versions)
+                and tuple(map(int, versions[1].split("."))) > tuple(map(int, versions[0].split("."))),
+                "B must be the independently bound higher Hub version")
+        self.spent, self.current, self.proof = False, None, None
+        self.ready_capture, self.capture_attempted = None, False
+        self._completed_file = None
+        self._inputs_unchanged()
+        self.recheck()
+
+    def _read_source(self, path, limit):
+        return self.migration.read_file(path, limit, uid=0, mode=0o444)
+
+    def _read_record(self, path, limit=262144):
+        return self.migration.read_file(path, limit, uid=self.migration.UID, mode=0o600)
+
+    def _file(self, path, limit, *, source=False):
+        info = path.lstat()
+        require(0 <= info.st_size <= limit, "Transition file exceeds its bound")
+        reader = self._read_source if source else self.migration.read_file
+        return _record(path, reader, info.st_size)
+
+    def _inputs_unchanged(self):
+        require(all(self._file(p, row["size"], source=True) == row for p, row in self.inputs.items()),
+                "Independent signed B inputs changed")
+
+    def _lease_a(self):
+        require(self.before.binding == {"resourceFiles": self.a_inventory}, "Original A binding changed")
+        require(all(self._file(self.home / name, row["size"]) == row for name, row in self.a_records.items()),
+                "Immutable retained A payload/router/metadata changed")
+
+    def recheck(self):
+        self._lease_a()
+        if self.current is None:
+            self.before.recheck()
+        else:
+            self.current.recheck()
+            require(self._file(self.handoff, 262144) == self._completed_file,
+                    "Completed handoff identity changed")
+            require(self._read_record(self.handoff) == bytes(self.proof["handoff"]["completed"]),
+                    "Actual Completed handoff changed")
+            self._read_record(self.active, 16384)
+            require(self._file(self.history, 16384) == self.history_record, "Exact A receipt history changed")
+
+    def capture_ready(self):
+        require(not self.spent and not self.capture_attempted and self.current is None,
+                "Ready capture is one-shot, read-only and before completion")
+        self.capture_attempted = True
+        self.recheck()
+        row = self._file(self.handoff, 262144)
+        raw = self._read_record(self.handoff)
+        require(row == self._file(self.handoff, 262144) and hashlib.sha256(raw).hexdigest() == row["sha256"],
+                "Actual Ready changed during capture")
+        value = self.migration.P.parse(raw)
+        require(type(value) is dict and value.get("phase") == "Ready", "Only an actual Ready record may be captured")
+        self.recheck()
+        self.ready_capture = {"path": str(self.handoff), "file": row, "raw": raw}
+        return {"path": str(self.handoff), "file": copy.deepcopy(row), "raw": list(raw)}
+
+    def complete(self, ready_raw, completed_raw):
+        require(not self.spent, "This transition evidence attempt is spent; never retry")
+        self.spent = True
+        require(self.ready_capture is not None and ready_raw == self.ready_capture["raw"],
+                "Original Ready bytes must come from the actual one-shot capture, not an expectation")
+        self._inputs_unchanged()
+        self._lease_a()
+        fields = ("schemaVersion", "fromVersion", "installed", "release", "signature", "previous")
+        records = []
+        for body in (ready_raw, completed_raw):
+            require(type(body) is bytes and 0 < len(body) <= 262144, "Bounded original raw handoff bytes required")
+            value = self.migration.P.parse(body)
+            self.migration.keys(value, (*fields, "phase"))
+            require(type(value["schemaVersion"]) is int and value["schemaVersion"] == 1
+                    and value["fromVersion"] == self.from_version and value["installed"] == "/usr/bin/creator-hub",
+                    "Handoff baseline/location differs")
+            for key, expected in (("release", self.release), ("signature", self.signature), ("previous", self.previous)):
+                data = value[key]
+                require(type(data) is list and len(data) == len(expected)
+                        and all(type(v) is int and 0 <= v <= 255 for v in data) and bytes(data) == expected,
+                        "Handoff signed release or original CAS differs")
+            records.append(value)
+        ready, completed = records
+        require(ready["phase"] == "Ready" and completed["phase"] == {"Completed": self.target}
+                and all(ready[k] == completed[k] for k in fields), "Actual Ready->Completed exact B required")
+        require(self._read_record(self.handoff) == completed_raw, "Completed bytes are not the actual current handoff")
+        completed_capture = self._file(self.handoff, 262144)
+        require(hashlib.sha256(completed_raw).hexdigest() == completed_capture["sha256"], "Actual Completed capture differs")
+        self.history = self.home / ROUTE_BASE / "history" / (hashlib.sha256(self.previous).hexdigest() + ".json")
+        require(self._read_record(self.history, 16384) == self.previous, "Exact original A history required")
+        self._read_record(self.active, 16384)
+        self.history_record = self._file(self.history, 16384)
+        # B's runtime is independent; the live stable router and its metadata remain A.
+        retained = {n: self.a_inventory[n] for n in ROUTING_FILES if n not in ("routing/runtime.json", "routing/runtime.minisig")}
+        candidate = BoundRoute(self.migration, self.home, {**self.b_inventory, **retained}, self.verify_signature)
+        require(candidate.command == self.command and candidate.server.parent.parent.parent.name == self.target["generation"],
+                "Only the exact stable command and bound B generation may reconnect")
+        self.proof = {"inventories": {"a": copy.deepcopy(self.a_inventory), "b": copy.deepcopy(self.b_inventory)},
+                      "handoff": {"ready": list(ready_raw), "completed": list(completed_raw),
+                                  "readyCapture": {k: copy.deepcopy(self.ready_capture[k]) for k in ("path", "file")},
+                                  "completedCapture": {"path": str(self.handoff), "file": completed_capture}},
+                      "target": copy.deepcopy(self.target)}
+        self.current = candidate
+        self._completed_file = copy.deepcopy(completed_capture)
+        self.server, self.node = candidate.server, candidate.node
+        self.binding, self.baseline = copy.deepcopy(candidate.binding), copy.deepcopy(candidate.baseline)
+        try:
+            self.recheck()
+            require(self._file(self.handoff, 262144) == completed_capture, "Completed file changed before adoption")
+        except Exception:
+            self.current, self.proof, self._completed_file = None, None, None
+            raise
+
+
 def _connect(route, directory, environment, pages, helper, native):
     migration = route.migration
     lock = migration.read_file(Path("/opt/creator-polkit-fixture/sdk/package-lock.json"), 2 * 1024**2, uid=0, mode=0o644)
@@ -329,3 +526,48 @@ class McpFixture:
                 "protectedBefore": copy.deepcopy(self.before), "protectedAfter": self._preserved(),
                 "originalNormalEofClose": True, "signalsRequested": False,
                 "liveAiAccepted": False, "unityAccepted": False, "releaseReady": False}
+
+
+class TransitionFixture(McpFixture):
+    def __init__(self, route, *args):
+        require(type(route) is TransitionRoute, "Exact separately bound A->B route required")
+        self._reconnect_observer = None
+        super().__init__(route, *args)
+
+    def _guard(self):
+        super()._guard()
+        if self._reconnect_observer is not None and self.replacement is not None:
+            observe, self._reconnect_observer = self._reconnect_observer, None
+            require(observe(self.replacement) is None, "Observer callbacks cannot supply an approval value")
+            super()._guard()
+
+    def complete(self, ready_raw, completed_raw):
+        require(self.started and not self.closed and len(self.checks) == 1 and not self.reconnect_started,
+                "Completion evidence requires the original live pre-update A connection")
+        require(self._preserved() == self.before, "Protected settings changed before completion")
+        self.connection.alive()
+        same_process(self.original_router, self.connection.native.native_process(self.connection.runtime.pid, self.helper))
+        same_process(self.original_sdk, self.connection.native.native_process(self.connection.child.pid, self.helper))
+        self.route.complete(ready_raw, completed_raw)
+        self._guard()
+
+    def check(self, phase):
+        require(phase == "before-update" or self.route.current is not None, "Only actual Completed B permits post-update checks")
+        return super().check(phase)
+
+    def reconnect(self):
+        require(self.route.current is not None, "Actual Completed B required before reconnect")
+        return super().reconnect()
+
+    def reconnect_observed(self, observe):
+        require(callable(observe) and not self.reconnect_started and self._reconnect_observer is None,
+                "One source-bound live-B observation before normal EOF required")
+        self._reconnect_observer = observe
+        return self.reconnect()
+
+    def close(self):
+        result = super().close()
+        result["scope"] = "existing-managed-mcp-transition-contract-only"
+        result["transition"] = copy.deepcopy(self.route.proof)
+        result["payloadSwapAccepted"] = False
+        return result

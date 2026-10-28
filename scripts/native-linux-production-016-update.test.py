@@ -2233,7 +2233,14 @@ process.stdout.write(JSON.stringify({error,calls,phases,signals,abortEvents,
     def test_authority_and_session_checked_after_every_broker_wait(self):
         tree = ast.parse((HERE / "native-linux-production-016-update.py").read_text())
         authorize = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "authorize")
-        guard = next(n for n in authorize.body if isinstance(n, ast.FunctionDef) and n.name == "guard")
+        self.assertEqual(len(authorize.body), 1)
+        call = authorize.body[0].value
+        self.assertEqual(ast.unparse(call.func), "_authorize")
+        self.assertEqual([ast.unparse(arg) for arg in call.args[:-1]], [arg.arg for arg in authorize.args.args])
+        self.assertEqual(ast.unparse(call.args[-1]), "FIXED['17']")
+        self.assertEqual([(value.arg, ast.unparse(value.value)) for value in call.keywords], [("migrated", "migrated")])
+        shared = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_authorize")
+        guard = next(n for n in shared.body if isinstance(n, ast.FunctionDef) and n.name == "guard")
         calls = [n.func.id for n in ast.walk(guard) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)]
         self.assertEqual(calls.count("recheck_endpoint"), 2)
         self.assertEqual(calls.count("wait"), 1)
@@ -4194,10 +4201,12 @@ class HtmlAttachmentTests(unittest.TestCase):
                     if state.input_error is not None: raise state.input_error
                     value = None
                 elif endpoint == "text":
-                    value = {"#platform-status": "Linux", ".footer-version": "0.1.16", "#page-title": "CREATOR HUB"}.get(selector, "")
+                    value = {"#platform-status": "Linux", ".footer-version": "0.1.16", "#page-title": "CREATOR HUB", "#projects-home-title": "Projects"}.get(selector, "")
                 elif endpoint in ("displayed", "enabled"): value = True
                 elif endpoint == "name": value = "input" if selector == "#usage-terms-checkbox" else "button"
                 elif endpoint == "attribute/type": value = "checkbox"
+                elif endpoint == "attribute/aria-busy": value = "false"
+                elif endpoint == "attribute/open": value = None
                 else: raise AssertionError("Unmodeled read endpoint: " + endpoint)
                 value = state.changed.get(selector + ":" + endpoint, value)
             elif request.method == "DELETE" and route == "":
@@ -7483,6 +7492,1691 @@ class EarlySessionDiagnostics(unittest.TestCase):
         self.assertIn("'result/root.json'", functions["export_evidence"])
         self.assertIn("info.st_uid in (0, UID)", functions["export_evidence"])
         self.assertNotIn("session.poll(", functions["session_wrapper_outcome"])
+
+
+class TransitionConsumerTests(unittest.TestCase):
+    """Synthetic harness qualification only; no production signature or native claim."""
+    def setUp(self):
+        self.stack = ExitStack(); self.addCleanup(self.stack.close)
+        self.directory = Path(self.stack.enter_context(tempfile.TemporaryDirectory())).resolve()
+        self.stack.enter_context(patch.object(M, "BASE", self.directory))
+        self.home, self.evidence = self.directory / "result/home", self.directory / "result/mcp"
+        self.home.mkdir(parents=True); self.evidence.mkdir()
+        self.mcp = M.load("native-linux-update-mcp")
+        self.real_read = M.read
+        self.linux_files, self.real_lstat = {}, Path.lstat
+        self.reader = self.stack.enter_context(patch.object(M, "read", side_effect=self.unit_read))
+        self.stack.enter_context(patch.object(Path, "lstat", lambda path: self.file_stat(path)))
+        # Windows unit fixtures model the Linux owner/mode; actual bytes, inode,
+        # size and both timestamps still come from the real temporary files.
+        self.stack.enter_context(patch.object(M, "transition_file", side_effect=self.capture))
+        self.signature = self.stack.enter_context(patch.object(M, "signature", return_value=None))
+        self.bodies, self.inventories = {}, {}
+        for side, version in (("a", "0.1.16"), ("b", "0.1.17")):
+            bodies = {n: ("unit-only:" + n).encode() for n in self.mcp.MODULE_FILES + self.mcp.ROUTING_FILES}
+            bodies["mcp/server/creator-works-mcp.mjs"] = ("unit-server-" + side).encode()
+            module = {"executable": "mcp/creator-works-mcp-launcher", "version": "2.7.7",
+                      "files": {n: M.pin(bodies[n])["sha256"] for n in self.mcp.MODULE_FILES}}
+            bodies["routing/runtime.json"] = json.dumps({"schemaVersion": 1, "product": "com.creatorworks.hub.mcp-runtime",
+                "hubVersion": version, "platform": "linux", "arch": "x86_64", "module": module}).encode()
+            self.bodies[side] = bodies
+            self.inventories[side] = {n: M.pin(b) for n, b in bodies.items()}
+            for name, raw in bodies.items(): self.put(self.directory / "mcp-transition-input" / side / name, raw)
+        self.release = json.dumps({"schemaVersion": 1, "appId": "creator-hub", "version": "0.1.17", "platform": "linux",
+            "architecture": "x86_64", "packageType": "deb", "installerProtocol": 1, "executableSha256": "a" * 64}).encode()
+        self.detached = b"unit-only-detached-signature"
+        self.put(self.directory / "mcp-transition-input/b/release.json", self.release)
+        self.put(self.directory / "mcp-transition-input/b/release.minisig", self.detached)
+        self.expected = M.review_transition_inputs(self.inventories, None)
+        self.active = self.home / self.mcp.ROUTE_BASE / "active.json"
+        self.previous = self.encode({"schemaVersion": 1, **self.target("a")})
+        self.put(self.active, self.previous); self.active_a = self.capture(self.active)
+        for name in ("runtime.json", "runtime.minisig", "router.json", "router.minisig", "creator-hub-mcp-router"):
+            base = (self.home / self.mcp.ROUTE_BASE / "descriptors" / self.target("a")["descriptorSha256"]
+                    if name.startswith("runtime.") else self.home / self.mcp.ROUTE_BASE / "router-v1")
+            self.put(base / name, self.bodies["a"]["routing/" + name])
+        self.record = self.home / "data/creator-hub-update-cache/deb/records/mcp-route-update.json"
+        self.ready = {"schemaVersion": 1, "fromVersion": "0.1.16", "installed": "/usr/bin/creator-hub", "release": list(self.release),
+                      "signature": list(self.detached), "previous": list(self.previous), "phase": "Ready"}
+        self.put(self.record, self.encode(self.ready)); ready = self.capture(self.record)
+        self.completed = {**self.ready, "phase": {"Completed": self.target("b")}}
+        self.put(self.record, self.encode(self.completed)); completed = self.capture(self.record)
+        self.put(self.active, self.encode({"schemaVersion": 1, **self.target("b")}))
+        self.b_root = self.home / "data/creator-hub/runtime-generations/linux-x86_64" / self.target("b")["generation"]
+        self.b_descriptor = self.active.parent / "descriptors" / self.target("b")["descriptorSha256"]
+        self.installed_b = {}
+        for name in self.mcp.MODULE_FILES + ("routing/runtime.json", "routing/runtime.minisig"):
+            path = self.b_root / name if name in self.mcp.MODULE_FILES else self.b_descriptor / Path(name).name
+            mode = 0o755 if name in ("mcp/creator-works-mcp-launcher", "mcp/server/runtime/node") else (0o600 if name.startswith("routing/") else 0o644)
+            self.put(path, self.bodies["b"][name])
+            self.linux_files[path] = {"st_mode": stat.S_IFREG | mode, "st_uid": M.UID, "st_gid": M.UID}
+            self.installed_b[path] = {"name": name, "mode": mode, "raw": self.bodies["b"][name]}
+        self.put(self.active.parent / "history" / (M.pin(self.previous)["sha256"] + ".json"), self.previous)
+        self.paths = ("config/client.json", "data/project/keep.txt")
+        for name in self.paths: self.put(self.home / name, b"unit-only-protected")
+        protocol = mcp_receipt()
+        protocol["scope"] = "existing-managed-mcp-transition-contract-only"; protocol["payloadSwapAccepted"] = False
+        original_route = M.transition_original_route(self.active_a, self.expected)
+        for row in protocol["checks"]:
+            row["route"] = copy.deepcopy(original_route)
+            row["router"]["kernelImageSha256"] = self.inventories["a"]["routing/creator-hub-mcp-router"]["sha256"]
+            row["sdk"]["kernelImageSha256"] = self.inventories["a"]["mcp/server/runtime/node"]["sha256"]
+        for role in ("router", "sdk"):
+            protocol["reconnect"][role]["kernelImageSha256"] = protocol["checks"][0][role]["kernelImageSha256"]
+        protocol["transition"] = {"inventories": {s: {n: p["sha256"] for n, p in self.inventories[s].items()} for s in ("a", "b")},
+            "target": self.target("b"), "handoff": {"ready": ready["raw"], "completed": completed["raw"],
+                "readyCapture": {k: ready[k] for k in ("path", "file")}, "completedCapture": {k: completed[k] for k in ("path", "file")}}}
+        protected = M.transition_protected(self.paths)
+        protocol["protectedBefore"] = protocol["protectedAfter"] = protected
+        source = (HERE.parent / "native/mcp-router/src/unix_exec.rs").read_text()
+        self.loader = re.search(r'const LOADER: &str = r#"(.*?)"#;', source, re.S).group(1)
+        self.assertEqual(M.pin(self.loader.encode())["sha256"], M.MCP_LOADER_SHA256)
+        self.observations = {n: self.observation("b" if n == "b" else "a", protocol) for n in ("aBefore", "aAfter", "aDuringB", "b")}
+        observers = {n: self.observer_capture(n, value) for n, value in self.observations.items()}
+        self.value = {"schemaVersion": 1, "scope": "managed-mcp-transition-evidence-only", "protocol": protocol,
+            "captures": {"activeA": self.active_a, "ready": ready, "completed": completed, "eofA": self.eof("existing", 4), "eofB": self.eof("reconnect", 2)},
+            "observers": observers, "protectedBefore": protected, "protectedAfter": protected,
+            **dict.fromkeys(("nativeAdmissionAccepted", "payloadSwapAccepted", "liveAiAccepted", "unityAccepted", "releaseReady"), False)}
+
+    @staticmethod
+    def encode(value):
+        return json.dumps(value, separators=(",", ":")).encode()
+
+    @staticmethod
+    def put(path, body):
+        path.parent.mkdir(parents=True, exist_ok=True); path.write_bytes(body)
+
+    def capture(self, path, maximum=262144, **kw):
+        raw, info = self.unit_read(path, maximum), path.lstat()
+        mode = kw.get("mode", 0o600)
+        identity = [info.st_dev, info.st_ino, stat.S_IFREG | mode, M.UID, M.UID, info.st_nlink,
+                    info.st_size, info.st_mtime_ns, info.st_ctime_ns]
+        return {"path": str(path), "raw": list(raw), "file": {**M.pin(raw), "identity": identity}}
+
+    def file_stat(self, path):
+        actual = self.real_lstat(path)
+        if path not in self.linux_files:
+            return actual
+        fields = ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns")
+        return SimpleNamespace(**{**{n: getattr(actual, n) for n in fields}, **self.linux_files[path]})
+
+    def unit_read(self, path, maximum=262144, **kw):
+        if path in self.linux_files:
+            raw = path.read_bytes()
+            self.assertLessEqual(len(raw), maximum)
+            return raw
+        return self.real_read(path, min(maximum, 65536))
+
+    def target(self, side):
+        return {k: self.expected["sides"][side][k] for k in ("descriptorSha256", "generation")}
+
+    def observation(self, side, protocol):
+        process = protocol["reconnect"]["router"] if side == "b" else protocol["checks"][0]["router"]
+        command = protocol["reconnect"]["command"]
+        def row(pid, parent, image):
+            return {"pid": pid, "parentPid": parent, "startTime": str(pid * 10), "uids": [M.UID] * 4, "gids": [M.UID] * 4,
+                "argv": [command], "executable": command, "imagePin": image,
+                "image": {"ctimeNs": "1", "dev": 1, "gid": M.UID, "ino": pid, "mode": stat.S_IFREG | 0o500,
+                          "mtimeNs": "1", "nlink": 1, "size": image["size"], "uid": M.UID}}
+        router = row(process["pid"], process["parentPid"], self.inventories["a"]["routing/creator-hub-mcp-router"])
+        supervisor = row(router["pid"] + 2, router["pid"], router["imagePin"])
+        node = row(router["pid"] + 3, supervisor["pid"], self.inventories[side]["mcp/server/runtime/node"])
+        server = self.home / "data/creator-hub/runtime-generations/linux-x86_64" / self.target(side)["generation"] / "mcp/server/creator-works-mcp.mjs"
+        digest = self.inventories[side]["mcp/server/creator-works-mcp.mjs"]["sha256"]
+        node.update(argv=[str(server.parent / "runtime/node"), "--input-type=module", "--eval", self.loader, str(server), digest],
+                    executable="/memfd:creator-hub-node (deleted)", fd4Link="/memfd:creator-hub-node (deleted)", seals=15)
+        node["image"]["nlink"] = 0; node["fd4Image"] = copy.deepcopy(node["image"])
+        return {"schemaVersion": 1, "scope": "synthetic-linux-router-node-observer-only", "passed": True, "syntheticFixtureOnly": True,
+            **dict.fromkeys(("qualified", "nativeAdmissionAccepted", "liveMcpProtocolAccepted", "payloadSwapAccepted", "releaseReady"), False),
+            "loaderSha256": M.MCP_LOADER_SHA256, "sourceSha256": digest,
+            "routerSourcePins": {Path(k).name: v["sha256"] for k, v in M.MCP_OBSERVER_PINS.items() if k.startswith("src/")},
+            "snapshot": {"router": router, "supervisor": supervisor, "serverNode": node}}
+
+    def observer_capture(self, name, value):
+        path = self.evidence / ("observer-" + name + ".json")
+        self.put(path, self.encode(value)); return self.capture(path)
+
+    def eof(self, name, checks):
+        close = {"closed": True, "eofSent": True, "ended": True, "signalsRequested": False, "stdoutBytes": 123, "stderrBytes": 0}
+        rows = [{"ready": True, "server": self.mcp.SERVER}] + [{"checked": True, "checks": n, "tools": self.mcp.TOOLS,
+                "signalsRequested": False} for n in range(1, checks + 1)] + [close]
+        directory = self.evidence / name
+        self.put(directory / "sdk.stdout", b"\n".join(self.encode(v) for v in rows) + b"\n")
+        self.put(directory / "sdk-result.json", self.encode(close))
+        return {"stdout": self.capture(directory / "sdk.stdout"), "result": self.capture(directory / "sdk-result.json"), "routerExit": 0, "sdkExit": 0}
+
+    def consume(self, value=None):
+        return M.mcp_transition_protocol_receipt(self.value if value is None else value, self.inventories, None, self.paths)
+
+    def test_independent_consumer_accepts_complete_synthetic_edge_without_native_claim(self):
+        result = self.consume(json.loads(json.dumps(self.value)))
+        self.assertEqual(result, self.value)
+        self.assertFalse(result["payloadSwapAccepted"])
+        self.assertTrue(all(not result["observers"][n].get("qualified", False) for n in result["observers"]))
+        for call in self.reader.call_args_list:
+            if "mcp-transition-input" in str(call.args[0]):
+                self.assertEqual(call.kwargs, {"uid": 0, "mode": 0o444})
+
+    def test_independent_consumer_never_delegates_whole_claim_to_transition_route(self):
+        with patch.object(self.mcp.TransitionRoute, "complete", side_effect=AssertionError("No wrapper delegation")):
+            self.consume()
+            value = copy.deepcopy(self.value); value["captures"]["completed"]["raw"][0] ^= 1
+            with self.assertRaises(RuntimeError): self.consume(value)
+
+    def test_completed_same_bytes_new_inode_after_capture_refuses(self):
+        replacement = self.record.with_suffix(".replacement")
+        replacement.write_bytes(self.record.read_bytes()); os.replace(replacement, self.record)
+        with self.assertRaisesRegex(RuntimeError, "identity changed"): self.consume()
+
+    def test_ready_attempting_failure_reverse_foreign_and_stale_cas_refuse(self):
+        cases = [self.ready, {**self.completed, "phase": {"Attempting": self.target("b")}},
+                 {**self.completed, "failure": "unknown"}, {**self.completed, "previous": list(b"stale")},
+                 {**self.completed, "phase": {"Completed": self.target("a")}}, {**self.completed, "installed": "/tmp/foreign"}]
+        for value in cases:
+            with self.subTest(value=value):
+                self.put(self.record, self.encode(value))
+                capture = self.capture(self.record)
+                with self.assertRaises(RuntimeError): M.transition_handoff(capture, self.expected, {"Completed": self.target("b")}, self.previous)
+
+    def test_boolean_raw_byte_and_reencoded_ready_are_not_actual_evidence(self):
+        value = copy.deepcopy(self.value)
+        value["captures"]["ready"]["raw"][0] = True
+        with self.assertRaises(RuntimeError): self.consume(value)
+        value = copy.deepcopy(self.value)
+        value["captures"]["ready"]["raw"] = list(json.dumps(self.ready, indent=2).encode())
+        with self.assertRaises(RuntimeError): self.consume(value)
+
+    def test_verified_current_booleans_and_missing_raw_completed_cannot_substitute(self):
+        for replacement in (True, {"outcome": "verified-current"}, {}):
+            with self.subTest(replacement=replacement):
+                value = copy.deepcopy(self.value); value["captures"]["completed"] = replacement
+                with self.assertRaises((RuntimeError, TypeError)): self.consume(value)
+
+    def test_stale_a_observer_cannot_pass_b_despite_equal_node_tools_and_version(self):
+        value = copy.deepcopy(self.value)
+        value["observers"]["b"] = self.observer_capture("b", self.observations["aBefore"])
+        with self.assertRaises(RuntimeError): self.consume(value)
+
+    def test_b_digest_path_loader_uid_seals_sdk_pid_and_flag_tamper_refuse(self):
+        for change in (lambda v: v.update(sourceSha256="f" * 64),
+                       lambda v: v["snapshot"]["serverNode"]["argv"].__setitem__(4, "foreign-server"),
+                       lambda v: v["snapshot"]["serverNode"]["argv"].__setitem__(3, "foreign-loader"),
+                       lambda v: v["snapshot"]["serverNode"].update(uids=[0] * 4),
+                       lambda v: v["snapshot"]["serverNode"].update(seals=0),
+                       lambda v: v["snapshot"]["serverNode"].update(pid=41),
+                       lambda v: v.update(qualified=True)):
+            with self.subTest(change=change):
+                value, observed = copy.deepcopy(self.value), copy.deepcopy(self.observations["b"])
+                change(observed); value["observers"]["b"] = self.observer_capture("b", observed)
+                with self.assertRaises(RuntimeError): self.consume(value)
+
+    def test_old_live_a_must_have_exact_same_full_observer_snapshot(self):
+        observed = copy.deepcopy(self.observations["aDuringB"])
+        observed["snapshot"]["serverNode"]["image"]["ctimeNs"] = "changed"
+        observed["snapshot"]["serverNode"]["fd4Image"] = copy.deepcopy(observed["snapshot"]["serverNode"]["image"])
+        self.value["observers"]["aDuringB"] = self.observer_capture("aDuringB", observed)
+        with self.assertRaisesRegex(RuntimeError, "A server identity changed"): self.consume()
+
+    def test_actual_sdk_output_and_result_required_not_only_eof_booleans(self):
+        for role in ("stdout", "result"):
+            value = copy.deepcopy(self.value)
+            value["captures"]["eofB"][role] = {"eofSent": True}
+            with self.assertRaises(RuntimeError): self.consume(value)
+        self.put(self.evidence / "reconnect/sdk.stdout", b'{"eofSent":true}\n')
+        with self.assertRaises(RuntimeError): self.consume()
+
+    def test_exit_status_and_original_phase_order_are_not_relaxed(self):
+        for change in (lambda v: v["captures"]["eofB"].update(routerExit=1),
+                       lambda v: v["captures"]["eofA"].update(sdkExit=False),
+                       lambda v: v["protocol"]["checks"].reverse()):
+            value = copy.deepcopy(self.value); change(value)
+            with self.assertRaises(RuntimeError): self.consume(value)
+
+    def test_protected_content_replacement_and_original_route_change_refuse(self):
+        self.put(self.home / self.paths[0], b"changed")
+        with self.assertRaises(RuntimeError): self.consume()
+
+    def test_boolean_current_store_schema_is_not_numeric_schema_one(self):
+        self.put(self.active, self.encode({"schemaVersion": True, **self.target("b")}))
+        with self.assertRaises(RuntimeError): self.consume()
+
+    def test_signed_input_change_boolean_verifier_and_changed_node_refuse(self):
+        self.signature.return_value = True
+        with self.assertRaises(RuntimeError): self.consume()
+        self.signature.return_value = None
+        self.put(self.directory / "mcp-transition-input/b/mcp/server/runtime/node", b"changed")
+        with self.assertRaises(RuntimeError): self.consume()
+
+    def test_missing_sealed_observer_inputs_refuses_before_any_child(self):
+        with patch.object(M.sys, "platform", "linux"), patch.object(M.os, "getuid", return_value=M.UID, create=True), \
+             patch.object(M.os, "geteuid", return_value=M.UID, create=True), patch.object(M.os, "getgid", return_value=M.UID, create=True), \
+             patch.object(M.os, "getegid", return_value=M.UID, create=True), patch.object(M, "run_tool") as child:
+            with self.assertRaises((FileNotFoundError, RuntimeError)): M.observe_transition_server(None, self.expected, "a", "aBefore")
+            child.assert_not_called()
+
+    def test_observer_spawn_uses_pinned_separate_child_without_scope_promotion(self):
+        process = SimpleNamespace(runtime=SimpleNamespace(pid=40), child=SimpleNamespace(pid=41),
+                                  runtime_identity=self.value["protocol"]["reconnect"]["router"])
+        self.value["observers"].pop("b")
+        (self.evidence / "observer-b.json").unlink()
+        with patch.object(M.sys, "platform", "linux"), patch.object(M.os, "getuid", return_value=M.UID, create=True), \
+             patch.object(M.os, "geteuid", return_value=M.UID, create=True), patch.object(M.os, "getgid", return_value=M.UID, create=True), \
+             patch.object(M.os, "getegid", return_value=M.UID, create=True), patch.object(M, "transition_observer_source", return_value={"unit-only": "stable"}) as sealed, \
+             patch.object(M, "run_tool", return_value=self.encode(self.observations["b"])) as child:
+            capture = M.observe_transition_server(process, self.expected, "b", "b")
+        self.assertEqual(child.call_args.args[0], ["/usr/bin/python3", "-I", "-S", "-B", str(self.directory / "mcp-node-observer/tests/linux-node-observer.py")])
+        self.assertEqual(child.call_args.kwargs["timeout"], 30)
+        self.assertEqual(child.call_args.kwargs["limit"], 131072)
+        contract = json.loads(child.call_args.kwargs["input"])
+        self.assertEqual(contract["callerPid"], os.getpid()); self.assertEqual(contract["routerPid"], 40)
+        self.assertEqual(sealed.call_count, 2)
+        self.assertEqual(json.loads(bytes(capture["raw"])), self.observations["b"])
+
+    def test_observer_source_requires_root_nonwritable_directories_and_root_0444_files(self):
+        source = self.directory / "mcp-node-observer"
+        for name in ("tests", "src"): (source / name).mkdir(parents=True, exist_ok=True)
+        directories = {self.directory, source, source / "tests", source / "src"}
+        lstat = Path.lstat
+        def metadata(path):
+            return SimpleNamespace(st_mode=stat.S_IFDIR | 0o755, st_uid=0, st_gid=0) if path in directories else lstat(path)
+        def file(path, maximum, **kw):
+            expected = M.MCP_OBSERVER_PINS[path.relative_to(source).as_posix()]
+            return {"file": {**expected, "identity": [1, 2, stat.S_IFREG | 0o444, 0, 0, 1, expected["size"], 3, 4]}}
+        with patch.object(Path, "lstat", metadata), patch.object(M, "transition_file", side_effect=file) as reader:
+            result = M.transition_observer_source()
+        self.assertEqual(set(result), set(M.MCP_OBSERVER_PINS))
+        self.assertEqual(len(reader.call_args_list), 3)
+        self.assertTrue(all(c.args[1] == 32768 and c.kwargs == {"uid": 0, "mode": 0o444} for c in reader.call_args_list))
+        for uid, mode in ((M.UID, 0o755), (0, 0o777)):
+            with patch.object(Path, "lstat", return_value=SimpleNamespace(st_mode=stat.S_IFDIR | mode, st_uid=uid, st_gid=uid)), \
+                 patch.object(Path, "resolve", lambda p, **kw: p), patch.object(M, "transition_file") as reader:
+                with self.assertRaises(RuntimeError): M.transition_observer_source()
+                reader.assert_not_called()
+
+    def test_observer_source_replacement_after_child_refuses_before_report_save(self):
+        process = SimpleNamespace(runtime=SimpleNamespace(pid=40), child=SimpleNamespace(pid=41),
+                                  runtime_identity=self.value["protocol"]["reconnect"]["router"])
+        target = self.evidence / "observer-b.json"; target.unlink()
+        with patch.object(M.sys, "platform", "linux"), patch.object(M.os, "getuid", return_value=M.UID, create=True), \
+             patch.object(M.os, "geteuid", return_value=M.UID, create=True), patch.object(M.os, "getgid", return_value=M.UID, create=True), \
+             patch.object(M.os, "getegid", return_value=M.UID, create=True), patch.object(M, "transition_observer_source", side_effect=[{"inode": 1}, {"inode": 2}]), \
+             patch.object(M, "run_tool", return_value=self.encode(self.observations["b"])):
+            with self.assertRaisesRegex(RuntimeError, "identity changed"): M.observe_transition_server(process, self.expected, "b", "b")
+        self.assertFalse(target.exists())
+
+    def test_historical_entry_points_and_admission_do_not_select_unbound_path(self):
+        source = ast.parse(Path(M.__file__).read_text())
+        functions = {n.name: ast.unparse(n) for n in source.body if isinstance(n, ast.FunctionDef)}
+        for name in ("native_session", "outcome", "mcp_protocol_receipt", "complete_mcp_protocol"):
+            self.assertNotIn("TransitionProtocolCapture", functions[name])
+            self.assertNotIn("mcp_transition_protocol_receipt", functions[name])
+
+    def collector(self, change=None):
+        self.put(self.active, self.previous); self.record.unlink()
+        module = M.load("native-linux-update-mcp")
+        fixture = object.__new__(module.TransitionFixture)
+        fixture.directory, fixture.paths, fixture.started = self.evidence, self.paths, False
+        fixture.connection = None
+        def connection(name, role):
+            row = self.value["protocol"]["checks"][0] if role == "a" else self.value["protocol"]["reconnect"]
+            return SimpleNamespace(root=self.evidence / name, runtime=SimpleNamespace(pid=row["router"]["pid"], poll=lambda: 0),
+                child=SimpleNamespace(pid=row["sdk"]["pid"], poll=lambda: 0), runtime_identity=row["router"])
+        original, replacement = connection("existing", "a"), connection("reconnect", "b")
+        fixture.replacement = replacement
+        def start():
+            fixture.connection = original; fixture.started = True
+        fixture.start = Mock(side_effect=start)
+        before = object.__new__(module.BoundRoute)
+        before.home = self.home
+        before.binding = {"resourceFiles": {n: p["sha256"] for n, p in self.inventories["a"].items()}}
+        before.command = self.home / module.ROUTE_BASE / "router-v1/creator-hub-mcp-router"
+        before.server = self.home / "data/creator-hub/runtime-generations/linux-x86_64" / self.target("a")["generation"] / "mcp/server/creator-works-mcp.mjs"
+        route = object.__new__(module.TransitionRoute)
+        route.before, route.home = before, self.home
+        route.source = self.directory / "mcp-transition-input/b"
+        route.a_inventory, route.b_inventory = (dict((n, p["sha256"]) for n, p in self.inventories[s].items()) for s in ("a", "b"))
+        route.binding = copy.deepcopy(before.binding)
+        route.command, route.server, route.node = before.command, before.server, before.server.parent / "runtime/node"
+        route.handoff, route.active, route.previous = self.record, self.active, self.previous
+        route.from_version, route.target = "0.1.16", self.target("b")
+        route.release, route.signature = self.release, self.detached
+        route.inputs = {route.source / n: dict(p) for n, p in self.inventories["b"].items()}
+        route.inputs.update({route.source / "release.json": M.pin(self.release), route.source / "release.minisig": M.pin(self.detached)})
+        route.capture_ready = Mock(side_effect=lambda: self.capture(self.record))
+        fixture.route = route
+        fixture.complete, fixture.check = Mock(), Mock()
+        fixture.reconnect_observed = Mock(side_effect=lambda observe: observe(replacement))
+        fixture.close = Mock(return_value=self.value["protocol"])
+        self.fixture = fixture
+        if change is not None:
+            change(fixture)
+        return M.TransitionProtocolCapture(fixture, self.inventories, None, self.paths)
+
+    def observe(self, connection, expected, side, name):
+        return self.observer_capture(name, self.observations[name])
+
+    def test_capture_wiring_reads_original_ready_completed_before_normal_eof_and_independent_consumer(self):
+        collector = self.collector()
+        with patch.object(M, "observe_transition_server", side_effect=self.observe):
+            collector.start()
+            ready_raw = json.dumps(self.ready, indent=1).encode()
+            self.put(self.record, ready_raw); collector.capture_ready()
+            self.assertEqual(bytes(collector.captures["ready"]["raw"]), ready_raw)
+            self.put(self.record, self.encode(self.completed))
+            self.put(self.active, self.encode({"schemaVersion": 1, **self.target("b")}))
+            collector.complete()
+            ready, completed = collector.captures["ready"], collector.captures["completed"]
+            proof = self.value["protocol"]["transition"]["handoff"]
+            proof.update(ready=ready["raw"], completed=completed["raw"],
+                         readyCapture={k: ready[k] for k in ("path", "file")}, completedCapture={k: completed[k] for k in ("path", "file")})
+            route = M.transition_original_route(collector.captures["activeA"], self.expected)
+            for row in self.value["protocol"]["checks"]: row["route"] = copy.deepcopy(route)
+            result = collector.finish()
+        self.fixture.complete.assert_called_once_with(ready_raw, self.encode(self.completed))
+        self.assertEqual(self.fixture.check.call_args_list, [unittest.mock.call("after-update"), unittest.mock.call("after-hub-close")])
+        self.fixture.reconnect_observed.assert_called_once(); self.fixture.close.assert_called_once()
+        self.assertEqual(json.loads((self.directory / "result/mcp-transition-protocol.json").read_bytes()), result)
+        self.assertEqual(set(result["observers"]), {"aBefore", "aAfter", "aDuringB", "b"})
+        self.assertEqual(bytes(result["captures"]["ready"]["raw"]), ready_raw)
+        with self.assertRaises(RuntimeError): collector.finish()
+
+    def test_collector_refuses_unknown_attempt_before_wrapper_completion_and_spends_attempt(self):
+        collector = self.collector()
+        with patch.object(M, "observe_transition_server", side_effect=self.observe):
+            collector.start(); self.put(self.record, self.encode(self.ready)); collector.capture_ready()
+            self.put(self.record, self.encode({**self.completed, "phase": {"Attempting": self.target("b")}}))
+            with self.assertRaises(RuntimeError): collector.complete()
+            self.put(self.record, self.encode(self.completed))
+            with self.assertRaises(RuntimeError): collector.complete()
+        self.fixture.complete.assert_not_called()
+        self.fixture.reconnect_observed.assert_not_called()
+
+    def test_collector_ready_is_actual_one_shot_read_not_supplied_or_retried_expectation(self):
+        collector = self.collector()
+        with patch.object(M, "observe_transition_server", side_effect=self.observe):
+            collector.start()
+            self.put(self.record, self.encode(self.completed))
+            with self.assertRaises(RuntimeError): collector.capture_ready()
+            self.put(self.record, self.encode(self.ready))
+            with self.assertRaises(RuntimeError): collector.capture_ready()
+        self.fixture.route.capture_ready.assert_not_called()
+
+    def test_initial_active_b_or_old_record_refuses_before_any_sdk_start(self):
+        collector = self.collector()
+        self.put(self.record, self.encode(self.ready))
+        with self.assertRaises(RuntimeError): M.TransitionProtocolCapture(self.fixture, self.inventories, None, self.paths)
+        self.record.unlink(); self.put(self.active, self.encode({"schemaVersion": 1, **self.target("b")}))
+        with self.assertRaises(RuntimeError): M.TransitionProtocolCapture(self.fixture, self.inventories, None, self.paths)
+        self.fixture.start.assert_not_called()
+
+    def test_original_signature_error_and_post_verification_input_change_are_preserved(self):
+        self.signature.side_effect = ValueError("original unit verifier refusal")
+        with self.assertRaisesRegex(ValueError, "original unit verifier refusal"): self.consume()
+        def change(body, detached, verifier):
+            if body.name == "router.json": self.put(body.parent / "runtime.json", b"changed-during-verification")
+        self.signature.side_effect = change
+        with self.assertRaises(RuntimeError): self.consume()
+
+    def test_production_capture_reader_retains_owner_mode_and_all_nine_fields(self):
+        # A separate module instance exercises the unmocked production reader.
+        spec = importlib.util.spec_from_file_location("transition_capture_reader_only", Path(M.__file__))
+        reader = importlib.util.module_from_spec(spec); spec.loader.exec_module(reader)
+        file = self.home / "unit-reader.txt"; file.write_bytes(b"actual bytes")
+        with patch.object(reader, "read", wraps=reader.read) as bounded:
+            value = reader.transition_file(file, 64, uid=file.stat().st_uid)
+        bounded.assert_called_once_with(file, 64, uid=file.stat().st_uid, mode=None)
+        self.assertEqual(len(value["file"]["identity"]), 9)
+        self.assertEqual(value["raw"], list(b"actual bytes"))
+
+    def test_installed_b_missing_descriptor_or_any_payload_refuses_after_wrapper_guard(self):
+        for path, expected in self.installed_b.items():
+            with self.subTest(path=expected["name"]):
+                path.unlink()
+                try:
+                    with self.assertRaises((RuntimeError, FileNotFoundError)):
+                        self.consume()
+                finally:
+                    self.put(path, expected["raw"])
+
+    def test_installed_b_changed_descriptor_or_any_payload_refuses_after_wrapper_guard(self):
+        for path, expected in self.installed_b.items():
+            with self.subTest(path=expected["name"]):
+                self.put(path, b"unit-only changed installed B")
+                try:
+                    with self.assertRaises(RuntimeError): self.consume()
+                finally:
+                    self.put(path, expected["raw"])
+
+    def test_installed_b_wrong_mode_uid_gid_nlink_or_type_refuses(self):
+        for path in (self.b_descriptor / "runtime.json", self.b_root / "mcp/server/runtime/node"):
+            for key, wrong in (("st_mode", stat.S_IFREG | 0o777), ("st_uid", 0), ("st_gid", 0),
+                               ("st_nlink", 2), ("st_mode", stat.S_IFIFO | 0o600)):
+                with self.subTest(path=path.name, key=key):
+                    saved = dict(self.linux_files[path]); self.linux_files[path][key] = wrong
+                    try:
+                        with self.assertRaises(RuntimeError): self.consume()
+                    finally:
+                        self.linux_files[path] = saved
+
+    def test_installed_b_mutation_during_its_own_signature_review_refuses(self):
+        node = self.b_root / "mcp/server/runtime/node"
+        for kind in ("bytes", "same-bytes-new-inode"):
+            with self.subTest(kind=kind):
+                original = self.installed_b[node]["raw"]
+                def change(body, detached, verifier):
+                    if body == self.b_descriptor / "runtime.json":
+                        if kind == "bytes":
+                            self.put(node, b"changed during installed verification")
+                        else:
+                            previous = self.real_lstat(node).st_ino
+                            temporary = node.with_name("unit-new-inode")
+                            self.put(temporary, original); os.replace(temporary, node)
+                            self.assertNotEqual(previous, self.real_lstat(node).st_ino)
+                self.signature.side_effect = change
+                try:
+                    with self.assertRaises(RuntimeError): self.consume()
+                finally:
+                    self.put(node, original)
+
+    def test_installed_b_verifier_exception_preserved_not_replaced_by_wrapper_claim(self):
+        def refuse(body, detached, verifier):
+            if body == self.b_descriptor / "runtime.json":
+                raise ValueError("original installed B signature refusal")
+        self.signature.side_effect = refuse
+        with self.assertRaisesRegex(ValueError, "original installed B signature refusal"): self.consume()
+
+    def test_independent_installed_b_reader_uses_exact_modes_owner_and_byte_bounds(self):
+        self.reader.reset_mock(); self.signature.reset_mock()
+        self.consume()
+        for path, expected in self.installed_b.items():
+            calls = [c for c in self.reader.call_args_list if c.args[0] == path]
+            self.assertEqual(len(calls), 2)
+            self.assertTrue(all(c.args[1] == len(expected["raw"]) and c.kwargs == {"uid": M.UID, "mode": expected["mode"]} for c in calls))
+        self.assertTrue(any(c.args[:2] == (self.b_descriptor / "runtime.json", self.b_descriptor / "runtime.minisig") for c in self.signature.call_args_list))
+
+    def test_foreign_current_or_before_home_refuses_in_constructor_before_launch(self):
+        for which in ("current", "before"):
+            with self.subTest(which=which):
+                self.put(self.record, self.encode(self.completed))
+                self.signature.reset_mock()
+                def change(fixture):
+                    setattr(fixture.route if which == "current" else fixture.route.before, "home", self.directory / "foreign-home")
+                with self.assertRaises(RuntimeError): self.collector(change)
+                self.fixture.start.assert_not_called(); self.signature.assert_not_called()
+
+    def test_identical_bytes_foreign_b_input_root_refuses_before_launch(self):
+        foreign = self.directory / "other-sealed-b"
+        shutil.copytree(self.directory / "mcp-transition-input/b", foreign)
+        self.signature.reset_mock()
+        with self.assertRaises(RuntimeError): self.collector(lambda f: setattr(f.route, "source", foreign))
+        self.fixture.start.assert_not_called(); self.signature.assert_not_called()
+
+    def test_route_inventory_target_release_or_source_path_mismatch_refuses_before_launch(self):
+        changes = (lambda r: r.a_inventory.update({"mcp/server/runtime/node": "f" * 64}),
+                   lambda r: r.b_inventory.update({"mcp/server/creator-works-mcp.mjs": "f" * 64}),
+                   lambda r: setattr(r, "target", {**r.target, "generation": "f" * 64}),
+                   lambda r: setattr(r, "previous", b"different actual CAS"),
+                   lambda r: setattr(r, "release", b"other signed release"),
+                   lambda r: setattr(r, "signature", b"other detached signature"),
+                   lambda r: setattr(r, "server", self.directory / "foreign-server"),
+                   lambda r: setattr(r, "command", self.directory / "foreign-router"),
+                   lambda r: setattr(r, "handoff", self.directory / "foreign-handoff.json"),
+                   lambda r: r.inputs.update({self.directory / "foreign-release.json": M.pin(b"foreign")}))
+        for change in changes:
+            with self.subTest(change=change):
+                self.put(self.record, self.encode(self.completed))
+                with self.assertRaises(RuntimeError): self.collector(lambda f: change(f.route))
+                self.fixture.start.assert_not_called()
+
+    def root_outcome_report(self, protocol):
+        # Synthetic Root claims combined with the actual temporary-file V4 proof.
+        value = {**M.FALSE, "privateTargetQualification": M.private_target_qualification(),
+            "oldRetirementHelperRestored": M.private_target_qualification()["privateDebApprovalRestoresOldRetirementHelper"],
+            "nativeActions": ["Update Hub"], "systemActions": ["Authenticate"], "automaticSuccessor": {"pid": 40},
+            "initialBitmap": {"nonblank": True}, "successorBitmap": {"nonblank": True}, "mcpProtocol": copy.deepcopy(protocol)}
+        for name in ("initial16Verified", "nativeConfirmationObserved", "settingsPreserved", "runtimeSurvived", "normalFinalClose",
+                     "oldNormalExit", "automaticRestartObserved", "installed17Verified", "fresh17UiVersion", "directPagesObserved",
+                     "targetRetirementHelperVerified"):
+            value[name] = True
+        for name, version in (("htmlWebDriver", "0.1.16"), ("successorHtmlWebDriver", "0.1.17")):
+            value[name] = {"probePassed": True, "inputCountAtProbe": 0, "detached": True,
+                           "toolsClosedAfterRootExit": True, "documentVersion": version}
+        return value
+
+    def test_historical_outcome_keeps_old_receipt_acceptance_and_failure_order(self):
+        old = self.root_outcome_report(mcp_receipt())
+        self.assertTrue(M.outcome("deb-approve", old))
+        with self.assertRaisesRegex(RuntimeError, "Complete MCP preservation receipt required"):
+            M.outcome("deb-approve", self.root_outcome_report(self.value))
+        before = {**old, "privateTargetQualification": {}, "mcpProtocol": {}}
+        with self.assertRaisesRegex(RuntimeError, "Exact source-bound helper evidence required"):
+            M.outcome("deb-approve", before)
+        between = {**old, "mcpProtocol": {}, "htmlWebDriver": {}}
+        with self.assertRaisesRegex(RuntimeError, "Complete MCP preservation receipt required"):
+            M.outcome("deb-approve", between)
+        after = {**old, "htmlWebDriver": {}, "nativeActions": []}
+        with self.assertRaisesRegex(RuntimeError, "Attached HTML compatibility"):
+            M.outcome("deb-approve", after)
+
+    def test_fixed_transition_composer_accepts_actual_a_b_proof_without_relabel(self):
+        report = self.root_outcome_report(self.value)
+        with self.assertRaisesRegex(RuntimeError, "Complete MCP preservation receipt required"):
+            M.outcome("deb-approve", report)
+        self.assertTrue(M.transition_outcome(report, self.inventories, None, self.paths))
+        self.assertEqual(report["mcpProtocol"], self.value)
+        self.assertEqual(report["mcpProtocol"]["scope"], "managed-mcp-transition-evidence-only")
+        self.assertFalse(report["mcpProtocol"]["payloadSwapAccepted"])
+
+    def test_both_composers_preserve_every_shared_root_guard(self):
+        changes = [(name, False) for name in ("initial16Verified", "nativeConfirmationObserved", "settingsPreserved", "runtimeSurvived",
+            "normalFinalClose", "oldNormalExit", "automaticRestartObserved", "installed17Verified", "fresh17UiVersion",
+            "directPagesObserved", "targetRetirementHelperVerified")]
+        changes += [("privateTargetQualification", {}), ("oldRetirementHelperRestored", not M.private_target_qualification()["privateDebApprovalRestoresOldRetirementHelper"]),
+                    ("nativeActions", []), ("systemActions", []), ("automaticSuccessor", None),
+                    ("initialBitmap", {"nonblank": False}), ("successorBitmap", {"nonblank": False})]
+        changes += [(name, True) for name in M.FALSE]
+        for html in ("htmlWebDriver", "successorHtmlWebDriver"):
+            good = self.root_outcome_report(self.value)[html]
+            for key, bad in (("probePassed", False), ("inputCountAtProbe", True), ("detached", False),
+                             ("toolsClosedAfterRootExit", False), ("documentVersion", "foreign")):
+                changes.append((html, {**good, key: bad}))
+        for name, bad in changes:
+            with self.subTest(field=name, value=bad):
+                old = self.root_outcome_report(mcp_receipt()); old[name] = bad
+                with self.assertRaises(RuntimeError): M.outcome("deb-approve", old)
+                new = self.root_outcome_report(self.value); new[name] = bad
+                with self.assertRaises(RuntimeError): M.transition_outcome(new, self.inventories, None, self.paths)
+
+    def test_transition_composer_refuses_boolean_dto_or_fake_historical_receipt(self):
+        for proof in (True, {"outcome": "verified-current"}, mcp_receipt()):
+            with self.subTest(proof=proof):
+                with self.assertRaises(RuntimeError):
+                    M.transition_outcome(self.root_outcome_report(proof), self.inventories, None, self.paths)
+
+    def test_transition_composer_refuses_completed_tamper_despite_root_success_claims(self):
+        self.put(self.record, self.encode({**self.completed, "phase": {"Attempting": self.target("b")}}))
+        with self.assertRaises(RuntimeError):
+            M.transition_outcome(self.root_outcome_report(self.value), self.inventories, None, self.paths)
+
+    def test_transition_composer_refuses_installed_b_tamper_despite_root_success_claims(self):
+        self.put(self.b_root / "mcp/server/creator-works-mcp.mjs", b"changed after successful SDK claims")
+        with self.assertRaises(RuntimeError):
+            M.transition_outcome(self.root_outcome_report(self.value), self.inventories, None, self.paths)
+
+    def test_extracted_root_statement_hashes_and_fixed_composer_orders(self):
+        tree = ast.parse(Path(M.__file__).read_text())
+        functions = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
+        def digest(nodes):
+            return hashlib.sha256(ast.dump(ast.Module(body=nodes, type_ignores=[]), include_attributes=False).encode()).hexdigest()
+        retained_before = [ast.parse("qualification = private_target_qualification()").body[0]] + functions["_outcome_before_mcp_qualified"].body
+        self.assertEqual(digest(retained_before), "17e7a1bb652248814370b9dfc95d87f1a35ae59ca8af00867a363cf9906af9c8")
+        self.assertEqual([ast.unparse(n) for n in functions["_outcome_before_mcp"].body], [
+            "return _outcome_before_mcp_qualified(scenario, evidence, private_target_qualification())"])
+        self.assertEqual(digest(functions["_outcome_after_mcp"].body), "b070a2d3bec12bd7d73d93b36da9e0d3bea261709f26f5bedf9fc081adaabf7c")
+        self.assertEqual([ast.unparse(n) for n in functions["outcome"].body], [
+            "_outcome_before_mcp(scenario, evidence)", "mcp_protocol_receipt(evidence.get('mcpProtocol'))",
+            "_outcome_after_mcp(scenario, evidence)", "return True"])
+        new = functions["transition_outcome"]
+        self.assertEqual([a.arg for a in new.args.args], ["evidence", "inventories", "verifier", "protected_paths"])
+        self.assertFalse(new.args.defaults or new.args.kwonlyargs or new.args.vararg or new.args.kwarg)
+        self.assertEqual([ast.unparse(n) for n in new.body], [
+            "_outcome_before_mcp('deb-approve', evidence)",
+            "mcp_transition_protocol_receipt(evidence.get('mcpProtocol'), inventories, verifier, protected_paths)",
+            "_outcome_after_mcp('deb-approve', evidence)", "return True"])
+
+
+class A1SourceMenuAdmission(unittest.TestCase):
+    # Physical A1 package evidence, not a native observation or successor pin.
+    SOURCE = "ee48f25905947e0795eccb9d1d6c67f28f270545"
+    IMAGE = {"size": 29088720, "sha256": "502f2ba0ad9877318fc7477d54c9c1e6efd6aec4acb19323a30eaa4e613f0832"}
+    RAW = {"size": 29088720, "sha256": "a297b0a3341f82ccf63bb27f27790501e6c9e8fc77c3784f6bb3e463bdade0d6"}
+    DONOR_SOURCE = "f00cd4433e261f8d968b7c88c068dae59ec970a6"
+    DONOR = {"size": 29088616, "sha256": "6fb2983c212b6bcd79f616019eca1b7f2f1daa3454d72cee7e6dc19bdc0dd5c9"}
+    PENDING_SOURCE = "dea67abb681ff99d3d0cd756954605a3c58627a6"
+
+    @classmethod
+    def surface(cls, image=None):
+        value = LiveSourceMenuWiring.surface(cls.SOURCE, labels=LiveSourceMenuWiring.CURRENT_READY, bound=False)
+        image = cls.IMAGE if image is None else image
+        value.record.update(kernelImageSha256=image["sha256"], image={"st_size": str(image["size"])},
+                            uids=[M.UID] * 4, parentPid=41, executable="/usr/bin/creator-hub")
+        return value
+
+    def test_exact_a1_catalog_preserves_every_historical_lane_without_aliasing(self):
+        self.assertEqual(M.A1_MENU_SOURCE, self.SOURCE)
+        self.assertEqual(M.A1_MENU_IMAGE, self.IMAGE)
+        self.assertEqual(M.CURRENT_MENU_SOURCES, LiveSourceMenuWiring.CURRENT)
+        self.assertEqual(M.HISTORICAL_MENU_SOURCES, LiveSourceMenuWiring.HISTORICAL)
+        expected = M.source_menu_profile(LiveSourceMenuWiring.CURRENT[0])
+        actual = M.source_menu_profile(self.SOURCE)
+        self.assertEqual(actual, {**expected, "source": self.SOURCE})
+        for source in LiveSourceMenuWiring.CURRENT + LiveSourceMenuWiring.HISTORICAL:
+            self.assertEqual(M.source_menu_profile(source)["source"], source)
+
+    def test_real_phase_identity_then_menu_binding_retains_existing_five_tuple(self):
+        surface = self.surface()
+        self.assertIs(M.phase_identity(surface.record, self.IMAGE, "/usr/bin/creator-hub", 41, M.UID), surface.record)
+        self.assertEqual(M.bind_source_menu(surface, self.SOURCE, dict(self.IMAGE))["source"], self.SOURCE)
+        self.assertEqual(surface.menu_binding, (self.SOURCE, self.IMAGE["sha256"], self.IMAGE["size"], 42, "23"))
+        self.assertEqual(M.bound_source_menu(surface)["ready"], LiveSourceMenuWiring.CURRENT_READY)
+        self.assertTrue(all(call.kwargs == {"full": True} for call in surface.recheck.call_args_list))
+        with self.assertRaisesRegex(RuntimeError, "already bound"):
+            M.bind_source_menu(surface, self.SOURCE, self.IMAGE)
+
+    def test_a1_rejects_matching_wrong_expected_and_kernel_images_not_just_disagreement(self):
+        for image in (self.RAW, self.DONOR, {"size": self.IMAGE["size"], "sha256": "a" * 64},
+                      {**self.IMAGE, "size": self.IMAGE["size"] + 1}):
+            surface = self.surface(image)
+            with self.subTest(image=image), self.assertRaisesRegex(RuntimeError, "A1 menu installed image required"):
+                M.bind_source_menu(surface, self.SOURCE, image)
+            self.assertFalse(hasattr(surface, "menu_binding"))
+            self.assertEqual(surface.inputs, [])
+
+    def test_b_donor_pending017_and_unknown_sources_cannot_borrow_a1_image_or_menus(self):
+        for source, image in ((self.DONOR_SOURCE, self.DONOR), (self.DONOR_SOURCE, self.IMAGE),
+                              (self.PENDING_SOURCE, self.IMAGE), ("ebdaf4f8a5e09f8e759279531c025038fe392593", self.IMAGE),
+                              ("f" * 40, self.IMAGE), ("ee48", self.IMAGE), ("0.1.16", self.IMAGE)):
+            surface = self.surface(image)
+            # The formerly pending017 source is now known, but cannot borrow A1's image.
+            reason = "B017 menu installed image required" if source == self.PENDING_SOURCE else "Unreviewed menu source"
+            with self.subTest(source=source, image=image), self.assertRaisesRegex(RuntimeError, reason):
+                M.bind_source_menu(surface, source, image)
+            self.assertFalse(hasattr(surface, "menu_binding"))
+            self.assertEqual(surface.inputs, [])
+
+    def test_forged_matching_wrong_image_binding_refuses_before_startup_wait_or_input(self):
+        for image in (self.RAW, self.DONOR, {"size": self.IMAGE["size"], "sha256": "a" * 64}):
+            surface = self.surface(image)
+            surface.menu_binding = (self.SOURCE, image["sha256"], image["size"], 42, "23")
+            with self.subTest(image=image), patch.object(M, "wait", side_effect=AssertionError("No UI wait before refusal")), self.assertRaisesRegex(RuntimeError, "A1 menu installed image required"):
+                M.startup_ui(surface, Path("/fixture/home"), first=True)
+            self.assertEqual(surface.inputs, [])
+
+    def test_kernel_identity_remains_separate_from_catalog_and_image_expectation(self):
+        for changes in ({"uids": [M.UID + 1] * 4}, {"parentPid": 40}, {"executable": "/other/creator-hub"},
+                        {"kernelImageSha256": self.RAW["sha256"]}, {"image": {"st_size": str(self.IMAGE["size"] + 1)}}):
+            surface = self.surface()
+            surface.record.update(changes)
+            with self.subTest(changes=changes), self.assertRaisesRegex(RuntimeError, "Exact live phase"):
+                M.phase_identity(surface.record, self.IMAGE, "/usr/bin/creator-hub", 41, M.UID)
+            self.assertFalse(hasattr(surface, "menu_binding"))
+        tree = ast.parse(Path(M.__file__).read_text())
+        session = ast.unparse(next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "native_session"))
+        self.assertLess(session.index("validate_profile("), session.index("old = phase_identity("))
+        self.assertLess(session.index("validate_all_api("), session.index("old = phase_identity("))
+        self.assertLess(session.index("old = phase_identity("), session.index("bind_source_menu(surface,"))
+        self.assertLess(session.index("bind_source_menu(surface,"), session.index("html.startup("))
+
+    def test_a1_actual_ax_direct_pages_and_home_use_current_menu_without_new_selectors(self):
+        surface, actions = self.surface(), []
+        M.bind_source_menu(surface, self.SOURCE, self.IMAGE)
+        with patch.object(M, "phase_processes"), patch.object(M, "feature_ready", side_effect=LiveSourceMenuWiring.ready):
+            self.assertTrue(M.direct_pages(surface, actions))
+            M.navigate_home(surface)
+        self.assertEqual(actions, ["view-mcp", "view-setup"])
+        self.assertEqual(surface.presses, ["navigation-mcp", "navigation-setup", "navigation-home"])
+
+    def test_a1_startup_preserves_terms_and_not_now_actions_without_resubmit(self):
+        for first in (True, False):
+            old_surface, state, waiting = Pure().startup_surface(first=first)
+            surface = SimpleNamespace(**{k: v for k, v in vars(old_surface).items() if k != "menu_binding"})
+            surface.record = self.surface().record
+            M.bind_source_menu(surface, self.SOURCE, self.IMAGE)
+            with self.subTest(first=first), patch.object(M, "wait", side_effect=waiting), patch.object(M, "read", return_value=b'{"autoDownload":false}'):
+                actions = M.startup_ui(surface, Path("/fixture/home"), first=first)
+            expected = (["usage-terms-checkbox", "usage-terms-continue"] if first else []) + ["convergence-later"]
+            self.assertEqual(actions, expected)
+            self.assertEqual(state.actions, expected)
+
+    def test_a1_live_image_pid_and_start_rechecked_before_navigation(self):
+        for changes in ({"kernelImageSha256": self.RAW["sha256"]}, {"pid": 43}, {"startTime": "24"},
+                        {"image": {"st_size": str(self.IMAGE["size"] + 1)}}):
+            surface = self.surface()
+            M.bind_source_menu(surface, self.SOURCE, self.IMAGE)
+            surface.recheck.side_effect = lambda changes=changes, **kwargs: surface.record.update(changes)
+            with self.subTest(changes=changes), self.assertRaisesRegex(RuntimeError, "menu source image changed"):
+                M.navigate_home(surface)
+            self.assertEqual(surface.inputs, [])
+
+
+class B017SourceMenuAdmission(unittest.TestCase):
+    # Exact physically inspected B017 package, not native execution evidence.
+    SOURCE = "dea67abb681ff99d3d0cd756954605a3c58627a6"
+    IMAGE = {"size": 29086768, "sha256": "fedc79bd67928a4e3570ca86c6157f4ecb553d046f0febe6823b3a976803a673"}
+    RAW = {"size": 29086768, "sha256": "47ea1c9c158df10b8e64709422ce99b91ac5f9e69152fb18248ac783e9f2e387"}
+
+    @classmethod
+    def surface(cls, image=None):
+        value = LiveSourceMenuWiring.surface(cls.SOURCE, labels=LiveSourceMenuWiring.CURRENT_READY, bound=False)
+        image = cls.IMAGE if image is None else image
+        value.record.update(kernelImageSha256=image["sha256"], image={"st_size": str(image["size"])},
+                            uids=[M.UID] * 4, parentPid=41, executable="/usr/bin/creator-hub")
+        return value
+
+    def test_exact_b017_catalog_and_image_keep_a1_and_historical_lanes(self):
+        self.assertEqual(M.B017_MENU_SOURCE, self.SOURCE)
+        self.assertEqual(M.B017_MENU_IMAGE, self.IMAGE)
+        self.assertEqual(M.CURRENT_MENU_SOURCES, LiveSourceMenuWiring.CURRENT)
+        self.assertEqual(M.HISTORICAL_MENU_SOURCES, LiveSourceMenuWiring.HISTORICAL)
+        expected = M.source_menu_profile(A1SourceMenuAdmission.SOURCE)
+        self.assertEqual(M.source_menu_profile(self.SOURCE), {**expected, "source": self.SOURCE})
+        for source in LiveSourceMenuWiring.CURRENT + LiveSourceMenuWiring.HISTORICAL:
+            self.assertEqual(M.source_menu_profile(source)["source"], source)
+
+    def test_real_phase_then_bind_and_recheck_admit_only_the_two_exact_images(self):
+        for source, image, surface in ((self.SOURCE, self.IMAGE, self.surface()),
+                                       (A1SourceMenuAdmission.SOURCE, A1SourceMenuAdmission.IMAGE, A1SourceMenuAdmission.surface())):
+            with self.subTest(source=source):
+                self.assertIs(M.phase_identity(surface.record, image, "/usr/bin/creator-hub", 41, M.UID), surface.record)
+                M.bind_source_menu(surface, source, dict(image))
+                self.assertEqual(surface.menu_binding, (source, image["sha256"], image["size"], 42, "23"))
+                self.assertEqual(M.bound_source_menu(surface)["source"], source)
+                self.assertTrue(all(call.kwargs == {"full": True} for call in surface.recheck.call_args_list))
+                with self.assertRaisesRegex(RuntimeError, "already bound"):
+                    M.bind_source_menu(surface, source, image)
+
+    def test_b017_matching_wrong_expected_and_kernel_images_are_rejected(self):
+        for image in (self.RAW, A1SourceMenuAdmission.DONOR, A1SourceMenuAdmission.IMAGE,
+                      {"size": self.IMAGE["size"], "sha256": "a" * 64}, {**self.IMAGE, "size": self.IMAGE["size"] + 1}):
+            surface = self.surface(image)
+            with self.subTest(image=image), self.assertRaisesRegex(RuntimeError, "B017 menu installed image required"):
+                M.bind_source_menu(surface, self.SOURCE, image)
+            self.assertFalse(hasattr(surface, "menu_binding"))
+            self.assertEqual(surface.inputs, [])
+
+    def test_b_donor_unknown_sources_and_p2_alias_cannot_borrow_b017_image(self):
+        for source in (A1SourceMenuAdmission.DONOR_SOURCE, "ebdaf4f8a5e09f8e759279531c025038fe392593",
+                       "f" * 40, "dea67", "0.1.17", None):
+            surface = self.surface()
+            with self.subTest(source=source), self.assertRaisesRegex(RuntimeError, "Unreviewed menu source"):
+                M.bind_source_menu(surface, source, self.IMAGE)
+            self.assertFalse(hasattr(surface, "menu_binding"))
+            self.assertEqual(surface.inputs, [])
+
+    def test_forged_matching_wrong_binding_refuses_before_startup_wait_or_input(self):
+        for image in (self.RAW, A1SourceMenuAdmission.DONOR, A1SourceMenuAdmission.IMAGE,
+                      {"size": self.IMAGE["size"], "sha256": "a" * 64}, {**self.IMAGE, "size": self.IMAGE["size"] + 1}):
+            surface = self.surface(image)
+            surface.menu_binding = (self.SOURCE, image["sha256"], image["size"], 42, "23")
+            with self.subTest(image=image), patch.object(M, "wait", side_effect=AssertionError("No UI wait before refusal")), self.assertRaisesRegex(RuntimeError, "B017 menu installed image required"):
+                M.startup_ui(surface, Path("/fixture/home"), first=False)
+            self.assertEqual(surface.inputs, [])
+
+    def test_exact_b017_expected_pin_does_not_replace_live_kernel_checks(self):
+        for changes in ({"kernelImageSha256": self.RAW["sha256"]}, {"image": {"st_size": str(self.IMAGE["size"] + 1)}},
+                        {"pid": 1}, {"startTime": ""}):
+            surface = self.surface()
+            surface.record.update(changes)
+            with self.subTest(changes=changes), self.assertRaisesRegex(RuntimeError, "Exact menu source image required"):
+                M.bind_source_menu(surface, self.SOURCE, self.IMAGE)
+            self.assertFalse(hasattr(surface, "menu_binding"))
+
+    def test_b017_actual_ax_direct_pages_and_home_retain_current_selectors(self):
+        surface, actions = self.surface(), []
+        M.bind_source_menu(surface, self.SOURCE, self.IMAGE)
+        with patch.object(M, "phase_processes"), patch.object(M, "feature_ready", side_effect=LiveSourceMenuWiring.ready):
+            self.assertTrue(M.direct_pages(surface, actions))
+            M.navigate_home(surface)
+        self.assertEqual(actions, ["view-mcp", "view-setup"])
+        self.assertEqual(surface.presses, ["navigation-mcp", "navigation-setup", "navigation-home"])
+
+    def test_b017_startup_keeps_original_terms_and_not_now_actions(self):
+        for first in (True, False):
+            old_surface, state, waiting = Pure().startup_surface(first=first)
+            surface = SimpleNamespace(**{k: v for k, v in vars(old_surface).items() if k != "menu_binding"})
+            surface.record = self.surface().record
+            M.bind_source_menu(surface, self.SOURCE, self.IMAGE)
+            with self.subTest(first=first), patch.object(M, "wait", side_effect=waiting), patch.object(M, "read", return_value=b'{"autoDownload":false}'):
+                actions = M.startup_ui(surface, Path("/fixture/home"), first=first)
+            expected = (["usage-terms-checkbox", "usage-terms-continue"] if first else []) + ["convergence-later"]
+            self.assertEqual(actions, expected)
+            self.assertEqual(state.actions, expected)
+
+    def test_b017_live_image_pid_start_and_size_are_rechecked_before_navigation(self):
+        for changes in ({"kernelImageSha256": self.RAW["sha256"]}, {"pid": 43}, {"startTime": "24"},
+                        {"image": {"st_size": str(self.IMAGE["size"] + 1)}}):
+            surface = self.surface()
+            M.bind_source_menu(surface, self.SOURCE, self.IMAGE)
+            surface.recheck.side_effect = lambda changes=changes, **kwargs: surface.record.update(changes)
+            with self.subTest(changes=changes), self.assertRaisesRegex(RuntimeError, "menu source image changed"):
+                M.navigate_home(surface)
+            self.assertEqual(surface.inputs, [])
+
+
+class Actual017AdapterTests(unittest.TestCase):
+    @staticmethod
+    def packages():
+        target, a1 = M.actual017_target_data(), M.actual017_a1_data()
+        elf = (b"\x7fELF\x02\x01\x01" + b"\0" * 11 + b"\x3e\x00").hex()
+        rows = {}
+        for name, kind, mode, uid, gid, size, digest in target["installedMembers"]:
+            row = dict(kind=kind, mode=mode, uid=uid, gid=gid, size=size)
+            if kind == "file":
+                row.update(sha256=digest, md5=hashlib.md5(name.encode()).hexdigest(), header=elf)
+            rows[name] = row
+        new = {"fields": dict(Package="creator-hub", Version="0.1.17", Architecture="amd64", **{"Installed-Size": "100"}), "files": rows}
+        old = copy.deepcopy(new); old["fields"]["Version"] = "0.1.16"
+        for name, field in ((M.ROOT_ENTRY, "hub"), ("usr/lib/Creator Hub/modules.tar.gz", "archive")):
+            old["files"][name].update(a1[field])
+        for value in (old, new):
+            value["md5sums"] = {name: row["md5"] for name, row in value["files"].items() if row["kind"] == "file"}
+        return old, new, a1
+
+    @classmethod
+    def review(cls):
+        old, new, a1 = cls.packages()
+        return dict(baseline=a1, deb16=old["files"], deb17=new["files"], portable={},
+                    privateTargetQualification=M.actual017_private_target_qualification(), signaturesVerified=True, **M.FALSE)
+
+    def test_literal_pair_is_immutable_and_returns_detached_exact_data(self):
+        self.assertIs(type(M.ACTUAL017_CASE), tuple)
+        def immutable(value):
+            self.assertIsNot(type(value), dict)
+            self.assertIsNot(type(value), list)
+            if type(value) is tuple:
+                for child in value: immutable(child)
+        immutable(M.ACTUAL017_CASE)
+        target, a1 = M.actual017_target_data(), M.actual017_a1_data()
+        self.assertEqual((target["source"], target["tree"], target["run"], target["job"], target["artifact"]),
+            ("dea67abb681ff99d3d0cd756954605a3c58627a6", "db4ec3934a8b80014f418fb9ed5ad2e0fe581bc5", 40619538729, 122590023543, 12786602892))
+        self.assertEqual(target["hub"], B017SourceMenuAdmission.IMAGE)
+        self.assertEqual(target["raw"], B017SourceMenuAdmission.RAW)
+        self.assertEqual(target["deb"], {"size": 64516566, "sha256": "1bd69ef6ad81f6af396175e8d2ce74fdabc7df39c936bf8c8e3704a92260f222"})
+        self.assertEqual(target["archive"], {"size": 55576707, "sha256": "5a41b14f5b1ece0d772a5cf71d028517db7e0711891d16019f247b3362009828"})
+        self.assertEqual((a1["source"], a1["hub"]), (A1SourceMenuAdmission.SOURCE, A1SourceMenuAdmission.IMAGE))
+        target["hub"]["sha256"] = "f" * 64; a1["features"].clear()
+        self.assertEqual(M.actual017_target_data()["hub"], B017SourceMenuAdmission.IMAGE)
+        self.assertEqual(M.actual017_a1_data()["features"], M.FEATURES)
+
+    def test_actual_qualification_does_not_admit_actual_source_through_old_getter(self):
+        expected = M.actual017_private_target_qualification()
+        self.assertEqual(expected["targetSource"], B017SourceMenuAdmission.SOURCE)
+        self.assertEqual(expected["targetRetirementHelper"]["sha256"], "7f22822e50ee8b96829c64c95da9e1b098c3e080a1370f577ae2b69055eed94a")
+        for name in ("privateDebApprovalRestoresOldRetirementHelper", "final016HelperFixRetained", "targetFixNativeAcceptance", "futurePublic017Qualified", "releaseReady"):
+            self.assertIs(expected[name], False)
+        before = copy.deepcopy(M.FIXED)
+        with patch.dict(M.FIXED["17"], source=B017SourceMenuAdmission.SOURCE, tree=M.actual017_target_data()["tree"]), self.assertRaisesRegex(RuntimeError, "Unreviewed target"):
+            M.private_target_qualification()
+        self.assertEqual(M.FIXED, before)
+
+    def test_outer_profile_and_cli_are_not_new_native_admission(self):
+        value = profile(); value["artifacts"]["assembly17"].update({k: M.actual017_target_data()[k] for k in ("source", "tree", "run", "job", "artifact", "zip")})
+        with self.assertRaises(RuntimeError): M.validate_profile(value, "deb-approve")
+        tree = ast.parse(Path(M.__file__).read_text())
+        main = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "main")
+        self.assertNotIn("session-changed-mcp", ast.unparse(main))
+        self.assertEqual(M.FIXED["17"]["source"], LiveSourceMenuWiring.CURRENT[-1])
+
+    def test_fixed_package_comparison_accepts_complete_original_pair_without_mutation(self):
+        old, new, a1 = self.packages(); before = copy.deepcopy((old, new, a1, M.FIXED))
+        self.assertEqual(M.actual017_compare_update_packages(old, new, a1), M.actual017_private_target_qualification())
+        self.assertEqual((old, new, a1, M.FIXED), before)
+
+    def test_package_pair_rejects_mixed_source_raw_images_and_member_changes(self):
+        for field, bad in (("source", A1SourceMenuAdmission.DONOR_SOURCE), ("tree", "a" * 40),
+                           ("hub", B017SourceMenuAdmission.IMAGE), ("raw", B017SourceMenuAdmission.RAW)):
+            old, new, a1 = self.packages(); a1[field] = bad
+            with self.subTest(field=field), self.assertRaises(RuntimeError): M.actual017_compare_update_packages(old, new, a1)
+        changes = (lambda value: value["files"][M.ROOT_ENTRY].update(B017SourceMenuAdmission.RAW),
+                   lambda value: value["files"][M.RETIREMENT_HELPER].update(sha256="a" * 64),
+                   lambda value: value["files"][M.ROOT_ENTRY].update(mode=0o777),
+                   lambda value: value["fields"].update(Architecture="arm64"),
+                   lambda value: value["files"].pop("usr/share/icons/hicolor/32x32/apps/creator-hub.png"),
+                   lambda value: value["md5sums"].update({M.ROOT_ENTRY: "f" * 32}))
+        for change in changes:
+            old, new, a1 = self.packages(); change(new)
+            with self.subTest(change=change), self.assertRaises((RuntimeError, ValueError)): M.actual017_compare_update_packages(old, new, a1)
+
+    @contextmanager
+    def installed(self, review, *, foreign=False, verify=b""):
+        requested = []
+        def row(file):
+            name = file.relative_to(Path("/")).as_posix(); value = review["deb17"][name]
+            return SimpleNamespace(st_mode=(stat.S_IFDIR if value["kind"] == "directory" else stat.S_IFREG) | value["mode"],
+                st_uid=1 if foreign and name == M.ROOT_ENTRY else 0, st_gid=0)
+        def run(argv, **kwargs):
+            return b"creator-hub\t0.1.17\tamd64\tinstalled\n" if argv[0] == "/usr/bin/dpkg-query" else verify
+        with patch.object(Path, "lstat", row), patch.object(Path, "resolve", lambda path, **kwargs: path), \
+             patch.object(M, "run_tool", side_effect=run), patch.object(M, "bound", side_effect=lambda file, pin, **kwargs: requested.append((file, pin, kwargs))):
+            yield requested
+
+    def test_installed_wrapper_reuses_all_file_owner_path_and_dpkg_assertions(self):
+        review = self.review()
+        with self.installed(review) as requested:
+            value = M.actual017_verify_installed(review)
+        self.assertEqual(value, {"version": "0.1.17", "hub": B017SourceMenuAdmission.IMAGE, "dpkgVerified": True})
+        files = {name: row for name, row in review["deb17"].items() if row["kind"] == "file"}
+        self.assertEqual(len(requested), len(files))
+        for path, pin, options in requested:
+            expected = files[path.relative_to(Path("/")).as_posix()]
+            self.assertEqual(pin, {k: expected[k] for k in ("size", "sha256")})
+            self.assertEqual(options, {"mode": expected["mode"], "uid": 0})
+
+    def test_installed_wrapper_refuses_mixed_review_foreign_owner_and_dpkg_failure(self):
+        for field, bad in (("privateTargetQualification", M.private_target_qualification()), ("baseline", profile()["baseline"])):
+            review = self.review(); review[field] = bad
+            with self.subTest(field=field), self.assertRaises(RuntimeError): M.actual017_verify_installed(review)
+        review = self.review(); review["deb17"][M.ROOT_ENTRY].update(B017SourceMenuAdmission.RAW)
+        with self.assertRaises(RuntimeError): M.actual017_verify_installed(review)
+        for options in (dict(foreign=True), dict(verify=b"changed")):
+            review = self.review()
+            with self.subTest(options=options), self.installed(review, **options), self.assertRaises(RuntimeError): M.actual017_verify_installed(review)
+
+    def test_all_eight_retained_assertion_blocks_match_original_ast_hashes(self):
+        tree = ast.parse(Path(M.__file__).read_text())
+        functions = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
+        html = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "HtmlPages")
+        methods = {n.name: n for n in html.body if isinstance(n, ast.FunctionDef)}
+        class Substitution(ast.NodeTransformer):
+            def __init__(self, values): self.values = values
+            def visit_Name(self, node):
+                return ast.parse(self.values[node.id], mode="eval").body if node.id in self.values else node
+        def normalized(nodes, **values):
+            return Substitution(values).visit(ast.Module(body=copy.deepcopy(nodes), type_ignores=[])).body
+        def without(nodes, source):
+            expected = ast.dump(ast.parse(source).body[0], include_attributes=False)
+            self.assertEqual(sum(ast.dump(n, include_attributes=False) == expected for n in nodes), 1)
+            return [n for n in nodes if ast.dump(n, include_attributes=False) != expected]
+        qual = normalized(functions["_private_target_qualification"].body, target="FIXED['17']")
+        qual.insert(1, functions["private_target_qualification"].body[0])
+        init = copy.deepcopy(methods["_initialize"].body)
+        for extra in (
+            'require(type(target_identity) is tuple and len(target_identity) == 5 and target_identity[0] in ("historical", "actual017"), "One fixed HTML target identity required")',
+            'require(previous is None or previous.target_identity == target_identity, "HTML target context differs from previous")',
+            'self.target_identity = target_identity'):
+            init = without(init, extra)
+        endpoint = copy.deepcopy(methods["endpoint_ready"].body)
+        manual = [(i, n) for i, n in enumerate(endpoint) if isinstance(n, ast.If) and ast.unparse(n.test) == "_actual017_reopened_mode(self)"]
+        self.assertEqual(len(manual), 1)
+        index, branch = manual[0]
+        self.assertEqual(ast.unparse(branch.body[0]), "_actual017_reopened_surface(self.surface, self.original, self.previous)")
+        self.assertEqual(len(branch.orelse), 1)
+        self.assertEqual(ast.unparse(branch.orelse[0].test), "self.previous is None")
+        endpoint[index] = branch.orelse[0]
+        blocks = {
+            "qualification": (qual, "c7daa144e3c93199bd44d997c36a55b779193e8d50d7822be1d286975ceed3da"),
+            "compare": (functions["compare_update_packages"].body[:1] + ast.parse("qualification = private_target_qualification()").body
+                + normalized(functions["_compare_update_packages"].body, target="FIXED['17']"), "9975ebe4ca815b21717d992efb2ecbb3be3db84feba0a55f161b1615cbeb3b20"),
+            "pending": (functions["pending_proof"].body[:1] + normalized(functions["_pending_proof"].body,
+                target="FIXED['17']", session_mode="'session'"), "b005bbd2ee836278a92d05c9ab19aed18b5ca6c8e822431c5b7cd0bbbf5104ca"),
+            "authorize": (normalized(functions["_authorize"].body, target="FIXED['17']"), "8320bcad9b4ee078fb00aa106e088bca67c2335f728db9d0baec76ebec1fc7a1"),
+            "installed": (normalized(functions["_verify_installed"].body, target="FIXED['17']"), "2866242323a637568da97193c469b188aca8ced6abbbf371975aa3c0b22863e4"),
+            "before": (ast.parse("qualification = private_target_qualification()").body + functions["_outcome_before_mcp_qualified"].body,
+                "17e7a1bb652248814370b9dfc95d87f1a35ae59ca8af00867a363cf9906af9c8"),
+            "html-init": (init, "f5d01457294bc91f80ea938ab3cb2a662d217f4b533eaf055c3d7b9c4b3ad5bf"),
+            "html-endpoint": (normalized(without(endpoint, "target_hub = self._target_hub()"),
+                target_hub="FIXED['17']['hub']"), "ef4d501e85bdd2d77d4276fe27712f951affc7a10b0828787be75fe8d46aef3a"),
+        }
+        for name, (nodes, expected) in blocks.items():
+            raw = ast.dump(ast.Module(body=nodes, type_ignores=[]), include_attributes=False).encode()
+            with self.subTest(block=name): self.assertEqual(hashlib.sha256(raw).hexdigest(), expected)
+
+    def test_new_public_wrappers_have_no_target_callback_skip_or_dispatch_inputs(self):
+        tree = ast.parse(Path(M.__file__).read_text())
+        functions = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
+        for name, function in functions.items():
+            if not name.startswith("actual017_"): continue
+            self.assertFalse(function.args.vararg or function.args.kwarg)
+            args = {arg.arg for arg in function.args.args + function.args.kwonlyargs}
+            self.assertFalse(args & {"target", "targets", "callback", "skip", "allow", "migrated"})
+            self.assertFalse(any(isinstance(node, ast.Name) and node.id == "FIXED" for node in ast.walk(function)))
+        for helper, expected in {
+            "_private_target_qualification": {"private_target_qualification", "actual017_private_target_qualification"},
+            "_compare_update_packages": {"compare_update_packages", "actual017_compare_update_packages"},
+            "_pending_proof": {"pending_proof", "actual017_pending_proof"},
+            "_authorize": {"authorize", "actual017_authorize"}, "_verify_installed": {"verify_installed", "actual017_verify_installed"},
+            "_outcome_before_mcp_qualified": {"_outcome_before_mcp", "actual017_transition_outcome"},
+        }.items():
+            callers = {name for name, function in functions.items() if any(isinstance(call, ast.Call)
+                and isinstance(call.func, ast.Name) and call.func.id == helper for call in ast.walk(function))}
+            self.assertEqual(callers, expected)
+
+
+class _Actual017TestSessionBus:
+    def __init__(self):
+        self.guid, self.bus_id, self.unique = "a" * 32, "b" * 32, ":1.10"
+        self.owner, self.pid, self.uid, self.closed = ":1.112", 12, M.UID, False
+        self.calls = []
+
+    def get_guid(self): return self.guid
+    def get_unique_name(self): return self.unique
+    def is_closed(self): return self.closed
+
+    def call_sync(self, destination, object_path, interface, method, arguments, reply, flags, timeout, cancel):
+        if (destination, object_path, interface) != ("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus"):
+            raise AssertionError("Only the actual message-bus daemon may be queried")
+        self.calls.append((method, None if arguments is None else arguments.value))
+        if method == "GetId": value = self.bus_id
+        elif method == "GetNameOwner":
+            if arguments.value != ("com.creatorworks.hub.SingleInstance",): raise AssertionError("Fixed Main SingleInstance name only")
+            value = self.owner
+        elif method == "GetConnectionUnixProcessID":
+            if arguments.value != (self.owner,): raise AssertionError("Unique owner PID query required")
+            value = self.pid
+        elif method == "GetConnectionUnixUser":
+            if arguments.value != (self.owner,): raise AssertionError("Unique owner UID query required")
+            value = self.uid
+        else: raise AssertionError("No DBus mutation, activation or generic RPC allowed")
+        return SimpleNamespace(unpack=lambda: (value,))
+
+
+class _Actual017SessionBusFixture:
+    def __init__(self):
+        self.bus, self.stack, self.types = _Actual017TestSessionBus(), ExitStack(), []
+        self.returned = self.bus
+        def get_bus(kind, cancel):
+            self.types.append(kind)
+            if kind != 1 or cancel is not None: raise AssertionError("Only fixed SESSION bus construction")
+            return self.returned
+        self.gio = SimpleNamespace(BusType=SimpleNamespace(SESSION=1, SYSTEM=2), DBusConnection=_Actual017TestSessionBus, bus_get_sync=get_bus)
+        self.glib = SimpleNamespace(Variant=lambda signature, value: SimpleNamespace(signature=signature, value=value),
+                                    VariantType=SimpleNamespace(new=lambda signature: signature))
+        gi, repository = ModuleType("gi"), ModuleType("gi.repository")
+        repository.Gio, repository.GLib, gi.repository = self.gio, self.glib, repository
+        self.stack.enter_context(patch.dict(sys.modules, {"gi": gi, "gi.repository": repository}))
+
+    def for_root(self, record):
+        self.bus.pid, self.bus.uid, self.bus.owner = record["pid"], M.UID, ":1." + str(record["pid"] + 100)
+
+    def close(self): self.stack.close()
+
+
+class Actual017HtmlAdapterTests(unittest.TestCase):
+    def setUp(self):
+        self.bus_fixture = _Actual017SessionBusFixture()
+        self.addCleanup(self.bus_fixture.close)
+
+    def initial(self):
+        state = HtmlAttachmentTests().fixture()
+        transport = state.html.d.http
+        image = A1SourceMenuAdmission.IMAGE
+        state.surface.record.update(kernelImageSha256=image["sha256"], image={"st_size": str(image["size"])})
+        M.bind_source_menu(state.surface, A1SourceMenuAdmission.SOURCE, image)
+        state.records[state.surface.pid] = copy.deepcopy(state.surface.record)
+        self.bus_fixture.for_root(state.surface.record)
+        with patch.object(M, "kernel_record", return_value=copy.deepcopy(state.surface.record)):
+            state.html = M.actual017_html_pages(state.surface, state.original, state.pages, {"size": 4, "sha256": "a" * 64}, 41000,
+                                              {"HOME": "/fixed"}, {})
+        state.html.d.http = transport
+        return state
+
+    def successor(self, old=None):
+        old = self.initial() if old is None else old
+        old.html.detached = old.html.tools_stopping = True
+        old.html.evidence["toolsClosedAfterRootExit"] = True; old.original.poll.return_value = 0
+        state = HtmlAttachmentTests().fixture(); state.original = old.original
+        transport = state.html.d.http
+        state.surface.pid = 77
+        state.surface.record = {**copy.deepcopy(old.surface.record), "pid": 77, "startTime": "101",
+            "kernelImageSha256": B017SourceMenuAdmission.IMAGE["sha256"], "image": {"st_size": str(B017SourceMenuAdmission.IMAGE["size"])}}
+        M.bind_source_menu(state.surface, B017SourceMenuAdmission.SOURCE, B017SourceMenuAdmission.IMAGE)
+        state.child.pid = 61
+        state.records = {61: {**state.records[51], "pid": 61}, 62: {**state.records[52], "pid": 62, "parentPid": 61},
+                         77: copy.deepcopy(state.surface.record)}
+        state.pages.subtree.return_value = {62: state.records[62]}
+        self.bus_fixture.for_root(state.surface.record)
+        with patch.object(M, "kernel_record", return_value=copy.deepcopy(state.surface.record)):
+            state.html = M.actual017_html_pages(state.surface, state.original, state.pages, old.html.driver_pin, old.html.port,
+                                              old.html.env, {}, previous=old.html)
+        state.html.d.http = transport
+        state.changed[".footer-version:text"] = "0.1.17"
+        state.old = old
+        return state
+
+    def test_both_factories_return_exact_htmlpages_type_and_context_is_identical(self):
+        state = self.successor()
+        self.assertIs(type(state.html), M.HtmlPages); self.assertIs(type(state.old.html), M.HtmlPages)
+        self.assertEqual(state.html.target_identity, state.old.html.target_identity)
+        self.assertEqual(state.html.version, "0.1.17"); self.assertEqual(state.old.html.version, "0.1.16")
+        with patch.object(M, "kernel_record", return_value=copy.deepcopy(state.surface.record)), patch.object(M, "windows", return_value=[20]):
+            self.assertTrue(state.html.endpoint_ready())
+
+    def test_both_phases_use_existing_real_driver_http_probe_with_no_root_launch_or_input(self):
+        owner = HtmlAttachmentTests(); old = self.initial()
+        with owner.native_stubs(old), patch.object(old.html, "retain_logs"):
+            old.html.start(); old.html.detach(); old.original.poll.return_value = 0
+            old.html.finish_tools()
+        state = self.successor(old)
+        with owner.native_stubs(state): state.html.start()
+        for phase, version in ((old, "0.1.16"), (state, "0.1.17")):
+            self.assertEqual(phase.html.evidence["documentVersion"], version)
+            self.assertEqual(phase.html.evidence["inputCountAtProbe"], 0)
+            self.assertEqual(phase.html.evidence["inputAttempts"], [])
+            self.assertEqual(sum((method, route) == ("POST", "/session") for method, route, _ in phase.requests), 1)
+            self.assertFalse(any(route.endswith("/click") for _, route, _ in phase.requests))
+
+    def test_actual_factory_rejects_raw_unknown_source_pid_uid_parent_and_size(self):
+        for field, bad in (("pid", 1), ("parentPid", 99), ("uids", [0] * 4),
+                           ("kernelImageSha256", A1SourceMenuAdmission.RAW["sha256"]), ("image", {"st_size": "1"})):
+            state = HtmlAttachmentTests().fixture(); source = A1SourceMenuAdmission.SOURCE
+            state.surface.record.update(kernelImageSha256=A1SourceMenuAdmission.IMAGE["sha256"], image={"st_size": str(A1SourceMenuAdmission.IMAGE["size"])})
+            M.bind_source_menu(state.surface, source, A1SourceMenuAdmission.IMAGE); state.surface.record[field] = bad
+            with self.subTest(field=field), self.assertRaises(RuntimeError):
+                M.actual017_html_pages(state.surface, state.original, state.pages, {}, 41000, {}, {})
+        state = self.initial(); state.surface.menu_binding = ("f" * 40, *state.surface.menu_binding[1:])
+        with self.assertRaises(RuntimeError): M.actual017_html_pages(state.surface, state.original, state.pages, {}, 41000, {}, {})
+
+    def test_old_factory_never_adopts_actual_context_or_actual_successor(self):
+        state = self.successor()
+        with self.assertRaises(RuntimeError):
+            M.HtmlPages(state.surface, state.original, state.pages, state.old.html.driver_pin, state.old.html.port,
+                        state.old.html.env, {}, previous=state.old.html, migrated=True)
+        with self.assertRaises(RuntimeError): M.HtmlPages(state.surface, state.original, state.pages, {}, 41000, {}, {}, migrated=True)
+        with patch.dict(M.FIXED["17"], M.actual017_target_data()), self.assertRaises(RuntimeError):
+            M.HtmlPages(state.surface, state.original, state.pages, {}, 41000, {}, {}, migrated=True)
+
+    def test_new_factory_cannot_adopt_historical_previous_context(self):
+        state = self.successor()
+        historical = HtmlAttachmentTests().fixture().html
+        with self.assertRaises(RuntimeError):
+            M.actual017_html_pages(state.surface, historical.original, state.pages, historical.driver_pin, historical.port,
+                                   historical.env, {}, previous=historical)
+
+    def test_actual_context_pin_and_source_are_rechecked_before_any_transport(self):
+        for defect in ("target", "source", "pid", "start", "uid", "size", "raw"):
+            state = self.successor()
+            if defect == "target": state.html.target_identity = (*state.html.target_identity[:-1], "a" * 64)
+            if defect == "source": state.surface.menu_binding = (LiveSourceMenuWiring.CURRENT[0], *state.surface.menu_binding[1:])
+            if defect == "pid": state.surface.pid = 78
+            if defect == "start": state.surface.record["startTime"] = "102"
+            if defect == "uid": state.surface.record["uids"] = [0] * 4
+            if defect == "size": state.surface.record["image"]["st_size"] = "1"
+            if defect == "raw": state.surface.record["kernelImageSha256"] = B017SourceMenuAdmission.RAW["sha256"]
+            with self.subTest(defect=defect), patch.object(M, "kernel_record", return_value=copy.deepcopy(state.surface.record)), \
+                 patch.object(M, "windows", return_value=[20]), self.assertRaises(RuntimeError): state.html.endpoint_ready()
+            self.assertEqual(state.requests, [])
+
+    def test_old_zero_exit_detach_tools_and_exact_live_successor_guards_remain(self):
+        for defect in ("alive", "abnormal", "attached", "tools", "context"):
+            state = self.successor()
+            if defect == "alive": state.original.poll.return_value = None
+            if defect == "abnormal": state.original.poll.return_value = 1
+            if defect == "attached": state.old.html.detached = False
+            if defect == "tools": state.old.html.evidence["toolsClosedAfterRootExit"] = False
+            if defect == "context": state.old.html.target_identity = ("historical", *state.old.html.target_identity[1:])
+            with self.subTest(defect=defect), patch.object(M, "kernel_record", return_value=copy.deepcopy(state.surface.record)), \
+                 patch.object(M, "windows", return_value=[20]), self.assertRaises(RuntimeError): state.html.endpoint_ready()
+
+
+class Actual017PendingProofTests(unittest.TestCase):
+    @contextmanager
+    def kernel(self, **changes):
+        target, a1 = M.actual017_target_data(), M.actual017_a1_data()
+        root = dict(pid=20, parentPid=10, startTime="200", uids=[M.UID] * 4, executable="/usr/bin/creator-hub",
+                    kernelImageSha256=a1["hub"]["sha256"], image={"st_size": str(a1["hub"]["size"])})
+        records = {20: root, 10: dict(pid=10, uids=[M.UID] * 4, executable="/usr/bin/python3.10"),
+                   30: dict(pid=30, parentPid=20, uids=[M.UID, 0, 0, 0], executable="/usr/bin/pkexec", kernelImageSha256="c" * 64)}
+        state = SimpleNamespace(**{**dict(root=root, records=records, seals=15, digest=target["deb"]["sha256"],
+            size=target["deb"]["size"], mode=stat.S_IFREG | 0o600, session="session-changed-mcp", child_pids={30}, updates=0), **changes})
+        control, _ = M.update_channel(True)
+        def command(path):
+            if path.as_posix() == "/proc/10/cmdline":
+                return b"\0".join(os.fsencode(v) for v in ("/usr/bin/python3", "-B", str(control / "scripts/native-linux-migrated-update.py"), state.session)) + b"\0"
+            raise AssertionError("Unexpected proc read")
+        def opened(path, *args, **kwargs):
+            self.assertEqual(path.as_posix(), "/proc/30/cmdline")
+            return io.BytesIO(b"/usr/bin/pkexec\0--disable-internal-agent\0/usr/bin/dpkg\0--install\0/proc/self/fd/0\0")
+        info = SimpleNamespace(st_dev=1, st_ino=2, st_mode=state.mode, st_uid=0, st_gid=0, st_nlink=0,
+            st_size=state.size, st_mtime_ns=3, st_ctime_ns=4)
+        class Digest:
+            def update(self, part): state.updates += len(part)
+            def hexdigest(self): return state.digest
+        fcntl = ModuleType("fcntl"); fcntl.F_GET_SEALS = 1034
+        fcntl.fcntl = lambda fd, operation: state.seals
+        polkit = SimpleNamespace(FILES={"/usr/bin/pkexec": (0, 0, 0, "c" * 64)})
+        # Synthetic syscall/digest model only; the production comparisons execute unchanged.
+        with patch.dict(sys.modules, {"fcntl": fcntl}), patch.object(M.os, "getuid", return_value=0, create=True), \
+             patch.object(M.os, "geteuid", return_value=0, create=True), patch.object(M, "kernel_record", side_effect=lambda pid, *_: copy.deepcopy(records[pid])), \
+             patch.object(M, "children", side_effect=lambda pid: set(state.child_pids)), patch.object(Path, "read_bytes", command), \
+             patch.object(M.os, "O_CLOEXEC", 0x80000, create=True), \
+             patch.object(Path, "open", opened), patch.object(M.os, "open", return_value=123), patch.object(M.os, "close"), \
+             patch.object(M.os, "fstat", side_effect=lambda fd: copy.copy(info)), \
+             patch.object(M.os, "pread", side_effect=lambda fd, count, offset: b"p" * count, create=True), \
+             patch.object(M.hashlib, "sha256", return_value=Digest()):
+            yield state, polkit, a1
+
+    def test_exact_new_supervisor_tail_and_fully_sealed_target_are_required(self):
+        with self.kernel() as (state, polkit, a1):
+            result = M.actual017_pending_proof(state.root, None, None, polkit, a1)
+            self.assertEqual(result["package"], M.actual017_target_data()["deb"])
+            self.assertEqual(state.updates, result["package"]["size"])
+            self.assertEqual((result["seals"], result["readOnly"]), (15, True))
+
+    def test_old_tail_unknown_interpreter_and_kernel_ancestry_refuse(self):
+        for defect in ("old-tail", "interpreter", "parent", "uids", "image"):
+            with self.subTest(defect=defect), self.kernel() as (state, polkit, a1):
+                if defect == "old-tail": state.session = "session"
+                if defect == "interpreter": state.records[10]["executable"] = "/usr/bin/python3.11"
+                if defect == "parent": state.records[30]["parentPid"] = 99
+                if defect == "uids": state.records[30]["uids"] = [0] * 4
+                if defect == "image": state.records[30]["kernelImageSha256"] = "d" * 64
+                with self.assertRaises(RuntimeError): M.actual017_pending_proof(state.root, None, None, polkit, a1)
+
+    def test_wrong_seals_size_type_digest_and_missing_request_refuse(self):
+        for changes in (dict(seals=14), dict(size=1), dict(mode=stat.S_IFDIR | 0o700), dict(digest="f" * 64), dict(child_pids=set())):
+            with self.subTest(changes=changes), self.kernel(**changes) as (state, polkit, a1), self.assertRaises(RuntimeError):
+                M.actual017_pending_proof(state.root, None, None, polkit, a1)
+
+    def test_mixed_a1_or_donor_baseline_refuses_before_kernel_observation(self):
+        for field, bad in (("source", A1SourceMenuAdmission.DONOR_SOURCE), ("hub", A1SourceMenuAdmission.DONOR),
+                           ("raw", A1SourceMenuAdmission.RAW), ("zip", {"size": 1, "sha256": "a" * 64})):
+            a1 = M.actual017_a1_data(); a1[field] = bad
+            if field == "raw": a1[field] = B017SourceMenuAdmission.RAW
+            with self.subTest(field=field), patch.object(M, "kernel_record", side_effect=AssertionError("No kernel read for mixed baseline")), self.assertRaises(RuntimeError):
+                M.actual017_pending_proof({}, None, None, None, a1)
+
+
+class Actual017AuthorizationTests(unittest.TestCase):
+    def setUp(self):
+        self.html_fixture = Actual017HtmlAdapterTests()
+        self.html_fixture.setUp()
+        self.addCleanup(self.html_fixture.doCleanups)
+
+    @contextmanager
+    def authentication(self, *, ack="good", guard_calls=1):
+        state = self.html_fixture.initial()
+        state.saved = []; endpoint = {"owner": ":1.1", "pid": 2, "uid": M.UID, "authority": {"owner": ":1.2", "pid": 3, "uid": 0}}
+        polkit = SimpleNamespace(windows=lambda *_: [{"window": 21}], session=lambda *_: {"id": "unit-logind"}, own_agent=Mock(),
+            bus_identity=lambda system, owner, glib: {k: endpoint[k] for k in ("owner", "pid", "uid")} if owner == endpoint["owner"] else endpoint["authority"],
+            native_window_absence=lambda *_: {"absent": True})
+        def authenticate(profile, guard, record, secret):
+            profile()
+            for _ in range(guard_calls): guard()
+        polkit.authenticate_once = authenticate
+        native = SimpleNamespace(native_ax_references=lambda: (object(), SimpleNamespace(close_sync=Mock())))
+        def answer(file, *args, **kwargs):
+            index = state.saved[-1]["index"]
+            proof = {"root": copy.deepcopy(state.surface.record), "package": M.actual017_target_data()["deb"]}
+            if ack == "old-package": proof["package"] = M.FIXED["17"]["deb"]
+            if ack == "root": proof["root"]["startTime"] = "foreign"
+            if ack == "index": index += 1
+            return json.dumps({"index": index, "proof": proof}).encode()
+        with patch.object(M, "windows", return_value=[20, 21]), patch.object(M, "wait", side_effect=lambda check, *args: check()), \
+             patch.object(M, "save", side_effect=lambda file, value: state.saved.append(value)), patch.object(M, "read", side_effect=answer):
+            yield state, polkit, native, endpoint
+
+    def call(self, state, polkit, native, endpoint):
+        evidence = {"systemActions": []}; state.evidence = evidence
+        M.actual017_authorize(state.surface, SimpleNamespace(pid=2), {"pid": 2}, {"pid": os.getpid()}, endpoint,
+            object(), object(), object(), polkit, SimpleNamespace(dpkg_profile=lambda *args, **kwargs: {}),
+            None, native, bytearray(b"unit-only-no-real-credential"), evidence)
+        return evidence
+
+    def test_actual_acknowledgement_runs_unchanged_authentication_guard_once(self):
+        with self.authentication() as (state, polkit, native, endpoint):
+            evidence = self.call(state, polkit, native, endpoint)
+            self.assertEqual(evidence["systemActions"], ["Authenticate"])
+            self.assertTrue(evidence["sealed17Observed"])
+            self.assertEqual(len(state.saved), 1)
+            self.assertEqual(evidence["systemInput"]["lastKernelProof"]["package"], M.actual017_target_data()["deb"])
+
+    def test_old_package_stale_root_or_wrong_sequence_ack_never_authorizes(self):
+        for ack in ("old-package", "root", "index"):
+            with self.subTest(ack=ack), self.authentication(ack=ack) as (state, polkit, native, endpoint), self.assertRaises(RuntimeError):
+                self.call(state, polkit, native, endpoint)
+            self.assertEqual(state.evidence["systemActions"], [])
+
+    def test_original_twelve_proof_bound_is_not_extended(self):
+        with self.authentication(guard_calls=13) as (state, polkit, native, endpoint), self.assertRaisesRegex(RuntimeError, "Bounded read-only input proof"):
+            self.call(state, polkit, native, endpoint)
+        self.assertEqual(len(state.saved), 12); self.assertEqual(state.evidence["systemActions"], [])
+
+    def test_wrong_a1_menu_source_or_raw_image_refuses_before_agent_work(self):
+        for defect in ("source", "raw"):
+            with self.subTest(defect=defect), self.authentication() as (state, polkit, native, endpoint):
+                if defect == "source": state.surface.menu_binding = (LiveSourceMenuWiring.CURRENT[0], *state.surface.menu_binding[1:])
+                else: state.surface.record["kernelImageSha256"] = A1SourceMenuAdmission.RAW["sha256"]
+                with self.assertRaises(RuntimeError): self.call(state, polkit, native, endpoint)
+                polkit.own_agent.assert_not_called(); self.assertEqual(state.saved, [])
+
+
+class Actual017OutcomeTests(unittest.TestCase):
+    def setUp(self):
+        self.f = TransitionConsumerTests(methodName="runTest"); self.f.setUp(); self.addCleanup(self.f.doCleanups)
+
+    def report(self, protocol=None):
+        value = self.f.root_outcome_report(self.f.value if protocol is None else protocol)
+        value.update(privateTargetQualification=M.actual017_private_target_qualification(), oldRetirementHelperRestored=False,
+            fromSource=A1SourceMenuAdmission.SOURCE, toSource=B017SourceMenuAdmission.SOURCE,
+            installed16={"version": "0.1.16", "hub": A1SourceMenuAdmission.IMAGE, "dpkgVerified": True},
+            installed17={"version": "0.1.17", "hub": B017SourceMenuAdmission.IMAGE, "dpkgVerified": True})
+        return value
+
+    def consume(self, value):
+        return M.actual017_transition_outcome(value, self.f.inventories, None, self.f.paths)
+
+    def test_same_v4_consumer_accepts_fixture_without_promoting_scope(self):
+        value = self.report(); before = copy.deepcopy(value)
+        self.assertTrue(self.consume(value)); self.assertEqual(value, before)
+        self.assertFalse(value["mcpProtocol"]["payloadSwapAccepted"])
+        with self.assertRaises(RuntimeError): M.transition_outcome(value, self.f.inventories, None, self.f.paths)
+        with self.assertRaises(RuntimeError): M.outcome("deb-approve", value)
+
+    def test_mixed_source_image_or_qualification_cannot_be_report_authority(self):
+        for field, bad in (("fromSource", A1SourceMenuAdmission.DONOR_SOURCE), ("toSource", LiveSourceMenuWiring.CURRENT[-1]),
+                           ("installed17", {"version": "0.1.17", "hub": B017SourceMenuAdmission.RAW, "dpkgVerified": True}),
+                           ("privateTargetQualification", M.private_target_qualification()), ("oldRetirementHelperRestored", True)):
+            value = self.report(); value[field] = bad
+            with self.subTest(field=field), self.assertRaises(RuntimeError): self.consume(value)
+
+    def test_boolean_fake_old_receipt_and_missing_root_or_close_guards_refuse(self):
+        for protocol in (True, {"passed": True}, mcp_receipt()):
+            with self.subTest(protocol=protocol), self.assertRaises(RuntimeError): self.consume(self.report(protocol))
+        for field in ("normalFinalClose", "automaticRestartObserved", "targetRetirementHelperVerified", "installed17Verified"):
+            value = self.report(); value[field] = False
+            with self.subTest(field=field), self.assertRaises(RuntimeError): self.consume(value)
+        for field in M.FALSE:
+            value = self.report(); value[field] = True
+            with self.subTest(field=field), self.assertRaises(RuntimeError): self.consume(value)
+
+    def test_actual_consumer_still_rechecks_real_v4_installed_files(self):
+        value = self.report(); self.f.put(self.f.b_root / "mcp/server/creator-works-mcp.mjs", b"tampered unit source")
+        with self.assertRaises(RuntimeError): self.consume(value)
+
+
+class Actual017ReopenedProjectsTests(unittest.TestCase):
+    def setUp(self):
+        self.bus_fixture = _Actual017SessionBusFixture()
+        self.addCleanup(self.bus_fixture.close)
+        self.owner = Actual017HtmlAdapterTests()
+        self.owner.bus_fixture = self.bus_fixture
+        self.http_owner = HtmlAttachmentTests()
+
+    def retired_automatic(self):
+        state = self.owner.successor()
+        state.child.wait.side_effect = lambda **_: setattr(state.child.poll, "return_value", -15)
+        with self.http_owner.native_stubs(state), patch.object(state.html, "retain_logs"), \
+                patch.object(M.os, "waitpid", return_value=(77, 0)), patch.object(M.os, "WNOHANG", 1, create=True), \
+                patch.object(M.os, "waitstatus_to_exitcode", return_value=0, create=True):
+            state.html.start(); state.html.detach(); state.html.finish_tools()
+        return state
+
+    def manual(self, previous=None):
+        previous = self.retired_automatic() if previous is None else previous
+        state = HtmlAttachmentTests().fixture(); transport = state.html.d.http
+        state.original = Mock(pid=88); state.original.poll.return_value = None
+        target = M.actual017_target_data()
+        state.surface.pid = 88
+        state.surface.record = {"pid": 88, "startTime": "102", "parentPid": os.getpid(), "uids": [M.UID] * 4,
+            "executable": "/usr/bin/creator-hub", "kernelImageSha256": target["hub"]["sha256"], "image": {"st_size": str(target["hub"]["size"])}}
+        M.bind_source_menu(state.surface, target["source"], target["hub"])
+        state.child.pid = 71
+        state.records = {71: {**state.records[51], "pid": 71}, 72: {**state.records[52], "pid": 72, "parentPid": 71}, 88: copy.deepcopy(state.surface.record)}
+        state.pages.subtree.return_value = {72: state.records[72]}
+        state.changed[".footer-version:text"] = "0.1.17"
+        state.previous, state.transport = previous, transport
+        self.bus_fixture.for_root(state.surface.record)
+        return state
+
+    def construct(self, state):
+        old = state.previous.html
+        with patch.object(M, "kernel_record", return_value=copy.deepcopy(state.surface.record)), \
+                patch.object(M, "alive_stat", side_effect=FileNotFoundError):
+            value = M.actual017_reopened_html_pages(state.surface, state.original, state.pages, {"size": 4, "sha256": "a" * 64}, 41000,
+                {"HOME": "/fixed"}, {}, previous=old)
+        value.d.http = state.transport; state.html = value
+        return value
+
+    @contextmanager
+    def running(self, state):
+        with self.http_owner.native_stubs(state), patch.object(M, "alive_stat", side_effect=FileNotFoundError):
+            yield
+
+    def test_actual017_objects_capture_real_helper_session_bus_at_construction(self):
+        first = self.owner.initial()
+        self.assertTrue(hasattr(first.html, "_actual017_session_binding"))
+        second = self.owner.successor(first)
+        self.assertNotEqual(first.html._actual017_session_binding[3], second.html._actual017_session_binding[3])
+        self.assertTrue(self.bus_fixture.bus.calls)
+        self.assertEqual(set(self.bus_fixture.types), {1})
+
+    def test_exact_type_fresh_manual_b_uses_own_popen_not_automatic_authority(self):
+        state = self.manual(); value = self.construct(state)
+        self.assertIs(type(value), M.HtmlPages); self.assertIs(value.previous, state.previous.html)
+        self.assertIs(value.original, state.original); self.assertIsNot(value.original, value.previous.original)
+        self.assertEqual(value.target_identity[0], "actual017-reopened-projects")
+        self.assertEqual(value.version, "0.1.17")
+        with self.running(state): value.start(); value.home()
+        self.assertTrue(value.evidence["projectsDocumentVerified"])
+        self.assertEqual(value.evidence["launchRole"], "manual-second-b-projects")
+        self.assertFalse(value.evidence["automaticRestartProof"])
+        self.assertFalse(value.evidence["probePassed"])
+        self.assertFalse(value.probe_started)
+        self.assertNotIn("adoptedExit", value.evidence)
+
+    def test_previous_a1_historical_or_subclass_is_not_a_retired_automatic_b(self):
+        a1 = self.owner.initial(); state = self.manual()
+        for bad in (a1.html, HtmlAttachmentTests().fixture().html, object()):
+            original = state.previous.html; state.previous.html = bad
+            with self.subTest(previous=type(bad).__name__), self.assertRaises(RuntimeError): self.construct(state)
+            state.previous.html = original
+        class Subclass(M.HtmlPages): pass
+        old = state.previous.html; state.previous.html = Subclass.__new__(Subclass)
+        with self.assertRaises(RuntimeError): self.construct(state)
+        state.previous.html = old
+
+    def test_retirement_requires_real_lifecycle_state_and_no_live_old_b_or_driver(self):
+        for field in ("detached", "tools_stopping", "adopted_wait_started"):
+            state = self.manual(); setattr(state.previous.html, field, False)
+            with self.subTest(field=field), self.assertRaises(RuntimeError): self.construct(state)
+        for defect in ("logs", "driver", "exit", "bus-proof"):
+            state = self.manual(); old = state.previous.html
+            if defect == "logs": old.logs = Mock()
+            if defect == "driver": old.child.poll.return_value = None
+            if defect == "exit": old.evidence["adoptedExit"]["exitCode"] = 1
+            if defect == "bus-proof": del old._actual017_session_binding
+            with self.subTest(defect=defect), self.assertRaises((RuntimeError, AttributeError)): self.construct(state)
+        state = self.manual()
+        with patch.object(M, "kernel_record", return_value=copy.deepcopy(state.surface.record)), patch.object(M, "alive_stat", return_value=[b"S"] * 20), self.assertRaises(RuntimeError):
+            old = state.previous.html
+            M.actual017_reopened_html_pages(state.surface, state.original, state.pages, old.driver_pin, old.port, old.env, {}, previous=old)
+
+    def test_current_source_image_pid_start_parent_uid_and_owned_popen_are_exact(self):
+        for defect in ("a1", "b16", "raw", "unknown", "pid", "start", "parent", "uid", "popen"):
+            state = self.manual()
+            if defect in ("a1", "b16", "raw", "unknown"):
+                hashes = {"a1": A1SourceMenuAdmission.IMAGE["sha256"], "b16": "6fb2983c212b6bcd79f616019eca1b7f2f1daa3454d72cee7e6dc19bdc0dd5c9",
+                          "raw": B017SourceMenuAdmission.RAW["sha256"], "unknown": "f" * 64}
+                state.surface.record["kernelImageSha256"] = hashes[defect]
+            if defect == "pid": state.surface.pid = 77
+            if defect == "start": state.surface.record["startTime"] = "101"
+            if defect == "parent": state.surface.record["parentPid"] = 99
+            if defect == "uid": state.surface.record["uids"] = [0] * 4
+            if defect == "popen": state.original.pid = 77
+            with self.subTest(defect=defect), self.assertRaises(RuntimeError): self.construct(state)
+
+    def test_previous_donor_raw_or_unknown_image_cannot_be_relabelled_as_retired_b(self):
+        for source, image in (("f00cd4433e261f8d968b7c88c068dae59ec970a6", "6fb2983c212b6bcd79f616019eca1b7f2f1daa3454d72cee7e6dc19bdc0dd5c9"),
+                              (B017SourceMenuAdmission.SOURCE, B017SourceMenuAdmission.RAW["sha256"]), ("f" * 40, "f" * 64)):
+            state = self.manual(); old = state.previous.html
+            old.surface.record["kernelImageSha256"] = image
+            old.phase_record = json.dumps(old.surface.record, sort_keys=True)
+            old.surface.menu_binding = (source, image, M.actual017_target_data()["hub"]["size"], old.phase_pid, old.surface.record["startTime"])
+            old._actual017_session_binding = (*old._actual017_session_binding[:6], old.phase_record)
+            with self.subTest(source=source, image=image), self.assertRaises(RuntimeError): self.construct(state)
+
+    def test_each_retired_root_driver_backend_kernel_pid_must_be_absent(self):
+        for live in (77, 61, 62):
+            state = self.manual(); old = state.previous.html
+            def alive(pid):
+                if pid == live: return [b"S"] * 20
+                raise FileNotFoundError
+            with self.subTest(pid=live), patch.object(M, "kernel_record", return_value=copy.deepcopy(state.surface.record)), \
+                    patch.object(M, "alive_stat", side_effect=alive), self.assertRaises(RuntimeError):
+                M.actual017_reopened_html_pages(state.surface, state.original, state.pages, old.driver_pin, old.port, old.env, {}, previous=old)
+
+    def test_owner_change_during_actual_helper_capture_refuses(self):
+        state = self.manual(); bus = self.bus_fixture.bus; original = bus.call_sync; seen = 0
+        def changed(*args):
+            nonlocal seen
+            value = original(*args)
+            if args[3] == "GetNameOwner":
+                seen += 1
+                if seen == 2: return SimpleNamespace(unpack=lambda: (":1.999",))
+            return value
+        with patch.object(bus, "call_sync", side_effect=changed), self.assertRaises(RuntimeError): self.construct(state)
+
+    def test_wrong_session_bus_ax_lookalike_owner_pid_uid_and_instance_refuse(self):
+        for defect in ("connection-type", "ax", "pid", "uid", "guid", "instance", "unique", "owner", "closed"):
+            state = self.manual(); bus = self.bus_fixture.bus
+            if defect == "connection-type": self.bus_fixture.returned = SimpleNamespace(**bus.__dict__)
+            if defect == "ax": state.surface.bus = bus
+            if defect == "pid": bus.pid = 77
+            if defect == "uid": bus.uid = 0
+            if defect == "guid": bus.guid = "c" * 32
+            if defect == "instance": bus.bus_id = "d" * 32
+            if defect == "unique": bus.unique = ":1.999"
+            if defect == "owner": bus.owner = state.previous.html._actual017_session_binding[3]
+            if defect == "closed": bus.closed = True
+            with self.subTest(defect=defect), self.assertRaises(RuntimeError): self.construct(state)
+            self.bus_fixture.close(); self.bus_fixture = _Actual017SessionBusFixture(); self.addCleanup(self.bus_fixture.close); self.owner.bus_fixture = self.bus_fixture
+
+    def test_bus_owner_or_connection_drift_refuses_before_http_transport(self):
+        for field, value in (("owner", ":1.999"), ("pid", 99), ("uid", 0), ("guid", "c" * 32), ("bus_id", "d" * 32), ("unique", ":1.999")):
+            state = self.manual(); html = self.construct(state)
+            with self.running(state): html.start()
+            before = len(state.requests); setattr(self.bus_fixture.bus, field, value)
+            with self.subTest(field=field), self.running(state), self.assertRaises(RuntimeError): html.d.call("GET", "/title")
+            self.assertEqual(len(state.requests), before)
+            self.bus_fixture.close(); self.bus_fixture = _Actual017SessionBusFixture(); self.addCleanup(self.bus_fixture.close); self.owner.bus_fixture = self.bus_fixture
+
+    def test_changed_root_frame_driver_pin_port_or_previous_identity_refuses(self):
+        for defect in ("driver", "port", "phase", "source"):
+            state = self.manual(); old = state.previous.html
+            if defect == "phase": old.surface.record["startTime"] = "999"
+            if defect == "source": old.surface.menu_binding = ("f" * 40, *old.surface.menu_binding[1:])
+            with patch.object(M, "kernel_record", return_value=copy.deepcopy(state.surface.record)), patch.object(M, "alive_stat", side_effect=FileNotFoundError), self.subTest(defect=defect), self.assertRaises(RuntimeError):
+                M.actual017_reopened_html_pages(state.surface, state.original, state.pages, {"size": 1, "sha256": "f" * 64} if defect == "driver" else old.driver_pin,
+                    old.port + 1 if defect == "port" else old.port, old.env, {}, previous=old)
+
+    def test_projects_only_forbids_feature_navigation_generic_probe_and_lifecycle_relabelling(self):
+        state = self.manual(); html = self.construct(state)
+        with self.running(state):
+            html.start(); before = len(state.requests)
+            for call in (lambda: html.probe(), lambda: html.startup(None, {}), lambda: html.direct_pages([]),
+                         lambda: html.require_feature_ready("mcp", "Creator Works MCP"), lambda: html.restored({}),
+                         lambda: html.click('#suite-menu [data-view="mcp"]', [], "view-mcp"),
+                         lambda: html.click('#suite-menu [data-view="setup"]', [], "view-setup"),
+                         lambda: html.d.elements("#feature-mcp"), lambda: html.d.elements("#feature-setup")):
+                with self.assertRaises(RuntimeError): call()
+            self.assertEqual(len(state.requests), before)
+        self.assertFalse(any("mcp" in json.dumps(payload) or "setup" in json.dumps(payload) for _, _, payload in state.requests))
+        self.assertNotIn("mcpChecks", html.evidence)
+
+    def test_manual_second_b_teardown_requires_own_zero_exit_not_adopted_wait(self):
+        state = self.manual(); html = self.construct(state)
+        state.child.wait.side_effect = lambda **_: setattr(state.child.poll, "return_value", -15)
+        with self.running(state), patch.object(html, "retain_logs"), patch.object(M, "adopted_zero_exit", side_effect=AssertionError("Manual B is not automatic")):
+            html.start(); html.detach()
+            with self.assertRaises(RuntimeError): html.finish_tools()
+            state.original.poll.return_value = 0; html.finish_tools()
+        self.assertEqual(html.evidence["manualExit"]["exitCode"], 0)
+        self.assertNotIn("adoptedExit", html.evidence)
+
+
+class Actual017ReopenedProjectsContractTests(unittest.TestCase):
+    READS = (
+        "#project-list .project-row",
+        '#project-list .project-row[data-mcp-selected="true"]',
+        '#project-list .project-row[data-mcp-selected="false"]',
+        '#project-list .project-row[data-mcp-selected="true"] .project-info small',
+        '#project-list .project-row[data-mcp-selected="false"] .project-info small',
+    )
+
+    def setUp(self):
+        self.fixture = Actual017ReopenedProjectsTests()
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.doCleanups)
+        source = HERE / "native-linux-migrated-update.py"
+        function = next(n for n in ast.parse(source.read_bytes()).body if isinstance(n, ast.FunctionDef) and n.name == "projects")
+        self.assertEqual(hashlib.sha256(ast.dump(function, include_attributes=False).encode()).hexdigest(),
+                         "c691e97d65a51e64f40689c03798bd59450350dce7daab69988c71c17127cad9")
+        # Compile only the pinned pure helper, never import the C orchestration.
+        namespace = {"U": M, "require": M.require}
+        exec(compile(ast.Module(body=[function], type_ignores=[]), str(source), "exec"), namespace)
+        self.projects = namespace["projects"]
+
+    def state(self, home):
+        state = self.fixture.manual()
+        html = self.fixture.construct(state)
+        state.changed[self.READS[0] + ":elements"] = [
+            {"element-6066-11e4-a52e-4f735466cecf": "project-current"},
+            {"element-6066-11e4-a52e-4f735466cecf": "project-missing"},
+        ]
+        for selected, name in (("true", "current-project"), ("false", "missing-project")):
+            selector = '#project-list .project-row[data-mcp-selected="' + selected + '"] .project-info small'
+            state.changed[selector + ":text"] = str(home / name)
+        prefs = home / M.PREFS
+        prefs.parent.mkdir(parents=True)
+        with prefs.open("xb") as stream:
+            stream.write(b'{"restoreHostedViews":false}\n')
+        return state, html, prefs
+
+    def test_exact_c_projects_composes_with_manual_factory_and_real_request_allowlist(self):
+        with tempfile.TemporaryDirectory() as folder:
+            home = Path(folder).resolve(); state, html, prefs = self.state(home)
+            before_prefs = prefs.read_bytes(); report = {}
+            with self.fixture.running(state):
+                html.start(); before = len(state.requests)
+                self.projects(html, home, report, "reopenedProjects")
+            reads = {payload["value"] for method, route, payload in state.requests[before:]
+                     if method == "POST" and route.endswith("/elements") and payload["value"].startswith("#project-list")}
+            self.assertEqual(reads, set(self.READS))
+            self.assertEqual(report, {"reopenedProjects": {"projectsObserved": True, "termsReaccepted": False, "migrationReplayed": False}})
+            self.assertEqual(prefs.read_bytes(), before_prefs)
+            self.assertTrue(html.evidence["projectsDocumentVerified"])
+            self.assertEqual(html.evidence["inputCountAtDocumentCheck"], 0)
+            self.assertFalse(html.evidence["probePassed"])
+            self.assertEqual(html.evidence["launchRole"], "manual-second-b-projects")
+            self.assertFalse(html.evidence["automaticRestartProof"])
+            self.assertEqual(html.evidence["inputAttempts"], [])
+            self.assertFalse(any(route.endswith("/click") for _, route, _ in state.requests))
+
+    def test_exact_c_projects_keeps_count_selection_path_and_saved_preference_guards(self):
+        for defect, message in (("rows", "inventory differs"), ("selected", "selection/path changed"),
+                                ("path", "selection/path changed"), ("preferences", "Migrated Projects state")):
+            with self.subTest(defect=defect), tempfile.TemporaryDirectory() as folder:
+                home = Path(folder).resolve(); state, html, prefs = self.state(home)
+                if defect == "rows": state.changed[self.READS[0] + ":elements"] = []
+                if defect == "selected": state.changed[self.READS[1] + ":elements"] = []
+                if defect == "path": state.changed[self.READS[4] + ":text"] = str(home / "foreign-project")
+                if defect == "preferences": prefs.write_bytes(b'{"restoreHostedViews":true}\n')
+                with self.fixture.running(state):
+                    html.start()
+                    with self.assertRaisesRegex(RuntimeError, message): self.projects(html, home, {}, "reopenedProjects")
+                self.assertEqual(html.evidence["inputAttempts"], [])
+
+    def test_closed_manual_tuple_is_original_reads_plus_only_the_five_c_reads(self):
+        tree = ast.parse(Path(M.__file__).read_bytes())
+        html = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "HtmlPages")
+        request = next(n for n in html.body if isinstance(n, ast.FunctionDef) and n.name == "request")
+        assignments = [n for n in ast.walk(request) if isinstance(n, ast.Assign)
+                       and any(isinstance(t, ast.Name) and t.id == "allowed" for t in n.targets)]
+        self.assertEqual(len(assignments), 1)
+        original = ("#platform-status", ".footer-version", "#page-title", "iframe,object,embed", "#view-projects", "#projects-home-title",
+                    "#refresh-projects", "#suite-trigger", '#suite-menu [data-view="hub"]', "#usage-terms-dialog", "#convergence-dialog")
+        self.assertEqual(ast.literal_eval(assignments[0].value), original + self.READS)
+
+    def test_near_matches_broad_other_page_writes_and_generic_probe_still_refuse(self):
+        with tempfile.TemporaryDirectory() as folder:
+            state, html, _ = self.state(Path(folder).resolve())
+            forbidden = ("#project-list", "#project-list *", ".project-row", self.READS[0] + " ",
+                         self.READS[1].replace('"true"', '"TRUE"'), self.READS[2].replace('"false"', '"false "'),
+                         self.READS[3] + " *", self.READS[4] + ",#feature-mcp", "#project-list .project-row .project-info small",
+                         "#feature-mcp", "#feature-setup", '#suite-menu [data-view="mcp"]', '#suite-menu [data-view="setup"]')
+            with self.fixture.running(state):
+                html.start(); before = len(state.requests)
+                for selector in forbidden:
+                    with self.subTest(selector=selector), self.assertRaisesRegex(RuntimeError, "Projects-only selector"):
+                        html.d.elements(selector)
+                for call in (lambda: html.probe(), lambda: html.click(self.READS[0], [], "suite-trigger"),
+                             lambda: html.d.call("POST", "/element/project-current/click", {}),
+                             lambda: html.d.call("POST", "/url", {"url": "tauri://localhost/#mcp"})):
+                    with self.assertRaises(RuntimeError): call()
+                self.assertEqual(len(state.requests), before)
+            self.assertFalse(html.evidence["probePassed"])
+            self.assertFalse(html.probe_started)
+            self.assertEqual(html.evidence["inputAttempts"], [])
 
 
 if __name__ == "__main__":

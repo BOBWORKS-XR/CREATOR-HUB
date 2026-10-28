@@ -23,6 +23,15 @@ on:
         required: true
         default: false
         type: boolean
+      continue_changed_mcp:
+        description: Test the exact private A1 to 017 changed-MCP update in the migration account
+        required: false
+        default: false
+        type: boolean
+      source_receipt_sha256:
+        description: Independently reviewed complete test-source receipt SHA256; no source fallback
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -34,7 +43,7 @@ jobs:
       github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.repository_id == '1364807512' &&
       github.ref == 'refs/heads/validation/native-linux-production-016' && github.event_name == 'workflow_dispatch' &&
       github.workflow_ref == 'BOBWORKS-XR/CREATOR-HUB/.github/workflows/native-linux-production-016-migration.yml@refs/heads/validation/native-linux-production-016' &&
-      inputs.execute_migration == true
+      inputs.execute_migration == true && inputs.continue_changed_mcp != true
     runs-on: ubuntu-22.04
     timeout-minutes: 25
     env:
@@ -172,3 +181,202 @@ jobs:
             ${{ runner.temp }}/polkit-stock-policy-preflight.json
             ${{ runner.temp }}/native-exact-target-observer.json
             ${{ runner.temp }}/native-linux-production-016-migration-result/
+  changed_mcp:
+    if: >-
+      github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.repository_id == '1364807512' &&
+      github.ref == 'refs/heads/validation/native-linux-production-016' && github.event_name == 'workflow_dispatch' &&
+      github.workflow_ref == 'BOBWORKS-XR/CREATOR-HUB/.github/workflows/native-linux-production-016-migration.yml@refs/heads/validation/native-linux-production-016' &&
+      inputs.execute_migration == true && inputs.continue_changed_mcp == true && inputs.scenario == 'migration-approve'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    env:
+      CREATOR_NATIVE_LINUX_PRODUCTION_016: '1'
+      CREATOR_MIGRATION_016_EXECUTE: ${{ inputs.execute_migration }}
+      CREATOR_MIGRATION_016_SCENARIO: ${{ inputs.scenario }}
+      CREATOR_MIGRATED_UPDATE_EXECUTE: ${{ inputs.continue_changed_mcp }}
+      CREATOR_CHANGED_MCP_SOURCE_RECEIPT_SHA256: ${{ inputs.source_receipt_sha256 }}
+      UPDATE_EXECUTE: ${{ inputs.continue_changed_mcp }}
+      UPDATE_SCENARIO: deb-approve
+      UPDATE_PROFILE_SHA256: 1fd56c76f100422e2c380e19cfc5dfb9da4ecf05a6348efdba99bbaebb5cd792
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24.17.0
+      - name: Reject a changed checkout before downloads or provisioning
+        run: |
+          node - <<'JS'
+          const assert = require('node:assert/strict'), fs = require('node:fs');
+          const c = require('./scripts/native-linux-changed-mcp-input.cjs');
+          c.admission({sha:process.env.GITHUB_SHA,runId:Number(process.env.GITHUB_RUN_ID)}, process.env);
+          const receipt = c.canonical(c.sourceReceipt(fs.realpathSync(process.env.GITHUB_WORKSPACE), process.env.GITHUB_SHA));
+          assert.equal(c.hash(receipt), process.env.CREATOR_CHANGED_MCP_SOURCE_RECEIPT_SHA256);
+          JS
+      - uses: actions/setup-python@v6
+        id: preflight_python
+        with:
+          python-version: '3.11.17'
+          update-environment: false
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Complete affected source suites before acquisition or privilege
+        env:
+          PREFLIGHT_PYTHON: ${{ steps.preflight_python.outputs.python-path }}
+        run: |
+          "$PREFLIGHT_PYTHON" -I -c 'import sys, tomllib; assert sys.version_info[:3] == (3, 11, 17)'
+          "$PREFLIGHT_PYTHON" -B scripts/native-linux-polkit-probe.test.py
+          "$PREFLIGHT_PYTHON" -B scripts/native-linux-root-probe.test.py
+          "$PREFLIGHT_PYTHON" -B scripts/native-unix-window.test.py
+          node --test scripts/native-linux-production-016-input.test.cjs scripts/native-linux-production-016-migration-workflow.test.cjs scripts/native-linux-changed-mcp-input.test.cjs
+          "$PREFLIGHT_PYTHON" -B scripts/native-linux-production-016-stage.test.py
+          "$PREFLIGHT_PYTHON" -B scripts/native-linux-production-016-migration.test.py
+          "$PREFLIGHT_PYTHON" -I -S -B scripts/native-linux-production-016-update.test.py
+          "$PREFLIGHT_PYTHON" -I -S -B scripts/native-linux-migrated-update.test.py
+          node --test scripts/linux-update-lab-feed.test.cjs scripts/linux-update-lab-feed-changed-mcp.test.cjs
+      - name: Acquire original migration inputs once through unchanged admission
+        uses: actions/github-script@v8
+        env:
+          PROFILE: ${{ inputs.profile }}
+        with:
+          retries: 0
+          script: |
+            const assert = require('node:assert/strict'), crypto = require('node:crypto');
+            const lane = require(require('node:path').join(process.env.GITHUB_WORKSPACE, 'scripts/native-linux-production-016-input.cjs'));
+            const incoming = Buffer.from(process.env.PROFILE || '');
+            assert.equal(incoming.length, 1763);
+            assert.equal(crypto.createHash('sha256').update(incoming).digest('hex'), '8f3b6a07c0e7a93213a95782e9d5fac0a20026813faf493b033d8cbab72fcbc4');
+            await lane.run({github, context, profile:process.env.PROFILE});
+      - name: Acquire only original successor ZIP and private signed delivery
+        uses: actions/github-script@v8
+        with:
+          retries: 0
+          script: |
+            const fs = require('node:fs'), path = require('node:path');
+            const lane = require(path.join(process.env.GITHUB_WORKSPACE, 'scripts/native-linux-changed-mcp-input.cjs'));
+            const raw = fs.readFileSync(path.join(process.env.GITHUB_WORKSPACE, 'scripts/fixtures/native-linux-changed-mcp-profile.json'));
+            core.info(JSON.stringify(await lane.run({github, context, raw})));
+      - name: Inspect original migration package and bind separate execution request
+        run: |
+          python3 -B scripts/native-linux-production-016-stage.py
+          python3 -B scripts/native-linux-production-016-migration.py
+      - name: Bind exact controller Node for the continuation
+        run: printf 'CONTROLLER_NODE=%s\n' "$(realpath "$(command -v node)")" >> "$GITHUB_ENV"
+      - name: Install only disposable native runtime and test-tool build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libayatana-appindicator3-dev libgtk-3-dev libxdo-dev libxres1 librsvg2-dev libssl-dev pkg-config build-essential \
+            python3-gi python3-toml gir1.2-gtk-3.0 gir1.2-atspi-2.0 gir1.2-gdkpixbuf-2.0 at-spi2-core webkit2gtk-driver \
+            dbus-x11 xvfb xauth openbox fonts-dejavu-core libpam-systemd policykit-1-gnome=0.105-7ubuntu3 \
+            pkexec=0.105-33ubuntu0.2 polkitd=0.105-33ubuntu0.2 coreutils=8.32-4.1ubuntu1.4 passwd=1:4.8.1-2ubuntu2.2
+          sudo systemctl start systemd-logind.service polkit.service
+      - name: Native exact-target dismissal before SDK or candidate execution
+        timeout-minutes: 2
+        env:
+          CREATOR_NATIVE_EXACT_TARGET_FIXTURE: '1'
+        run: |
+          set -o noclobber
+          /usr/bin/timeout --signal=TERM --kill-after=5s 40s /usr/bin/python3 -B scripts/native-linux-polkit-probe.test.py --native-exact-target > "$RUNNER_TEMP/native-exact-target-observer.json"
+          test "$(wc -c < "$RUNNER_TEMP/native-exact-target-observer.json")" -le 16384
+      - name: Install only the locked SDK test dependency
+        run: |
+          test "$(sha256sum modules/mcp/package-lock.json | cut -d' ' -f1)" = ded7a99b78aca304253d5287cc1b884a845afde083eb32d1a2abecd14468ba60
+          npm ci --prefix modules/mcp --ignore-scripts --no-audit --no-fund
+      - uses: dtolnay/rust-toolchain@1.99.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          shared-key: native-linux-test-tools
+      - name: Build locked WebDriver tooling, never the product
+        run: cargo install tauri-driver --version 2.1.0 --locked --root "$RUNNER_TEMP/native-linux-production-016-driver"
+      - name: Qualify metadata and whole-installer verifiers before native intent
+        run: |
+          /usr/bin/python3 -I -S -B - <<'PY'
+          import importlib.util, os, sys
+          from pathlib import Path
+          spec = importlib.util.spec_from_file_location('continuation', Path('scripts/native-linux-migrated-update.py').resolve())
+          m = importlib.util.module_from_spec(spec); sys.modules[spec.name] = m; spec.loader.exec_module(m)
+          m.changed_admission(os.environ)
+          m.U.build_offline_verifier(os.environ)
+          m.changed_build_installer_verifier(os.environ)
+          PY
+      - name: Check stock policy before native intent
+        run: |
+          python3 -B - <<'PY'
+          import importlib.util, os, sys
+          from pathlib import Path
+          spec = importlib.util.spec_from_file_location('migration016', 'scripts/native-linux-production-016-migration.py')
+          m = importlib.util.module_from_spec(spec); sys.modules[spec.name] = m; spec.loader.exec_module(m)
+          m.admission(os.environ)
+          m.load('native-linux-polkit-probe').secure_stock_policy(Path(os.environ['RUNNER_TEMP']))
+          PY
+      - name: Seal continuation intent before the real migration
+        run: |
+          python3 -B - <<'PY'
+          import importlib.util, os, subprocess, sys
+          from pathlib import Path
+          source = Path('scripts/native-linux-migrated-update.py').resolve()
+          spec = importlib.util.spec_from_file_location('continuation', source)
+          m = importlib.util.module_from_spec(spec); sys.modules[spec.name] = m; spec.loader.exec_module(m)
+          m.changed_admission(os.environ)
+          values = [key + '=' + os.environ[key] for key in m.U.ENVIRONMENT + m.EXTRA_ENV + (m.CHANGED_SOURCE_RECEIPT_ENV,)]
+          subprocess.run(['/usr/bin/sudo', '-n', '/usr/bin/env', '-i', *values, 'PATH=/usr/bin:/bin', 'LANG=C', 'LC_ALL=C',
+                          '/usr/bin/python3', '-B', str(source), 'prepare-changed-mcp'], stdin=subprocess.DEVNULL, check=True)
+          PY
+      - name: Run the original migration broker exactly once
+        run: |
+          python3 -B - <<'PY'
+          import importlib.util, os, subprocess, sys
+          from pathlib import Path
+          source = Path('scripts/native-linux-production-016-migration.py').resolve()
+          spec = importlib.util.spec_from_file_location('migration016', source)
+          m = importlib.util.module_from_spec(spec); sys.modules[spec.name] = m; spec.loader.exec_module(m)
+          m.admission(os.environ)
+          values = [key + '=' + os.environ[key] for key in m.ENVIRONMENT]
+          subprocess.run(['/usr/bin/sudo', '-n', '/usr/bin/env', '-i', *values, 'PATH=/usr/bin:/bin', 'LANG=C', 'LC_ALL=C',
+                          '/usr/bin/python3', '-B', str(source), 'broker'], stdin=subprocess.DEVNULL, check=True)
+          PY
+      - name: Signed changed-payload update, automatic restart and Projects-only reopen
+        run: |
+          python3 -B - <<'PY'
+          import importlib.util, os, subprocess, sys
+          from pathlib import Path
+          source = Path('scripts/native-linux-migrated-update.py').resolve()
+          spec = importlib.util.spec_from_file_location('continuation', source)
+          m = importlib.util.module_from_spec(spec); sys.modules[spec.name] = m; spec.loader.exec_module(m)
+          m.changed_admission(os.environ)
+          values = [key + '=' + os.environ[key] for key in m.U.ENVIRONMENT + m.EXTRA_ENV + (m.CHANGED_SOURCE_RECEIPT_ENV,)]
+          subprocess.run(['/usr/bin/sudo', '-n', '/usr/bin/env', '-i', *values, 'PATH=/usr/bin:/bin', 'LANG=C', 'LC_ALL=C',
+                          '/usr/bin/python3', '-B', str(source), 'broker-changed-mcp'], stdin=subprocess.DEVNULL, check=True)
+          PY
+      - name: Export bounded evidence even when native acceptance fails
+        if: always()
+        run: |
+          python3 -B - <<'PY'
+          import importlib.util, os, subprocess, sys
+          from pathlib import Path
+          source = Path('scripts/native-linux-migrated-update.py').resolve()
+          spec = importlib.util.spec_from_file_location('continuation', source)
+          m = importlib.util.module_from_spec(spec); sys.modules[spec.name] = m; spec.loader.exec_module(m)
+          m.changed_admission(os.environ)
+          values = [key + '=' + os.environ[key] for key in m.U.ENVIRONMENT + m.EXTRA_ENV + (m.CHANGED_SOURCE_RECEIPT_ENV,)]
+          subprocess.run(['/usr/bin/sudo', '-n', '/usr/bin/env', '-i', *values, 'PATH=/usr/bin:/bin', 'LANG=C', 'LC_ALL=C',
+                          '/usr/bin/python3', '-B', str(source), 'export-changed-mcp'], stdin=subprocess.DEVNULL, check=True)
+          PY
+      - name: Preserve original failures and acceptance evidence, never publish
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: changed-mcp-native-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/native-linux-production-016-input/profile.json
+            ${{ runner.temp }}/native-linux-production-016-input/api-binding.json
+            ${{ runner.temp }}/native-linux-production-016-stage/binding.json
+            ${{ runner.temp }}/native-linux-production-016-migration-request.json
+            ${{ runner.temp }}/native-linux-migrated-update-input/profile.json
+            ${{ runner.temp }}/native-linux-migrated-update-input/source-receipt.json
+            ${{ runner.temp }}/native-linux-migrated-update-input/acquisition.json
+            ${{ runner.temp }}/native-linux-migrated-update-evidence/
+            ${{ runner.temp }}/native-exact-target-observer.json

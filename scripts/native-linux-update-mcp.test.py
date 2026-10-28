@@ -392,6 +392,300 @@ class AdapterTests(FixtureBase):
             with self.subTest(pid=pid), self.assertRaises(RuntimeError): self.adapter({"ready": True, "server": M.SERVER}, pid)
 
 
+class TransitionTests(FixtureBase):
+    def setUp(self):
+        super().setUp()
+        target = tempfile.TemporaryDirectory()
+        self.addCleanup(target.cleanup)
+        self.source = Path(target.name).resolve()
+        self.b_files = dict(self.route_files.files)
+        self.b_files["mcp/server/creator-works-mcp.mjs"] += b":unit-only-B"
+        module = {"executable": "mcp/creator-works-mcp-launcher", "version": "2.7.7",
+                  "files": {name: sha(raw) for name, raw in sorted(self.b_files.items())}}
+        self.b_generation = sha(json.dumps(module, separators=(",", ":"), ensure_ascii=False).encode())
+        self.b_descriptor = json.dumps({"schemaVersion": 1, "product": "com.creatorworks.hub.mcp-runtime",
+            "hubVersion": "0.1.17", "platform": "linux", "arch": "x86_64", "module": module}).encode()
+        raw = dict(self.b_files)
+        raw["routing/runtime.json"] = self.b_descriptor
+        raw["routing/runtime.minisig"] = b"runtime-test-signature"
+        for name in ("creator-hub-mcp-router", "router.json", "router.minisig"):
+            raw["routing/" + name] = (self.route.command.parent / name).read_bytes()
+        self.b_resources = {name: sha(body) for name, body in raw.items()}
+        for name, body in raw.items():
+            path = self.source / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(body)
+        # Synthetic unit data with the existing mocked signature callback only.
+        # These bytes/signatures are not real release artifacts or admission pins.
+        self.release = json.dumps({"schemaVersion": 1, "appId": "creator-hub", "version": "0.1.17",
+            "platform": "linux", "architecture": "x86_64", "packageType": "deb", "installerProtocol": 1,
+            "executableSha256": sha(b"unit-only-root-B")}).encode()
+        self.release_pair = (self.source / "release.json", self.source / "release.minisig")
+        self.release_pair[0].write_bytes(self.release)
+        self.release_pair[1].write_bytes(b"unit-only-release-signature")
+        self.active = self.home / M.ROUTE_BASE / "active.json"
+        self.old_active = self.active.read_bytes()
+        self.handoff = self.home / "data/creator-hub-update-cache/deb/records/mcp-route-update.json"
+        self.target = {"descriptorSha256": sha(self.b_descriptor), "generation": self.b_generation}
+        self.ready = {"schemaVersion": 1, "fromVersion": "0.1.16", "installed": "/usr/bin/creator-hub",
+                      "release": list(self.release), "signature": list(self.release_pair[1].read_bytes()),
+                      "previous": list(self.old_active), "phase": "Ready"}
+        self.completed = {**self.ready, "phase": {"Completed": self.target}}
+
+    def make(self):
+        self.transition = M.TransitionRoute(self.route, self.source, self.b_resources, self.release_pair)
+        self.fixture = M.TransitionFixture(self.transition, self.evidence, self.env,
+            ["unrelated/keep.json", "config/client.json"], None, None, None)
+
+    def record(self, value):
+        raw = json.dumps(value, separators=(",", ":")).encode()
+        self.handoff.parent.mkdir(parents=True, exist_ok=True)
+        self.handoff.write_bytes(raw)
+        return raw
+
+    def install_b(self, *, capture_ready=True):
+        if capture_ready and hasattr(self, "transition") and self.transition.ready_capture is None:
+            self.record(self.ready)
+            self.ready_raw = bytes(self.transition.capture_ready()["raw"])
+        base = self.home / "data/creator-hub/runtime-generations/linux-x86_64" / self.b_generation
+        for name, body in self.b_files.items():
+            path = base / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(body)
+        descriptor = self.home / M.ROUTE_BASE / "descriptors" / sha(self.b_descriptor)
+        descriptor.mkdir(parents=True)
+        (descriptor / "runtime.json").write_bytes(self.b_descriptor)
+        (descriptor / "runtime.minisig").write_bytes(b"runtime-test-signature")
+        history = self.home / M.ROUTE_BASE / "history" / (sha(self.old_active) + ".json")
+        history.parent.mkdir()
+        history.write_bytes(self.old_active)
+        self.active.write_bytes(json.dumps({"schemaVersion": 1, **self.target}, separators=(",", ":")).encode())
+        return self.record(self.completed)
+
+    def complete(self):
+        completed = self.install_b()
+        return self.fixture.complete(self.ready_raw, completed)
+
+    def test_legitimate_completed_edge_keeps_live_a_and_reconnects_b_without_seed_or_acceptance(self):
+        self.make(); self.fixture.start()
+        self.complete()
+        self.fixture.check("after-update"); self.fixture.check("after-hub-close")
+        self.fixture.reconnect()
+        self.assertFalse(self.original.closed)
+        receipt = self.fixture.close()
+        self.assertEqual(receipt["scope"], "existing-managed-mcp-transition-contract-only")
+        self.assertEqual(receipt["transition"]["inventories"],
+                         {"a": self.route_files.resources, "b": self.b_resources})
+        self.assertEqual(bytes(receipt["transition"]["handoff"]["ready"]),
+                         json.dumps(self.ready, separators=(",", ":")).encode())
+        self.assertEqual(bytes(receipt["transition"]["handoff"]["completed"]), self.handoff.read_bytes())
+        self.assertEqual(self.transition.server.parent.parent.parent.name, self.b_generation)
+        self.assertFalse(receipt["payloadSwapAccepted"])
+        self.assertFalse(receipt["releaseReady"])
+
+    def test_early_b_refuses_before_completed_and_before_next_protocol(self):
+        self.make(); self.fixture.start(); self.install_b()
+        with self.assertRaises(RuntimeError): self.transition.recheck()
+        with self.assertRaises(RuntimeError): self.fixture.check("after-update")
+        self.assertEqual(self.original.count, 2)
+        self.assertFalse(self.original.closed)
+
+    def test_ready_or_attempting_is_not_completed_and_the_attempt_is_spent(self):
+        self.make(); self.fixture.start(); self.install_b()
+        raw = self.record({**self.completed, "phase": {"Attempting": self.target}})
+        with self.assertRaises(RuntimeError):
+            self.fixture.complete(self.ready_raw, raw)
+        with self.assertRaises(RuntimeError):
+            self.fixture.complete(self.ready_raw, self.record(self.completed))
+        self.assertFalse(self.original.closed)
+
+    def test_stale_cas_previous_cannot_authorize_a_to_b(self):
+        self.make(); self.fixture.start(); self.install_b()
+        raw = self.record({**self.completed, "previous": list(b"stale")})
+        with self.assertRaises(RuntimeError): self.fixture.complete(self.ready_raw, raw)
+
+    def test_foreign_completed_target_cannot_adopt_actual_b(self):
+        self.make(); self.fixture.start(); self.install_b()
+        raw = self.record({**self.completed, "phase": {"Completed": {**self.target, "generation": "f" * 64}}})
+        with self.assertRaises(RuntimeError): self.fixture.complete(self.ready_raw, raw)
+
+    def test_reverse_b_to_a_refuses_after_completed(self):
+        self.make(); self.fixture.start(); self.complete()
+        self.active.write_bytes(self.old_active)
+        with self.assertRaises(RuntimeError): self.fixture.check("after-update")
+
+    def test_completed_bytes_must_be_the_actual_current_record(self):
+        self.make(); self.fixture.start(); raw = self.install_b()
+        self.record({**self.completed, "failure": "unknown"})
+        with self.assertRaises(RuntimeError): self.fixture.complete(self.ready_raw, raw)
+
+    def test_changed_immutable_fields_and_failure_cannot_pass(self):
+        self.make(); self.fixture.start(); self.install_b()
+        raw = self.record({**self.completed, "fromVersion": "0.1.15", "failure": "unknown"})
+        with self.assertRaises(RuntimeError): self.fixture.complete(self.ready_raw, raw)
+
+    def test_old_a_payload_identity_remains_immutable_after_completed(self):
+        self.make(); self.fixture.start(); self.complete()
+        self.route_files.server.write_bytes(b"changed old A")
+        with self.assertRaises(RuntimeError): self.fixture.check("after-update")
+
+    def test_missing_old_history_refuses_without_retry_or_repair(self):
+        self.make(); self.fixture.start(); self.install_b()
+        (self.home / M.ROUTE_BASE / "history" / (sha(self.old_active) + ".json")).unlink()
+        with self.assertRaises(FileNotFoundError):
+            self.fixture.complete(self.ready_raw, self.handoff.read_bytes())
+        self.assertFalse(self.original.closed)
+
+    def test_signature_refusal_or_boolean_never_binds_target(self):
+        self.route.verify_signature = Mock(side_effect=lambda body, sig: True if body.is_relative_to(self.source) else None)
+        with self.assertRaises(RuntimeError): self.make()
+        self.connect.assert_not_called()
+
+    def test_b_signature_exception_is_preserved(self):
+        def verify(body, sig):
+            if body.is_relative_to(self.source):
+                raise RuntimeError("unit signature refusal")
+        self.route.verify_signature = verify
+        with self.assertRaisesRegex(RuntimeError, "unit signature refusal"): self.make()
+        self.connect.assert_not_called()
+
+    def test_ready_alone_and_old_completed_are_not_a_new_operation(self):
+        self.make(); self.fixture.start(); self.install_b()
+        raw = self.record(self.ready)
+        with self.assertRaises(RuntimeError): self.fixture.complete(raw, raw)
+
+    def test_unknown_existing_handoff_refuses_at_initial_binding(self):
+        self.record(self.completed)
+        with self.assertRaises(RuntimeError): self.make()
+        self.connect.assert_not_called()
+
+    def test_b_inventory_is_closed_and_does_not_adopt_observed_values(self):
+        self.b_resources["unreviewed"] = "f" * 64
+        with self.assertRaises(RuntimeError): self.make()
+        self.connect.assert_not_called()
+
+    def test_same_hub_version_collision_refuses_even_with_different_server_bytes(self):
+        descriptor = json.loads(self.b_descriptor)
+        descriptor["hubVersion"] = "0.1.16"
+        raw = json.dumps(descriptor).encode()
+        (self.source / "routing/runtime.json").write_bytes(raw)
+        self.b_resources["routing/runtime.json"] = sha(raw)
+        release = json.loads(self.release); release["version"] = "0.1.16"
+        self.release_pair[0].write_bytes(json.dumps(release).encode())
+        with self.assertRaisesRegex(RuntimeError, "higher Hub version"): self.make()
+        self.connect.assert_not_called()
+
+    def test_provided_boolean_is_not_completion_and_cannot_be_retried(self):
+        self.make(); self.fixture.start()
+        with self.assertRaises(RuntimeError): self.fixture.complete(True, True)
+        with self.assertRaises(RuntimeError): self.complete()
+        self.assertIsNone(self.transition.current)
+        self.assertFalse(self.original.closed)
+
+    def test_late_actual_record_race_never_leaves_an_adopted_b_state(self):
+        self.make(); self.fixture.start(); raw = self.install_b()
+        def change(body, signature):
+            if body == self.home / M.ROUTE_BASE / "descriptors" / sha(self.b_descriptor) / "runtime.json":
+                self.record({**self.completed, "failure": "concurrent change"})
+        self.transition.verify_signature = change
+        with self.assertRaises(RuntimeError): self.fixture.complete(self.ready_raw, raw)
+        self.assertIsNone(self.transition.current)
+        self.assertIsNone(self.transition.proof)
+        with self.assertRaises(RuntimeError): self.fixture.check("after-update")
+
+    def test_actual_record_reader_requires_native_owner_and_private_mode(self):
+        self.make(); self.fixture.start(); self.complete()
+        with patch.object(MIG, "read_file", wraps=MIG.read_file) as reader:
+            self.transition.recheck()
+        reads = [c for c in reader.call_args_list if c.args[0] in (self.handoff, self.active)]
+        self.assertTrue(reads)
+        self.assertTrue(all(c.kwargs.get("uid") == MIG.UID and c.kwargs.get("mode") == 0o600
+                            for c in reads if c.kwargs))
+
+    def test_real_adapter_initialization_selects_b_node_path_and_stable_router(self):
+        self.make(); self.fixture.start(); self.complete()
+        self.route = self.transition
+        result, processes = AdapterTests.adapter(self, {"ready": True, "server": M.SERVER})
+        self.assertEqual(processes[0][0], [str(self.transition.command)])
+        self.assertEqual(processes[1][0][:3], [str(self.transition.node), "-e", MIG.SDK_JS])
+        self.assertIn(self.b_generation, str(self.transition.node))
+        self.assertIsInstance(result, MIG.SDK)
+
+    def test_target_source_change_after_binding_refuses_before_adoption(self):
+        self.make(); self.fixture.start(); raw = self.install_b()
+        (self.source / "routing/runtime.json").write_bytes(b"changed")
+        with self.assertRaises(RuntimeError): self.fixture.complete(self.ready_raw, raw)
+
+    def test_original_process_change_still_refuses_and_eof_is_not_protocol(self):
+        self.make(); self.fixture.start(); self.complete()
+        self.original.records[101]["startTime"] = "changed"
+        with self.assertRaises(RuntimeError): self.fixture.check("after-update")
+        self.assertEqual(self.original.count, 2)
+
+    def test_foreign_active_c_cannot_pass_even_with_completed_b(self):
+        self.make(); self.fixture.start(); raw = self.install_b()
+        self.active.write_bytes(json.dumps({"schemaVersion": 1, **self.target, "generation": "f" * 64}).encode())
+        with self.assertRaises(RuntimeError): self.fixture.complete(self.ready_raw, raw)
+
+    def test_provided_expected_ready_without_actual_capture_cannot_adopt_b(self):
+        self.make(); self.fixture.start(); raw = self.install_b(capture_ready=False)
+        with self.assertRaisesRegex(RuntimeError, "actual one-shot capture"):
+            self.fixture.complete(json.dumps(self.ready).encode(), raw)
+        self.assertIsNone(self.transition.current)
+
+    def test_reencoded_ready_is_not_the_original_actual_capture(self):
+        self.make(); self.fixture.start(); raw = self.install_b()
+        with self.assertRaisesRegex(RuntimeError, "actual one-shot capture"):
+            self.fixture.complete(json.dumps(self.ready, indent=2).encode(), raw)
+
+    def test_same_bytes_completed_replacement_with_new_inode_is_refused(self):
+        self.make(); self.fixture.start(); self.complete()
+        raw, original = self.handoff.read_bytes(), self.handoff.stat()
+        replacement = self.handoff.with_name("unit-replacement.json")
+        replacement.write_bytes(raw)
+        replacement.chmod(original.st_mode & 0o777)
+        os.replace(replacement, self.handoff)
+        self.assertNotEqual(original.st_ino, self.handoff.stat().st_ino)
+        self.assertEqual(self.handoff.read_bytes(), raw)
+        with self.assertRaisesRegex(RuntimeError, "Completed.*identity"):
+            self.transition.recheck()
+
+    def test_future_changed_node_or_router_is_outside_this_finite_gate(self):
+        for name in ("mcp/server/runtime/node", "routing/creator-hub-mcp-router"):
+            with self.subTest(name=name):
+                resources = dict(self.b_resources)
+                resources[name] = sha(b"unit-only-future-image")
+                with self.assertRaisesRegex(RuntimeError, "unchanged Node/router"):
+                    M.TransitionRoute(self.route, self.source, resources, self.release_pair)
+
+    def test_live_b_observer_runs_after_protocol_before_eof_with_a_still_alive(self):
+        self.make(); self.fixture.start(); self.complete()
+        self.fixture.check("after-update"); self.fixture.check("after-hub-close")
+        observed = []
+        def capture(connection):
+            self.assertIs(connection, self.next)
+            self.assertEqual(connection.count, 2)
+            self.assertFalse(connection.closed)
+            self.assertFalse(self.original.closed)
+            observed.append(connection.runtime.pid)
+        self.fixture.reconnect_observed(capture)
+        self.assertEqual(observed, [201])
+        self.assertTrue(self.next.closed)
+        self.assertFalse(self.original.closed)
+        self.fixture.close()
+
+    def test_observer_failure_is_spent_without_eof_success_or_reconnect_retry(self):
+        self.make(); self.fixture.start(); self.complete()
+        self.fixture.check("after-update"); self.fixture.check("after-hub-close")
+        def refuse(connection):
+            raise ValueError("original observer refusal")
+        with self.assertRaisesRegex(ValueError, "original observer refusal"):
+            self.fixture.reconnect_observed(refuse)
+        with self.assertRaises(RuntimeError): self.fixture.reconnect_observed(refuse)
+        self.assertIsNone(self.fixture.reconnected)
+        self.assertFalse(self.original.closed)
+
+
 ORIGINAL_CONNECT = M._connect
 ORIGINAL_SEED_ADMISSION = M._fixture_session
 

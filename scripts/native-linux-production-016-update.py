@@ -6,6 +6,7 @@ pure validation use only the Python 3.10 standard library.
 """
 import base64
 from contextlib import ExitStack
+import copy
 import ctypes
 import errno
 import hashlib
@@ -60,6 +61,77 @@ FIXED = {
            "helper": {"size": 1168536, "sha256": "7f22822e50ee8b96829c64c95da9e1b098c3e080a1370f577ae2b69055eed94a"},
            "archive": {"size": 55576696, "sha256": "5cc9719912560fe0dd0efb0482a5257631d5eafd416975a153e8af5c01a99430"}},
 }
+# Fixed product evidence only; outer profile/carrier admission remains unchanged.
+ACTUAL017_CASE = (
+    ("source", "dea67abb681ff99d3d0cd756954605a3c58627a6"),
+    ("tree", "db4ec3934a8b80014f418fb9ed5ad2e0fe581bc5"),
+    ("run", 40619538729),
+    ("job", 122590023543),
+    ("artifact", 12786602892),
+    ("zip", (128430365, "33134f88a958fb18d8a52827468ddcc4c167019b1e793d80f21cee7c1174a10a")),
+    ("raw", (29086768, "47ea1c9c158df10b8e64709422ce99b91ac5f9e69152fb18248ac783e9f2e387")),
+    ("deb", (64516566, "1bd69ef6ad81f6af396175e8d2ce74fdabc7df39c936bf8c8e3704a92260f222")),
+    ("hub", (29086768, "fedc79bd67928a4e3570ca86c6157f4ecb553d046f0febe6823b3a976803a673")),
+    ("archive", (55576707, "5a41b14f5b1ece0d772a5cf71d028517db7e0711891d16019f247b3362009828")),
+    ("helper", (1168536, "7f22822e50ee8b96829c64c95da9e1b098c3e080a1370f577ae2b69055eed94a")),
+    ("policy", (878, "f4819f08e0a96e98d10a449a82a26b4f59d69714460eb9082387f746e1889bb4")),
+    ("service", (92, "9a270a39c219b4f2d294cfaa2a849db84b1e1883fa532d2c90d7f95625780340")),
+    ("runtime", (1133, "6a04f7839757cf33b806fa0429c3db16b74ef4bcd47a9d4d5cf8d8b16281a35b")),
+    ("runtimeSignature", (305, "0d0ec34b7da207972b1f5f6fa1d08d5b747562ca6bffa0c04d46e0fc5698d80d")),
+    ("generation", "bd96785284674fc62bdf2f967966e1d81932e697df2ceefe43a1504bb8c39a8a"),
+    ("qualificationScope", "private-dea-updater-lifecycle-only"),
+    ("installedMembers", (
+        ("usr", "directory", 493, 0, 0, 0, None),
+        ("usr/libexec", "directory", 493, 0, 0, 0, None),
+        ("usr/libexec/creator-hub-deb-retirement-helper", "file", 493, 0, 0, 1168536, "7f22822e50ee8b96829c64c95da9e1b098c3e080a1370f577ae2b69055eed94a"),
+        ("usr/bin", "directory", 493, 0, 0, 0, None),
+        ("usr/bin/creator-hub", "file", 493, 0, 0, 29086768, "fedc79bd67928a4e3570ca86c6157f4ecb553d046f0febe6823b3a976803a673"),
+        ("usr/lib", "directory", 493, 0, 0, 0, None),
+        ("usr/lib/Creator Hub", "directory", 493, 0, 0, 0, None),
+        ("usr/lib/Creator Hub/modules.tar.gz", "file", 420, 0, 0, 55576707, "5a41b14f5b1ece0d772a5cf71d028517db7e0711891d16019f247b3362009828"),
+        ("usr/share", "directory", 493, 0, 0, 0, None),
+        ("usr/share/dbus-1", "directory", 493, 0, 0, 0, None),
+        ("usr/share/dbus-1/services", "directory", 493, 0, 0, 0, None),
+        ("usr/share/dbus-1/services/com.creatorworks.hub.Host.service", "file", 420, 0, 0, 92, "9a270a39c219b4f2d294cfaa2a849db84b1e1883fa532d2c90d7f95625780340"),
+        ("usr/share/icons", "directory", 493, 0, 0, 0, None),
+        ("usr/share/icons/hicolor", "directory", 493, 0, 0, 0, None),
+        ("usr/share/icons/hicolor/32x32", "directory", 493, 0, 0, 0, None),
+        ("usr/share/icons/hicolor/32x32/apps", "directory", 493, 0, 0, 0, None),
+        ("usr/share/icons/hicolor/32x32/apps/creator-hub.png", "file", 420, 0, 0, 2001, "d43f1d37f34de6e2720ecac0a869905cfabe18f02f29e8b97c083e531e80edf7"),
+        ("usr/share/icons/hicolor/256x256@2", "directory", 493, 0, 0, 0, None),
+        ("usr/share/icons/hicolor/256x256@2/apps", "directory", 493, 0, 0, 0, None),
+        ("usr/share/icons/hicolor/256x256@2/apps/creator-hub.png", "file", 420, 0, 0, 19571, "6a4e772d7a76ff364cdf9065d05473f43de58d9dd8a6dacc4407adb20ba34d75"),
+        ("usr/share/icons/hicolor/128x128", "directory", 493, 0, 0, 0, None),
+        ("usr/share/icons/hicolor/128x128/apps", "directory", 493, 0, 0, 0, None),
+        ("usr/share/icons/hicolor/128x128/apps/creator-hub.png", "file", 420, 0, 0, 8835, "4be3a9795c9478c9c37b5e7fdb8b775168fc574352097fa0a038a31ea88245cb"),
+        ("usr/share/icons/hicolor/512x512", "directory", 493, 0, 0, 0, None),
+        ("usr/share/icons/hicolor/512x512/apps", "directory", 493, 0, 0, 0, None),
+        ("usr/share/icons/hicolor/512x512/apps/creator-hub.png", "file", 420, 0, 0, 57743, "5dc63bd8fcb18e5af2564077292a40df99ec0c9e87a8fdb9f9c53c562c80bf3a"),
+        ("usr/share/polkit-1", "directory", 493, 0, 0, 0, None),
+        ("usr/share/polkit-1/actions", "directory", 493, 0, 0, 0, None),
+        ("usr/share/polkit-1/actions/com.creatorworks.hub.deb-retirement.policy", "file", 420, 0, 0, 878, "f4819f08e0a96e98d10a449a82a26b4f59d69714460eb9082387f746e1889bb4"),
+        ("usr/share/applications", "directory", 493, 0, 0, 0, None),
+        ("usr/share/applications/Creator Hub.desktop", "file", 420, 0, 0, 170, "4d61099d5890876993a750d51195a02f9f723a951384058b4a7536e7d611b20b"),
+    )),
+    ("a1", (
+        ("version", "0.1.16"),
+        ("source", "ee48f25905947e0795eccb9d1d6c67f28f270545"),
+        ("tree", "2157cd82c0c1500390c6cf496506e5eb287b9051"),
+        ("run", 40611629636),
+        ("job", 122564362113),
+        ("artifact", 12784045079),
+        ("zip", (183997997, "a027eb4912ececd05f98dc7c23d47f01a3ca976660d88d229630441165f490b4")),
+        ("raw", (29088720, "a297b0a3341f82ccf63bb27f27790501e6c9e8fc77c3784f6bb3e463bdade0d6")),
+        ("deb", (64512558, "6ac58a1417ee10647f0b9f7d6e71565373e799c70767c020b8a96c229eaa48eb")),
+        ("hub", (29088720, "502f2ba0ad9877318fc7477d54c9c1e6efd6aec4acb19323a30eaa4e613f0832")),
+        ("archive", (55576690, "36b250f9e6e9e6c7dbd4278d6ab6d7bec69c77894f690673ae137e669479ea82")),
+        ("helper", (1168536, "7f22822e50ee8b96829c64c95da9e1b098c3e080a1370f577ae2b69055eed94a")),
+        ("policy", (878, "f4819f08e0a96e98d10a449a82a26b4f59d69714460eb9082387f746e1889bb4")),
+        ("service", (92, "9a270a39c219b4f2d294cfaa2a849db84b1e1883fa532d2c90d7f95625780340")),
+        ("features", ("integrated-features", "experimental-flatpak-host", "linux-production-migration", "experimental-linux-portable-update")),
+    )),
+)
+
 FALSE = dict.fromkeys(("publicDiscovery", "flatpakAccepted", "steamDeckAccepted", "liveAiAccepted", "unityAccepted", "releaseReady"), False)
 ENVIRONMENT = ("GITHUB_ACTIONS", "GITHUB_REPOSITORY", "GITHUB_REPOSITORY_ID", "GITHUB_REF", "GITHUB_EVENT_NAME",
                "GITHUB_WORKFLOW_REF", "GITHUB_SHA", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT", "GITHUB_WORKSPACE",
@@ -807,16 +879,83 @@ def request(env, profile_raw, api_raw):
     return result
 
 
+def actual017_target_data():
+    value = dict(ACTUAL017_CASE)
+    del value["a1"]
+    for name in ("zip", "raw", "deb", "hub", "archive", "helper", "policy", "service", "runtime", "runtimeSignature"):
+        size, sha256 = value[name]
+        value[name] = {"size": size, "sha256": sha256}
+    return value
+
+
+def actual017_a1_data():
+    value = dict(dict(ACTUAL017_CASE)["a1"])
+    for name in ("zip", "raw", "deb", "hub", "archive", "helper", "policy", "service"):
+        size, sha256 = value[name]
+        value[name] = {"size": size, "sha256": sha256}
+    value["features"] = list(value["features"])
+    return value
+
+
+def _actual017_baseline(baseline):
+    expected = actual017_a1_data()
+    keys(baseline, tuple(expected))
+    for name in ("zip", "raw", "deb", "hub", "archive", "helper", "policy", "service"):
+        validate_pin(baseline[name], MAX_ZIP if name == "zip" else MAX_FILE)
+    require(baseline == expected, "Exact independent A1 baseline required; never the B016 donor")
+
+
+def _actual017_b_files():
+    result = {}
+    for name, kind, mode, uid, gid, size, sha256 in dict(ACTUAL017_CASE)["installedMembers"]:
+        result[name] = {"kind": kind, "mode": mode, "uid": uid, "gid": gid, "size": size}
+        if kind == "file": result[name]["sha256"] = sha256
+    return result
+
+
+def _actual017_a_files():
+    result, a1 = _actual017_b_files(), actual017_a1_data()
+    result[ROOT_ENTRY].update(a1["hub"])
+    result["usr/lib/Creator Hub/modules.tar.gz"].update(a1["archive"])
+    return result
+
+
+def _actual017_bound_files(files, expected):
+    keys(files, tuple(expected))
+    require(all(type(files[name]) is dict and all(type(files[name].get(k)) is type(v) and files[name][k] == v
+                for k, v in row.items()) for name, row in expected.items()), "Exact original physical package member metadata required")
+
+
+def _actual017_review(review):
+    keys(review, ("baseline", "deb16", "deb17", "portable", "signaturesVerified", "privateTargetQualification", *FALSE))
+    _actual017_baseline(review["baseline"])
+    require(review["signaturesVerified"] is True and review["portable"] == {}
+            and review["privateTargetQualification"] == actual017_private_target_qualification()
+            and all(review[k] is False for k in FALSE), "Exact source-bound actual017 DEB review required")
+    _actual017_bound_files(review["deb16"], _actual017_a_files())
+    _actual017_bound_files(review["deb17"], _actual017_b_files())
+
+
 def private_target_qualification():
-    source = FIXED["17"]["source"]
     targets = {
         "75a99ff4a267064aaa3ac9e30039bc91dc791d89": ("private-source75-updater-lifecycle-only", True,
             {"size": 1167744, "sha256": "501e97da9c93d370caa750c46f4c3f272d546281e8e2eeedfaf4f01193d644be"}, "5f62bf4bc1ba85eb293ca9a5a30330b06b6b4351"),
         "dce183ec0a0f23210d83b064c04ecc8b6af999fe": ("private-dce-updater-lifecycle-only", False,
             {"size": 1168536, "sha256": "7f22822e50ee8b96829c64c95da9e1b098c3e080a1370f577ae2b69055eed94a"}, "6d881eade5b3178913012d3a6c6632bd41b0e849"),
     }
-    require(source in targets and FIXED["17"]["helper"] == targets[source][2]
-            and FIXED["17"]["tree"] == targets[source][3], "Unreviewed target source/tree/helper semantics")
+    return _private_target_qualification(FIXED["17"], targets)
+
+
+def actual017_private_target_qualification():
+    target = actual017_target_data()
+    return _private_target_qualification(target, {target["source"]:
+        (target["qualificationScope"], False, target["helper"], target["tree"])})
+
+
+def _private_target_qualification(target, targets):
+    source = target["source"]
+    require(source in targets and target["helper"] == targets[source][2]
+            and target["tree"] == targets[source][3], "Unreviewed target source/tree/helper semantics")
     scope, restores_old, helper, _ = targets[source]
     return {"scope": scope, "targetSource": source,
             "targetRetirementHelper": dict(helper), "privateDebApprovalRestoresOldRetirementHelper": restores_old,
@@ -826,12 +965,22 @@ def private_target_qualification():
 
 def compare_update_packages(baseline, candidate, baseline_pins):
     """Closed source-bound comparison, not native fix-retention acceptance."""
-    qualification = private_target_qualification()
+    return _compare_update_packages(baseline, candidate, baseline_pins, FIXED["17"], private_target_qualification())
+
+
+def actual017_compare_update_packages(baseline, candidate, baseline_pins):
+    _actual017_baseline(baseline_pins)
+    _actual017_bound_files(baseline["files"], _actual017_a_files())
+    _actual017_bound_files(candidate["files"], _actual017_b_files())
+    return _compare_update_packages(baseline, candidate, baseline_pins, actual017_target_data(), actual017_private_target_qualification())
+
+
+def _compare_update_packages(baseline, candidate, baseline_pins, target, qualification):
     if not qualification["privateDebApprovalRestoresOldRetirementHelper"]:
-        require(baseline_pins["helper"] == FIXED["17"]["helper"], "Dce must preserve the independently reviewed baseline helper bytes")
+        require(baseline_pins["helper"] == target["helper"], "Dce must preserve the independently reviewed baseline helper bytes")
     shared = load("private-linux-update-fixture-017-package-verify")
     expected = {"baseline": {k: baseline_pins[k] for k in ("deb", "hub", "helper", "policy", "service")},
-                "candidate": {k: FIXED["17"][k] for k in ("deb", "hub", "archive")}}
+                "candidate": {k: target[k] for k in ("deb", "hub", "archive")}}
     shared.validate_expected(expected)
     before, after = baseline["fields"], candidate["fields"]
     require(before["Version"] == "0.1.16" and after["Version"] == "0.1.17" and set(before) == set(after), "Only actual016 -> source-bound private017 control fields admitted")
@@ -854,9 +1003,9 @@ def compare_update_packages(baseline, candidate, baseline_pins):
     for package in (baseline, candidate):
         require(package["md5sums"] == {n: v["md5"] for n, v in package["files"].items() if v["kind"] == "file"}, "DEB checksums do not match actual data")
     shared.baseline_members(baseline, expected["baseline"])
-    shared.baseline_members(candidate, {"hub": FIXED["17"]["hub"], "helper": FIXED["17"]["helper"],
+    shared.baseline_members(candidate, {"hub": target["hub"], "helper": target["helper"],
                                         "policy": baseline_pins["policy"], "service": baseline_pins["service"]})
-    require({k: new[archive][k] for k in ("size", "sha256")} == FIXED["17"]["archive"]
+    require({k: new[archive][k] for k in ("size", "sha256")} == target["archive"]
             and old[ROOT_ENTRY]["sha256"] != new[ROOT_ENTRY]["sha256"], "Original source-bound Root/archive pins required; relabelling refused")
     for name in (ROOT_ENTRY, RETIREMENT_HELPER):
         header = bytes.fromhex(new[name]["header"])
@@ -1014,15 +1163,20 @@ def selection(value, generation, previous=None):
     require(value == {"schemaVersion": 1, "generation": generation, "version": "0.1.17" if previous else "0.1.16", "previousGeneration": previous}, "Exact current/prior signed generation selection required")
 
 
-def outcome(scenario, evidence):
-    qualification = private_target_qualification()
+def _outcome_before_mcp(scenario, evidence):
+    return _outcome_before_mcp_qualified(scenario, evidence, private_target_qualification())
+
+
+def _outcome_before_mcp_qualified(scenario, evidence, qualification):
     approved_deb = scenario == "deb-approve"
     require(evidence.get("privateTargetQualification") == qualification
             and evidence.get("oldRetirementHelperRestored") is (approved_deb and qualification["privateDebApprovalRestoresOldRetirementHelper"])
             and evidence.get("targetRetirementHelperVerified") is approved_deb,
             "Exact source-bound helper evidence required; no fix-retention/public017 qualification")
     require(scenario in SCENARIOS and all(evidence.get(n) is True for n in ("initial16Verified", "nativeConfirmationObserved", "settingsPreserved", "runtimeSurvived", "normalFinalClose")), "Full initial/consent/preservation/close proof required")
-    mcp_protocol_receipt(evidence.get("mcpProtocol"))
+
+
+def _outcome_after_mcp(scenario, evidence):
     if scenario in HTML_SCENARIOS:
         phases = ("htmlWebDriver", "successorHtmlWebDriver") if scenario == "deb-approve" else ("htmlWebDriver",)
         for name in phases:
@@ -1048,6 +1202,35 @@ def outcome(scenario, evidence):
     if scenario == COMBINED:
         combined_adapter_for_profile().continuation_proof(evidence.get("flatpakContinuation", {}))
     require(all(evidence.get(k) is False for k in FALSE), "Scope cannot be promoted to public/Flatpak/release acceptance")
+
+
+def outcome(scenario, evidence):
+    _outcome_before_mcp(scenario, evidence)
+    mcp_protocol_receipt(evidence.get("mcpProtocol"))
+    _outcome_after_mcp(scenario, evidence)
+    return True
+
+
+def transition_outcome(evidence, inventories, verifier, protected_paths):
+    _outcome_before_mcp("deb-approve", evidence)
+    mcp_transition_protocol_receipt(evidence.get("mcpProtocol"), inventories, verifier, protected_paths)
+    _outcome_after_mcp("deb-approve", evidence)
+    return True
+
+
+def actual017_transition_outcome(evidence, inventories, verifier, protected_paths):
+    target, a1 = actual017_target_data(), actual017_a1_data()
+    require(evidence.get("fromSource") == a1["source"] and evidence.get("toSource") == target["source"],
+            "Exact A1 to actual017 product sources required")
+    for name, version, image in (("installed16", "0.1.16", a1["hub"]), ("installed17", "0.1.17", target["hub"])):
+        row = evidence.get(name)
+        keys(row, ("version", "hub", "dpkgVerified"))
+        validate_pin(row["hub"])
+        require(row["version"] == version and row["hub"] == image and row["dpkgVerified"] is True,
+                "Exact independently verified installed phase image required")
+    _outcome_before_mcp_qualified("deb-approve", evidence, actual017_private_target_qualification())
+    mcp_transition_protocol_receipt(evidence.get("mcpProtocol"), inventories, verifier, protected_paths)
+    _outcome_after_mcp("deb-approve", evidence)
     return True
 
 
@@ -1094,6 +1277,448 @@ def complete_mcp_protocol(connection, report, *, migrated=False):
     report["mcpProtocol"] = mcp_protocol_receipt(connection.close())
     save(update_channel(migrated)[1] / "mcp-protocol.json", report["mcpProtocol"])
     report["runtimeSurvived"] = True
+
+
+MCP_OBSERVER_PINS = {
+    "tests/linux-node-observer.py": {"size": 12415, "sha256": "7f0dcc3d7b8588dfcf01f652f5a3911a4427de077a56afe928955e13a81395a5"},
+    "src/unix_exec.rs": {"size": 10594, "sha256": "a8e714620c90ac852eaa0b583ecf11ca33ec7dcd3ab5ed176b3bc266cada4872"},
+    "src/unix_exec_linux.rs": {"size": 5948, "sha256": "ca4552a4db13d5580cdf282da929faec4d08975710decbbe0ad555b1361940a7"},
+}
+MCP_LOADER_SHA256 = "967673441c0ce4e16b7f8df79807f6f51bfc5b6854e93705016d6036ff1469f5"
+
+
+def transition_file(path, maximum=262144, *, uid=None, mode=None):
+    """Capture actual file bytes and all nine path identity fields, never expectations."""
+    path = Path(path)
+    uid = UID if uid is None else uid
+    identity = lambda s: tuple(getattr(s, k) for k in (
+        "st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns"))
+    before = identity(path.lstat())
+    raw = read(path, maximum, uid=uid, mode=mode)
+    require(identity(path.lstat()) == before and before[4] == uid, "Transition capture identity/group changed")
+    return {"path": str(path), "raw": list(raw), "file": {**pin(raw), "identity": list(before)}}
+
+
+def transition_bytes(value, maximum):
+    require(type(value) is list and 0 < len(value) <= maximum
+            and all(type(v) is int and 0 <= v <= 255 for v in value), "Original bounded bytes required")
+    return bytes(value)
+
+
+def transition_capture(value, path, maximum=262144, *, current=True):
+    keys(value, ("path", "raw", "file"))
+    raw = transition_bytes(value["raw"], maximum)
+    row = value["file"]
+    keys(row, ("size", "sha256", "identity"))
+    identity = row["identity"]
+    require(value["path"] == str(path) and pin(raw) == {k: row[k] for k in ("size", "sha256")}
+            and type(identity) is list and len(identity) == 9 and all(type(v) is int for v in identity)
+            and stat.S_ISREG(identity[2]) and stat.S_IMODE(identity[2]) == 0o600
+            and identity[3:6] == [UID, UID, 1] and identity[6] == len(raw), "Actual private capture path/pin/identity differs")
+    if current:
+        require(transition_file(path, maximum, mode=0o600) == value, "Actual captured file identity changed")
+    return raw
+
+
+def review_transition_inputs(inventories, verifier):
+    """Independent production-key review of an explicitly staged, fixed input layout."""
+    mcp = load("native-linux-update-mcp")
+    keys(inventories, ("a", "b"))
+    result = {"inventories": copy.deepcopy(inventories), "sides": {}}
+    for side, version in (("a", "0.1.16"), ("b", "0.1.17")):
+        keys(inventories[side], mcp.MODULE_FILES + mcp.ROUTING_FILES)
+        directory = BASE / "mcp-transition-input" / side
+        bodies = {}
+        for name, expected in inventories[side].items():
+            validate_pin(expected, 128 * 1024**2)
+            bodies[name] = bound(directory / name, expected, 128 * 1024**2, uid=0, mode=0o444)
+        require(sum(map(len, bodies.values())) <= 256 * 1024**2, "Bounded transition input set required")
+        for name in ("runtime", "router"):
+            require(signature(directory / ("routing/" + name + ".json"),
+                              directory / ("routing/" + name + ".minisig"), verifier) is None,
+                    "Actual production-key verification required, not a supplied boolean")
+        require(all(bound(directory / name, inventories[side][name], 128 * 1024**2, uid=0, mode=0o444) == body
+                    for name, body in bodies.items()), "Signed transition input changed during verification")
+        descriptor = parse(bodies["routing/runtime.json"])
+        keys(descriptor, ("schemaVersion", "product", "hubVersion", "platform", "arch", "module"))
+        module = descriptor["module"]
+        keys(module, ("executable", "version", "files"))
+        require(type(descriptor["schemaVersion"]) is int and descriptor["schemaVersion"] == 1
+                and descriptor["product"] == "com.creatorworks.hub.mcp-runtime"
+                and descriptor["hubVersion"] == version and descriptor["platform"] == "linux" and descriptor["arch"] == "x86_64"
+                and module["executable"] == "mcp/creator-works-mcp-launcher" and module["version"] == mcp.SERVER["version"]
+                and module["files"] == {n: inventories[side][n]["sha256"] for n in mcp.MODULE_FILES},
+                "Independent signed runtime/version/inventory differs")
+        canonical = json.dumps({"executable": module["executable"], "version": module["version"],
+                                "files": dict(sorted(module["files"].items()))}, separators=(",", ":"), ensure_ascii=False).encode()
+        result["sides"][side] = {"generation": hashlib.sha256(canonical).hexdigest(),
+            "descriptorSha256": inventories[side]["routing/runtime.json"]["sha256"], "hubVersion": version}
+    require(result["sides"]["a"]["generation"] != result["sides"]["b"]["generation"]
+            and inventories["a"]["mcp/server/creator-works-mcp.mjs"] != inventories["b"]["mcp/server/creator-works-mcp.mjs"],
+            "Different signed server generation required")
+    require(all(inventories["a"][n] == inventories["b"][n]
+                for n in ("mcp/server/runtime/node", "routing/creator-hub-mcp-router")), "Only unchanged Node/router images are qualified")
+    directory = BASE / "mcp-transition-input/b"
+    result["release"] = read(directory / "release.json", 32768, uid=0, mode=0o444)
+    result["signature"] = read(directory / "release.minisig", 4096, uid=0, mode=0o444)
+    require(signature(directory / "release.json", directory / "release.minisig", verifier) is None,
+            "Actual signed Hub release required")
+    require(read(directory / "release.json", 32768, uid=0, mode=0o444) == result["release"]
+            and read(directory / "release.minisig", 4096, uid=0, mode=0o444) == result["signature"], "Signed release changed during verification")
+    release = parse(result["release"])
+    require(type(release.get("schemaVersion")) is int and release["schemaVersion"] == 1
+            and all(release.get(k) == v for k, v in {"appId": "creator-hub", "platform": "linux", "architecture": "x86_64",
+                "packageType": "deb", "version": "0.1.17", "installerProtocol": 1}.items())
+            and type(release["installerProtocol"]) is int
+            and type(release.get("executableSha256")) is str and re.fullmatch(r"[a-f0-9]{64}", release["executableSha256"]),
+            "Independent signed native Hub target differs")
+    return result
+
+
+def transition_handoff(capture, expected, phase, previous):
+    home = BASE / "result/home"
+    path = home / "data/creator-hub-update-cache/deb/records/mcp-route-update.json"
+    keys(capture, ("path", "raw", "file"))
+    raw = capture["raw"]
+    require(capture["path"] == str(path) and type(raw) is list and 0 < len(raw) <= 262144
+            and all(type(v) is int and 0 <= v <= 255 for v in raw), "Original actual handoff capture required")
+    body = bytes(raw)
+    row = capture["file"]
+    keys(row, ("size", "sha256", "identity"))
+    identity = row["identity"]
+    require(pin(body) == {k: row[k] for k in ("size", "sha256")} and type(identity) in (list, tuple) and len(identity) == 9
+            and all(type(v) is int for v in identity) and stat.S_ISREG(identity[2]) and stat.S_IMODE(identity[2]) == 0o600
+            and identity[3:6] == type(identity)((UID, UID, 1)) and identity[6] == len(body), "Actual private handoff pin/identity differs")
+    value = parse(body)
+    keys(value, ("schemaVersion", "fromVersion", "installed", "release", "signature", "previous", "phase"))
+    require(type(value["schemaVersion"]) is int and value["schemaVersion"] == 1
+            and value["fromVersion"] == "0.1.16" and value["installed"] == "/usr/bin/creator-hub"
+            and transition_bytes(value["release"], 32768) == expected["release"]
+            and transition_bytes(value["signature"], 4096) == expected["signature"]
+            and transition_bytes(value["previous"], 16384) == previous
+            and value["phase"] == phase, "Actual immutable Ready/Completed fields differ")
+    return value
+
+
+def transition_observation(value, expected, side, process, sdk_pid):
+    """Independent raw snapshot validation, not the helper's passed/qualified flag."""
+    require(type(value) is dict and type(value.get("schemaVersion")) is int and value["schemaVersion"] == 1
+            and value.get("scope") == "synthetic-linux-router-node-observer-only"
+            and value.get("syntheticFixtureOnly") is True and value.get("passed") is True
+            and all(value.get(k) is False for k in ("qualified", "nativeAdmissionAccepted", "liveMcpProtocolAccepted", "payloadSwapAccepted", "releaseReady"))
+            and value.get("loaderSha256") == MCP_LOADER_SHA256
+            and value.get("routerSourcePins") == {Path(k).name: v["sha256"] for k, v in MCP_OBSERVER_PINS.items() if k.startswith("src/")},
+            "Original observer scope/source pins required without flag promotion")
+    snapshot = value.get("snapshot")
+    keys(snapshot, ("router", "supervisor", "serverNode"))
+    router, supervisor, node = (snapshot[n] for n in ("router", "supervisor", "serverNode"))
+    command = BASE / "result/home/data/creator-hub/mcp-route-v1/linux-x86_64/router-v1/creator-hub-mcp-router"
+    generation = expected["sides"][side]["generation"]
+    server = BASE / "result/home/data/creator-hub/runtime-generations/linux-x86_64" / generation / "mcp/server/creator-works-mcp.mjs"
+    inventory = expected["inventories"][side]
+    require(router["pid"] == process["pid"] and router["startTime"] == process["startTime"]
+            and router["parentPid"] == process["parentPid"] and supervisor["parentPid"] == router["pid"]
+            and node["parentPid"] == supervisor["pid"] and len({r["pid"] for r in (router, supervisor, node)}) == 3
+            and sdk_pid not in {r["pid"] for r in (router, supervisor, node)}, "Exact owned server ancestry, not SDK wrapper, required")
+    for row in (router, supervisor, node):
+        require(type(row["pid"]) is int and row["pid"] > 1 and type(row["startTime"]) is str and row["startTime"].isdigit()
+                and type(row["parentPid"]) is int and row["parentPid"] > 1
+                and row["uids"] == row["gids"] == [UID] * 4
+                and all(type(v) is int for v in row["uids"] + row["gids"]), "Actual observer PID/start/UID/GID differs")
+    require(int(router["startTime"]) <= int(supervisor["startTime"]) <= int(node["startTime"]), "Kernel start order differs")
+    for row in (router, supervisor):
+        require(row["executable"] == str(command) and row["argv"] == [str(command)]
+                and row["imagePin"] == expected["inventories"]["a"]["routing/creator-hub-mcp-router"]
+                and stat.S_ISREG(row["image"]["mode"]) and row["image"]["size"] == row["imagePin"]["size"]
+                and row["image"]["uid"] == row["image"]["gid"] == UID, "Retained zero-argument router image differs")
+    argv = node["argv"]
+    require(type(argv) is list and len(argv) == 6 and argv[:3] == [str(server.parent / "runtime/node"), "--input-type=module", "--eval"]
+            and type(argv[3]) is str and hashlib.sha256(argv[3].encode()).hexdigest() == MCP_LOADER_SHA256
+            and argv[4:] == [str(server), inventory["mcp/server/creator-works-mcp.mjs"]["sha256"]]
+            and value["sourceSha256"] == inventory["mcp/server/creator-works-mcp.mjs"]["sha256"], "Exact independent server path/source digest required")
+    image = node["image"]
+    require(node["executable"] == node["fd4Link"] == "/memfd:creator-hub-node (deleted)"
+            and node["imagePin"] == inventory["mcp/server/runtime/node"] and node["fd4Image"] == image
+            and type(node["seals"]) is int and node["seals"] & 15 == 15
+            and stat.S_ISREG(image["mode"]) and stat.S_IMODE(image["mode"]) == 0o500
+            and image["uid"] == image["gid"] == UID and image["nlink"] == 0
+            and image["size"] == inventory["mcp/server/runtime/node"]["size"], "Actual sealed server Node/fd4/image differs")
+    return snapshot
+
+
+def transition_sdk_eof(value, checks, directory):
+    keys(value, ("stdout", "result", "routerExit", "sdkExit"))
+    require(type(value["routerExit"]) is type(value["sdkExit"]) is int
+            and value["routerExit"] == value["sdkExit"] == 0, "Actual normal SDK/router exit statuses required")
+    raw = transition_capture(value["stdout"], directory / "sdk.stdout", 131072)
+    rows = [parse(line) for line in raw.splitlines()]
+    mcp = load("native-linux-update-mcp")
+    require(len(rows) == checks + 2 and rows[0] == {"ready": True, "server": mcp.SERVER}, "Actual SDK initialization/check/EOF sequence required")
+    for index in range(checks):
+        mcp._protocol(rows[index + 1], index + 1)
+    close = rows[-1]
+    keys(close, ("closed", "eofSent", "ended", "signalsRequested", "stdoutBytes", "stderrBytes"))
+    require(all(close[k] is True for k in ("closed", "eofSent", "ended")) and close["signalsRequested"] is False
+            and type(close["stdoutBytes"]) is int and 0 < close["stdoutBytes"] <= 524288
+            and type(close["stderrBytes"]) is int and 0 <= close["stderrBytes"] <= 65536
+            and parse(transition_capture(value["result"], directory / "sdk-result.json", 16384)) == close,
+            "Actual SDK EOF reply/result file required; boolean sentinels cannot pass")
+    return rows
+
+
+def mcp_transition_protocol_receipt(value, inventories, verifier, protected_paths):
+    expected = review_transition_inputs(inventories, verifier)
+    keys(value, ("schemaVersion", "scope", "protocol", "captures", "observers", "protectedBefore", "protectedAfter", "nativeAdmissionAccepted", "payloadSwapAccepted", "liveAiAccepted", "unityAccepted", "releaseReady"))
+    require(type(value["schemaVersion"]) is int and value["schemaVersion"] == 1 and value["scope"] == "managed-mcp-transition-evidence-only"
+            and all(value[k] is False for k in ("nativeAdmissionAccepted", "payloadSwapAccepted", "liveAiAccepted", "unityAccepted", "releaseReady")), "Component evidence scope only, never admission/release authority")
+    mcp, protocol, captures = load("native-linux-update-mcp"), value["protocol"], value["captures"]
+    require(protocol.get("scope") == "existing-managed-mcp-transition-contract-only"
+            and type(protocol.get("schemaVersion")) is int and protocol["schemaVersion"] == 1
+            and protocol.get("originalNormalEofClose") is True and protocol.get("signalsRequested") is False
+            and all(protocol.get(k) is False for k in ("payloadSwapAccepted", "liveAiAccepted", "unityAccepted", "releaseReady")), "Original wrapper scope/EOF evidence required")
+    protected = transition_protected(protected_paths)
+    require(value["protectedBefore"] == value["protectedAfter"] == protected
+            == protocol.get("protectedBefore") == protocol.get("protectedAfter"), "Independently captured protected settings differ")
+    keys(captures, ("activeA", "ready", "completed", "eofA", "eofB"))
+    previous = transition_capture(captures["activeA"], BASE / "result/home/data/creator-hub/mcp-route-v1/linux-x86_64/active.json", 16384, current=False)
+    active_a = parse(previous)
+    require(type(active_a.get("schemaVersion")) is int and active_a == {"schemaVersion": 1, **{k: expected["sides"]["a"][k] for k in ("descriptorSha256", "generation")}}
+            and pin(previous) == {k: captures["activeA"]["file"][k] for k in ("size", "sha256")}, "Actual original signed A receipt capture required")
+    target = {k: expected["sides"]["b"][k] for k in ("descriptorSha256", "generation")}
+    ready = transition_handoff(captures["ready"], expected, "Ready", previous)
+    completed = transition_handoff(captures["completed"], expected, {"Completed": target}, previous)
+    require(all(ready[k] == completed[k] for k in ready if k != "phase"), "Immutable handoff fields changed")
+    transition_capture(captures["ready"], Path(captures["ready"]["path"]), current=False)
+    transition_capture(captures["completed"], Path(captures["completed"]["path"]))
+    active = transition_file(BASE / "result/home/data/creator-hub/mcp-route-v1/linux-x86_64/active.json", 16384, mode=0o600)
+    active_b = parse(bytes(active["raw"]))
+    require(type(active_b.get("schemaVersion")) is int and active_b == {"schemaVersion": 1, **target}, "Actual signed B is not active")
+    history = BASE / "result/home/data/creator-hub/mcp-route-v1/linux-x86_64/history" / (hashlib.sha256(previous).hexdigest() + ".json")
+    require(read(history, 16384, uid=UID, mode=0o600) == previous, "Actual original A history missing")
+    transition = parse(json.dumps(protocol.get("transition", {})))
+    require(transition.get("inventories") == {s: {n: p["sha256"] for n, p in inventories[s].items()} for s in ("a", "b")}
+            and transition.get("target") == target
+            and transition.get("handoff") == {"ready": captures["ready"]["raw"], "completed": captures["completed"]["raw"],
+                "readyCapture": {k: captures["ready"][k] for k in ("path", "file")},
+                "completedCapture": {k: captures["completed"][k] for k in ("path", "file")}}, "Wrapper claim does not match independent raw captures")
+    checks = protocol.get("checks")
+    require(type(checks) is list and len(checks) == 3, "All original live A SDK phases required")
+    original_route = transition_original_route(captures["activeA"], expected)
+    for index, row in enumerate(checks):
+        require(row.get("phase") == mcp.PHASES[index] and row.get("handshake") == {"ready": True, "server": mcp.SERVER}
+                and parse(json.dumps(row.get("route"))) == original_route, "Ordered real SDK phase/original route required")
+        mcp._protocol(row.get("protocol"), index + 2)
+        for role, name in (("router", "routing/creator-hub-mcp-router"), ("sdk", "mcp/server/runtime/node")):
+            mcp.same_process(checks[0][role], row[role])
+            require(type(row[role]["pid"]) is int and row[role]["pid"] > 1 and row[role]["uids"] == [UID] * 4
+                    and row[role]["kernelImageSha256"] == inventories["a"][name]["sha256"], "Original owned A process differs")
+    reconnect = protocol["reconnect"]
+    require(reconnect["command"] == str(BASE / "result/home/data/creator-hub/mcp-route-v1/linux-x86_64/router-v1/creator-hub-mcp-router")
+            and reconnect["handshake"] == {"ready": True, "server": mcp.SERVER} and reconnect["normalEofClose"] is True, "Fresh stable-router SDK B reconnect required")
+    mcp._protocol(reconnect["protocol"], 2)
+    for role in ("router", "sdk"):
+        before, after = checks[0][role], reconnect[role]
+        require(type(after["pid"]) is int and after["pid"] > 1 and after["pid"] != before["pid"]
+                and all(after[k] == before[k] for k in ("parentPid", "uids", "kernelImageSha256")), "Fresh same-image B reconnect, not reused A, required")
+    observers = value["observers"]
+    keys(observers, ("aBefore", "aAfter", "aDuringB", "b"))
+    observed = {n: parse(transition_capture(observers[n], BASE / "result/mcp" / ("observer-" + n + ".json"), 131072)) for n in observers}
+    old = [transition_observation(observed[n], expected, "a", checks[0]["router"], checks[0]["sdk"]["pid"])
+           for n in ("aBefore", "aAfter", "aDuringB")]
+    require(old[0] == old[1] == old[2], "Actual original A server identity changed")
+    new = transition_observation(observed["b"], expected, "b", reconnect["router"], reconnect["sdk"]["pid"])
+    require(not {r["pid"] for r in old[0].values()} & {r["pid"] for r in new.values()}
+            and not {checks[0]["sdk"]["pid"], reconnect["sdk"]["pid"]} & {r["pid"] for r in (*old[0].values(), *new.values())}, "Fresh actual B server ancestry required")
+    a_rows = transition_sdk_eof(captures["eofA"], 4, BASE / "result/mcp/existing")
+    b_rows = transition_sdk_eof(captures["eofB"], 2, BASE / "result/mcp/reconnect")
+    require([r["protocol"] for r in checks] == a_rows[2:5] and reconnect["protocol"] == b_rows[2], "Actual SDK stdout does not match phase claims")
+    transition_installed_b(expected, verifier)
+    return value
+
+
+def transition_installed_b(expected, verifier):
+    """Review installed B independently, after the wrapper's last guard/EOF."""
+    mcp = load("native-linux-update-mcp")
+    home = BASE / "result/home"
+    descriptor = home / "data/creator-hub/mcp-route-v1/linux-x86_64/descriptors" / expected["sides"]["b"]["descriptorSha256"]
+    generation = home / "data/creator-hub/runtime-generations/linux-x86_64" / expected["sides"]["b"]["generation"]
+    files = {descriptor / name: (expected["inventories"]["b"]["routing/" + name], 0o600)
+             for name in ("runtime.json", "runtime.minisig")}
+    for name in mcp.MODULE_FILES:
+        # Exact Linux modes from build-unified/unix-managed-payload.fileMode.
+        mode = 0o755 if name in ("mcp/creator-works-mcp-launcher", "mcp/server/runtime/node") else 0o644
+        files[generation / name] = (expected["inventories"]["b"][name], mode)
+    def capture():
+        rows = {}
+        fields = ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns")
+        for path, (expected_pin, mode) in files.items():
+            before = path.lstat()
+            identity = tuple(getattr(before, name) for name in fields)
+            require(stat.S_ISREG(before.st_mode) and stat.S_IMODE(before.st_mode) == mode
+                    and before.st_uid == before.st_gid == UID and before.st_nlink == 1
+                    and before.st_size == expected_pin["size"], "Installed B mode/owner/link/type/size differs")
+            bound(path, expected_pin, expected_pin["size"], uid=UID, mode=mode)
+            after = path.lstat()
+            require(tuple(getattr(after, name) for name in fields) == identity, "Installed B identity changed while reading")
+            rows[path] = identity
+        return rows
+    before = capture()
+    require(signature(descriptor / "runtime.json", descriptor / "runtime.minisig", verifier) is None,
+            "Installed B production-key signature required, not a boolean")
+    require(capture() == before, "Installed B identity changed during verification")
+
+
+def transition_original_route(active, expected):
+    home = BASE / "result/home"
+    route = home / "data/creator-hub/mcp-route-v1/linux-x86_64"
+    result = {str(Path(active["path"]).relative_to(home)).replace("\\", "/"): active["file"]}
+    descriptor = route / "descriptors" / expected["sides"]["a"]["descriptorSha256"]
+    for name in ("runtime.json", "runtime.minisig", "router.json", "router.minisig", "creator-hub-mcp-router"):
+        path = (descriptor if name.startswith("runtime.") else route / "router-v1") / name
+        capture = transition_file(path, 32 * 1024**2, mode=0o500 if name == "creator-hub-mcp-router" else 0o600)
+        require({k: capture["file"][k] for k in ("size", "sha256")} == expected["inventories"]["a"]["routing/" + name], "Original signed route image/metadata differs")
+        result[path.relative_to(home).as_posix()] = capture["file"]
+    return result
+
+
+def transition_protected(paths):
+    require(type(paths) in (list, tuple) and 0 < len(paths) <= 64 and len(set(paths)) == len(paths), "Finite independent protected paths required")
+    result = {}
+    for name in paths:
+        safe_name(name)
+        result[name] = transition_file(BASE / "result/home" / name, 2 * 1024**2)["file"]
+    return result
+
+
+def transition_observer_source():
+    source = BASE / "mcp-node-observer"
+    directories = {BASE, source, source / "tests", source / "src"}
+    for directory in directories:
+        info = directory.lstat()
+        require(directory.resolve(strict=True) == directory and stat.S_ISDIR(info.st_mode)
+                and info.st_uid == info.st_gid == 0 and not info.st_mode & 0o022,
+                "Observer source directories must be sealed against ordinary-UID replacement")
+    result = {}
+    for path, expected in MCP_OBSERVER_PINS.items():
+        value = transition_file(source / path, 32768, uid=0, mode=0o444)
+        require({k: value["file"][k] for k in ("size", "sha256")} == expected, "Exact sealed observer source required")
+        result[path] = value["file"]
+    return result
+
+
+def observe_transition_server(connection, expected, side, name):
+    """Run only the sealed ordinary-UID observer; its original scope is retained."""
+    require(sys.platform == "linux" and os.getuid() == os.geteuid() == UID
+            and os.getgid() == os.getegid() == UID and name in ("aBefore", "aAfter", "aDuringB", "b"), "Disposable ordinary UID observer only")
+    source = BASE / "mcp-node-observer"
+    source_before = transition_observer_source()
+    generation = expected["sides"][side]["generation"]
+    server = BASE / "result/home/data/creator-hub/runtime-generations/linux-x86_64" / generation / "mcp/server/creator-works-mcp.mjs"
+    request = {"routerPid": connection.runtime.pid, "callerPid": os.getpid(), "uid": UID, "gid": UID,
+               "routerPath": str(BASE / "result/home/data/creator-hub/mcp-route-v1/linux-x86_64/router-v1/creator-hub-mcp-router"),
+               "routerImage": expected["inventories"]["a"]["routing/creator-hub-mcp-router"],
+               "nodePath": str(server.parent / "runtime/node"), "nodeImage": expected["inventories"][side]["mcp/server/runtime/node"],
+               "serverPath": str(server), "sourceSha256": expected["inventories"][side]["mcp/server/creator-works-mcp.mjs"]["sha256"]}
+    raw = run_tool(["/usr/bin/python3", "-I", "-S", "-B", str(source / "tests/linux-node-observer.py")],
+                   input=json.dumps(request, separators=(",", ":")).encode(), timeout=30, limit=131072)
+    require(transition_observer_source() == source_before, "Observer source identity changed during child execution")
+    transition_observation(parse(raw), expected, side, connection.runtime_identity, connection.child.pid)
+    target = BASE / "result/mcp" / ("observer-" + name + ".json")
+    write(target, raw)
+    return transition_file(target, 131072, mode=0o600)
+
+
+class TransitionProtocolCapture:
+    """Additive, unbound API; historical profiles/native session never select it."""
+    def __init__(self, fixture, inventories, verifier, protected_paths):
+        mcp = sys.modules.get(type(fixture).__module__)
+        require(mcp is not None and Path(mcp.__file__).resolve() == HERE / "native-linux-update-mcp.py"
+                and type(fixture) is mcp.TransitionFixture
+                and fixture.directory == BASE / "result/mcp" and not fixture.started,
+                "Exact new transition fixture before its first connection required")
+        route = fixture.route
+        home, source = BASE / "result/home", BASE / "mcp-transition-input/b"
+        require(type(route) is mcp.TransitionRoute and type(route.before) is mcp.BoundRoute
+                and route.home == route.before.home == home and route.source == source
+                and home.resolve(strict=True) == home and source.resolve(strict=True) == source,
+                "Transition route HOME/B input root differs from the independently reviewed layout")
+        self.fixture, self.inventories, self.verifier = fixture, copy.deepcopy(inventories), verifier
+        self.paths = tuple(protected_paths)
+        require(self.paths == fixture.paths, "Independent protected path closure differs")
+        self.expected = review_transition_inputs(inventories, verifier)
+        self.before = transition_protected(self.paths)
+        self.captures = {"activeA": transition_file(BASE / "result/home/data/creator-hub/mcp-route-v1/linux-x86_64/active.json", 16384, mode=0o600)}
+        active = parse(bytes(self.captures["activeA"]["raw"]))
+        require(type(active.get("schemaVersion")) is int and active == {"schemaVersion": 1,
+                    **{k: self.expected["sides"]["a"][k] for k in ("descriptorSha256", "generation")}}
+                and not os.path.lexists(BASE / "result/home/data/creator-hub-update-cache/deb/records/mcp-route-update.json"),
+                "Only actual signed A with no preexisting handoff may start")
+        a, b = ({n: p["sha256"] for n, p in inventories[side].items()} for side in ("a", "b"))
+        command = home / "data/creator-hub/mcp-route-v1/linux-x86_64/router-v1/creator-hub-mcp-router"
+        server = home / "data/creator-hub/runtime-generations/linux-x86_64" / self.expected["sides"]["a"]["generation"] / "mcp/server/creator-works-mcp.mjs"
+        inputs = {source / n: p for n, p in inventories["b"].items()}
+        inputs.update({source / "release.json": pin(self.expected["release"]), source / "release.minisig": pin(self.expected["signature"])})
+        require(route.a_inventory == a and route.b_inventory == b
+                and route.before.binding == route.binding == {"resourceFiles": a}
+                and route.before.command == route.command == command
+                and route.before.server == route.server == server and route.node == server.parent / "runtime/node"
+                and route.active == Path(self.captures["activeA"]["path"])
+                and route.handoff == home / "data/creator-hub-update-cache/deb/records/mcp-route-update.json"
+                and route.previous == bytes(self.captures["activeA"]["raw"])
+                and route.from_version == self.expected["sides"]["a"]["hubVersion"]
+                and route.target == {k: self.expected["sides"]["b"][k] for k in ("descriptorSha256", "generation")}
+                and route.release == self.expected["release"] and route.signature == self.expected["signature"]
+                and type(route.inputs) is dict and route.inputs.keys() == inputs.keys()
+                and all({k: route.inputs[path][k] for k in ("size", "sha256")} == value for path, value in inputs.items()),
+                "Transition route inventory/CAS/target/release paths differ before fixture launch")
+        self.observers, self.spent, self.ready_started = {}, False, False
+
+    def start(self):
+        value = self.fixture.start()
+        self.observers["aBefore"] = observe_transition_server(self.fixture.connection, self.expected, "a", "aBefore")
+        return value
+
+    def capture_ready(self):
+        require(not self.spent and not self.ready_started and self.fixture.connection is not None, "One actual Ready capture only")
+        self.ready_started = True
+        path = BASE / "result/home/data/creator-hub-update-cache/deb/records/mcp-route-update.json"
+        value = transition_file(path, mode=0o600)
+        transition_handoff(value, self.expected, "Ready", bytes(self.captures["activeA"]["raw"]))
+        own = self.fixture.route.capture_ready()
+        require(own["raw"] == value["raw"] and parse(json.dumps(own["file"])) == value["file"], "Independent actual Ready reads differ")
+        self.captures["ready"] = value
+
+    def complete(self):
+        require(not self.spent and "ready" in self.captures, "Prior actual Ready required; no retry")
+        self.spent = True
+        value = transition_file(Path(self.captures["ready"]["path"]), mode=0o600)
+        target = {k: self.expected["sides"]["b"][k] for k in ("descriptorSha256", "generation")}
+        transition_handoff(value, self.expected, {"Completed": target}, bytes(self.captures["activeA"]["raw"]))
+        self.fixture.complete(bytes(self.captures["ready"]["raw"]), bytes(value["raw"]))
+        self.captures["completed"] = value
+        result = self.fixture.check("after-update")
+        self.observers["aAfter"] = observe_transition_server(self.fixture.connection, self.expected, "a", "aAfter")
+        return result
+
+    def finish(self):
+        require("completed" in self.captures and "eofA" not in self.captures, "Completed before one normal finish required")
+        self.fixture.check("after-hub-close")
+        def observe(connection):
+            self.observers["aDuringB"] = observe_transition_server(self.fixture.connection, self.expected, "a", "aDuringB")
+            self.observers["b"] = observe_transition_server(connection, self.expected, "b", "b")
+        self.fixture.reconnect_observed(observe)
+        protocol = parse(json.dumps(self.fixture.close()))
+        for side, connection in (("A", self.fixture.connection), ("B", self.fixture.replacement)):
+            self.captures["eof" + side] = {"stdout": transition_file(connection.root / "sdk.stdout", 131072, mode=0o600),
+                "result": transition_file(connection.root / "sdk-result.json", 16384, mode=0o600),
+                "routerExit": connection.runtime.poll(), "sdkExit": connection.child.poll()}
+        value = {"schemaVersion": 1, "scope": "managed-mcp-transition-evidence-only", "protocol": protocol,
+            "captures": copy.deepcopy(self.captures), "observers": copy.deepcopy(self.observers),
+            "protectedBefore": self.before, "protectedAfter": transition_protected(self.paths),
+            **dict.fromkeys(("nativeAdmissionAccepted", "payloadSwapAccepted", "liveAiAccepted", "unityAccepted", "releaseReady"), False)}
+        mcp_transition_protocol_receipt(value, self.inventories, self.verifier, self.paths)
+        save(BASE / "result/mcp-transition-protocol.json", value)
+        return value
 
 
 def children(pid):
@@ -2119,9 +2744,181 @@ def bind_html_owner(surface, *, diagnostic=None):
         time.sleep(min(0.05, max(0, deadline - time.monotonic())))
 
 
+def _historical_html_identity():
+    target = FIXED["17"]
+    require(target["source"] != actual017_target_data()["source"], "Historical HTML cannot adopt actual017 target context")
+    return ("historical", target["source"], target["tree"], target["hub"]["size"], target["hub"]["sha256"])
+
+
+def _actual017_html_identity():
+    target = actual017_target_data()
+    return ("actual017", target["source"], target["tree"], target["hub"]["size"], target["hub"]["sha256"])
+
+
+def _actual017_a1_surface(surface):
+    a1 = actual017_a1_data()
+    require(bound_source_menu(surface)["source"] == a1["source"] and surface.pid == surface.record["pid"],
+            "Exact source-bound A1 surface required")
+    phase_identity(surface.record, a1["hub"], "/usr/bin/creator-hub", os.getpid(), UID)
+
+
+def _actual017_html_surface(surface, previous):
+    if previous is None:
+        _actual017_a1_surface(surface)
+        return
+    require(type(previous) is HtmlPages and previous.target_identity == _actual017_html_identity(),
+            "Actual017 HTML requires its exact original target context")
+    target = actual017_target_data()
+    require(bound_source_menu(surface)["source"] == target["source"] and surface.pid == surface.record["pid"],
+            "Exact source-bound actual017 successor required")
+    phase_identity(surface.record, target["hub"], "/usr/bin/creator-hub", os.getpid(), UID, previous=previous.surface.record)
+
+
+def _actual017_session_bus_snapshot(surface):
+    """Fixed read-only SESSION ownership, never the separate AX bus."""
+    from gi.repository import Gio, GLib
+    polkit = load("native-linux-polkit-probe")
+    current = kernel_record(surface.pid, surface.native, surface.helper)
+    require(current == surface.record and surface.pid == current["pid"], "Actual017 bus Root kernel identity differs")
+    bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+    require(type(bus) is Gio.DBusConnection and bus is not getattr(surface, "bus", None) and not bus.is_closed(),
+            "Exact live SESSION bus connection required, never an AX lookalike")
+    guid, connection = bus.get_guid(), bus.get_unique_name()
+    bus_id = polkit.dbus_call(bus, "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus",
+                             "GetId", None, (), "(s)", GLib)[0]
+    require(type(guid) is str and re.fullmatch(r"[a-f0-9]{32}", guid)
+            and type(bus_id) is str and re.fullmatch(r"[a-f0-9]{32}", bus_id)
+            and type(connection) is str and re.fullmatch(r":[0-9]+\.[0-9]+", connection), "Bound SESSION bus instance/connection required")
+    peer = polkit.bus_identity(bus, "com.creatorworks.hub.SingleInstance", GLib)
+    require(type(peer["pid"]) is int and type(peer["uid"]) is int and peer["pid"] == current["pid"]
+            and peer["uid"] == UID and current["uids"] == [UID] * 4, "SESSION Main SingleInstance owner PID/UID differs")
+    require(polkit.bus_identity(bus, "com.creatorworks.hub.SingleInstance", GLib) == peer
+            and polkit.dbus_call(bus, "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus",
+                                "GetId", None, (), "(s)", GLib)[0] == bus_id
+            and bus.get_guid() == guid and bus.get_unique_name() == connection and not bus.is_closed()
+            and kernel_record(surface.pid, surface.native, surface.helper) == current, "SESSION bus/Root changed during attribution")
+    return (guid, bus_id, connection, peer["owner"], peer["pid"], peer["uid"], json.dumps(current, sort_keys=True))
+
+
+def _actual017_bus_binding(value):
+    require(type(value) is HtmlPages and value.target_identity in (_actual017_html_identity(), _actual017_reopened_identity()),
+            "Exact actual017 HTML object required for its captured SESSION proof")
+    binding = getattr(value, "_actual017_session_binding", None)
+    require(type(binding) is tuple and len(binding) == 7 and binding[6] == value.phase_record
+            and binding[4] == value.phase_pid and binding[5] == UID, "Prior constructor-bound SESSION proof required; no retrospective adoption")
+    return binding
+
+
+def _actual017_bind_session(value):
+    require(not hasattr(value, "_actual017_session_binding"), "SESSION binding is one-shot")
+    captured = _actual017_session_bus_snapshot(value.surface)
+    require(captured[6] == value.phase_record, "SESSION capture differs from bound Root frame")
+    if value.previous is not None:
+        previous = _actual017_bus_binding(value.previous)
+        require(captured[:3] == previous[:3] and captured[3] != previous[3], "Fresh Root owner on the original SESSION instance/connection required")
+    value._actual017_session_binding = captured
+
+
+def _actual017_recheck_session(value):
+    require(_actual017_session_bus_snapshot(value.surface) == _actual017_bus_binding(value), "Bound SESSION instance/owner/Root drifted")
+
+
+def _actual017_reopened_identity():
+    target = actual017_target_data()
+    return ("actual017-reopened-projects", target["source"], target["tree"], target["hub"]["size"], target["hub"]["sha256"])
+
+
+def _actual017_reopened_mode(value):
+    identity = getattr(value, "target_identity", None)
+    return type(identity) is tuple and bool(identity) and identity[0] == "actual017-reopened-projects"
+
+
+def _actual017_retired_automatic(previous):
+    require(type(previous) is HtmlPages and previous.target_identity == _actual017_html_identity()
+            and type(previous.previous) is HtmlPages and previous.previous.previous is None
+            and previous.previous.target_identity == _actual017_html_identity(), "Fully retired automatic B017 chain required, never A1/historical")
+    HtmlPages.successor_handoff(previous)
+    target, a1 = actual017_target_data(), actual017_a1_data()
+    require(previous.version == "0.1.17" and previous.previous.version == "0.1.16"
+            and previous.surface.menu_binding == (target["source"], target["hub"]["sha256"], target["hub"]["size"], previous.phase_pid, previous.surface.record["startTime"])
+            and previous.previous.surface.menu_binding == (a1["source"], a1["hub"]["sha256"], a1["hub"]["size"], previous.previous.phase_pid, previous.previous.surface.record["startTime"]),
+            "Exact A1 then actual B017 source frames required")
+    phase_identity(previous.surface.record, target["hub"], "/usr/bin/creator-hub", os.getpid(), UID, previous=previous.previous.surface.record)
+    _actual017_bus_binding(previous); _actual017_bus_binding(previous.previous)
+    require(previous.started and previous.probed and previous.session_sent and previous.detach_started and previous.detach_sent
+            and previous.detached and previous.tools_stopping and not previous.input_unknown and previous.armed_element is None
+            and previous.adopted_wait_started and previous.logs is None
+            and previous.evidence.get("toolsClosedAfterRootExit") is True
+            and previous.evidence.get("adoptedExit") == {"pid": previous.phase_pid, "startTime": previous.surface.record["startTime"], "exitCode": 0},
+            "Automatic B must finish its exact detach/normal-exit/tool-retirement lifecycle")
+    require(previous.child is not None and type(previous.child.poll()) is int
+            and previous.child.pid == previous.driver_record["pid"] and previous.backend is not None,
+            "Old B driver tools are dirty or not fully retired")
+    pids = (previous.phase_pid, previous.child.pid, previous.backend["pid"])
+    require(all(type(pid) is int and pid > 1 for pid in pids) and len(set(pids)) == 3, "Exact distinct retired B/tool PIDs required")
+    for pid in pids:
+        try: alive_stat(pid)
+        except (FileNotFoundError, ProcessLookupError): pass
+        else: raise RuntimeError("Retired B/tool kernel PID remains live or reused")
+
+
+def _actual017_reopened_surface(surface, original, previous):
+    _actual017_retired_automatic(previous)
+    target = actual017_target_data()
+    require(bound_source_menu(surface)["source"] == target["source"] and surface.pid == surface.record["pid"], "Exact manual SECOND B017 source surface required")
+    require(original is not previous.original and original.pid == surface.pid and original.poll() is None,
+            "Manual SECOND B requires its own live owned Popen, never automatic attribution")
+    current = kernel_record(surface.pid, surface.native, surface.helper)
+    require(current == surface.record, "Manual SECOND B kernel frame differs")
+    phase_identity(current, target["hub"], "/usr/bin/creator-hub", os.getpid(), UID)
+    require(current["pid"] not in (previous.phase_pid, previous.previous.phase_pid)
+            and int(current["startTime"]) > int(previous.surface.record["startTime"]), "Fresh distinct manual SECOND B PID/start required")
+
+
+def actual017_reopened_html_pages(surface, original, pages, driver_pin, port, env, evidence, *, previous, root_diagnostics=None):
+    _actual017_reopened_surface(surface, original, previous)
+    require(driver_pin == previous.driver_pin and port == previous.port and env == previous.env, "Original driver pin/port/environment must survive SECOND B")
+    require(root_diagnostics is None or type(root_diagnostics) is RootEndpointDiagnostics
+            and root_diagnostics.child is original and root_diagnostics.port == port, "Only owned SECOND B diagnostics permitted")
+    value = HtmlPages.__new__(HtmlPages)
+    value.control, value.output = update_channel(True)
+    value.migrated = True
+    value.surface, value.original, value.pages = surface, original, pages
+    value.driver_pin, value.port, value.env, value.evidence = driver_pin, port, env, evidence
+    value.target_identity, value.previous = _actual017_reopened_identity(), previous
+    value.root_diagnostics, value.version, value.log_name = root_diagnostics, "0.1.17", "reopened-projects-html-driver"
+    value.phase_pid, value.phase_record = surface.pid, json.dumps(surface.record, sort_keys=True)
+    value.child = value.logs = value.backend = value.driver_record = None
+    value.detached, value.probed, value.adopted_wait_started = False, False, False
+    value.started = value.probe_started = value.detach_started = value.tools_stopping = value.input_unknown = False
+    value.session_sent = value.detach_sent = value.projects_identity_started = False
+    value.armed_element = value.expected_modal = None
+    value.d = pages.Driver(); value.d.guard = value.guard
+    value.transport = value.d.request; value.d.request = value.request
+    _actual017_bind_session(value)
+    return value
+
+
+def actual017_html_pages(surface, original, pages, driver_pin, port, env, evidence, *, previous=None, root_diagnostics=None):
+    _actual017_html_surface(surface, previous)
+    value = HtmlPages.__new__(HtmlPages)
+    value._initialize(surface, original, pages, driver_pin, port, env, evidence, _actual017_html_identity(),
+                      previous=previous, root_diagnostics=root_diagnostics, migrated=True)
+    _actual017_bind_session(value)
+    return value
+
+
 class HtmlPages:
     """Standard elements only; separate original-Popen and adopted-successor attachments."""
     def __init__(self, surface, original, pages, driver_pin, port, env, evidence, *, previous=None, root_diagnostics=None, migrated=False):
+        require(surface.record.get("kernelImageSha256") != actual017_target_data()["hub"]["sha256"],
+                "Actual017 HTML requires the fixed actual017 factory")
+        self._initialize(surface, original, pages, driver_pin, port, env, evidence, _historical_html_identity(),
+                         previous=previous, root_diagnostics=root_diagnostics, migrated=migrated)
+
+    def _initialize(self, surface, original, pages, driver_pin, port, env, evidence, target_identity, *, previous=None, root_diagnostics=None, migrated=False):
+        require(type(target_identity) is tuple and len(target_identity) == 5 and target_identity[0] in ("historical", "actual017"),
+                "One fixed HTML target identity required")
         self.control, self.output = update_channel(migrated)
         self.migrated = migrated
         self.surface, self.original, self.pages = surface, original, pages
@@ -2130,6 +2927,8 @@ class HtmlPages:
                 and original is previous.original and port == previous.port and driver_pin == previous.driver_pin
                 and migrated == previous.migrated,
                 "One exact initial-to-successor HTML handoff required")
+        require(previous is None or previous.target_identity == target_identity, "HTML target context differs from previous")
+        self.target_identity = target_identity
         self.previous = previous
         self.root_diagnostics = previous.root_diagnostics if previous is not None else root_diagnostics
         self.version = "0.1.17" if previous is not None else "0.1.16"
@@ -2148,7 +2947,32 @@ class HtmlPages:
         self.transport = self.d.request
         self.d.request = self.request
 
+    def _target_hub(self):
+        if _actual017_reopened_mode(self):
+            require(type(self) is HtmlPages and self.target_identity == _actual017_reopened_identity(), "Fixed SECOND B role changed")
+            _actual017_reopened_surface(self.surface, self.original, self.previous)
+            _actual017_recheck_session(self)
+            return actual017_target_data()["hub"]
+        require(type(self.target_identity) is tuple and len(self.target_identity) == 5, "Bound HTML target identity required")
+        if self.target_identity[0] == "actual017":
+            require(self.target_identity == _actual017_html_identity(), "Actual017 HTML target identity changed")
+            require(self.previous is None or self.previous.target_identity == self.target_identity, "Actual017 previous target context changed")
+            _actual017_html_surface(self.surface, self.previous)
+            _actual017_recheck_session(self)
+            return actual017_target_data()["hub"]
+        require(self.target_identity == _historical_html_identity(), "Historical HTML target identity changed")
+        require(self.previous is None or self.previous.target_identity == self.target_identity, "Historical previous target context changed")
+        return FIXED["17"]["hub"]
+
     def request(self, method, route, payload=None, limit=131072):
+        if _actual017_reopened_mode(self) and method == "POST" and route.endswith("/elements"):
+            allowed = ("#platform-status", ".footer-version", "#page-title", "iframe,object,embed", "#view-projects", "#projects-home-title",
+                       "#refresh-projects", "#suite-trigger", '#suite-menu [data-view="hub"]', "#usage-terms-dialog", "#convergence-dialog",
+                       "#project-list .project-row", '#project-list .project-row[data-mcp-selected="true"]',
+                       '#project-list .project-row[data-mcp-selected="false"]',
+                       '#project-list .project-row[data-mcp-selected="true"] .project-info small',
+                       '#project-list .project-row[data-mcp-selected="false"] .project-info small')
+            require(type(payload) is dict and payload.get("value") in allowed, "SECOND B Projects-only selector required")
         require(not self.detached, "Detached HTML adapter cannot send commands")
         if (method, route) == ("GET", "/status"):
             require(not self.session_sent and payload is None, "Status is only a pre-attachment read")
@@ -2182,13 +3006,16 @@ class HtmlPages:
     def endpoint_ready(self):
         require(self.surface.pid == self.phase_pid and json.dumps(self.surface.record, sort_keys=True) == self.phase_record,
                 "Bound HTML phase identity changed")
-        if self.previous is None:
+        target_hub = self._target_hub()
+        if _actual017_reopened_mode(self):
+            _actual017_reopened_surface(self.surface, self.original, self.previous)
+        elif self.previous is None:
             require(self.original.pid == self.surface.pid and self.original.poll() is None, "Original owned Popen changed/exited")
         else:
             self.successor_handoff()
             current = kernel_record(self.phase_pid, self.surface.native, self.surface.helper)
             require(current == self.surface.record, "Automatic successor kernel identity changed")
-            phase_identity(current, FIXED["17"]["hub"],
+            phase_identity(current, target_hub,
                            "/usr/bin/creator-hub", os.getpid(), UID, previous=self.previous.surface.record)
         self.surface.recheck(full=True)
         current = windows(self.surface.x11)
@@ -2283,9 +3110,32 @@ class HtmlPages:
             "webkitgtk:browserOptions": {"targetAddress": "127.0.0.1:" + str(self.port)}, "unhandledPromptBehavior": "ignore"}}})
         self.d.session = result["sessionId"]
         require(type(self.d.session) is str and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", self.d.session), "Bounded WebDriver session required")
-        self.probe()
+        if _actual017_reopened_mode(self):
+            self.evidence.update(probeReadOnly=False, launchRole="manual-second-b-projects", automaticRestartProof=False)
+            self._reopened_projects_document()
+        else:
+            self.probe()
+
+    def _reopened_projects_document(self):
+        require(type(self) is HtmlPages and self.target_identity == _actual017_reopened_identity()
+                and not self.projects_identity_started and not self.evidence["inputAttempts"], "One fixed SECOND B Projects document check required")
+        self.projects_identity_started = True
+        self.guard()
+        handles = self.d.call("GET", "/window/handles")
+        require(type(handles) is list and len(handles) == 1 and type(handles[0]) is str and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", handles[0]), "One SECOND B native document required")
+        require(self.d.call("GET", "/title") == "Creator Hub" and self.d.call("GET", "/url") in ("tauri://localhost", "tauri://localhost/"), "SECOND B document identity/origin differs")
+        wait(lambda: self.optional("#platform-status") == "Linux" and self.optional(".footer-version") == "0.1.17")
+        require(self.d.read("#page-title") == "CREATOR HUB" and not self.d.elements("iframe,object,embed"), "SECOND B original document required")
+        require(self.optional("#usage-terms-dialog", "attribute/open") is None and self.optional("#convergence-dialog", "attribute/open") is None, "SECOND B must not repeat terms/migration")
+        require(self.optional("#view-projects", "displayed") is True, "SECOND B must reopen Projects, never a feature page")
+        wait(lambda: self.optional("#view-projects", "attribute/aria-busy") == "false")
+        require(self.d.read("#projects-home-title") == "Projects" and self.d.read("#refresh-projects", "enabled") is True, "SECOND B Projects readiness differs")
+        self.guard(); self.probed = True
+        self.evidence.update(projectsDocumentVerified=True, documentVersion="0.1.17", originalRoot=self.surface.record,
+                             driver=self.driver_record, nativeDriver=self.backend, endpointPort=self.port, inputCountAtDocumentCheck=0)
 
     def probe(self):
+        require(not _actual017_reopened_mode(self), "SECOND B cannot run the generic or SDK probe")
         require(not self.probe_started and not self.evidence["inputAttempts"], "One no-input compatibility probe required")
         self.probe_started = True; self.evidence["phase"] = "probe-document"
         self.guard()
@@ -2310,6 +3160,7 @@ class HtmlPages:
         return self.d.call("GET", "/element/" + rows[0] + "/" + endpoint) if rows else None
 
     def click(self, selector, actions, label):
+        require(not _actual017_reopened_mode(self) or label in ("suite-trigger", "view-home"), "SECOND B permits Projects navigation only")
         require(self.probed and not self.detached and not self.input_unknown, "HTML input unqualified/unknown; no retry")
         controls = {"usage-terms-checkbox": "#usage-terms-checkbox", "usage-terms-continue": "#usage-terms-continue",
                     "convergence-later": "#convergence-later", "suite-trigger": "#suite-trigger",
@@ -2336,6 +3187,7 @@ class HtmlPages:
         self.evidence["phase"] = "html-input-returned"
 
     def startup(self, home, report):
+        require(not _actual017_reopened_mode(self), "SECOND B cannot repeat startup or migration")
         def phase(name): report["startupPhase"] = name
         actions = report["startupUi"]
         phase("wait-usage-terms")
@@ -2359,6 +3211,7 @@ class HtmlPages:
         phase("complete")
 
     def require_feature_ready(self, feature, heading):
+        require(not _actual017_reopened_mode(self), "SECOND B feature/SDK inspection forbidden")
         require(feature in ("mcp", "setup"), "Fixed direct feature required")
         prefix = "#feature-" + feature
         record = {"feature": feature, "readOnly": True, "inputAuthority": False, "guardPassed": False,
@@ -2405,6 +3258,7 @@ class HtmlPages:
             require(False, "Direct feature not Ready")
 
     def direct_pages(self, actions):
+        require(not _actual017_reopened_mode(self), "SECOND B MCP/Setup navigation forbidden")
         phase_processes(self.surface)
         for feature, heading in (("mcp", "Creator Works MCP"), ("setup", "Project Setup")):
             self.click("#suite-trigger", [], "suite-trigger")
@@ -2426,6 +3280,7 @@ class HtmlPages:
         return True
 
     def restored(self, report):
+        require(not _actual017_reopened_mode(self), "Manual SECOND B is not automatic restoration evidence")
         require(self.previous is not None and self.probed and not self.detached, "Qualified successor attachment required")
         require(self.optional("#usage-terms-dialog", "attribute/open") is None, "Saved terms acknowledgement did not survive")
         actions = report.setdefault("successorStartupUi", [])
@@ -2447,6 +3302,7 @@ class HtmlPages:
         report["restoredLastTool"] = "setup"
 
     def diagnostic_phase(self, phase):
+        if _actual017_reopened_mode(self): return
         try:
             callback = getattr(self, "diagnostic_callback", None)
             if callback is not None:
@@ -2477,7 +3333,13 @@ class HtmlPages:
 
     def finish_tools(self):
         require(self.detached and not self.tools_stopping, "Tool teardown requires one qualified detach")
-        if self.previous is None:
+        if _actual017_reopened_mode(self):
+            require(self.target_identity == _actual017_reopened_identity() and type(self) is HtmlPages, "SECOND B teardown role changed")
+            _actual017_retired_automatic(self.previous)
+            require(self.original.pid == self.phase_pid and self.original.poll() == 0
+                    and json.dumps(self.surface.record, sort_keys=True) == self.phase_record, "SECOND B teardown requires its own normal zero exit")
+            self.evidence["manualExit"] = {"pid": self.phase_pid, "startTime": self.surface.record["startTime"], "exitCode": 0}
+        elif self.previous is None:
             require(self.original.pid == self.phase_pid and self.original.poll() == 0, "Tool teardown requires independently observed normal Root exit")
         else:
             self.successor_handoff()
@@ -2509,13 +3371,17 @@ def field_text(surface, source_id):
 
 HISTORICAL_MENU_SOURCES = ("a89ed2b90278b33bebd0b4ba29d87904d2fe683b", "75a99ff4a267064aaa3ac9e30039bc91dc791d89")
 CURRENT_MENU_SOURCES = ("085131ba6f3050a795fd513139a34975658ba321", "dce183ec0a0f23210d83b064c04ecc8b6af999fe")
+A1_MENU_SOURCE = "ee48f25905947e0795eccb9d1d6c67f28f270545"
+A1_MENU_IMAGE = {"size": 29088720, "sha256": "502f2ba0ad9877318fc7477d54c9c1e6efd6aec4acb19323a30eaa4e613f0832"}
+B017_MENU_SOURCE = "dea67abb681ff99d3d0cd756954605a3c58627a6"
+B017_MENU_IMAGE = {"size": 29086768, "sha256": "fedc79bd67928a4e3570ca86c6157f4ecb553d046f0febe6823b3a976803a673"}
 
 
 def source_menu_profile(source):
     """Finite source expectations; this does not admit an artifact or discover UI."""
-    require(type(source) is str and source in HISTORICAL_MENU_SOURCES + CURRENT_MENU_SOURCES,
+    require(type(source) is str and source in HISTORICAL_MENU_SOURCES + CURRENT_MENU_SOURCES + (A1_MENU_SOURCE, B017_MENU_SOURCE),
             "Unreviewed menu source; version or UI labels are not source identity")
-    if source in CURRENT_MENU_SOURCES:
+    if source in CURRENT_MENU_SOURCES + (A1_MENU_SOURCE, B017_MENU_SOURCE):
         return {"source": source,
                 "initial": {"hub": "Home Projects and updates", "mcp": "MCP AI bridge for Unity Checking",
                             "setup": "Setup / Repair Unity + Creator SDK project setup and repair Checking"},
@@ -2535,6 +3401,8 @@ def bind_source_menu(surface, source, expected_image):
     require(not hasattr(surface, "menu_binding"), "Menu source already bound")
     profile = source_menu_profile(source)
     validate_pin(expected_image, MAX_FILE)
+    require(source != A1_MENU_SOURCE or expected_image == A1_MENU_IMAGE, "A1 menu installed image required")
+    require(source != B017_MENU_SOURCE or expected_image == B017_MENU_IMAGE, "B017 menu installed image required")
     surface.recheck(full=True)
     record = surface.record
     require(type(record.get("pid")) is int and record["pid"] > 1
@@ -2551,6 +3419,10 @@ def bound_source_menu(surface):
     source, image_hash, image_size, pid, start = binding
     profile = source_menu_profile(source)
     validate_pin({"size": image_size, "sha256": image_hash}, MAX_FILE)
+    require(source != A1_MENU_SOURCE or {"size": image_size, "sha256": image_hash} == A1_MENU_IMAGE,
+            "A1 menu installed image required")
+    require(source != B017_MENU_SOURCE or {"size": image_size, "sha256": image_hash} == B017_MENU_IMAGE,
+            "B017 menu installed image required")
     surface.recheck(full=True)
     record = surface.record
     require(record.get("pid") == pid and record.get("startTime") == start
@@ -2693,6 +3565,15 @@ def feature_ready(surface, feature):
 
 def pending_proof(root, native, helper, polkit, baseline, *, migrated=False):
     """Root-only, read-only attribution of the actual sealed private017 stdin."""
+    return _pending_proof(root, native, helper, polkit, baseline, FIXED["17"], "session", migrated=migrated)
+
+
+def actual017_pending_proof(root, native, helper, polkit, baseline):
+    _actual017_baseline(baseline)
+    return _pending_proof(root, native, helper, polkit, baseline, actual017_target_data(), "session-changed-mcp", migrated=True)
+
+
+def _pending_proof(root, native, helper, polkit, baseline, target, session_mode, *, migrated=False):
     require(os.getuid() == os.geteuid() == 0, "Setuid observer requires the fixed root broker")
     require(root["uids"] == [UID] * 4 and root["executable"] == "/usr/bin/creator-hub"
             and root["kernelImageSha256"] == baseline["hub"]["sha256"]
@@ -2702,7 +3583,7 @@ def pending_proof(root, native, helper, polkit, baseline, *, migrated=False):
     command = Path(f"/proc/{supervisor['pid']}/cmdline").read_bytes()
     control, _ = update_channel(migrated)
     script = "native-linux-migrated-update.py" if migrated else "native-linux-production-016-update.py"
-    expected_command = b"\0".join(os.fsencode(part) for part in ("/usr/bin/python3", "-B", str(control / "scripts" / script), "session")) + b"\0"
+    expected_command = b"\0".join(os.fsencode(part) for part in ("/usr/bin/python3", "-B", str(control / "scripts" / script), session_mode)) + b"\0"
     require(command == expected_command, "Fixed reviewed session ancestry required")
     matches = []
     import fcntl
@@ -2722,16 +3603,16 @@ def pending_proof(root, native, helper, polkit, baseline, *, migrated=False):
         fd = os.open(f"/proc/{pid}/fd/0", os.O_RDONLY | os.O_CLOEXEC)
         try:
             before = os.fstat(fd)
-            require(stat.S_ISREG(before.st_mode) and before.st_size == FIXED["17"]["deb"]["size"]
+            require(stat.S_ISREG(before.st_mode) and before.st_size == target["deb"]["size"]
                     and fcntl.fcntl(fd, fcntl.F_GET_SEALS) == 15, "Exact fully sealed private017 package stdin required")
             offset, digest = 0, hashlib.sha256()
             while offset < before.st_size:
                 part = os.pread(fd, min(65536, before.st_size - offset), offset)
                 require(part, "Truncated sealed package"); offset += len(part); digest.update(part)
-            require(digest.hexdigest() == FIXED["17"]["deb"]["sha256"] and stamp(os.fstat(fd)) == stamp(before)
+            require(digest.hexdigest() == target["deb"]["sha256"] and stamp(os.fstat(fd)) == stamp(before)
                     and fcntl.fcntl(fd, fcntl.F_GET_SEALS) == 15 and kernel_record(pid, native, helper) == process
                     and kernel_record(root["pid"], native, helper) == root, "Pending sealed package/process changed")
-            matches.append({"root": root, "pkexec": process, "package": FIXED["17"]["deb"], "seals": 15, "readOnly": True})
+            matches.append({"root": root, "pkexec": process, "package": target["deb"], "seals": 15, "readOnly": True})
         finally:
             os.close(fd)
     require(len(matches) == 1, "One exact pending Root -> pkexec -> sealed017 request required")
@@ -2739,6 +3620,15 @@ def pending_proof(root, native, helper, polkit, baseline, *, migrated=False):
 
 
 def verify_installed(review, version):
+    return _verify_installed(review, version, None if version == "16" else FIXED["17"])
+
+
+def actual017_verify_installed(review):
+    _actual017_review(review)
+    return _verify_installed(review, "17", actual017_target_data())
+
+
+def _verify_installed(review, version, target):
     state = run_tool(["/usr/bin/dpkg-query", "-W", "-f=${Package}\t${Version}\t${Architecture}\t${db:Status-Status}\n", "creator-hub"])
     require(state == ("creator-hub\t0.1." + version + "\tamd64\tinstalled\n").encode(), "Actual installed package state differs")
     require(run_tool(["/usr/bin/dpkg", "--verify", "creator-hub"]) == b"", "Installed package verification differs")
@@ -2750,7 +3640,7 @@ def verify_installed(review, version):
             bound(file, {k: expected[k] for k in ("size", "sha256")}, mode=expected["mode"], uid=0)
         else:
             require(stat.S_ISDIR(info.st_mode), "Installed package directory became a file")
-    return {"version": "0.1." + version, "hub": review["baseline"]["hub"] if version == "16" else FIXED["17"]["hub"], "dpkgVerified": True}
+    return {"version": "0.1." + version, "hub": review["baseline"]["hub"] if version == "16" else target["hub"], "dpkgVerified": True}
 
 
 def portable_state(home, review, version, *, previous=None):
@@ -2793,6 +3683,16 @@ def recheck_endpoint(system, polkit, glib, endpoint, session_identity, pids):
 
 
 def authorize(surface, agent, agent_record, parent, endpoint, system, glib, atspi, polkit, flow, helper, native, secret, evidence, *, migrated=False):
+    return _authorize(surface, agent, agent_record, parent, endpoint, system, glib, atspi, polkit, flow, helper, native, secret, evidence, FIXED["17"], migrated=migrated)
+
+
+def actual017_authorize(surface, agent, agent_record, parent, endpoint, system, glib, atspi, polkit, flow, helper, native, secret, evidence):
+    _actual017_a1_surface(surface)
+    require(type(secret) is bytearray and len(secret) > 0, "Fixed actual017 approval requires its owned credential frame")
+    return _authorize(surface, agent, agent_record, parent, endpoint, system, glib, atspi, polkit, flow, helper, native, secret, evidence, actual017_target_data(), migrated=True)
+
+
+def _authorize(surface, agent, agent_record, parent, endpoint, system, glib, atspi, polkit, flow, helper, native, secret, evidence, target, *, migrated=False):
     control, output = update_channel(migrated)
     require(not evidence["systemActions"], "At most one authorization action")
     captured = wait(lambda: polkit.windows(agent.pid, helper, surface.x11), 30)
@@ -2811,7 +3711,7 @@ def authorize(surface, agent, agent_record, parent, endpoint, system, glib, atsp
         answer_file = control / f"input-{counter}.json"
         wait(answer_file.exists)
         answer = parse(read(answer_file, 32768, uid=0, mode=0o644))
-        require(answer["index"] == counter and answer["proof"]["root"] == surface.record and answer["proof"]["package"] == FIXED["17"]["deb"], "Fresh kernel sealed-package input proof refused")
+        require(answer["index"] == counter and answer["proof"]["root"] == surface.record and answer["proof"]["package"] == target["deb"], "Fresh kernel sealed-package input proof refused")
         polkit.own_agent(agent, agent_record, parent, helper)
         recheck_endpoint(system, polkit, glib, endpoint, session_identity, (parent["pid"], agent.pid, surface.pid))
         record["lastKernelProof"] = answer["proof"]
