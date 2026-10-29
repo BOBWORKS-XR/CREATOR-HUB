@@ -29,7 +29,7 @@ import xml.etree.ElementTree as ET
 
 sys.dont_write_bytecode = True
 HERE = Path(__file__).resolve().parent
-BRANCH = "refs/heads/validation/native-linux-production-016"
+BRANCH = "refs/heads/validation/native-linux-journal-production-016"
 WORKFLOW = "BOBWORKS-XR/CREATOR-HUB/.github/workflows/native-linux-production-016-migration.yml@" + BRANCH
 SCENARIOS = ("migration-guide-cancel", "migration-first-system-cancel",
              "migration-second-system-cancel", "migration-approve")

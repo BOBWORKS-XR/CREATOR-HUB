@@ -5,30 +5,30 @@
   "toVersion": "0.1.17",
   "baseline": {
     "version": "0.1.16",
-    "source": "ee48f25905947e0795eccb9d1d6c67f28f270545",
-    "tree": "2157cd82c0c1500390c6cf496506e5eb287b9051",
-    "run": 40611629636,
-    "job": 122564362113,
-    "artifact": 12784045079,
+    "source": "be0adef208c80a60f8599bd466a45b28bde73588",
+    "tree": "8eb710826de448d820a3cee6d964e4a3f3a24e10",
+    "run": 40899552207,
+    "job": 123537944797,
+    "artifact": 12909617948,
     "zip": {
-      "size": 183997997,
-      "sha256": "a027eb4912ececd05f98dc7c23d47f01a3ca976660d88d229630441165f490b4"
+      "size": 183999603,
+      "sha256": "d6612027fded7b6163e8212453b853a08285f6551baaa1d0871f0121a040a2a7"
     },
     "raw": {
-      "size": 29088720,
-      "sha256": "a297b0a3341f82ccf63bb27f27790501e6c9e8fc77c3784f6bb3e463bdade0d6"
+      "size": 29088440,
+      "sha256": "7a84da3326fbc41501c2a5415fdf6a6f82ccf9401ad203a9734d2c9025a5961e"
     },
     "deb": {
-      "size": 64512558,
-      "sha256": "6ac58a1417ee10647f0b9f7d6e71565373e799c70767c020b8a96c229eaa48eb"
+      "size": 64513510,
+      "sha256": "9293238fe70c95302735aed96dd547cd648c224f6b29f72449d0d10428afad45"
     },
     "hub": {
-      "size": 29088720,
-      "sha256": "502f2ba0ad9877318fc7477d54c9c1e6efd6aec4acb19323a30eaa4e613f0832"
+      "size": 29088440,
+      "sha256": "f4b86cbceed7e81b9b871160f11a9dd126f2c1dae8e24ecbbf5014e00e588a33"
     },
     "archive": {
-      "size": 55576690,
-      "sha256": "36b250f9e6e9e6c7dbd4278d6ab6d7bec69c77894f690673ae137e669479ea82"
+      "size": 55580358,
+      "sha256": "248de103e40dabd032516c2d291099fb2f372deba9ab1a980ca65e570874f50e"
     },
     "helper": {
       "size": 1168536,
@@ -51,43 +51,55 @@
   },
   "artifacts": {
     "assembly16": {
-      "source": "ee48f25905947e0795eccb9d1d6c67f28f270545",
-      "tree": "2157cd82c0c1500390c6cf496506e5eb287b9051",
-      "branch": "validation/linux-integrated-candidate-016",
+      "source": "be0adef208c80a60f8599bd466a45b28bde73588",
+      "tree": "8eb710826de448d820a3cee6d964e4a3f3a24e10",
+      "branch": "validation/journal-a-assembly-016",
       "workflow": ".github/workflows/unix-managed-assembly.yml",
-      "run": 40611629636,
+      "run": 40899552207,
       "attempt": 1,
-      "job": 122564362113,
-      "artifact": 12784045079,
-      "name": "signed-unix-hub-linux-40611629636-1",
+      "job": 123537944797,
+      "artifact": 12909617948,
+      "name": "signed-unix-hub-linux-40899552207-1",
       "zip": {
-        "size": 183997997,
-        "sha256": "a027eb4912ececd05f98dc7c23d47f01a3ca976660d88d229630441165f490b4"
+        "size": 183999603,
+        "sha256": "d6612027fded7b6163e8212453b853a08285f6551baaa1d0871f0121a040a2a7"
       },
       "files": {
         "builtin-manifest.json": {
           "size": 3663,
-          "sha256": "d510446b1280151e7e43a9fc3641492d979346c880b9346f82efe30dfdd227be"
-        },
-        "builtin-manifest.pre-wrapper.json": {
-          "size": 2027,
-          "sha256": "e51ae2029cae75471edfd9763fed312c94fbe45c13713a896d5e290cf57a816d"
+          "sha256": "8f7e7efa742207a20980dbb8099b6a0d982cef11bbdd4fb91dd17e4984fa6b4a"
         },
         "builtin-manifest.preparation.json": {
           "size": 1457,
-          "sha256": "6bb58c1b9bc29980e6463e7dfd237443019147a6f7169e426a8c5ee681046217"
+          "sha256": "482eeecd53891796f00f4e617541bc8a5f6aa6ff4d642131b42009beb155fdba"
+        },
+        "builtin-manifest.pre-wrapper.json": {
+          "size": 2027,
+          "sha256": "f990dd8282d779b6dd3c177d927cdeaeddaac538f1b73ff4a4a2fbd7017f33de"
+        },
+        "signed-unix-assembly.json": {
+          "size": 3560,
+          "sha256": "1651ce5f0ba7b1d153030624eef544804ddbd4b4ede0ed3c712f7e7af28cffc6"
+        },
+        "unix-package-integrity.json": {
+          "size": 2151,
+          "sha256": "e83f6d35bb067057117d9e5fe6da305cb63cb0f4cbb7ae3bbb5682040545a4dc"
+        },
+        "native-packages/Creator Hub_0.1.16_amd64.deb": {
+          "size": 64513510,
+          "sha256": "9293238fe70c95302735aed96dd547cd648c224f6b29f72449d0d10428afad45"
         },
         "creator-hub": {
-          "size": 29088720,
-          "sha256": "a297b0a3341f82ccf63bb27f27790501e6c9e8fc77c3784f6bb3e463bdade0d6"
+          "size": 29088440,
+          "sha256": "7a84da3326fbc41501c2a5415fdf6a6f82ccf9401ad203a9734d2c9025a5961e"
         },
         "modules.tar.gz": {
-          "size": 55576690,
-          "sha256": "36b250f9e6e9e6c7dbd4278d6ab6d7bec69c77894f690673ae137e669479ea82"
+          "size": 55580358,
+          "sha256": "248de103e40dabd032516c2d291099fb2f372deba9ab1a980ca65e570874f50e"
         },
         "modules/mcp/creator-works-mcp-launcher": {
-          "size": 17369264,
-          "sha256": "689d390f50f5f2621a844115218ff9366beac6a982667b95475c54ca26ea3b17"
+          "size": 17369144,
+          "sha256": "a0ba3e3ad57aa8a8a981b2daae5332f2125264a048b19ad765c860fc5da720d7"
         },
         "modules/mcp/server/LICENSE": {
           "size": 1068,
@@ -131,124 +143,112 @@
         },
         "modules/routing/router.minisig": {
           "size": 305,
-          "sha256": "ba1fc6822be7a3d53e4a7ea5afe2bec4a68dffc19950315cc00732adfcf83842"
+          "sha256": "882b398752e223c333a95ed4ef19045fdb04578041fc0264879ad3a48ce967d9"
         },
         "modules/routing/runtime.json": {
           "size": 1133,
-          "sha256": "939f19bf4f376315c8aa8143573e59065a822b90932f576a25f29b171f2cc057"
+          "sha256": "a41d5590ad1fc5147e848a96ff270bd4e22bfa6da9b4f48e4086dc7036dffa06"
         },
         "modules/routing/runtime.minisig": {
           "size": 305,
-          "sha256": "4c0ca3610f3881e1b3185d7302609bbd8f7aba4623b2ea90e5ac5774004ac864"
+          "sha256": "5df6a718d7f13d9bb3efa311b4af5b30458a9cd03d00a1be6a2658545d6e6bae"
         },
         "modules/setup/creator-project-setup": {
           "size": 16613776,
           "sha256": "b2972b64fded6e91f7e06d0443534ce6c8a5a1f0a9001857a8cd77ea7fa95d80"
-        },
-        "native-packages/Creator Hub_0.1.16_amd64.deb": {
-          "size": 64512558,
-          "sha256": "6ac58a1417ee10647f0b9f7d6e71565373e799c70767c020b8a96c229eaa48eb"
-        },
-        "signed-unix-assembly.json": {
-          "size": 3547,
-          "sha256": "44c800da70f5c8e69f6963390ff6761c94051dfce9492b908ecfd22c78d61937"
-        },
-        "unix-package-integrity.json": {
-          "size": 2151,
-          "sha256": "9554c56f6a7642a66a9935599b084d8eacbf4801ab1add8d3c6316aae486d763"
         }
       }
     },
     "assembly17": {
-      "source": "dea67abb681ff99d3d0cd756954605a3c58627a6",
-      "tree": "db4ec3934a8b80014f418fb9ed5ad2e0fe581bc5",
+      "source": "a61e7b0152689b7fa25fd0f4fe3e7d3894751cc5",
+      "tree": "ab48fbce32accb627a5f5e0de2f496699c2317b4",
       "branch": "validation/linux-private-update-fixture-017",
       "workflow": ".github/workflows/private-linux-update-fixture-017.yml",
-      "run": 40619538729,
+      "run": 40903331594,
       "attempt": 1,
-      "job": 122590023543,
-      "artifact": 12786602892,
-      "name": "private-linux-update-fixture-017-40619538729-1",
+      "job": 123551467029,
+      "artifact": 12909839246,
+      "name": "private-linux-update-fixture-017-40903331594-1",
       "zip": {
-        "size": 128430365,
-        "sha256": "33134f88a958fb18d8a52827468ddcc4c167019b1e793d80f21cee7c1174a10a"
+        "size": 128433738,
+        "sha256": "2dcce20200c14fe88098a48ef5768cb63a91a01de14a2c82bf44a4672bf1a86a"
       },
       "files": {
-        "CREATOR-HUB/CREATOR-HUB/artifacts/unified/private-linux-update-fixture-017/builtin-manifest.json": {
-          "size": 3663,
-          "sha256": "42ec01cf6b4c34b2c0c2b9f13aef493b41e14bab0703f8cee06c78e49097c4bd"
-        },
-        "CREATOR-HUB/CREATOR-HUB/artifacts/unified/private-linux-update-fixture-017/creator-hub": {
-          "size": 29086768,
-          "sha256": "47ea1c9c158df10b8e64709422ce99b91ac5f9e69152fb18248ac783e9f2e387"
-        },
-        "CREATOR-HUB/CREATOR-HUB/artifacts/unified/private-linux-update-fixture-017/modules.tar.gz": {
-          "size": 55576707,
-          "sha256": "5a41b14f5b1ece0d772a5cf71d028517db7e0711891d16019f247b3362009828"
+        "_temp/private017-fresh-api.json": {
+          "size": 31805,
+          "sha256": "99531be5779e9502ac46772e85bd2babda948b4d8289632a8d33dbf43bf03caf"
         },
         "CREATOR-HUB/CREATOR-HUB/artifacts/unified/private-linux-update-fixture-017/native-packages/Creator Hub_0.1.17_amd64.deb": {
-          "size": 64516566,
-          "sha256": "1bd69ef6ad81f6af396175e8d2ce74fdabc7df39c936bf8c8e3704a92260f222"
+          "size": 64519358,
+          "sha256": "61a32fe588280366c3d6f8b76323764867bca8c3537d30a45c33ed2302be4a43"
         },
-        "CREATOR-HUB/CREATOR-HUB/artifacts/unified/private-linux-update-fixture-017/private017-assembly.json": {
-          "size": 4996,
-          "sha256": "89193cdc7f970c2be668ee03566fa97b0222325587b72828edebad1440d774ee"
-        },
-        "CREATOR-HUB/CREATOR-HUB/artifacts/unified/private-linux-update-fixture-017/private017-package-expected.json": {
-          "size": 830,
-          "sha256": "8ded2958c847a9a2ada41ffc858d2b2d22d1da7ca85d0691e75cc87727dd3c06"
+        "CREATOR-HUB/CREATOR-HUB/artifacts/unified/private-linux-update-fixture-017/builtin-manifest.json": {
+          "size": 3663,
+          "sha256": "c37d3c6addc4d6f5b711a52677176c093ad5e4bba30021ce430d9f841026db15"
         },
         "CREATOR-HUB/CREATOR-HUB/artifacts/unified/private-linux-update-fixture-017/unix-package-integrity.json": {
           "size": 2151,
-          "sha256": "002961f14bcec965830b5fc2540d737f9499d550c8264c1bbde569bdef6a2570"
+          "sha256": "93da197ce1590b49ce491cf4b5870987f3ed210b54183115c361cee51aefc208"
         },
-        "_temp/private017-fresh-api.json": {
-          "size": 32556,
-          "sha256": "2c983fc42d63512e9ef350203750a5e24f2176a956ebf4577e2595e20842c057"
+        "CREATOR-HUB/CREATOR-HUB/artifacts/unified/private-linux-update-fixture-017/private017-package-expected.json": {
+          "size": 830,
+          "sha256": "0fcc205b8f964302805ddc9edd442cde34bf09d66f98da5a5a6419873b97eb1e"
+        },
+        "CREATOR-HUB/CREATOR-HUB/artifacts/unified/private-linux-update-fixture-017/private017-assembly.json": {
+          "size": 4996,
+          "sha256": "9b8a4d8b1383fa2d53c19f9a433ae0c64f93377206885ac32e21ec2c1abbd292"
+        },
+        "CREATOR-HUB/CREATOR-HUB/artifacts/unified/private-linux-update-fixture-017/creator-hub": {
+          "size": 29087688,
+          "sha256": "184160aaf17b1ad2535dbd08bf66b3a7aefc04b64ce6fe6f54365c4afc6c7674"
+        },
+        "CREATOR-HUB/CREATOR-HUB/artifacts/unified/private-linux-update-fixture-017/modules.tar.gz": {
+          "size": 55580353,
+          "sha256": "96c04c882a6c3826e096d8e04f78a1b1a1804ed563612634469cb596c869da75"
         }
       }
     }
   },
   "deliveries": {
     "signedDeb17": {
-      "asset": 683714773,
-      "name": "signed-private-deb017-carrier-40619538729.zip",
+      "asset": 689113479,
+      "name": "signed-private-deb017-carrier-40903331594.zip",
       "zip": {
-        "size": 64474918,
-        "sha256": "4aa2ffb8f7c43782e16f163253a570e1840ad2d5fe78edf16b80775ee187c476"
+        "size": 64479116,
+        "sha256": "9719b4d8d205b4d8a61c0b4bb77c056110a227e7f0a8aa9aba23f7787da7bbde"
       },
       "files": {
         "Creator_Hub_0.1.17_amd64-acceptance-only.deb": {
-          "size": 64516566,
-          "sha256": "1bd69ef6ad81f6af396175e8d2ce74fdabc7df39c936bf8c8e3704a92260f222"
+          "size": 64519358,
+          "sha256": "61a32fe588280366c3d6f8b76323764867bca8c3537d30a45c33ed2302be4a43"
         },
         "Creator_Hub_0.1.17_amd64-acceptance-only.deb.minisig": {
           "size": 329,
-          "sha256": "0867b181a331e248dc7efd2789dce1f94b0a1cb64831bcdccc06e105a33d135a"
+          "sha256": "f58b0587727cad13049642245eb7bb309b51dfd481366ee89245f290076dfce6"
         },
         "creator-hub-linux-x86_64-deb.json": {
           "size": 514,
-          "sha256": "be4754284d87f067f6fa4b4f19bfc1ef29df187c76aa9e481d95535edf7391e5"
+          "sha256": "c2862a4b6c0c9d7d3dccc232079bf4436c0d8695e8a88ed8a3bccf6dad04a16c"
         },
         "creator-hub-linux-x86_64-deb.json.minisig": {
           "size": 311,
-          "sha256": "2467de9d43e08f56f9705e3695af6dc027682deda414c173953abd2801b4b1df"
+          "sha256": "24f9e75cbea3b8afcfa59df70ee0ff595ef21b93a9efb2313de223788f91b885"
         },
         "fresh-api.json": {
-          "size": 58422,
-          "sha256": "83ccbaafab570260d70bcea7b01269bd40ca01c8a69d9aa8c06a30b824b38549"
+          "size": 57246,
+          "sha256": "a554d4de0308cffc570e678258e6c47f6d4a5843e45825dcacc6c7c6034ccd7e"
         },
         "latest.json": {
           "size": 751,
-          "sha256": "3610eab34edcf9a2c2c4ee16736ba8416e8e8dcfb0e7194a10ed2f3d0fd27787"
+          "sha256": "3e9362038eeb37cdac6f0caae08a0b7d8b4124e8dbb210de5f62a81f988742ef"
         },
         "plan.json": {
-          "size": 4909,
-          "sha256": "fcc6587c46677a59bcdfec35c74fdd2b21da6d207fc045e0169f92eec84425d4"
+          "size": 4789,
+          "sha256": "bab785cdbce7faee4a9ab9cca9fea9b27ca9268b2f73483024286f03c1531401"
         },
         "private-deb-qualification-receipt.json": {
           "size": 1983,
-          "sha256": "b30c52c3c55f19474d8abea050e7a5c6faa17b44dc94dd9724e1c59314e5bd01"
+          "sha256": "574bd90ad64d53e5d3c9506f6ba4e6f2e07def1a0e5d68d5d0025326d55e76b4"
         }
       }
     }

@@ -13,7 +13,7 @@ const workflow = parsed.toJSON();
 
 test('exact validation-branch push registers the workflow but execution remains manual and opted in', () => {
   assert.deepEqual(Object.keys(workflow.on).sort(), ['push', 'workflow_dispatch']);
-  assert.deepEqual(workflow.on.push, { branches: ['validation/native-linux-production-016'] });
+  assert.deepEqual(workflow.on.push, { branches: ['validation/native-linux-journal-production-016'] });
   assert.deepEqual(workflow.permissions, { contents: 'read', actions: 'read' });
   assert.deepEqual(Object.keys(workflow.jobs), ['migration', 'changed_delivery', 'changed_mcp']);
   const inputs = workflow.on.workflow_dispatch.inputs;
@@ -24,8 +24,8 @@ test('exact validation-branch push registers the workflow but execution remains 
   assert.deepEqual(inputs.scenario.options, ['migration-guide-cancel', 'migration-first-system-cancel', 'migration-second-system-cancel', 'migration-approve']);
   const job = workflow.jobs.migration;
   for (const condition of ["github.repository == 'BOBWORKS-XR/CREATOR-HUB'", "github.repository_id == '1364807512'",
-    "github.ref == 'refs/heads/validation/native-linux-production-016'", "github.event_name == 'workflow_dispatch'",
-    "github.workflow_ref == 'BOBWORKS-XR/CREATOR-HUB/.github/workflows/native-linux-production-016-migration.yml@refs/heads/validation/native-linux-production-016'",
+    "github.ref == 'refs/heads/validation/native-linux-journal-production-016'", "github.event_name == 'workflow_dispatch'",
+    "github.workflow_ref == 'BOBWORKS-XR/CREATOR-HUB/.github/workflows/native-linux-production-016-migration.yml@refs/heads/validation/native-linux-journal-production-016'",
     'inputs.execute_migration == true']) assert.ok(job.if.includes(condition), condition);
   assert.equal(job['runs-on'], 'ubuntu-22.04');
   assert.equal(job.strategy, undefined);
@@ -45,8 +45,8 @@ test('actual job guard skips registration pushes even with execution requested, 
   });
   assert.equal(clauses.length, 7);
   const github = { repository: 'BOBWORKS-XR/CREATOR-HUB', repository_id: '1364807512',
-    ref: 'refs/heads/validation/native-linux-production-016', event_name: 'workflow_dispatch',
-    workflow_ref: 'BOBWORKS-XR/CREATOR-HUB/.github/workflows/native-linux-production-016-migration.yml@refs/heads/validation/native-linux-production-016' };
+    ref: 'refs/heads/validation/native-linux-journal-production-016', event_name: 'workflow_dispatch',
+    workflow_ref: 'BOBWORKS-XR/CREATOR-HUB/.github/workflows/native-linux-production-016-migration.yml@refs/heads/validation/native-linux-journal-production-016' };
   const admitted = (context, inputs) => clauses.every(({ field: [root, key], operator, expected }) =>
     operator === '==' ? ({ github: context, inputs })[root]?.[key] === expected
       : ({ github: context, inputs })[root]?.[key] !== expected);
@@ -193,8 +193,8 @@ test('changed-payload job has only the exact opted-in conjunction and excludes r
   });
   assert.equal(clauses.length, 8);
   const github = { repository: 'BOBWORKS-XR/CREATOR-HUB', repository_id: '1364807512',
-    ref: 'refs/heads/validation/native-linux-production-016', event_name: 'workflow_dispatch',
-    workflow_ref: 'BOBWORKS-XR/CREATOR-HUB/.github/workflows/native-linux-production-016-migration.yml@refs/heads/validation/native-linux-production-016' };
+    ref: 'refs/heads/validation/native-linux-journal-production-016', event_name: 'workflow_dispatch',
+    workflow_ref: 'BOBWORKS-XR/CREATOR-HUB/.github/workflows/native-linux-production-016-migration.yml@refs/heads/validation/native-linux-journal-production-016' };
   const input = { execute_migration: true, continue_changed_mcp: true, scenario: 'migration-approve' };
   const accepts = (g, inputs) => clauses.every(({ field: [root, key], expected }) => ({ github: g, inputs })[root]?.[key] === expected);
   assert.equal(accepts(github, input), true);
@@ -210,7 +210,7 @@ test('changed-payload job has only the exact opted-in conjunction and excludes r
   assert.equal(job.needs, 'changed_delivery');
   assert.deepEqual(job.permissions, { contents: 'read', actions: 'read' });
   assert.equal(job.env.CREATOR_CHANGED_MCP_DELIVERY_ARTIFACT, '${{ needs.changed_delivery.outputs.artifact }}');
-  assert.equal(job.env.UPDATE_PROFILE_SHA256, '1fd56c76f100422e2c380e19cfc5dfb9da4ecf05a6348efdba99bbaebb5cd792');
+  assert.equal(job.env.UPDATE_PROFILE_SHA256, 'ef2b5a589d934bf48306ddfd53d133513f3ab4d22b9622672f76887cb7acb095');
 });
 
 test('changed-payload source, input, fixture, verifiers, migration and continuation are ordered', () => {
@@ -233,7 +233,7 @@ test('changed-payload source, input, fixture, verifiers, migration and continuat
   assert.equal(acquire.length, 2); assert.ok(acquire.every(step => step.with.retries === 0));
   assert.match(acquire[0].with.script, /lane\.run\(\{github, context, profile:process\.env\.PROFILE\}\)/);
   assert.match(acquire[0].with.script, /assert\.equal\(incoming\.length, 1763\)/);
-  assert.match(acquire[0].with.script, /8f3b6a07c0e7a93213a95782e9d5fac0a20026813faf493b033d8cbab72fcbc4/);
+  assert.match(acquire[0].with.script, /08f2df3b8139f00f5bd5b84619218228c7878d62ae0e4ec180fdcaaec6b87fc3/);
   assert.ok(acquire[0].with.script.indexOf('assert.equal(incoming.length') < acquire[0].with.script.indexOf('await lane.run'));
   assert.match(acquire[1].with.script, /native-linux-changed-mcp-input\.cjs/);
   const downloaded = steps.find(step => step.uses === 'actions/download-artifact@v5');

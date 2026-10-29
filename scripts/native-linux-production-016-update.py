@@ -63,32 +63,32 @@ FIXED = {
 }
 # Fixed product evidence only; outer profile/carrier admission remains unchanged.
 ACTUAL017_CASE = (
-    ("source", "dea67abb681ff99d3d0cd756954605a3c58627a6"),
-    ("tree", "db4ec3934a8b80014f418fb9ed5ad2e0fe581bc5"),
-    ("run", 40619538729),
-    ("job", 122590023543),
-    ("artifact", 12786602892),
-    ("zip", (128430365, "33134f88a958fb18d8a52827468ddcc4c167019b1e793d80f21cee7c1174a10a")),
-    ("raw", (29086768, "47ea1c9c158df10b8e64709422ce99b91ac5f9e69152fb18248ac783e9f2e387")),
-    ("deb", (64516566, "1bd69ef6ad81f6af396175e8d2ce74fdabc7df39c936bf8c8e3704a92260f222")),
-    ("hub", (29086768, "fedc79bd67928a4e3570ca86c6157f4ecb553d046f0febe6823b3a976803a673")),
-    ("archive", (55576707, "5a41b14f5b1ece0d772a5cf71d028517db7e0711891d16019f247b3362009828")),
+    ("source", "a61e7b0152689b7fa25fd0f4fe3e7d3894751cc5"),
+    ("tree", "ab48fbce32accb627a5f5e0de2f496699c2317b4"),
+    ("run", 40903331594),
+    ("job", 123551467029),
+    ("artifact", 12909839246),
+    ("zip", (128433738, "2dcce20200c14fe88098a48ef5768cb63a91a01de14a2c82bf44a4672bf1a86a")),
+    ("raw", (29087688, "184160aaf17b1ad2535dbd08bf66b3a7aefc04b64ce6fe6f54365c4afc6c7674")),
+    ("deb", (64519358, "61a32fe588280366c3d6f8b76323764867bca8c3537d30a45c33ed2302be4a43")),
+    ("hub", (29087688, "822e46106d5caaf36890965d3020fb49b2235e91517eb33bd5d2f4210d5b5690")),
+    ("archive", (55580353, "96c04c882a6c3826e096d8e04f78a1b1a1804ed563612634469cb596c869da75")),
     ("helper", (1168536, "7f22822e50ee8b96829c64c95da9e1b098c3e080a1370f577ae2b69055eed94a")),
     ("policy", (878, "f4819f08e0a96e98d10a449a82a26b4f59d69714460eb9082387f746e1889bb4")),
     ("service", (92, "9a270a39c219b4f2d294cfaa2a849db84b1e1883fa532d2c90d7f95625780340")),
-    ("runtime", (1133, "6a04f7839757cf33b806fa0429c3db16b74ef4bcd47a9d4d5cf8d8b16281a35b")),
-    ("runtimeSignature", (305, "0d0ec34b7da207972b1f5f6fa1d08d5b747562ca6bffa0c04d46e0fc5698d80d")),
-    ("generation", "bd96785284674fc62bdf2f967966e1d81932e697df2ceefe43a1504bb8c39a8a"),
-    ("qualificationScope", "private-dea-updater-lifecycle-only"),
+    ("runtime", (1133, "2116cf1fe040a6be770e726a66f99f6d42e1303576c7d07e16be4dfb5f307dc4")),
+    ("runtimeSignature", (305, "6b6d92ecf7f2efa2963a918b2481c3c6612addd68d8cb523f81ead713f88608c")),
+    ("generation", "e93878d682900a6292aeeeca23d3fc4c3d280cdf1cd7bee2cc8c89802f539f7f"),
+    ("qualificationScope", "private-a61-updater-lifecycle-only"),
     ("installedMembers", (
         ("usr", "directory", 493, 0, 0, 0, None),
         ("usr/libexec", "directory", 493, 0, 0, 0, None),
         ("usr/libexec/creator-hub-deb-retirement-helper", "file", 493, 0, 0, 1168536, "7f22822e50ee8b96829c64c95da9e1b098c3e080a1370f577ae2b69055eed94a"),
         ("usr/bin", "directory", 493, 0, 0, 0, None),
-        ("usr/bin/creator-hub", "file", 493, 0, 0, 29086768, "fedc79bd67928a4e3570ca86c6157f4ecb553d046f0febe6823b3a976803a673"),
+        ("usr/bin/creator-hub", "file", 493, 0, 0, 29087688, "822e46106d5caaf36890965d3020fb49b2235e91517eb33bd5d2f4210d5b5690"),
         ("usr/lib", "directory", 493, 0, 0, 0, None),
         ("usr/lib/Creator Hub", "directory", 493, 0, 0, 0, None),
-        ("usr/lib/Creator Hub/modules.tar.gz", "file", 420, 0, 0, 55576707, "5a41b14f5b1ece0d772a5cf71d028517db7e0711891d16019f247b3362009828"),
+        ("usr/lib/Creator Hub/modules.tar.gz", "file", 420, 0, 0, 55580353, "96c04c882a6c3826e096d8e04f78a1b1a1804ed563612634469cb596c869da75"),
         ("usr/share", "directory", 493, 0, 0, 0, None),
         ("usr/share/dbus-1", "directory", 493, 0, 0, 0, None),
         ("usr/share/dbus-1/services", "directory", 493, 0, 0, 0, None),
@@ -115,16 +115,16 @@ ACTUAL017_CASE = (
     )),
     ("a1", (
         ("version", "0.1.16"),
-        ("source", "ee48f25905947e0795eccb9d1d6c67f28f270545"),
-        ("tree", "2157cd82c0c1500390c6cf496506e5eb287b9051"),
-        ("run", 40611629636),
-        ("job", 122564362113),
-        ("artifact", 12784045079),
-        ("zip", (183997997, "a027eb4912ececd05f98dc7c23d47f01a3ca976660d88d229630441165f490b4")),
-        ("raw", (29088720, "a297b0a3341f82ccf63bb27f27790501e6c9e8fc77c3784f6bb3e463bdade0d6")),
-        ("deb", (64512558, "6ac58a1417ee10647f0b9f7d6e71565373e799c70767c020b8a96c229eaa48eb")),
-        ("hub", (29088720, "502f2ba0ad9877318fc7477d54c9c1e6efd6aec4acb19323a30eaa4e613f0832")),
-        ("archive", (55576690, "36b250f9e6e9e6c7dbd4278d6ab6d7bec69c77894f690673ae137e669479ea82")),
+        ("source", "be0adef208c80a60f8599bd466a45b28bde73588"),
+        ("tree", "8eb710826de448d820a3cee6d964e4a3f3a24e10"),
+        ("run", 40899552207),
+        ("job", 123537944797),
+        ("artifact", 12909617948),
+        ("zip", (183999603, "d6612027fded7b6163e8212453b853a08285f6551baaa1d0871f0121a040a2a7")),
+        ("raw", (29088440, "7a84da3326fbc41501c2a5415fdf6a6f82ccf9401ad203a9734d2c9025a5961e")),
+        ("deb", (64513510, "9293238fe70c95302735aed96dd547cd648c224f6b29f72449d0d10428afad45")),
+        ("hub", (29088440, "f4b86cbceed7e81b9b871160f11a9dd126f2c1dae8e24ecbbf5014e00e588a33")),
+        ("archive", (55580358, "248de103e40dabd032516c2d291099fb2f372deba9ab1a980ca65e570874f50e")),
         ("helper", (1168536, "7f22822e50ee8b96829c64c95da9e1b098c3e080a1370f577ae2b69055eed94a")),
         ("policy", (878, "f4819f08e0a96e98d10a449a82a26b4f59d69714460eb9082387f746e1889bb4")),
         ("service", (92, "9a270a39c219b4f2d294cfaa2a849db84b1e1883fa532d2c90d7f95625780340")),
@@ -3391,13 +3391,17 @@ A1_MENU_SOURCE = "ee48f25905947e0795eccb9d1d6c67f28f270545"
 A1_MENU_IMAGE = {"size": 29088720, "sha256": "502f2ba0ad9877318fc7477d54c9c1e6efd6aec4acb19323a30eaa4e613f0832"}
 B017_MENU_SOURCE = "dea67abb681ff99d3d0cd756954605a3c58627a6"
 B017_MENU_IMAGE = {"size": 29086768, "sha256": "fedc79bd67928a4e3570ca86c6157f4ecb553d046f0febe6823b3a976803a673"}
+FRESH_A_MENU_SOURCE = "be0adef208c80a60f8599bd466a45b28bde73588"
+FRESH_A_MENU_IMAGE = {"size": 29088440, "sha256": "f4b86cbceed7e81b9b871160f11a9dd126f2c1dae8e24ecbbf5014e00e588a33"}
+FRESH_B_MENU_SOURCE = "a61e7b0152689b7fa25fd0f4fe3e7d3894751cc5"
+FRESH_B_MENU_IMAGE = {"size": 29087688, "sha256": "822e46106d5caaf36890965d3020fb49b2235e91517eb33bd5d2f4210d5b5690"}
 
 
 def source_menu_profile(source):
     """Finite source expectations; this does not admit an artifact or discover UI."""
-    require(type(source) is str and source in HISTORICAL_MENU_SOURCES + CURRENT_MENU_SOURCES + (A1_MENU_SOURCE, B017_MENU_SOURCE),
+    require(type(source) is str and source in HISTORICAL_MENU_SOURCES + CURRENT_MENU_SOURCES + (A1_MENU_SOURCE, B017_MENU_SOURCE, FRESH_A_MENU_SOURCE, FRESH_B_MENU_SOURCE),
             "Unreviewed menu source; version or UI labels are not source identity")
-    if source in CURRENT_MENU_SOURCES + (A1_MENU_SOURCE, B017_MENU_SOURCE):
+    if source in CURRENT_MENU_SOURCES + (A1_MENU_SOURCE, B017_MENU_SOURCE, FRESH_A_MENU_SOURCE, FRESH_B_MENU_SOURCE):
         return {"source": source,
                 "initial": {"hub": "Home Projects and updates", "mcp": "MCP AI bridge for Unity Checking",
                             "setup": "Setup / Repair Unity + Creator SDK project setup and repair Checking"},
@@ -3419,6 +3423,8 @@ def bind_source_menu(surface, source, expected_image):
     validate_pin(expected_image, MAX_FILE)
     require(source != A1_MENU_SOURCE or expected_image == A1_MENU_IMAGE, "A1 menu installed image required")
     require(source != B017_MENU_SOURCE or expected_image == B017_MENU_IMAGE, "B017 menu installed image required")
+    require(source != FRESH_A_MENU_SOURCE or expected_image == FRESH_A_MENU_IMAGE, "Fresh A menu installed image required")
+    require(source != FRESH_B_MENU_SOURCE or expected_image == FRESH_B_MENU_IMAGE, "Fresh B menu installed image required")
     surface.recheck(full=True)
     record = surface.record
     require(type(record.get("pid")) is int and record["pid"] > 1
@@ -3439,6 +3445,10 @@ def bound_source_menu(surface):
             "A1 menu installed image required")
     require(source != B017_MENU_SOURCE or {"size": image_size, "sha256": image_hash} == B017_MENU_IMAGE,
             "B017 menu installed image required")
+    require(source != FRESH_A_MENU_SOURCE or {"size": image_size, "sha256": image_hash} == FRESH_A_MENU_IMAGE,
+            "Fresh A menu installed image required")
+    require(source != FRESH_B_MENU_SOURCE or {"size": image_size, "sha256": image_hash} == FRESH_B_MENU_IMAGE,
+            "Fresh B menu installed image required")
     surface.recheck(full=True)
     record = surface.record
     require(record.get("pid") == pid and record.get("startTime") == start

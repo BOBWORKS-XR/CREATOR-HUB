@@ -7,6 +7,10 @@ const crypto = require('node:crypto');
 const REPO = { owner: 'BOBWORKS-XR', repo: 'CREATOR-HUB' };
 const REPOSITORY_ID = 1364807512;
 const REF = 'refs/heads/validation/native-linux-016';
+const JOURNAL_A_ASSEMBLY = Object.freeze({ sourceCommit: 'be0adef208c80a60f8599bd466a45b28bde73588',
+  sourceTree: '8eb710826de448d820a3cee6d964e4a3f3a24e10', runId: 40899552207, runAttempt: 1,
+  jobId: 123537944797, artifactId: 12909617948, zipBytes: 183999603,
+  zipSha256: 'd6612027fded7b6163e8212453b853a08285f6551baaa1d0871f0121a040a2a7' });
 const PRIVATE = { sourceCommit: '52e3a537c9d323c81ab259cb82b44bbe0828b414', runId: 39326776585, runAttempt: 1 };
 const PRIVATE_PATHS = ['modules/mcp', 'modules/project-setup', 'native/mcp-router', 'native/host_parent_macos.rs',
   'native/plugins_retirement.rs', 'native/convergence-server-unix.rs', 'src-tauri/src/module_archive.rs', 'src-tauri/src/catalog-key.pub'];
@@ -56,6 +60,16 @@ function producer(run, expected, workflow, branch) {
 }
 function artifactBinding(run, job, artifact, p) {
   producer(run, p, '.github/workflows/unix-managed-assembly.yml', 'validation/linux-integrated-candidate-016');
+  return assemblyArtifactBinding(run, job, artifact, p);
+}
+function journalAFreshArtifactBinding(run, job, artifact, p) {
+  for (const [key, value] of Object.entries(JOURNAL_A_ASSEMBLY)) assert.equal(p[key], value, `Fresh A ${key} differs`);
+  producer(run, p, '.github/workflows/unix-managed-assembly.yml', 'validation/journal-a-assembly-016');
+  assert.equal(job.head_sha, p.sourceCommit); assert.equal(job.head_branch, 'validation/journal-a-assembly-016');
+  assert.ok(job.name.startsWith('assembly (linux, ubuntu-22.04'));
+  return assemblyArtifactBinding(run, job, artifact, p);
+}
+function assemblyArtifactBinding(run, job, artifact, p) {
   assert.equal(run.event, 'workflow_dispatch');
   assert.equal(job.id, p.jobId); assert.equal(job.run_id, p.runId); assert.equal(job.run_attempt, p.runAttempt);
   assert.equal(job.status, 'completed'); assert.equal(job.conclusion, 'success'); assert.ok(job.name.startsWith('assembly (linux,'));
@@ -135,4 +149,4 @@ async function run({ github, context, profile, env = process.env, fetch_ = fetch
   write('api-binding.json', JSON.stringify({ schemaVersion: 1, harnessSource: context.sha, assembly: p.assembly,
     privatePayload: PRIVATE, privateSourcePaths: assemblyTree, legacy, releaseReady: false }));
 }
-module.exports = { validate, admission, producer, artifactBinding, treePaths, publicDeb, run, PRIVATE, PRIVATE_PATHS, LEGACY, PINS, REF };
+module.exports = { validate, admission, producer, artifactBinding, journalAFreshArtifactBinding, treePaths, publicDeb, run, PRIVATE, PRIVATE_PATHS, LEGACY, PINS, REF, JOURNAL_A_ASSEMBLY };

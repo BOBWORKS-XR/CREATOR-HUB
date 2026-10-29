@@ -13,8 +13,8 @@ const clone = value => JSON.parse(JSON.stringify(value));
 const repo = { id: 1364807512, full_name: 'BOBWORKS-XR/CREATOR-HUB' };
 const context = { sha: 'a'.repeat(40), runId: 12345 };
 const env = { GITHUB_ACTIONS: 'true', GITHUB_REPOSITORY: repo.full_name, GITHUB_REPOSITORY_ID: '1364807512',
-  GITHUB_REF: 'refs/heads/validation/native-linux-production-016', GITHUB_EVENT_NAME: 'workflow_dispatch',
-  GITHUB_WORKFLOW_REF: repo.full_name + '/.github/workflows/native-linux-production-016-migration.yml@refs/heads/validation/native-linux-production-016',
+  GITHUB_REF: 'refs/heads/validation/native-linux-journal-production-016', GITHUB_EVENT_NAME: 'workflow_dispatch',
+  GITHUB_WORKFLOW_REF: repo.full_name + '/.github/workflows/native-linux-production-016-migration.yml@refs/heads/validation/native-linux-journal-production-016',
   RUNNER_ENVIRONMENT: 'github-hosted', RUNNER_OS: 'Linux', RUNNER_ARCH: 'X64',
   CREATOR_NATIVE_LINUX_PRODUCTION_016: '1', CREATOR_MIGRATION_016_EXECUTE: 'true',
   CREATOR_MIGRATION_016_SCENARIO: 'migration-approve', CREATOR_MIGRATED_UPDATE_EXECUTE: 'true',
@@ -23,17 +23,17 @@ const env = { GITHUB_ACTIONS: 'true', GITHUB_REPOSITORY: repo.full_name, GITHUB_
   GITHUB_RUN_ID: String(context.runId), GITHUB_RUN_ATTEMPT: '1' };
 
 test('exact reviewed profile keeps A1 separate from packaging donor', () => {
-  assert.equal(p.baseline.source, 'ee48f25905947e0795eccb9d1d6c67f28f270545');
-  assert.equal(p.artifacts.assembly17.source, 'dea67abb681ff99d3d0cd756954605a3c58627a6');
-  assert.equal(p.deliveries.signedDeb17.asset, 683714773);
+  assert.equal(p.baseline.source, 'be0adef208c80a60f8599bd466a45b28bde73588');
+  assert.equal(p.artifacts.assembly17.source, 'a61e7b0152689b7fa25fd0f4fe3e7d3894751cc5');
+  assert.equal(p.deliveries.signedDeb17.asset, 689113479);
   assert.equal(Object.keys(p.objects).length, 13);
-  assert.equal(c.hash(fs.readFileSync(path.join(__dirname, 'fixtures/native-linux-changed-mcp-incoming.json'))), c.INCOMING_SHA);
+  assert.equal(c.hash(fs.readFileSync(path.join(__dirname, 'fixtures/journal-a-native-incoming.UNBOUND.json'))), c.INCOMING_SHA);
   assert.equal(c.canonical(p).equals(raw), true);
 });
 
 for (const [name, changed] of [
   ['newline change', Buffer.concat([raw, Buffer.from('\n')])],
-  ['donor substitution', Buffer.from(raw.toString().replace('ee48f259', 'f00cd443'))],
+  ['donor substitution', Buffer.from(raw.toString().replace('be0adef2', 'c5bd13a5'))],
   ['single-byte mutation', Buffer.from(raw.map((x, i) => i === 100 ? x ^ 1 : x))],
 ]) test('profile refuses ' + name, () => assert.throws(() => c.profile(changed)));
 
@@ -74,7 +74,7 @@ for (const role of ['assembly16', 'assembly17']) {
 }
 
 const current = { id: context.runId, head_sha: context.sha, run_attempt: 1,
-  head_branch: 'validation/native-linux-production-016', path: '.github/workflows/native-linux-production-016-migration.yml',
+  head_branch: 'validation/native-linux-journal-production-016', path: '.github/workflows/native-linux-production-016-migration.yml',
   event: 'workflow_dispatch', status: 'in_progress', conclusion: null, repository: repo, head_repository: repo };
 test('current original harness API is not a producer API', () => c.harness(current, context, env));
 for (const [label, mutate] of [
@@ -135,7 +135,7 @@ const deliveryRecord = () => ({ schemaVersion: 1, source: context.sha, run: cont
   dataOnly: true, ...c.FALSE });
 const transferArtifact = () => ({ id: 987654, name: 'changed-mcp-delivery-12345-1',
   size_in_bytes: 64475000, expired: false, digest: 'sha256:' + 'd'.repeat(64),
-  workflow_run: { id: context.runId, head_sha: context.sha, head_branch: 'validation/native-linux-production-016',
+  workflow_run: { id: context.runId, head_sha: context.sha, head_branch: 'validation/native-linux-journal-production-016',
     repository_id: repo.id, head_repository_id: repo.id } });
 
 test('collector has the fixed API and common admission does not require a future artifact ID', () => {
@@ -462,7 +462,7 @@ test('native retained actual A1/B017/staged carrier keeps five C files and downl
   const f = routeFixture(t); f.state.forbidPrivate = true; f.state.successor = retainedB17;
   f.env.CREATOR_CHANGED_MCP_DELIVERY_ARTIFACT = '987654'; f.stage(retainedCarrier, 0o644);
   const incoming = path.join(f.temp, 'native-linux-production-016-input'); fs.mkdirSync(incoming, { mode: 0o700 });
-  f.put(path.join(incoming, 'profile.json'), fs.readFileSync(path.join(__dirname, 'fixtures/native-linux-changed-mcp-incoming.json')));
+  f.put(path.join(incoming, 'profile.json'), fs.readFileSync(path.join(__dirname, 'fixtures/journal-a-native-incoming.UNBOUND.json')));
   f.put(path.join(incoming, 'assembly.zip'), retainedA1);
   const result = await c.run({ github: f.github, context: f.context, raw, env: f.env });
   const output = path.join(f.temp, 'native-linux-migrated-update-input');

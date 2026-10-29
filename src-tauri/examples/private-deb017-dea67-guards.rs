@@ -22,24 +22,24 @@ const DESCRIPTOR: &str = "creator-hub-linux-x86_64-deb.json";
 const PLATFORM: &str = "linux-x86_64-deb";
 const URL: &str = "https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/download/v0.1.17/Creator_Hub_0.1.17_amd64-acceptance-only.deb";
 const DEB: (u64, &str) = (
-    64516566,
-    "1bd69ef6ad81f6af396175e8d2ce74fdabc7df39c936bf8c8e3704a92260f222",
+    64519358,
+    "61a32fe588280366c3d6f8b76323764867bca8c3537d30a45c33ed2302be4a43",
 );
 const RAW: (u64, &str) = (
-    29086768,
-    "47ea1c9c158df10b8e64709422ce99b91ac5f9e69152fb18248ac783e9f2e387",
+    29087688,
+    "184160aaf17b1ad2535dbd08bf66b3a7aefc04b64ce6fe6f54365c4afc6c7674",
 );
 const INSTALLED: (u64, &str) = (
-    29086768,
-    "fedc79bd67928a4e3570ca86c6157f4ecb553d046f0febe6823b3a976803a673",
+    29087688,
+    "822e46106d5caaf36890965d3020fb49b2235e91517eb33bd5d2f4210d5b5690",
 );
 const MODULES: (u64, &str) = (
-    55576707,
-    "5a41b14f5b1ece0d772a5cf71d028517db7e0711891d16019f247b3362009828",
+    55580353,
+    "96c04c882a6c3826e096d8e04f78a1b1a1804ed563612634469cb596c869da75",
 );
 const MANIFEST: (u64, &str) = (
     3663,
-    "42ec01cf6b4c34b2c0c2b9f13aef493b41e14bab0703f8cee06c78e49097c4bd",
+    "c37d3c6addc4d6f5b711a52677176c093ad5e4bba30021ce430d9f841026db15",
 );
 const MAX_TAR: u64 = 128 * 1024 * 1024;
 

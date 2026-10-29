@@ -1551,8 +1551,8 @@ def native_exact_target_admission(env, system, machine):
     p.require(system == "linux" and machine == "x86_64", "Native Linux x86_64 fixture only")
     expected = {"GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted", "RUNNER_OS": "Linux",
         "RUNNER_ARCH": "X64", "GITHUB_REPOSITORY": "BOBWORKS-XR/CREATOR-HUB", "GITHUB_REPOSITORY_ID": "1364807512",
-        "GITHUB_REF": "refs/heads/validation/native-linux-production-016", "GITHUB_EVENT_NAME": "workflow_dispatch",
-        "GITHUB_WORKFLOW_REF": "BOBWORKS-XR/CREATOR-HUB/.github/workflows/native-linux-production-016-migration.yml@refs/heads/validation/native-linux-production-016",
+        "GITHUB_REF": "refs/heads/validation/native-linux-journal-production-016", "GITHUB_EVENT_NAME": "workflow_dispatch",
+        "GITHUB_WORKFLOW_REF": "BOBWORKS-XR/CREATOR-HUB/.github/workflows/native-linux-production-016-migration.yml@refs/heads/validation/native-linux-journal-production-016",
         "CREATOR_NATIVE_EXACT_TARGET_FIXTURE": "1"}
     p.require(all(env.get(k) == v for k, v in expected.items()) and re.fullmatch(r"[a-f0-9]{40}", env.get("GITHUB_SHA", "")),
               "Exact disposable native fixture context required")
@@ -2031,8 +2031,8 @@ class NativeFixtureAdmissionTests(unittest.TestCase):
     def env(self):
         return {"GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted", "RUNNER_OS": "Linux", "RUNNER_ARCH": "X64",
             "GITHUB_REPOSITORY": "BOBWORKS-XR/CREATOR-HUB", "GITHUB_REPOSITORY_ID": "1364807512",
-            "GITHUB_REF": "refs/heads/validation/native-linux-production-016", "GITHUB_EVENT_NAME": "workflow_dispatch",
-            "GITHUB_WORKFLOW_REF": "BOBWORKS-XR/CREATOR-HUB/.github/workflows/native-linux-production-016-migration.yml@refs/heads/validation/native-linux-production-016",
+            "GITHUB_REF": "refs/heads/validation/native-linux-journal-production-016", "GITHUB_EVENT_NAME": "workflow_dispatch",
+            "GITHUB_WORKFLOW_REF": "BOBWORKS-XR/CREATOR-HUB/.github/workflows/native-linux-production-016-migration.yml@refs/heads/validation/native-linux-journal-production-016",
             "CREATOR_NATIVE_EXACT_TARGET_FIXTURE": "1", "GITHUB_SHA": "a" * 40, "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "1"}
 
     def test_native_fixture_is_explicit_and_rejects_other_platform_context_or_injection_before_spawn(self):

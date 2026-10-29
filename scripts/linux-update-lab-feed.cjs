@@ -63,13 +63,13 @@ const UPDATE_DEB = Object.freeze({ size: 64455526, sha256: 'f58801c95e6932266a89
 const UPDATE_ASSET = 'Creator_Hub_0.1.17_amd64-acceptance-only.deb';
 const UPDATE_SOURCE17 = Object.freeze({ commit: '75a99ff4a267064aaa3ac9e30039bc91dc791d89', tree: '5f62bf4bc1ba85eb293ca9a5a30330b06b6b4351' });
 // BEGIN fixed changed-MCP transport data; historical tuples remain unchanged.
-const CHANGED_MCP_PROFILE_SHA256 = '1fd56c76f100422e2c380e19cfc5dfb9da4ecf05a6348efdba99bbaebb5cd792';
-const CHANGED_MCP_IMAGE_SHA256 = 'fedc79bd67928a4e3570ca86c6157f4ecb553d046f0febe6823b3a976803a673';
+const CHANGED_MCP_PROFILE_SHA256 = 'ef2b5a589d934bf48306ddfd53d133513f3ab4d22b9622672f76887cb7acb095';
+const CHANGED_MCP_IMAGE_SHA256 = '822e46106d5caaf36890965d3020fb49b2235e91517eb33bd5d2f4210d5b5690';
 const CHANGED_MCP_FILES = Object.freeze(Object.fromEntries(Object.entries({
-  'deb17/creator-hub-linux-x86_64-deb.json': { size: 514, sha256: 'be4754284d87f067f6fa4b4f19bfc1ef29df187c76aa9e481d95535edf7391e5' },
-  'deb17/creator-hub-linux-x86_64-deb.json.minisig': { size: 311, sha256: '2467de9d43e08f56f9705e3695af6dc027682deda414c173953abd2801b4b1df' },
-  'deb17/Creator_Hub_0.1.17_amd64-acceptance-only.deb': { size: 64516566, sha256: '1bd69ef6ad81f6af396175e8d2ce74fdabc7df39c936bf8c8e3704a92260f222' },
-  'deb17/latest.json': { size: 751, sha256: '3610eab34edcf9a2c2c4ee16736ba8416e8e8dcfb0e7194a10ed2f3d0fd27787' },
+  'deb17/creator-hub-linux-x86_64-deb.json': { size: 514, sha256: 'c2862a4b6c0c9d7d3dccc232079bf4436c0d8695e8a88ed8a3bccf6dad04a16c' },
+  'deb17/creator-hub-linux-x86_64-deb.json.minisig': { size: 311, sha256: '24f9e75cbea3b8afcfa59df70ee0ff595ef21b93a9efb2313de223788f91b885' },
+  'deb17/Creator_Hub_0.1.17_amd64-acceptance-only.deb': { size: 64519358, sha256: '61a32fe588280366c3d6f8b76323764867bca8c3537d30a45c33ed2302be4a43' },
+  'deb17/latest.json': { size: 751, sha256: '3e9362038eeb37cdac6f0caae08a0b7d8b4124e8dbb210de5f62a81f988742ef' },
 }).map(([name, pin]) => [name, Object.freeze(pin)])));
 // END fixed changed-MCP transport data.
 const contracts = new WeakMap();
@@ -678,7 +678,7 @@ async function updateMain() {
 function reviewedChangedMcpTarget(contract) {
   assert.ok(contracts.has(contract) && contract.mode === 'deb'
     && contract.profile === '016-deb-to-private017', 'Distinct changed-MCP DEB contract required');
-  assert.deepEqual(contract.pins, CHANGED_MCP_FILES, 'Exact actual40619538729 signed transport bodies required');
+  assert.deepEqual(contract.pins, CHANGED_MCP_FILES, 'Exact actual40903331594 signed transport bodies required');
   assert.equal(contract.executableSha256, CHANGED_MCP_IMAGE_SHA256, 'Exact installed actual017 Root required');
 }
 function loadChangedMcp016017(root) {
@@ -701,7 +701,7 @@ function loadChangedMcp016017(root) {
 }
 function assertChangedMcpRunner(env = process.env, platform = process.platform, arch = process.arch, uid = process.getuid?.(), euid = process.geteuid?.()) {
   assert.equal(platform, 'linux'); assert.equal(arch, 'x64'); assert.equal(uid, 21314); assert.equal(euid, uid);
-  const branch = 'refs/heads/validation/native-linux-production-016';
+  const branch = 'refs/heads/validation/native-linux-journal-production-016';
   const workflow = '.github/workflows/native-linux-production-016-migration.yml';
   for (const [name, expected] of Object.entries({ GITHUB_ACTIONS: 'true', RUNNER_ENVIRONMENT: 'github-hosted', RUNNER_OS: 'Linux', RUNNER_ARCH: 'X64',
     GITHUB_REPOSITORY: 'BOBWORKS-XR/CREATOR-HUB', GITHUB_REPOSITORY_ID: '1364807512', GITHUB_EVENT_NAME: 'workflow_dispatch',
