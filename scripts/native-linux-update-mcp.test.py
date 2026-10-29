@@ -48,7 +48,7 @@ class RouteFiles:
         generation = sha(canonical)
         descriptor = json.dumps({"schemaVersion": 1, "product": "com.creatorworks.hub.mcp-runtime",
                                  "hubVersion": "0.1.16", "platform": "linux", "arch": "x86_64", "module": module}).encode()
-        router = b"synthetic-not-executable:router"
+        router = b"synthetic-not-executable:router" * 2048
         self.resources = {**module["files"], "routing/runtime.json": sha(descriptor),
                           "routing/runtime.minisig": sha(b"runtime-test-signature"),
                           "routing/router.json": sha(json.dumps({"sha256": sha(router)}).encode()),
@@ -436,6 +436,32 @@ class TransitionTests(FixtureBase):
         self.transition = M.TransitionRoute(self.route, self.source, self.b_resources, self.release_pair)
         self.fixture = M.TransitionFixture(self.transition, self.evidence, self.env,
             ["unrelated/keep.json", "config/client.json"], None, None, None)
+
+    def test_full_sized_router_is_hash_checked_without_metadata_size_limit(self):
+        self.assertGreater((self.source / "routing/creator-hub-mcp-router").stat().st_size, 32768)
+        self.make()
+        self.assertEqual(self.transition.inputs[self.source / "routing/creator-hub-mcp-router"]["sha256"],
+                         self.b_resources["routing/creator-hub-mcp-router"])
+
+    def test_oversized_runtime_descriptor_remains_refused(self):
+        path = self.source / "routing/runtime.json"
+        raw = path.read_bytes() + b" " * 32769
+        path.write_bytes(raw)
+        self.b_resources["routing/runtime.json"] = sha(raw)
+        with self.assertRaisesRegex(RuntimeError, "Bounded ordinary input metadata differs"):
+            self.make()
+
+    def test_changed_router_bytes_remain_refused(self):
+        path = self.source / "routing/creator-hub-mcp-router"
+        path.write_bytes(path.read_bytes() + b"changed")
+        with self.assertRaisesRegex(RuntimeError, "Independently bound B input differs"):
+            self.make()
+
+    def test_router_change_after_capture_remains_refused(self):
+        self.make()
+        path = self.source / "routing/creator-hub-mcp-router"
+        path.write_bytes(path.read_bytes() + b"changed")
+        with self.assertRaises(RuntimeError): self.transition._inputs_unchanged()
 
     def record(self, value):
         raw = json.dumps(value, separators=(",", ":")).encode()

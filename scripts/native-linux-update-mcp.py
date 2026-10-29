@@ -231,7 +231,7 @@ class TransitionRoute:
             row = self._file(path, 128 * 1024**2, source=True)
             require(row["sha256"] == self.b_inventory[name], "Independently bound B input differs")
             self.inputs[path] = row
-            if name.startswith("routing/"):
+            if name.startswith("routing/") and name != "routing/creator-hub-mcp-router":
                 raw[name] = self._read_source(path, 32768)
         require(sum(row["size"] for row in self.inputs.values()) <= 256 * 1024**2,
                 "Bounded complete target inventory required")
