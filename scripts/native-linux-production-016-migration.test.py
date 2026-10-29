@@ -4107,6 +4107,112 @@ class CombinedInventoryContract(unittest.TestCase):
             if name != 'update': self.assertNotIn('portable-flatpak-approve', values)
 
 
+class VisibleAgentReadyTests(unittest.TestCase):
+    def native_error(self, helper, *, state=0, override=0, kind=1):
+        x11 = object.__new__(helper.X11); x11.display = 1
+        def attrs(_display, _target, pointer):
+            value = helper.C.cast(pointer, helper.C.POINTER(helper.WindowAttributes)).contents
+            value.map_state, value.override_redirect, value.class_ = state, override, kind
+            return 1
+        x11.x = SimpleNamespace(XGetWindowAttributes=attrs); x11.sync = lambda: None
+        try: x11.inspect(77)
+        except RuntimeError as error: return error, x11
+        self.fail("Expected genuine native visibility refusal")
+
+    def test_authenticated_unmapped_candidate_is_only_pending(self):
+        helper = M.load("native-unix-window"); error, x11 = self.native_error(helper)
+        polkit = SimpleNamespace(windows=Mock(side_effect=[error, []])); evidence = {}
+        self.assertFalse(M.visible_agent_ready(polkit, 21, helper, x11, evidence))
+        self.assertEqual(evidence, {"unmappedCandidatePending": 1})
+        self.assertFalse(M.visible_agent_ready(polkit, 21, helper, x11, evidence))
+        self.assertEqual(polkit.windows.call_count, 2)
+
+    def test_unverified_or_different_errors_remain_refusals(self):
+        for defect in ("marker", "map", "override", "class", "error-latch", "message", "type", "fields"):
+            with self.subTest(defect=defect):
+                helper = M.load("native-unix-window"); error, x11 = self.native_error(helper)
+                if defect == "marker": error._visibility_diagnostic_origin = object()
+                if defect == "map": error.window_visibility_refusal["map_state"] = 1
+                if defect == "override": error.window_visibility_refusal["override_redirect"] = 1
+                if defect == "class": error.window_visibility_refusal["class"] = 2
+                if defect == "error-latch": x11.error = True
+                if defect == "message": error.args = ("Different refusal",)
+                if defect == "type": error.window_visibility_refusal["window"] = True
+                if defect == "fields": error.window_visibility_refusal["extra"] = 1
+                polkit = SimpleNamespace(windows=Mock(side_effect=error)); evidence = {}
+                with self.assertRaises(RuntimeError) as caught:
+                    M.visible_agent_ready(polkit, 21, helper, x11, evidence)
+                self.assertIs(caught.exception, error); self.assertEqual(evidence, {})
+
+    def test_actual_action_retains_strict_window_and_input_checks(self):
+        source = Path(M.__file__).read_text()
+        start = source.index('def act(self, target, authenticate, secret):')
+        end = source.index('def ', start + 5)
+        action = source[start:end]
+        self.assertIn('visible_agent_ready(', action)
+        self.assertIn('windows = p.windows(self.identity["pid"], s.helper, s.x11)', action)
+        self.assertIn('require(len(windows) == 1', action)
+        self.assertIn('self.input_guard(target, record)', source[start:])
+        self.assertIn('require(p.windows(self.identity["pid"], s.helper, s.x11) == windows', source[start:])
+
+    def test_persistent_unmapped_candidate_times_out_without_input(self):
+        helper = M.load("native-unix-window"); error, x11 = self.native_error(helper)
+        polkit = SimpleNamespace(windows=Mock(side_effect=error), authenticate_once=Mock(), cancel_once=Mock())
+        def bounded_wait(check, _seconds):
+            self.assertFalse(check()); self.assertFalse(check())
+            raise RuntimeError("Read-only readiness deadline; no mutation retried")
+        session = SimpleNamespace(evidence={}, helper=helper, x11=x11, polkit=polkit,
+            pages=SimpleNamespace(wait=bounded_wait))
+        authorizer = M.Authorization(session, Mock(), {"pid": 21}, {}, {}, Mock(), Mock(), Mock(), "fixed", [0], Mock(), {})
+        with self.assertRaisesRegex(RuntimeError, "Read-only readiness deadline"):
+            authorizer.act("mcp", True, None)
+        self.assertEqual(session.evidence["unmappedCandidatePending"], 2)
+        polkit.authenticate_once.assert_not_called(); polkit.cancel_once.assert_not_called()
+
+    def test_real_readiness_wait_times_out_on_persistent_unmapped_candidate(self):
+        helper = M.load("native-unix-window"); error, x11 = self.native_error(helper)
+        pages = M.load("native-linux-integrated-pages")
+        polkit = SimpleNamespace(windows=Mock(side_effect=error)); evidence = {}
+        with patch.object(pages.time, "monotonic", side_effect=[0, 0.1, 0.2, 2]), \
+                patch.object(pages.time, "sleep") as sleep:
+            with self.assertRaisesRegex(RuntimeError, "Read-only readiness deadline"):
+                pages.wait(lambda: M.visible_agent_ready(polkit, 21, helper, x11, evidence), 1)
+        self.assertEqual(polkit.windows.call_count, 2); self.assertEqual(sleep.call_count, 2)
+        self.assertEqual(evidence["unmappedCandidatePending"], 2)
+
+    def test_window_change_after_readiness_refuses_before_input(self):
+        helper = M.load("native-unix-window"); _error, x11 = self.native_error(helper)
+        polkit = SimpleNamespace(windows=Mock(side_effect=[[{"window": 77}], RuntimeError("Foreign XRes owner")]),
+            authenticate_once=Mock(), cancel_once=Mock())
+        session = SimpleNamespace(evidence={}, helper=helper, x11=x11, polkit=polkit,
+            pages=SimpleNamespace(wait=lambda check, _seconds: self.assertTrue(check())))
+        authorizer = M.Authorization(session, Mock(), {"pid": 21}, {}, {}, Mock(), Mock(), Mock(), "fixed", [0], Mock(), {})
+        with self.assertRaisesRegex(RuntimeError, "Foreign XRes owner"):
+            authorizer.act("mcp", True, None)
+        polkit.authenticate_once.assert_not_called(); polkit.cancel_once.assert_not_called()
+
+    def test_unmapped_then_visible_rechecks_window_before_authentication(self):
+        helper = M.load("native-unix-window"); error, x11 = self.native_error(helper)
+        window = {"window": 77, "pid": 21, "client": 3, "title": "Authenticate", "mapped": True}
+        polkit = SimpleNamespace(windows=Mock(side_effect=[error, [window], [window]]),
+            authenticate_once=Mock(), cancel_once=Mock())
+        checks = []
+        def wait(check, _seconds):
+            if not checks:
+                self.assertFalse(check()); self.assertTrue(check()); checks.append("ready")
+            else:
+                self.assertTrue(check()); checks.append("dismissed")
+        session = SimpleNamespace(evidence={}, helper=helper, x11=x11, polkit=polkit,
+            pages=SimpleNamespace(wait=wait), native=SimpleNamespace(native_ax_references=lambda: (Mock(), Mock())),
+            native_target_absent=lambda target, _result: target == 77)
+        authorizer = M.Authorization(session, Mock(), {"pid": 21}, {}, {}, Mock(), Mock(), Mock(), "fixed", [0], Mock(), {})
+        authorizer.act("setup", True, None)
+        self.assertEqual(checks, ["ready", "dismissed"])
+        self.assertEqual(polkit.windows.call_count, 3)
+        polkit.authenticate_once.assert_called_once(); polkit.cancel_once.assert_not_called()
+        self.assertEqual(session.evidence["unmappedCandidatePending"], 1)
+
+
 class CachedVisibilityFailureTests(unittest.TestCase):
     @contextmanager
     def fixture(self):

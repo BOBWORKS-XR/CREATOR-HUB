@@ -2632,6 +2632,28 @@ def serve_helper_diagnostics(context, record, env, binding, native, helper):
         record.setdefault("helperDiagnosticChannelRefusal", {**HELPER_DIAGNOSTIC_FLAGS, "stage": "channel", "errorType": type(error).__name__[:100]})
 
 
+def visible_agent_ready(polkit, pid, helper, x11, evidence):
+    """An unmapped candidate is pending only during the bounded visible-window wait."""
+    try:
+        return bool(polkit.windows(pid, helper, x11))
+    except RuntimeError as error:
+        raw = getattr(error, "window_visibility_refusal", None)
+        origin = getattr(helper, "_VISIBILITY_DIAGNOSTIC_ORIGIN", None)
+        if not (type(error) is RuntimeError and str(error) == "Owned X window is not a managed visible window"
+                and origin is not None and getattr(error, "_visibility_diagnostic_origin", None) is origin
+                and type(raw) is dict and set(raw) == {"window", "map_state", "override_redirect", "class"}
+                and type(raw["window"]) is int and 0 < raw["window"] < 2**32
+                and type(raw["map_state"]) is int and raw["map_state"] == 0
+                and type(raw["override_redirect"]) is int and raw["override_redirect"] == 0
+                and type(raw["class"]) is int and raw["class"] == 1
+                and getattr(x11, "error", None) is False):
+            raise
+        count = evidence.get("unmappedCandidatePending", 0)
+        require(type(count) is int and 0 <= count <= 1800, "Invalid pending-window observation count")
+        evidence["unmappedCandidatePending"] = min(count + 1, 1800)
+        return False
+
+
 class Authorization:
     def __init__(self, session, agent, identity, parent, endpoint, system, atspi, glib, question, counter, sdk, session_identity):
         self.s, self.agent, self.identity, self.parent = session, agent, identity, parent
@@ -2692,7 +2714,7 @@ class Authorization:
             # MCP approval dismisses the dialog before its cleanup finishes.
             # The helper permits 180 seconds per system command; no input is repeated here.
             seconds = 180 if target == "setup" and self.mcp_dismissed_ns is not None else 30
-            s.pages.wait(lambda: bool(p.windows(self.identity["pid"], s.helper, s.x11)), seconds)
+            s.pages.wait(lambda: visible_agent_ready(p, self.identity["pid"], s.helper, s.x11, s.evidence), seconds)
         except Exception:
             if target == "setup" and self.mcp_dismissed_ns is not None:
                 self.helper_diagnostic(HELPER_DIAGNOSTIC_PHASES[1], wait_started)
