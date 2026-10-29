@@ -202,7 +202,7 @@ jobs:
       CREATOR_CHANGED_MCP_SOURCE_RECEIPT_SHA256: ${{ inputs.source_receipt_sha256 }}
       UPDATE_EXECUTE: ${{ inputs.continue_changed_mcp }}
       UPDATE_SCENARIO: deb-approve
-      UPDATE_PROFILE_SHA256: 1fd56c76f100422e2c380e19cfc5dfb9da4ecf05a6348efdba99bbaebb5cd792
+      UPDATE_PROFILE_SHA256: ef2b5a589d934bf48306ddfd53d133513f3ab4d22b9622672f76887cb7acb095
     steps:
       - uses: actions/checkout@v6
         with:
@@ -262,7 +262,7 @@ jobs:
       CREATOR_CHANGED_MCP_DELIVERY_ARTIFACT: ${{ needs.changed_delivery.outputs.artifact }}
       UPDATE_EXECUTE: ${{ inputs.continue_changed_mcp }}
       UPDATE_SCENARIO: deb-approve
-      UPDATE_PROFILE_SHA256: 1fd56c76f100422e2c380e19cfc5dfb9da4ecf05a6348efdba99bbaebb5cd792
+      UPDATE_PROFILE_SHA256: ef2b5a589d934bf48306ddfd53d133513f3ab4d22b9622672f76887cb7acb095
     steps:
       - uses: actions/checkout@v6
         with:
@@ -318,7 +318,7 @@ jobs:
             const lane = require(require('node:path').join(process.env.GITHUB_WORKSPACE, 'scripts/native-linux-production-016-input.cjs'));
             const incoming = Buffer.from(process.env.PROFILE || '');
             assert.equal(incoming.length, 1763);
-            assert.equal(crypto.createHash('sha256').update(incoming).digest('hex'), '8f3b6a07c0e7a93213a95782e9d5fac0a20026813faf493b033d8cbab72fcbc4');
+            assert.equal(crypto.createHash('sha256').update(incoming).digest('hex'), '08f2df3b8139f00f5bd5b84619218228c7878d62ae0e4ec180fdcaaec6b87fc3');
             await lane.run({github, context, profile:process.env.PROFILE});
       - name: Acquire only original successor ZIP and private signed delivery
         uses: actions/github-script@v8

@@ -210,7 +210,7 @@ test('changed-payload job has only the exact opted-in conjunction and excludes r
   assert.equal(job.needs, 'changed_delivery');
   assert.deepEqual(job.permissions, { contents: 'read', actions: 'read' });
   assert.equal(job.env.CREATOR_CHANGED_MCP_DELIVERY_ARTIFACT, '${{ needs.changed_delivery.outputs.artifact }}');
-  assert.equal(job.env.UPDATE_PROFILE_SHA256, '1fd56c76f100422e2c380e19cfc5dfb9da4ecf05a6348efdba99bbaebb5cd792');
+  assert.equal(job.env.UPDATE_PROFILE_SHA256, 'ef2b5a589d934bf48306ddfd53d133513f3ab4d22b9622672f76887cb7acb095');
 });
 
 test('changed-payload source, input, fixture, verifiers, migration and continuation are ordered', () => {
@@ -233,7 +233,7 @@ test('changed-payload source, input, fixture, verifiers, migration and continuat
   assert.equal(acquire.length, 2); assert.ok(acquire.every(step => step.with.retries === 0));
   assert.match(acquire[0].with.script, /lane\.run\(\{github, context, profile:process\.env\.PROFILE\}\)/);
   assert.match(acquire[0].with.script, /assert\.equal\(incoming\.length, 1763\)/);
-  assert.match(acquire[0].with.script, /8f3b6a07c0e7a93213a95782e9d5fac0a20026813faf493b033d8cbab72fcbc4/);
+  assert.match(acquire[0].with.script, /08f2df3b8139f00f5bd5b84619218228c7878d62ae0e4ec180fdcaaec6b87fc3/);
   assert.ok(acquire[0].with.script.indexOf('assert.equal(incoming.length') < acquire[0].with.script.indexOf('await lane.run'));
   assert.match(acquire[1].with.script, /native-linux-changed-mcp-input\.cjs/);
   const downloaded = steps.find(step => step.uses === 'actions/download-artifact@v5');
