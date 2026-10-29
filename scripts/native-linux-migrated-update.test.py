@@ -1614,6 +1614,67 @@ class TransitionHomeTests(unittest.TestCase):
                 (self.home / name).unlink()
                 for directory in sorted((p for p in (self.home / self.G).iterdir() if p.name == "f" * 64), reverse=True): directory.rmdir()
 
+    def test_unexpected_home_paths_are_bounded_diagnostic_only_and_still_refuse(self):
+        guard = self.guard()
+        for index in range(10): self.put(f"cache/unexpected-{index:02}", b"not captured")
+        with patch.object(C, "tree", wraps=C.tree) as snapshot, self.assertRaises(RuntimeError) as caught:
+            guard.check(checkpoint="pre-update-input")
+        self.assertEqual(snapshot.call_count, 1)
+        error = caught.exception
+        self.assertEqual(str(error), "Unexpected new HOME path; no prefix exemption")
+        self.assertTrue(guard._refused)
+        record = {}; C.changed_retain_home_path_refusal(record, error)
+        self.assertEqual(record["homePathRefusal"], {
+            "checkpoint": "pre-update-input", "handoffPhase": "none",
+            "paths": [f"cache/unexpected-{index:02}" for index in range(8)],
+            "omittedCount": 2, "authorityGranted": False})
+        self.assertNotIn("not captured", json.dumps(record))
+        with self.assertRaisesRegex(RuntimeError, "no repair/retry"): guard.check()
+        foreign = {}; C.changed_retain_home_path_refusal(foreign, RuntimeError(str(error)))
+        self.assertEqual(foreign, {})
+
+    def test_unsafe_path_is_omitted_without_changing_refusal(self):
+        guard = self.guard()
+        after = copy.deepcopy(self.before["home"])
+        after["cache/" + "x" * 251] = {"kind": "file"}
+        with patch.object(C, "tree", return_value=after), self.assertRaises(RuntimeError) as caught:
+            guard.check(checkpoint="pre-update-input")
+        record = {}; C.changed_retain_home_path_refusal(record, caught.exception)
+        self.assertEqual(record["homePathRefusal"]["paths"], [])
+        self.assertEqual(record["homePathRefusal"]["omittedCount"], 1)
+        self.assertTrue(guard._refused)
+
+    def test_diagnostic_failure_never_replaces_original_guard_refusal(self):
+        guard = self.guard(); self.put("cache/unexpected", b"not captured")
+        with patch.object(C, "sorted", side_effect=RuntimeError("diagnostic failure"), create=True), \
+                self.assertRaisesRegex(RuntimeError, "Unexpected new HOME path; no prefix exemption") as caught:
+            guard.check(checkpoint="pre-update-input")
+        self.assertTrue(guard._refused)
+        record = {}; C.changed_retain_home_path_refusal(record, caught.exception)
+        self.assertEqual(record, {})
+
+    def test_bounded_non_ascii_paths_survive_json_escaping(self):
+        guard = self.guard(); after = copy.deepcopy(self.before["home"])
+        names = ["cache/" + chr(0x100) * 124 + str(index) for index in range(8)]
+        for name in names: after[name] = {"kind": "file"}
+        with patch.object(C, "tree", return_value=after), self.assertRaises(RuntimeError) as caught:
+            guard.check(checkpoint="pre-update-input")
+        record = {}; C.changed_retain_home_path_refusal(record, caught.exception)
+        self.assertEqual(record["homePathRefusal"]["paths"], names)
+        self.assertGreater(len(json.dumps(record, ensure_ascii=True).encode()), 4096)
+        self.assertLessEqual(len(json.dumps(record, ensure_ascii=True).encode()), 16384)
+        self.assertTrue(guard._refused)
+
+    def test_ready_phase_and_report_wiring_are_retained(self):
+        guard = self.guard(); self.record("Ready"); self.put("cache/unexpected", b"unit")
+        with self.assertRaises(RuntimeError) as caught: guard.check(checkpoint="arm-before-input")
+        record = {}; C.changed_retain_home_path_refusal(record, caught.exception)
+        self.assertEqual(record["homePathRefusal"]["handoffPhase"], "ready")
+        self.assertEqual(record["homePathRefusal"]["checkpoint"], "arm-before-input")
+        functions = {n.name: ast.unparse(n) for n in ast.parse(Path(C.__file__).read_bytes()).body if isinstance(n, ast.FunctionDef)}
+        self.assertIn("changed_retain_home_path_refusal(report, error)", functions["changed_session"])
+        self.assertIn("changed_retain_home_path_refusal(record, error)", functions["changed_broker"])
+
     def test_original_same_bytes_new_inode_refuses(self):
         guard = self.guard()
         name = "config/client-0/.creator-hub-settings-backups/original.bak"
