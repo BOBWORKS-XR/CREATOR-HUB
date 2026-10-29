@@ -12,6 +12,7 @@ import os
 import queue
 from pathlib import Path
 import shutil
+import sqlite3
 import stat
 import struct
 import sys
@@ -1613,6 +1614,71 @@ class TransitionHomeTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "no prefix exemption"): guard.check()
                 (self.home / name).unlink()
                 for directory in sorted((p for p in (self.home / self.G).iterdir() if p.name == "f" * 64), reverse=True): directory.rmdir()
+
+    def test_exact_webkit_localstorage_sidecars_remain_untrusted_additions(self):
+        base = "data/com.creatorworks.hub/localstorage/tauri_localhost_0.localstorage"
+        self.put(base, b"synthetic existing protected settings", 0o600)
+        self.before["home"] = C.tree(self.home, M.UID)
+        for suffix in ("-wal", "-shm"):
+            with self.subTest(suffix=suffix):
+                guard = self.guard(); extra = self.put(base + suffix, b"unverified sidecar", 0o600)
+                with self.assertRaisesRegex(RuntimeError, "Unexpected new HOME path") as caught: guard.check(checkpoint="pre-update-input")
+                diagnostic = {}; C.changed_retain_home_path_refusal(diagnostic, caught.exception)
+                row = diagnostic["homePathRefusal"]["localStorageSidecars"][base + suffix]
+                self.assertEqual(row["kind"], "file"); self.assertEqual(row["uid"], M.UID); self.assertEqual(row["gid"], M.UID)
+                self.assertEqual(row["size"], len(b"unverified sidecar")); self.assertEqual(row["sha256"], U.pin(b"unverified sidecar")["sha256"])
+                self.assertNotIn("unverified sidecar", json.dumps(diagnostic))
+                self.assertTrue(guard._refused); extra.unlink()
+        guard = self.guard(); self.put(base, b"changed protected settings", 0o600, replace=True)
+        with self.assertRaisesRegex(RuntimeError, "Original protected bytes/identity changed"): guard.check()
+        self.assertTrue(guard._refused)
+
+    def test_synthetic_sqlite_wal_can_hold_committed_setting_with_unchanged_main_database(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            db = Path(temporary).resolve() / "tauri_localhost_0.localstorage"
+            connection = sqlite3.connect(db)
+            self.assertEqual(connection.execute("PRAGMA journal_mode=WAL").fetchone()[0].lower(), "wal")
+            connection.execute("CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT)")
+            connection.execute("INSERT INTO settings VALUES (?, ?)", ("synthetic", "before"))
+            connection.commit(); connection.close()
+            before = U.pin(db.read_bytes())
+            connection = sqlite3.connect(db)
+            try:
+                self.assertEqual(connection.execute("SELECT value FROM settings").fetchone()[0], "before")
+                self.assertTrue(Path(str(db) + "-wal").is_file())
+                self.assertTrue(Path(str(db) + "-shm").is_file())
+                self.assertEqual(Path(str(db) + "-wal").stat().st_size, 0)
+                connection.execute("UPDATE settings SET value=?", ("after",)); connection.commit()
+                self.assertEqual(U.pin(db.read_bytes()), before)
+                self.assertGreater(Path(str(db) + "-wal").stat().st_size, 0)
+                self.assertEqual(connection.execute("SELECT value FROM settings").fetchone()[0], "after")
+            finally:
+                connection.close()
+            self.assertFalse(Path(str(db) + "-wal").exists())
+            self.assertFalse(Path(str(db) + "-shm").exists())
+
+    @unittest.skipUnless(sys.platform == "linux", "Actual POSIX SQLite ownership requires Linux")
+    def test_synthetic_sqlite_sidecars_inherit_private_database_owner(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            db = Path(temporary).resolve() / "tauri_localhost_0.localstorage"
+            fd = os.open(db, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600); os.close(fd)
+            connection = sqlite3.connect(db)
+            try:
+                self.assertEqual(connection.execute("PRAGMA journal_mode=WAL").fetchone()[0].lower(), "wal")
+                connection.execute("CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT)")
+                connection.execute("INSERT INTO settings VALUES (?, ?)", ("synthetic", "value")); connection.commit()
+                metadata = {}
+                for suffix in ("", "-wal", "-shm"):
+                    info = Path(str(db) + suffix).lstat()
+                    self.assertTrue(stat.S_ISREG(info.st_mode)); self.assertEqual(info.st_nlink, 1)
+                    self.assertEqual(info.st_uid, os.getuid()); self.assertEqual(info.st_gid, os.getgid())
+                    self.assertEqual(stat.S_IMODE(info.st_mode), 0o600)
+                    metadata[suffix or "main"] = {"uid": info.st_uid, "gid": info.st_gid,
+                                                   "mode": stat.S_IMODE(info.st_mode), "size": info.st_size}
+                print(json.dumps({"scope": "synthetic-sqlite-posix-only", "sqliteVersion": sqlite3.sqlite_version,
+                                  "files": metadata}, sort_keys=True))
+            finally:
+                connection.close()
 
     def test_unexpected_home_paths_are_bounded_diagnostic_only_and_still_refuse(self):
         guard = self.guard()

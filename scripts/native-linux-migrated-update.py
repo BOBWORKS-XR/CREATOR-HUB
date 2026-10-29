@@ -452,6 +452,14 @@ class TransitionHomePreservation:
                 handoff = "none" if phase is None else "ready" if phase == "Ready" else "attempting" if phase == {"Attempting": self.target} else "completed"
                 error.home_path_refusal = {"checkpoint": checkpoint if checkpoint in checkpoints else "unspecified", "handoffPhase": handoff,
                                            "paths": paths, "omittedCount": len(unknown) - len(paths), "authorityGranted": False}
+                database = "data/com.creatorworks.hub/localstorage/tauri_localhost_0.localstorage"
+                sidecars = {}
+                for name in (database + "-shm", database + "-wal"):
+                    if name in unknown:
+                        row = after[name]
+                        keys = ("kind", "dev", "ino", "uid", "gid", "mode", "size", "sha256")
+                        sidecars[name] = {key: row[key] for key in keys if key in row}
+                if sidecars: error.home_path_refusal["localStorageSidecars"] = sidecars
                 error._home_path_refusal_origin = _HOME_PATH_REFUSAL_ORIGIN
             except Exception:
                 pass
