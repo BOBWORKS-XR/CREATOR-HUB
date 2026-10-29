@@ -2509,6 +2509,36 @@ class ChangedCaseOutcomeTests(unittest.TestCase):
         self.assertEqual(report, {"reopenedProjects": {"projectsObserved": True, "termsReaccepted": False, "migrationReplayed": False}})
         self.assertEqual(html.evidence["inputAttempts"], [])
 
+    def test_reopened_filter_selection_is_guarded_recorded_and_not_retried(self):
+        fixture = T.Actual017ReopenedProjectsTests(methodName="runTest"); fixture.setUp(); self.addCleanup(fixture.doCleanups)
+        state = fixture.manual(); html = fixture.construct(state)
+        state.changed["#project-sdk:property/value"] = "sdk"
+        with fixture.running(state):
+            html.start()
+            self.assertEqual(html.projects_filter_value(), "sdk")
+            actions = []
+            html.click('#project-sdk option[value="all"]', actions, "projects-filter-all")
+            self.assertEqual(html.projects_filter_value(), "all")
+            with self.assertRaises(RuntimeError):
+                html.click('#project-sdk option[value="all"]', actions, "projects-filter-all")
+            before = len(state.requests)
+            with self.assertRaises(RuntimeError): html.d.elements("#feature-mcp")
+            self.assertEqual(len(state.requests), before)
+        self.assertEqual(actions, ["projects-filter-all"])
+        self.assertEqual(html.evidence["inputAttempts"], actions)
+
+    def test_reopened_uncertain_filter_click_is_not_retried(self):
+        fixture = T.Actual017ReopenedProjectsTests(methodName="runTest"); fixture.setUp(); self.addCleanup(fixture.doCleanups)
+        state = fixture.manual(); html = fixture.construct(state)
+        with fixture.running(state):
+            html.start()
+            state.input_error = OSError("unknown click outcome")
+            actions = []
+            with self.assertRaises(Exception): html.click('#project-sdk option[value="all"]', actions, "projects-filter-all")
+            with self.assertRaises(RuntimeError): html.click('#project-sdk option[value="all"]', actions, "projects-filter-all")
+        self.assertEqual(actions, ["projects-filter-all"])
+        self.assertEqual(html.evidence["inputAttempts"], actions)
+
 
 class ChangedCaseStagingTests(unittest.TestCase):
     def home_fixture(self):
@@ -3375,6 +3405,55 @@ class ContinuationSystemChecksTests(unittest.TestCase):
             with patch.object(C, "CONTROL", control), patch.object(C, "directory"):
                 with self.assertRaises(FileExistsError): C.continuation_system_checks(polkit)
             polkit.verify_files.assert_not_called()
+
+
+class ProjectsFilterTests(unittest.TestCase):
+    def fixture(self, *, click_changes=True):
+        value = {"filter": "sdk"}
+        home = Path("/synthetic-home")
+        html = Mock(probed=True, detached=False)
+        html.optional.side_effect = lambda selector, endpoint="text": "false" if selector == "#view-projects" else None
+        def read(selector, endpoint="text"):
+            if selector == "#project-sdk": return value["filter"]
+            if selector == "#projects-home-title": return "Projects"
+            if selector == "#view-projects": return True
+            if 'data-mcp-selected="true"' in selector: return str(home / "current-project")
+            if 'data-mcp-selected="false"' in selector: return str(home / "missing-project")
+            raise AssertionError(selector)
+        def elements(selector):
+            if selector == "iframe,object,embed": return []
+            return ["one", "two"] if selector == "#project-list .project-row" else ["one"]
+        html.d.read.side_effect = read
+        html.projects_filter_value.side_effect = lambda: value["filter"]
+        html.d.elements.side_effect = elements
+        def click(selector, actions, label):
+            actions.append(label)
+            if click_changes: value["filter"] = "all"
+        html.click.side_effect = click
+        return html, home
+
+    def test_selects_all_once_and_keeps_exact_project_checks(self):
+        html, home = self.fixture()
+        report = {}
+        with patch.object(C.U, "wait", side_effect=lambda check: check()), patch.object(C.U, "read", return_value=b"{}"), \
+                patch.object(C.U, "parse", return_value={"restoreHostedViews": False}):
+            C.projects(html, home, report, "initialProjects")
+        self.assertEqual(report["initialProjectsFilterActions"], ["projects-filter-all"])
+        self.assertTrue(report["initialProjects"]["projectsObserved"])
+
+    def test_unknown_or_ineffective_selection_refuses_without_retry(self):
+        html, home = self.fixture(click_changes=False)
+        with patch.object(C.U, "wait", side_effect=lambda check: check()), patch.object(C.U, "read", return_value=b"{}"), \
+                patch.object(C.U, "parse", return_value={"restoreHostedViews": False}):
+            with self.assertRaisesRegex(RuntimeError, "all-projects filter"): C.projects(html, home, {}, "initialProjects")
+        html.click.assert_called_once()
+
+    def test_wrong_project_count_still_refuses(self):
+        html, home = self.fixture()
+        html.d.elements.side_effect = lambda selector: []
+        with patch.object(C.U, "wait", side_effect=lambda check: check()), patch.object(C.U, "read", return_value=b"{}"), \
+                patch.object(C.U, "parse", return_value={"restoreHostedViews": False}):
+            with self.assertRaisesRegex(RuntimeError, "inventory differs"): C.projects(html, home, {}, "initialProjects")
 
 
 if __name__ == "__main__":

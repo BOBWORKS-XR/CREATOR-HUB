@@ -4199,11 +4199,13 @@ class HtmlAttachmentTests(unittest.TestCase):
                 if request.method == "POST":
                     self.assertEqual(endpoint, "click")
                     if state.input_error is not None: raise state.input_error
+                    if selector == '#project-sdk option[value="all"]': state.changed["#project-sdk:property/value"] = "all"
                     value = None
                 elif endpoint == "text":
                     value = {"#platform-status": "Linux", ".footer-version": "0.1.16", "#page-title": "CREATOR HUB", "#projects-home-title": "Projects"}.get(selector, "")
                 elif endpoint in ("displayed", "enabled"): value = True
-                elif endpoint == "name": value = "input" if selector == "#usage-terms-checkbox" else "button"
+                elif endpoint == "name": value = "input" if selector == "#usage-terms-checkbox" else "option" if selector == '#project-sdk option[value="all"]' else "button"
+                elif endpoint == "property/value" and selector == "#project-sdk": value = "all"
                 elif endpoint == "attribute/type": value = "checkbox"
                 elif endpoint == "attribute/aria-busy": value = "false"
                 elif endpoint == "attribute/open": value = None
@@ -8480,6 +8482,14 @@ class Actual017AdapterTests(unittest.TestCase):
         qual = normalized(functions["_private_target_qualification"].body, target="FIXED['17']")
         qual.insert(1, functions["private_target_qualification"].body[0])
         init = copy.deepcopy(methods["_initialize"].body)
+        filter_init = 'self.project_filter_element = None'
+        init_text = [ast.unparse(node) for node in init]
+        self.assertEqual(init_text.count(filter_init), 1)
+        filter_index = init_text.index(filter_init)
+        self.assertGreater(filter_index, 0)
+        self.assertEqual(init_text[filter_index - 1], 'self.armed_element = None')
+        self.assertEqual(init_text[filter_index + 1], 'self.expected_modal = None')
+        init = without(init, filter_init)
         for extra in (
             'require(type(target_identity) is tuple and len(target_identity) == 5 and target_identity[0] in ("historical", "actual017"), "One fixed HTML target identity required")',
             'require(previous is None or previous.target_identity == target_identity, "HTML target context differs from previous")',
@@ -9083,18 +9093,59 @@ class Actual017ReopenedProjectsContractTests(unittest.TestCase):
         '#project-list .project-row[data-mcp-selected="false"] .project-info small',
     )
 
+    def assert_projects_invariant(self, function):
+        normalized = copy.deepcopy(function)
+        additions = ast.parse('''
+if html.projects_filter_value() != "all":
+    html.click('#project-sdk option[value="all"]', report.setdefault(phase + "FilterActions", []), "projects-filter-all")
+require(html.projects_filter_value() == "all", "Expected all-projects filter required")
+''').body
+        dump = lambda node: ast.dump(node, include_attributes=False)
+        signatures = [dump(node) for node in additions]
+        body = normalized.body
+        for signature in signatures:
+            self.assertEqual(sum(dump(node) == signature for node in body), 1)
+        positions = [next(i for i, node in enumerate(body) if dump(node) == signature) for signature in signatures]
+        self.assertEqual(positions[1], positions[0] + 1)
+        self.assertGreater(positions[0], 0)
+        self.assertEqual(ast.unparse(body[positions[0] - 1]),
+                         "require(not html.d.elements('iframe,object,embed'), 'Unexpected separate page document')")
+        self.assertEqual(ast.unparse(body[positions[1] + 1]),
+                         "require(len(html.d.elements('#project-list .project-row')) == 2, 'Migrated Projects inventory differs')")
+        del body[positions[0]:positions[1] + 1]
+        self.assertEqual(hashlib.sha256(dump(normalized).encode()).hexdigest(),
+                         "c691e97d65a51e64f40689c03798bd59450350dce7daab69988c71c17127cad9")
+
     def setUp(self):
         self.fixture = Actual017ReopenedProjectsTests()
         self.fixture.setUp()
         self.addCleanup(self.fixture.doCleanups)
         source = HERE / "native-linux-migrated-update.py"
         function = next(n for n in ast.parse(source.read_bytes()).body if isinstance(n, ast.FunctionDef) and n.name == "projects")
-        self.assertEqual(hashlib.sha256(ast.dump(function, include_attributes=False).encode()).hexdigest(),
-                         "c691e97d65a51e64f40689c03798bd59450350dce7daab69988c71c17127cad9")
+        self.assert_projects_invariant(function)
         # Compile only the pinned pure helper, never import the C orchestration.
         namespace = {"U": M, "require": M.require}
         exec(compile(ast.Module(body=[function], type_ignores=[]), str(source), "exec"), namespace)
         self.projects = namespace["projects"]
+
+    def test_projects_invariant_rejects_changed_or_extra_statements(self):
+        source = HERE / "native-linux-migrated-update.py"
+        function = next(n for n in ast.parse(source.read_bytes()).body if isinstance(n, ast.FunctionDef) and n.name == "projects")
+        for defect in ("addition", "extra", "retained", "position"):
+            mutated = copy.deepcopy(function)
+            if defect == "addition":
+                node = next(n for n in mutated.body if isinstance(n, ast.If) and "projects_filter_value" in ast.unparse(n))
+                node.test.comparators[0] = ast.Constant(value="sdk")
+            elif defect == "extra":
+                mutated.body.append(ast.Pass())
+            elif defect == "retained":
+                node = next(n for n in mutated.body if "Migrated Projects inventory differs" in ast.unparse(n))
+                node.value.args[0].comparators[0] = ast.Constant(value=3)
+            else:
+                index = next(i for i, n in enumerate(mutated.body) if isinstance(n, ast.If) and "projects_filter_value" in ast.unparse(n))
+                mutated.body[index], mutated.body[index + 1] = mutated.body[index + 1], mutated.body[index]
+            with self.subTest(defect=defect), self.assertRaises(AssertionError):
+                self.assert_projects_invariant(mutated)
 
     def state(self, home):
         state = self.fixture.manual()
@@ -9155,7 +9206,8 @@ class Actual017ReopenedProjectsContractTests(unittest.TestCase):
         self.assertEqual(len(assignments), 1)
         original = ("#platform-status", ".footer-version", "#page-title", "iframe,object,embed", "#view-projects", "#projects-home-title",
                     "#refresh-projects", "#suite-trigger", '#suite-menu [data-view="hub"]', "#usage-terms-dialog", "#convergence-dialog")
-        self.assertEqual(ast.literal_eval(assignments[0].value), original + self.READS)
+        self.assertEqual(ast.literal_eval(assignments[0].value),
+                         original + ("#project-sdk", '#project-sdk option[value="all"]') + self.READS)
 
     def test_near_matches_broad_other_page_writes_and_generic_probe_still_refuse(self):
         with tempfile.TemporaryDirectory() as folder:

@@ -2941,6 +2941,7 @@ class HtmlPages:
         self.started = self.probe_started = self.detach_started = self.tools_stopping = self.input_unknown = False
         self.session_sent = self.detach_sent = False
         self.armed_element = None
+        self.project_filter_element = None
         self.expected_modal = None
         self.d = pages.Driver()
         self.d.guard = self.guard
@@ -2968,6 +2969,7 @@ class HtmlPages:
         if _actual017_reopened_mode(self) and method == "POST" and route.endswith("/elements"):
             allowed = ("#platform-status", ".footer-version", "#page-title", "iframe,object,embed", "#view-projects", "#projects-home-title",
                        "#refresh-projects", "#suite-trigger", '#suite-menu [data-view="hub"]', "#usage-terms-dialog", "#convergence-dialog",
+                       "#project-sdk", '#project-sdk option[value="all"]',
                        "#project-list .project-row", '#project-list .project-row[data-mcp-selected="true"]',
                        '#project-list .project-row[data-mcp-selected="false"]',
                        '#project-list .project-row[data-mcp-selected="true"] .project-info small',
@@ -2987,8 +2989,11 @@ class HtmlPages:
             require(route == prefix or route.startswith(prefix + "/"), "Foreign HTML session route refused")
             suffix = route[len(prefix):]
             if method == "GET":
+                if suffix.endswith("/property/value"):
+                    require(self.project_filter_element is not None and suffix == "/element/" + self.project_filter_element + "/property/value",
+                            "Only the bound Projects filter value may be read")
                 require(payload is None and (suffix in ("/window/handles", "/title", "/url") or re.fullmatch(
-                    r"/element/[A-Za-z0-9_-]{1,128}/(?:text|name|displayed|enabled|attribute/(?:type|open|aria-busy|disabled|aria-pressed))", suffix)),
+                    r"/element/[A-Za-z0-9_-]{1,128}/(?:text|name|displayed|enabled|property/value|attribute/(?:type|open|aria-busy|disabled|aria-pressed))", suffix)),
                     "Only fixed HTML metadata reads permitted")
             elif (method, suffix) == ("POST", "/elements"):
                 require(type(payload) is dict and set(payload) == {"using", "value"} and payload["using"] == "css selector"
@@ -3159,17 +3164,28 @@ class HtmlPages:
         require(len(rows) <= 1, "Ambiguous fixed HTML control")
         return self.d.call("GET", "/element/" + rows[0] + "/" + endpoint) if rows else None
 
+    def projects_filter_value(self):
+        require(self.probed and not self.detached and not self.input_unknown, "Owned Projects filter required")
+        self.project_filter_element = self.d.element("#project-sdk")
+        try:
+            return self.d.call("GET", "/element/" + self.project_filter_element + "/property/value")
+        finally:
+            self.project_filter_element = None
+
     def click(self, selector, actions, label):
-        require(not _actual017_reopened_mode(self) or label in ("suite-trigger", "view-home"), "SECOND B permits Projects navigation only")
+        require(not _actual017_reopened_mode(self) or label in ("suite-trigger", "view-home", "projects-filter-all"), "SECOND B permits Projects navigation only")
         require(self.probed and not self.detached and not self.input_unknown, "HTML input unqualified/unknown; no retry")
+        require(label != "projects-filter-all" or label not in self.evidence["inputAttempts"], "No repeated Projects filter input")
         controls = {"usage-terms-checkbox": "#usage-terms-checkbox", "usage-terms-continue": "#usage-terms-continue",
                     "convergence-later": "#convergence-later", "suite-trigger": "#suite-trigger",
                     "view-mcp": '#suite-menu [data-view="mcp"]', "view-setup": '#suite-menu [data-view="setup"]',
-                    "view-home": '#suite-menu [data-view="hub"]', "hub-update-button": "#hub-update-button"}
+                    "view-home": '#suite-menu [data-view="hub"]', "hub-update-button": "#hub-update-button",
+                    "projects-filter-all": '#project-sdk option[value="all"]'}
         require(controls.get(label) == selector, "Only finite source-bound HTML actions permitted")
         element = self.d.element(selector)
         prefix = "/element/" + element + "/"
-        require(self.d.call("GET", prefix + "name") == ("input" if label == "usage-terms-checkbox" else "button")
+        expected_tag = "input" if label == "usage-terms-checkbox" else "option" if label == "projects-filter-all" else "button"
+        require(self.d.call("GET", prefix + "name") == expected_tag
                 and self.d.call("GET", prefix + "displayed") is True
                 and self.d.call("GET", prefix + "enabled") is True, "HTML control not actionable/source-bound")
         if label == "usage-terms-checkbox":

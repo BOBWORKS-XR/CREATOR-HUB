@@ -953,6 +953,9 @@ def projects(html, home, report, phase):
             and U.parse(U.read(home / U.PREFS))["restoreHostedViews"] is False,
             "Migrated Projects state did not survive; no fallback consent/dismissal")
     require(not html.d.elements("iframe,object,embed"), "Unexpected separate page document")
+    if html.projects_filter_value() != "all":
+        html.click('#project-sdk option[value="all"]', report.setdefault(phase + "FilterActions", []), "projects-filter-all")
+    require(html.projects_filter_value() == "all", "Expected all-projects filter required")
     require(len(html.d.elements("#project-list .project-row")) == 2, "Migrated Projects inventory differs")
     for selected, name in (("true", "current-project"), ("false", "missing-project")):
         selector = '#project-list .project-row[data-mcp-selected="' + selected + '"]'
@@ -2126,7 +2129,9 @@ def changed_outcome(report, inventories, verifier, protected_paths):
     require(html.get("launchRole") == "manual-second-b-projects" and html.get("automaticRestartProof") is False
             and html.get("projectsDocumentVerified") is True and html.get("probePassed") is html.get("probeReadOnly") is False
             and type(html.get("inputCountAtDocumentCheck")) is int and html["inputCountAtDocumentCheck"] == 0
-            and html.get("inputAttempts") == [] and "inputCountAtProbe" not in html and "adoptedExit" not in html
+            and html.get("inputAttempts") in ([], ["projects-filter-all"])
+            and html["inputAttempts"] == report.get("reopenedProjectsFilterActions", [])
+            and "inputCountAtProbe" not in html and "adoptedExit" not in html
             and html.get("originalRoot") == current and type(exit_record.get("exitCode")) is int
             and exit_record == {"pid": current["pid"], "startTime": current["startTime"], "exitCode": 0}
             and html.get("detached") is html.get("toolsClosedAfterRootExit") is True and html.get("documentVersion") == "0.1.17",
