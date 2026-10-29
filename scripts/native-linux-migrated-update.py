@@ -271,6 +271,7 @@ class TransitionHomePreservation:
                 "Exact original HOME/UID context required")
         self.expected, self.groups, release = transition_home_closure(manifests, manifest_pins, archives, inventories, verifier)
         self.before, self.journal = copy.deepcopy(adopted["home"]), copy.deepcopy(adopted["journal"])
+        self._journal_mode = self.before[M.JOURNAL]["mode"]
         require(tree(HOME, M.UID) == self.before, "Original adopted HOME drifted")
         self.R, self.E, self.D = "data/creator-hub/mcp-route-v1/linux-x86_64", "data/creator-hub-update-cache/deb/records", "data/creator-hub-update-cache/deb"
         self.active, self.handoff = self.R + "/active.json", self.E + "/mcp-route-update.json"
@@ -413,9 +414,13 @@ class TransitionHomePreservation:
             if name == self.active and complete: continue
             if name == M.JOURNAL:
                 fields = ("kind", "dev", "uid", "gid", "mode")
-                require(all(after[name][k] == wanted[k] for k in fields),
+                old_mode, new_mode = self._journal_mode, after[name]["mode"]
+                private_tightening = new_mode == 0o600 and old_mode in (0o644, 0o664, 0o666)
+                require(all(after[name][k] == wanted[k] for k in fields if k != "mode")
+                        and (new_mode == old_mode or private_tightening),
                         "Journal ownership/mode/filesystem changed: " + json.dumps(
-                            {"before": {k: wanted[k] for k in fields}, "after": {k: after[name][k] for k in fields}},
+                            {"before": {k: wanted[k] for k in fields}, "lastMode": old_mode,
+                             "after": {k: after[name][k] for k in fields}},
                             sort_keys=True, separators=(",", ":")))
             else:
                 require(after[name] == wanted, "Original protected bytes/identity changed: " + name)
@@ -448,6 +453,7 @@ class TransitionHomePreservation:
         self._seen.update({n: copy.deepcopy(after[n]) for n in additions if n not in (self.pending, self.partial, self.handoff)})
         if phase == "Ready" and self._ready is None: self._ready = copy.deepcopy(capture)
         if complete and self._active_b is None: self._active_b = copy.deepcopy(active)
+        self._journal_mode = after[M.JOURNAL]["mode"]
         self._phase, self._record = copy.deepcopy(phase), copy.deepcopy(capture)
 
     def finish(self):

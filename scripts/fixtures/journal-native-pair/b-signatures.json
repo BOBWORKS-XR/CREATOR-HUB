@@ -1,0 +1,43 @@
+{
+  "verifierSha256": "08af48e94021d4a201db5ca8dd66235e51e2763fcf90080eeea45df6bb1e10ca",
+  "checks": [
+    {
+      "body": "journal-017-physical-audit-41\\package-routing\\router.json",
+      "signature": "journal-017-physical-audit-41\\package-routing\\router.minisig",
+      "bodySha256": "1315487222bd02492a502b59cea29c530a6ae77b66f11348d07fdcf7efb99eaa",
+      "signatureSha256": "678f812169d52b2ad1d1ecdc2a2a8a03bb756aec15018f19e1098f344bf422ea",
+      "verified": true
+    },
+    {
+      "body": "journal-017-physical-audit-41\\package-routing\\runtime.json",
+      "signature": "journal-017-physical-audit-41\\package-routing\\runtime.minisig",
+      "bodySha256": "2116cf1fe040a6be770e726a66f99f6d42e1303576c7d07e16be4dfb5f307dc4",
+      "signatureSha256": "6b6d92ecf7f2efa2963a918b2481c3c6612addd68d8cb523f81ead713f88608c",
+      "verified": true
+    },
+    {
+      "body": "journal-017-carrier-39\\staged\\handoff.json",
+      "signature": "journal-017-carrier-39\\staged\\handoff.minisig",
+      "bodySha256": "b5cc32f560135d51ffe2cc405cb35968914e9bb4c323e4542378387530749bea",
+      "signatureSha256": "a590cfb397d8a9d0bdebc3ac5e6c0553bead0622725ae965ee71d35e3580d2ac",
+      "verified": true
+    },
+    {
+      "body": "journal-017-carrier-39\\staged\\routing\\runtime.json",
+      "signature": "journal-017-carrier-39\\staged\\routing\\runtime.minisig",
+      "bodySha256": "92f5d79667f81cec4933d4a0c4550a93a4477d47131a94959dad9cbaf0efbcc8",
+      "signatureSha256": "16e3d1502b5a5be54ced73b5e93eb95676fbe9844cc80785d29774c44660bbc2",
+      "verified": true
+    },
+    {
+      "body": "journal-017-carrier-39\\staged\\derivation017.json",
+      "signature": "journal-017-carrier-39\\staged\\derivation017.minisig",
+      "bodySha256": "198d40daad35f0128038b1cc92c1d48b9f9527586f2f7efd1b583aa55d1e53ee",
+      "signatureSha256": "677cc26585405972b616b47fd86f46a50613727de60acc61e8fec954d9aed925",
+      "verified": true
+    }
+  ],
+  "embeddedPackageSignatures": 2,
+  "allFiveInputSignaturesVerified": true,
+  "candidateExecuted": false
+}

@@ -1,0 +1,57 @@
+{
+  "schemaVersion": 1,
+  "cohort": "production-migration-016",
+  "mode": "pages",
+  "assembly": {
+    "sourceCommit": "be0adef208c80a60f8599bd466a45b28bde73588",
+    "sourceTree": "8eb710826de448d820a3cee6d964e4a3f3a24e10",
+    "runId": 40899552207,
+    "runAttempt": 1,
+    "jobId": 123537944797,
+    "artifactId": 12909617948,
+    "zipBytes": 183999603,
+    "zipSha256": "d6612027fded7b6163e8212453b853a08285f6551baaa1d0871f0121a040a2a7"
+  },
+  "pins": {
+    "rawHub": {
+      "size": 29088440,
+      "sha256": "7a84da3326fbc41501c2a5415fdf6a6f82ccf9401ad203a9734d2c9025a5961e"
+    },
+    "hub": {
+      "size": 29088440,
+      "sha256": "f4b86cbceed7e81b9b871160f11a9dd126f2c1dae8e24ecbbf5014e00e588a33"
+    },
+    "deb": {
+      "size": 64513510,
+      "sha256": "9293238fe70c95302735aed96dd547cd648c224f6b29f72449d0d10428afad45"
+    },
+    "manifest": {
+      "size": 3663,
+      "sha256": "8f7e7efa742207a20980dbb8099b6a0d982cef11bbdd4fb91dd17e4984fa6b4a"
+    },
+    "modulesArchive": {
+      "size": 55580358,
+      "sha256": "248de103e40dabd032516c2d291099fb2f372deba9ab1a980ca65e570874f50e"
+    },
+    "assemblyReceipt": {
+      "size": 3560,
+      "sha256": "1651ce5f0ba7b1d153030624eef544804ddbd4b4ede0ed3c712f7e7af28cffc6"
+    },
+    "packageIntegrity": {
+      "size": 2151,
+      "sha256": "e83f6d35bb067057117d9e5fe6da305cb63cb0f4cbb7ae3bbb5682040545a4dc"
+    },
+    "helper": {
+      "size": 1168536,
+      "sha256": "7f22822e50ee8b96829c64c95da9e1b098c3e080a1370f577ae2b69055eed94a"
+    },
+    "policy": {
+      "size": 878,
+      "sha256": "f4819f08e0a96e98d10a449a82a26b4f59d69714460eb9082387f746e1889bb4"
+    },
+    "service": {
+      "size": 92,
+      "sha256": "9a270a39c219b4f2d294cfaa2a849db84b1e1883fa532d2c90d7f95625780340"
+    }
+  }
+}
