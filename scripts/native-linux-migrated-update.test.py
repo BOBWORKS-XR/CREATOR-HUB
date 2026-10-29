@@ -2780,6 +2780,24 @@ class ChangedCaseExportTests(unittest.TestCase):
             row = next(row for row in rows if row["source"] == str(tool / "receipt.json"))
             self.assertEqual((folder / row["member"]).read_bytes(), b'{"releaseReady":false}')
 
+    def test_original_and_continuation_diagnostics_survive_failure_export(self):
+        with self.fixture() as (runner, base, _, _, _):
+            continuation = base / "control/system-checks"
+            continuation.mkdir()
+            polkit = C.U.load("native-linux-polkit-probe")
+            name = Path(next(iter(polkit.FILES))).name
+            with patch.dict(polkit.FILES, {}, clear=True):
+                polkit.system_file_observation(base)
+                polkit.system_file_observation(continuation)
+                with self.assertRaises(FileExistsError): polkit.system_file_observation(base)
+            command = continuation / ("package-" + name + ".stderr")
+            command.write_bytes(b"diagnostic failure")
+            expected = {str(path): path.read_bytes() for path in
+                        (base / "system-files-observation.json", continuation / "system-files-observation.json", command)}
+            folder, rows = self.export(runner)
+            exported = {row["source"]: (folder / row["member"]).read_bytes() for row in rows if "member" in row}
+            for path, data in expected.items(): self.assertEqual(exported[path], data)
+
     def test_changed_export_runner_owner_not_admitted_for_native_evidence(self):
         with self.fixture() as (runner, base, _, _, _):
             file = base / "intent.json"; file.write_bytes(b"native")
@@ -3291,6 +3309,72 @@ class CachedInitialInventoryTests(unittest.TestCase):
         self.assertIs(caught.exception, original)
         capture.assert_called_once()
         self.assertEqual(namespace["record"], {})
+
+
+class ContinuationSystemChecksTests(unittest.TestCase):
+    def test_new_output_keeps_original_and_runs_every_guard(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            control = base / "control"
+            control.mkdir()
+            original = base / "system-files-observation.json"
+            original.write_bytes(b"original evidence")
+            calls = []
+            class Polkit:
+                def verify_files(self, path):
+                    calls.append("verify")
+                    with (path / "system-files-observation.json").open("xb") as stream:
+                        stream.write(b"new evidence")
+                def admin_config(self): calls.append("policy")
+                def credential_tools(self, path):
+                    calls.append("credential")
+                    with (path / "credential-package.json").open("xb") as stream:
+                        stream.write(b"credential evidence")
+            with patch.object(C, "CONTROL", control), patch.object(C, "directory"):
+                C.continuation_system_checks(Polkit())
+            self.assertEqual(calls, ["verify", "policy", "credential"])
+            self.assertEqual(original.read_bytes(), b"original evidence")
+            self.assertEqual((control / "system-checks/system-files-observation.json").read_bytes(), b"new evidence")
+            self.assertEqual((control / "system-checks/credential-package.json").read_bytes(), b"credential evidence")
+
+    def test_existing_output_refuses_without_running_guards(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            control = Path(tmp)
+            (control / "system-checks").mkdir()
+            polkit = Mock()
+            with patch.object(C, "CONTROL", control), patch.object(C, "directory"):
+                with self.assertRaises(FileExistsError): C.continuation_system_checks(polkit)
+            polkit.verify_files.assert_not_called()
+
+    def test_verification_failure_stops_before_policy_and_credentials(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            polkit = Mock()
+            polkit.verify_files.side_effect = RuntimeError("bad package pin")
+            with patch.object(C, "CONTROL", Path(tmp)), patch.object(C, "directory"):
+                with self.assertRaisesRegex(RuntimeError, "bad package pin"): C.continuation_system_checks(polkit)
+            polkit.admin_config.assert_not_called()
+            polkit.credential_tools.assert_not_called()
+
+    def test_policy_failure_stops_before_credentials(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            polkit = Mock()
+            polkit.admin_config.side_effect = RuntimeError("bad policy")
+            with patch.object(C, "CONTROL", Path(tmp)), patch.object(C, "directory"):
+                with self.assertRaisesRegex(RuntimeError, "bad policy"): C.continuation_system_checks(polkit)
+            polkit.verify_files.assert_called_once()
+            polkit.credential_tools.assert_not_called()
+
+    @unittest.skipUnless(hasattr(os, "symlink") and os.name != "nt", "symlink fixture requires Unix")
+    def test_redirected_output_refuses_without_running_guards(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            control = Path(tmp)
+            outside = control / "outside"
+            outside.mkdir()
+            (control / "system-checks").symlink_to(outside, target_is_directory=True)
+            polkit = Mock()
+            with patch.object(C, "CONTROL", control), patch.object(C, "directory"):
+                with self.assertRaises(FileExistsError): C.continuation_system_checks(polkit)
+            polkit.verify_files.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -2825,6 +2825,16 @@ def observe_refused_fixture_processes(initial, native, helper):
     return result
 
 
+def continuation_system_checks(polkit):
+    directory(CONTROL, 0)
+    output = CONTROL / "system-checks"
+    output.mkdir(mode=0o700)
+    directory(output, 0)
+    polkit.verify_files(output)
+    polkit.admin_config()
+    polkit.credential_tools(output)
+
+
 def changed_broker(env):
     changed_admission(env)
     original = changed_intent(env)
@@ -2881,7 +2891,7 @@ def changed_broker(env):
         inspected_report = U.parse(inspected.stdout)
         require(inspected_report["fromVersion"] == "0.1.16" and inspected_report["targetVersion"] == "0.1.17"
                 and inspected_report["publicDiscovery"] is inspected_report["releaseReady"] is False, "Transport scope differs")
-        polkit.verify_files(BASE); polkit.admin_config(); polkit.credential_tools(BASE)
+        continuation_system_checks(polkit)
         require(polkit.fixture_credential("status") == "L", "Original synthetic account is not locked")
         changed_broker_preservation(sealed, home_guard)
         tls = changed_prepare_tls(env)
@@ -2987,6 +2997,14 @@ def changed_export(env):
         *(OUTPUT / name for name in ("report.json", "root.json", "handoff-ready.json", "handoff-completed.json", "html-driver.stdout", "html-driver.stderr",
           "successor-html-driver.stdout", "successor-html-driver.stderr", "reopened-projects-html-driver.stdout", "reopened-projects-html-driver.stderr", "initial-bitmap/root-window.png", "successor-bitmap/root-window.png")),
         BASE / "result/mcp-transition-protocol.json"]
+    polkit = U.load("native-linux-polkit-probe")
+    labels = [kind + Path(name).name for name in polkit.FILES
+              for kind in ("observed-package-", "observed-owner-", "package-", "owner-")]
+    labels += [kind + Path(name).name for name in polkit.CREDENTIAL_TOOLS
+               for kind in ("credential-package-", "credential-owner-")]
+    for check_dir in (BASE, CONTROL / "system-checks"):
+        files.append(check_dir / "system-files-observation.json")
+        files.extend(check_dir / (label + "." + suffix) for label in labels for suffix in ("json", "stdout", "stderr"))
     for name in ("aBefore", "aAfter", "aDuringB", "b"): files.append(BASE / "result/mcp" / ("observer-" + name + ".json"))
     for role in ("existing", "reconnect"):
         files.extend(BASE / "result/mcp" / role / leaf for leaf in ("sdk.stdout", "sdk.stderr", "sdk-result.json"))
