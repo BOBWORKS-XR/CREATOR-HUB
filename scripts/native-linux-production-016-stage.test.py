@@ -326,5 +326,33 @@ class ProductionStageTests(unittest.TestCase):
         self.assertEqual(command.elts[-1].value, "--verify-staged")
 
 
+class JournalASourceBindingTests(unittest.TestCase):
+    def test_exact_profile_and_producer_remain_separate_from_historical(self):
+        value = P.parse((HERE / "fixtures/journal-a-native-incoming.UNBOUND.json").read_bytes())
+        P.profile(value)
+        legacy = []
+        for product, repo, tag, name in (("mcp", "CREATOR-WORKS-UNITY-MCP", "v2.7.7", "Creator.Works.MCP_2.7.7_amd64.deb"),
+                                        ("setup", "CREATOR-PROJECT-SETUP", "v0.3.7", "Creator.Project.Setup_0.3.7_amd64.deb")):
+            size, digest = P.S.LEGACY[product]
+            legacy.append({"assetId": 1, "releaseId": 2, "product": product, "repo": repo, "tag": tag,
+                           "name": name, "size": size, "sha256": digest})
+        api = {"schemaVersion": 1, "cohort": P.COHORT, "harnessSource": "f" * 40, "assembly": value["assembly"],
+               "privatePayload": dict(P.JOURNAL_A_PRIVATE), "privateSourcePaths": {k: "9" * 40 for k in P.PRIVATE_PATHS},
+               "legacy": legacy, **P.FLAGS}
+        P.api_binding(api, value, "f" * 40)
+        with self.assertRaises(RuntimeError):
+            P.api_binding({**api, "privatePayload": P.PRIVATE}, value, "f" * 40)
+        for key, replacement in (("sourceCommit", "a" * 40), ("sourceTree", "b" * 40), ("runId", 1),
+                                 ("runAttempt", 2), ("jobId", 2), ("artifactId", 3), ("zipBytes", 100),
+                                 ("zipSha256", "c" * 64)):
+            with self.subTest(key=key):
+                changed = copy.deepcopy(value)
+                changed["assembly"][key] = replacement
+                with self.assertRaises(RuntimeError): P.profile(changed)
+        changed = copy.deepcopy(value)
+        changed["pins"]["hub"]["sha256"] = "a" * 64
+        with self.assertRaises(RuntimeError): P.profile(changed)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

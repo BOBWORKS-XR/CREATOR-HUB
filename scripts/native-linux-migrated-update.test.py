@@ -1473,6 +1473,60 @@ class TransitionHomeTests(unittest.TestCase):
         self.assertEqual(diagnostic["after"]["mode"], 0o644)
         self.assertEqual(set(diagnostic["before"]), {"kind", "dev", "uid", "gid", "mode"})
 
+    def test_existing_public_journal_can_be_tightened_without_losing_records(self):
+        self.metadata(self.home / M.JOURNAL, 0o644)
+        self.before["home"] = C.tree(self.home, M.UID)
+        guard = self.guard()
+        self.metadata(self.home / M.JOURNAL, 0o600)
+        guard.check()
+
+    def test_private_journal_cannot_gain_access(self):
+        guard = self.guard()
+        self.metadata(self.home / M.JOURNAL, 0o644)
+        with self.assertRaisesRegex(RuntimeError, "Journal ownership/mode/filesystem changed"):
+            guard.check()
+
+    def test_journal_cannot_widen_again_after_observed_tightening(self):
+        self.metadata(self.home / M.JOURNAL, 0o644)
+        self.before["home"] = C.tree(self.home, M.UID)
+        guard = self.guard()
+        self.metadata(self.home / M.JOURNAL, 0o600)
+        guard.check()
+        self.metadata(self.home / M.JOURNAL, 0o644)
+        with self.assertRaisesRegex(RuntimeError, "Journal ownership/mode/filesystem changed"):
+            guard.check()
+
+    def test_only_reviewed_legacy_modes_can_tighten(self):
+        for old in (0o644, 0o664, 0o666, 0o602, 0o620, 0o660, 0o755):
+            with self.subTest(old=oct(old)):
+                self.metadata(self.home / M.JOURNAL, old)
+                self.before["home"] = C.tree(self.home, M.UID)
+                guard = self.guard()
+                self.metadata(self.home / M.JOURNAL, 0o600)
+                if old in (0o644, 0o664, 0o666): guard.check()
+                else:
+                    with self.assertRaisesRegex(RuntimeError, "Journal ownership/mode/filesystem changed"):
+                        guard.check()
+
+    def test_tightening_does_not_allow_unrelated_data_changes(self):
+        self.metadata(self.home / M.JOURNAL, 0o644)
+        self.before["home"] = C.tree(self.home, M.UID)
+        guard = self.guard()
+        self.metadata(self.home / M.JOURNAL, 0o600)
+        self.put("config/launcher.json", b"changed", 0o600, replace=True)
+        with self.assertRaisesRegex(RuntimeError, "Original protected bytes/identity changed"):
+            guard.check()
+
+    def test_tightening_does_not_allow_journal_prefix_changes(self):
+        self.metadata(self.home / M.JOURNAL, 0o644)
+        self.before["home"] = C.tree(self.home, M.UID)
+        guard = self.guard()
+        changed = copy.deepcopy(self.journal)
+        changed["records"][0]["command"] = "different"
+        self.put(M.JOURNAL, self.f.encode(changed), 0o600, replace=True)
+        with self.assertRaisesRegex(RuntimeError, "journal prefix"):
+            guard.check()
+
     def test_old_gate_still_rejects_real_filesystem_a_to_b(self):
         self.complete_b()
         with self.assertRaisesRegex(RuntimeError, "Original protected bytes/identity changed"):
@@ -2292,6 +2346,7 @@ class ChangedCaseAdmissionTests(unittest.TestCase):
         value["baseline"] = U.actual017_a1_data()
         for role, fixed in (("assembly16", value["baseline"]), ("assembly17", U.actual017_target_data())):
             value["artifacts"][role].update({k: copy.deepcopy(fixed[k]) for k in ("source", "tree", "run", "job", "artifact", "zip")})
+            if role == "assembly16": value["artifacts"][role]["branch"] = "validation/journal-a-assembly-016"
             for name in ("raw", "deb"):
                 value["artifacts"][role]["files"][value["objects"][name + role[-2:]]["member"]] = fixed[name]
             count = 23 if role == "assembly16" else 8
@@ -2301,7 +2356,7 @@ class ChangedCaseAdmissionTests(unittest.TestCase):
         for name in ("installer17", "installerSignature17", "outerPlan17", "outerApi17", "outerReceipt17"):
             member = "unit-" + name
             pin = (U.actual017_target_data()["deb"] if name == "installer17" else
-                   {"size": 4909, "sha256": "fcc6587c46677a59bcdfec35c74fdd2b21da6d207fc045e0169f92eec84425d4"} if name == "outerPlan17" else
+                   {"size": 4789, "sha256": "bab785cdbce7faee4a9ab9cca9fea9b27ca9268b2f73483024286f03c1531401"} if name == "outerPlan17" else
                    {"size": 1, "sha256": "f" * 64})
             value["deliveries"]["signedDeb17"]["files"][member] = pin
             value["objects"][name] = {"artifact": "signedDeb17", "member": member}
@@ -2329,8 +2384,8 @@ class ChangedCaseAdmissionTests(unittest.TestCase):
     def test_changed_profile_keeps_donor_separate_from_native_a1(self):
         value = self.profile_value(); raw = json.dumps(value).encode()
         with self.bindings(raw): self.assertEqual(C.changed_profile(raw), value)
-        value["baseline"]["source"] = "f00cd4433e261f8d968b7c88c068dae59ec970a6"
-        value["baseline"]["hub"]["sha256"] = "6fb2983c212b6bcd79f616019eca1b7f2f1daa3454d72cee7e6dc19bdc0dd5c9"
+        value["baseline"]["source"] = "c5bd13a5145aa54a50f28f073e1543826a210a4e"
+        value["baseline"]["hub"]["sha256"] = "d6c1515395df40fa67bdf09736be83613329dd8c15f42ada4474c7c8960be941"
         raw = json.dumps(value).encode()
         with self.bindings(raw), self.assertRaisesRegex(RuntimeError, "donor"):
             C.changed_profile(raw)
@@ -2723,8 +2778,8 @@ class ChangedCaseVerifierTests(unittest.TestCase):
         self.assertIn("obj('deb17'), obj('raw17'), manifest, modules", verifier)
         self.assertNotIn("U.signature(", verifier)
         self.assertEqual(C.CHANGED_INSTALLER_SOURCES["src-tauri/examples/private-deb017-dea67.rs"],
-            {"size": 20520, "sha256": "e9f6b5de863cb6c8004c0db741c58bcab1d6656e236b34c26429225263ca719f"})
-        self.assertEqual(C.CHANGED_PROFILE_SHA, "1fd56c76f100422e2c380e19cfc5dfb9da4ecf05a6348efdba99bbaebb5cd792")
+            {"size": 20520, "sha256": "d7c8eab95b36846a7a8a1d1aed0745c91af37b73f5dbfeed2c453711f7566803"})
+        self.assertEqual(C.CHANGED_PROFILE_SHA, "ef2b5a589d934bf48306ddfd53d133513f3ab4d22b9622672f76887cb7acb095")
 
     def test_changed_linux_oracle_and_real_guard_inputs_precede_guard_execution(self):
         functions = {n.name: n for n in ast.parse(Path(C.__file__).read_bytes()).body if isinstance(n, ast.FunctionDef)}

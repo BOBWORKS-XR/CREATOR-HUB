@@ -4,6 +4,7 @@ Only a future independently guarded controller may consume binding.json. A
 successful inspection is not migration, update, restart or Flatpak acceptance.
 """
 import importlib.util
+import hashlib
 import io
 import json
 import os
@@ -34,6 +35,12 @@ BRANCH = "refs/heads/validation/native-linux-production-016"
 FEATURES = ["integrated-features", "experimental-flatpak-host", "linux-production-migration", "experimental-linux-portable-update"]
 PINS = (*S.PINS, "rawHub")
 PRIVATE = {"sourceCommit": "085131ba6f3050a795fd513139a34975658ba321", "runId": 40538427509, "runAttempt": 1}
+JOURNAL_A_PRIVATE = {"sourceCommit": "f9c6da1af4ea51fc0214fba058c3946c1cda255a", "runId": 40893082867, "runAttempt": 1}
+JOURNAL_A_ASSEMBLY = {"sourceCommit": "be0adef208c80a60f8599bd466a45b28bde73588",
+                      "sourceTree": "8eb710826de448d820a3cee6d964e4a3f3a24e10", "runId": 40899552207,
+                      "runAttempt": 1, "jobId": 123537944797, "artifactId": 12909617948, "zipBytes": 183999603,
+                      "zipSha256": "d6612027fded7b6163e8212453b853a08285f6551baaa1d0871f0121a040a2a7"}
+JOURNAL_A_PROFILE_SHA = "08f2df3b8139f00f5bd5b84619218228c7878d62ae0e4ec180fdcaaec6b87fc3"
 PRIVATE_PATHS = ("modules/mcp", "modules/project-setup", "native/mcp-router", "native/host_parent_macos.rs",
                  "native/plugins_retirement.rs", "native/convergence-server-unix.rs", "src-tauri/src/module_archive.rs", "src-tauri/src/catalog-key.pub")
 FLAGS = dict.fromkeys(("nativeExecution", "nativeGuiAccepted", "migrationAccepted", "authenticationAccepted",
@@ -58,6 +65,13 @@ def profile(value):
     S.keys(raw, ("size", "sha256"))
     require(type(raw["size"]) is int and 64 <= raw["size"] <= 256 * 1024 * 1024
             and type(raw["sha256"]) is str and re.fullmatch(r"[a-f0-9]{64}", raw["sha256"]), "Independent raw Root pin required")
+    candidate = any(assembly[k] == JOURNAL_A_ASSEMBLY[k] for k in ("sourceCommit", "runId", "jobId", "artifactId"))
+    if candidate:
+        require(assembly == JOURNAL_A_ASSEMBLY, "Fresh A assembly tuple is incomplete or mixed")
+        expected = (HERE / "fixtures/journal-a-native-incoming.UNBOUND.json").read_bytes()
+        require(len(expected) == 1763 and hashlib.sha256(expected).hexdigest() == JOURNAL_A_PROFILE_SHA,
+                "Fresh A source-bound profile differs")
+        require(value == parse(expected), "Fresh A profile differs")
     return value
 
 
@@ -93,9 +107,14 @@ def api_binding(api, p, harness):
     S.keys(api["privatePayload"], PRIVATE)
     require(type(api["privatePayload"]["sourceCommit"]) is str
             and all(type(api["privatePayload"][k]) is int for k in ("runId", "runAttempt")), "Typed private API identity required")
+    assembly = p["assembly"]
+    candidate = any(assembly[k] == JOURNAL_A_ASSEMBLY[k] for k in ("sourceCommit", "runId", "jobId", "artifactId"))
+    if candidate:
+        require(assembly == JOURNAL_A_ASSEMBLY, "Fresh A assembly tuple is incomplete or mixed")
+    private_source = JOURNAL_A_PRIVATE if candidate else PRIVATE
     require(type(api["schemaVersion"]) is int and api["schemaVersion"] == 1 and api["cohort"] == COHORT
             and api["harnessSource"] == harness and re.fullmatch(r"[a-f0-9]{40}", harness)
-            and api["assembly"] == p["assembly"] and api["privatePayload"] == PRIVATE, "Production API/source binding differs")
+            and api["assembly"] == assembly and api["privatePayload"] == private_source, "Production API/source binding differs")
     for key in FLAGS:
         require(api[key] is False, "API receipt cannot self-certify acceptance")
     S.keys(api["privateSourcePaths"], PRIVATE_PATHS)
