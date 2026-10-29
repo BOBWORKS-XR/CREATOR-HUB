@@ -55,6 +55,89 @@ test('production pins its own private payload and rejects the former payload rec
     assert.throws(() => L.proofs({ ...receipt, privateSource }, p), { code: 'ERR_ASSERTION' });
   }
 });
+test('fresh A has an exact source-bound profile and cannot mix historical identity or bytes', () => {
+  const a = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures/journal-a-native-incoming.UNBOUND.json')));
+  L.validate(a); assert.deepEqual(L.privateFor(a.assembly), L.JOURNAL_A_PRIVATE);
+  assert.deepEqual(L.privateFor(fixture().p.assembly), L.PRIVATE);
+  for (const mutate of [p => p.assembly.sourceCommit = 'f'.repeat(40), p => p.assembly.sourceTree = 'f'.repeat(40),
+    p => p.assembly.runId++, p => p.assembly.runAttempt++, p => p.assembly.jobId++, p => p.assembly.artifactId++,
+    p => p.assembly.zipBytes++, p => p.assembly.zipSha256 = 'f'.repeat(64), p => p.pins.hub.sha256 = 'f'.repeat(64),
+    p => p.mode = 'migration-cancel']) {
+    const bad = clone(a); mutate(bad); assert.throws(() => L.validate(bad));
+  }
+});
+test('fresh A producer and assembly checks occur before source closure and download', async () => {
+  const a = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures/journal-a-native-incoming.UNBOUND.json')));
+  const raw = fs.readFileSync(path.join(__dirname, 'fixtures/journal-a-native-incoming.UNBOUND.json'), 'utf8');
+  const { c, env } = context(), repo = { id: 1364807512, full_name: 'BOBWORKS-XR/CREATOR-HUB' };
+  const producer = { id: L.JOURNAL_A_PRIVATE.runId, head_sha: L.JOURNAL_A_PRIVATE.sourceCommit, run_attempt: 1,
+    status: 'completed', conclusion: 'success', path: '.github/workflows/unix-managed-payload.yml',
+    head_branch: 'validation/journal-a-payload-016', event: 'workflow_dispatch', repository: repo, head_repository: repo };
+  const run = { ...producer, id: a.assembly.runId, head_sha: a.assembly.sourceCommit,
+    path: '.github/workflows/unix-managed-assembly.yml', head_branch: 'validation/journal-a-assembly-016' };
+  const job = { id: a.assembly.jobId, run_id: a.assembly.runId, run_attempt: 1, status: 'completed', conclusion: 'success',
+    head_sha: a.assembly.sourceCommit, head_branch: run.head_branch, name: 'assembly (linux, ubuntu-22.04, synthetic)',
+    started_at: '2026-10-29T15:14:55Z', completed_at: '2026-10-29T15:28:32Z' };
+  const artifact = { id: a.assembly.artifactId, name: `signed-unix-hub-linux-${a.assembly.runId}-1`, expired: false,
+    size_in_bytes: a.assembly.zipBytes, digest: `sha256:${a.assembly.zipSha256}`, created_at: '2026-10-29T15:28:29Z',
+    workflow_run: { id: a.assembly.runId, head_sha: a.assembly.sourceCommit, repository_id: repo.id, head_repository_id: repo.id } };
+  const stop = Error('Stop at source-closure boundary'), calls = [];
+  const github = { rest: { actions: { async getWorkflowRun({ run_id }) { calls.push(run_id); return { data: calls.length === 1 ? producer : run }; },
+    async getJobForWorkflowRun() { return { data: job }; }, async getArtifact() { return { data: artifact }; },
+    async downloadArtifact() { throw Error('Download must not be reached'); } },
+    git: { async getCommit() { throw stop; } } } };
+  await assert.rejects(L.run({ github, context: c, env, profile: raw }), error => error === stop);
+  assert.deepEqual(calls, [L.JOURNAL_A_PRIVATE.runId, a.assembly.runId]);
+  producer.event = 'push'; calls.length = 0;
+  await assert.rejects(L.run({ github, context: c, env, profile: raw }));
+  assert.deepEqual(calls, [L.JOURNAL_A_PRIVATE.runId]);
+  producer.event = 'workflow_dispatch'; job.head_sha = 'f'.repeat(40); calls.length = 0;
+  await assert.rejects(L.run({ github, context: c, env, profile: raw }));
+  assert.deepEqual(calls, [L.JOURNAL_A_PRIVATE.runId, a.assembly.runId]);
+});
+test('fresh A receipt requires its exact private provenance and both production proofs', () => {
+  const a = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures/journal-a-native-incoming.UNBOUND.json')));
+  const { receipt } = fixture();
+  receipt.assemblyCommit = a.assembly.sourceCommit;
+  receipt.privateSource = { repository: 'BOBWORKS-XR/CREATOR-HUB', repositoryId: 1364807512,
+    workflow: '.github/workflows/unix-managed-payload.yml', event: 'workflow_dispatch',
+    ...L.JOURNAL_A_PRIVATE, buildCommit: L.JOURNAL_A_PRIVATE.sourceCommit,
+    sourceTree: 'c747ce8b9cd65169ba478162f9abb6c500be6186' };
+  for (const proof of [receipt.productionMigration, receipt.portableHostBuild]) {
+    proof.sourceCommit = a.assembly.sourceCommit; proof.sourceTree = a.assembly.sourceTree; proof.rawHub = a.pins.rawHub;
+  }
+  receipt.productionMigration.staging.sourceCommit = a.assembly.sourceCommit;
+  for (const [name, file] of [['helper', retirement.HELPER], ['policy', retirement.POLICY]])
+    Object.assign(receipt.productionMigration.staging.files[file], a.pins[name]);
+  L.proofs(receipt, a);
+  for (const [field, value] of [['repository', 'foreign'], ['repositoryId', 1], ['workflow', 'other'], ['event', 'push'],
+    ['sourceCommit', 'f'.repeat(40)], ['buildCommit', 'f'.repeat(40)], ['sourceTree', 'f'.repeat(40)], ['runId', 1], ['runAttempt', 2]]) {
+    const changed = clone(receipt); changed.privateSource[field] = value;
+    assert.throws(() => L.proofs(changed, a), field);
+  }
+  const old = clone(receipt); old.privateSource = PRODUCTION_PRIVATE;
+  assert.throws(() => L.proofs(old, a));
+});
+test('fresh A source closure checks both exact commit trees and all protected path identities', async () => {
+  const a = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures/journal-a-native-incoming.UNBOUND.json')));
+  const producerTree = 'c747ce8b9cd65169ba478162f9abb6c500be6186';
+  const originalTreePaths = old.treePaths;
+  let producerDrift = false, assemblyDrift = false, pathDrift = false;
+  const github = { rest: { git: { async getCommit({ commit_sha }) {
+    if (commit_sha === a.assembly.sourceCommit)
+      return { data: { sha: commit_sha, tree: { sha: assemblyDrift ? 'f'.repeat(40) : a.assembly.sourceTree } } };
+    assert.equal(commit_sha, L.JOURNAL_A_PRIVATE.sourceCommit);
+    return { data: { sha: commit_sha, tree: { sha: producerDrift ? 'f'.repeat(40) : producerTree } } };
+  } } } };
+  try {
+    old.treePaths = async (_github, source) => Object.fromEntries(old.PRIVATE_PATHS.map((name, i) =>
+      [name, pathDrift && source === a.assembly.sourceCommit && i === 0 ? 'f'.repeat(40) : 'a'.repeat(40)]));
+    assert.equal(Object.keys(await L.sourceBinding(github, a.assembly)).length, old.PRIVATE_PATHS.length);
+    producerDrift = true; await assert.rejects(L.sourceBinding(github, a.assembly)); producerDrift = false;
+    assemblyDrift = true; await assert.rejects(L.sourceBinding(github, a.assembly)); assemblyDrift = false;
+    pathDrift = true; await assert.rejects(L.sourceBinding(github, a.assembly));
+  } finally { old.treePaths = originalTreePaths; }
+});
 test('production rejects former, mixed or wrong-attempt producer API evidence before assembly access or download', async () => {
   const { c, env } = context(), p = fixture().p;
   const boundary = new Error('Private producer accepted; stop before assembly access');

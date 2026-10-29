@@ -11,6 +11,8 @@ const { verifyLinuxHub } = require('./unix-package-payload.cjs');
 const COHORT = 'production-migration-016';
 const REF = 'refs/heads/validation/native-linux-production-016';
 const PRIVATE = Object.freeze({ sourceCommit: '085131ba6f3050a795fd513139a34975658ba321', runId: 40538427509, runAttempt: 1 });
+const JOURNAL_A_PRIVATE = Object.freeze({ sourceCommit: 'f9c6da1af4ea51fc0214fba058c3946c1cda255a', runId: 40893082867, runAttempt: 1 });
+const JOURNAL_A_PRIVATE_TREE = 'c747ce8b9cd65169ba478162f9abb6c500be6186';
 const FEATURES = Object.freeze(['integrated-features', 'experimental-flatpak-host',
   'linux-production-migration', 'experimental-linux-portable-update']);
 const PINS = Object.freeze([...neutral.PINS, 'rawHub']);
@@ -19,6 +21,12 @@ const FLAGS = Object.freeze({ nativeExecution: false, nativeGuiAccepted: false, 
   authenticationAccepted: false, signedUpdateAccepted: false, automaticRestartAccepted: false,
   flatpakAccepted: false, releaseReady: false });
 const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
+const JOURNAL_A_PROFILE_SHA = '08f2df3b8139f00f5bd5b84619218228c7878d62ae0e4ec180fdcaaec6b87fc3';
+function journalAProfile() {
+  const bytes = fs.readFileSync(path.join(__dirname, 'fixtures/journal-a-native-incoming.UNBOUND.json'));
+  assert.equal(bytes.length, 1763); assert.equal(hash(bytes), JOURNAL_A_PROFILE_SHA);
+  return JSON.parse(bytes);
+}
 function keys(value, expected) {
   assert.ok(value && typeof value === 'object' && !Array.isArray(value));
   assert.deepEqual(Object.keys(value).sort(), [...expected].sort(), 'Unknown/missing production fields');
@@ -40,6 +48,7 @@ function validate(value) {
     assert.ok(pin.size <= 256 * 1024 * 1024);
   }
   assert.ok(value.pins.rawHub.size >= 64);
+  if (privateFor(value.assembly) === JOURNAL_A_PRIVATE) assert.deepEqual(value, journalAProfile(), 'Fresh A profile differs');
   return value;
 }
 function admission(context, env) {
@@ -49,16 +58,29 @@ function admission(context, env) {
     GITHUB_REPOSITORY_ID: '1364807512', RUNNER_ENVIRONMENT: 'github-hosted', RUNNER_OS: 'Linux', RUNNER_ARCH: 'X64',
     GITHUB_EVENT_NAME: 'workflow_dispatch', GITHUB_REF: REF, GITHUB_SHA: context.sha })) assert.equal(env[key], expected);
 }
+function privateFor(assembly) {
+  const expected = neutral.JOURNAL_A_ASSEMBLY;
+  const isCandidate = ['sourceCommit', 'runId', 'jobId', 'artifactId'].some(key => assembly[key] === expected[key]);
+  if (!isCandidate) return PRIVATE;
+  assert.deepEqual(assembly, expected, 'Fresh A assembly tuple is incomplete or mixed');
+  return JOURNAL_A_PRIVATE;
+}
 async function sourceBinding(github, assembly) {
+  const privateSource = privateFor(assembly);
   const { data } = await github.rest.git.getCommit({ ...REPO, commit_sha: assembly.sourceCommit });
   assert.equal(data.sha, assembly.sourceCommit); assert.equal(data.tree.sha, assembly.sourceTree);
-  const original = await neutral.treePaths(github, PRIVATE.sourceCommit);
+  if (privateSource === JOURNAL_A_PRIVATE) {
+    const { data: producerCommit } = await github.rest.git.getCommit({ ...REPO, commit_sha: privateSource.sourceCommit });
+    assert.equal(producerCommit.sha, privateSource.sourceCommit); assert.equal(producerCommit.tree.sha, JOURNAL_A_PRIVATE_TREE);
+  }
+  const original = await neutral.treePaths(github, privateSource.sourceCommit);
   const current = await neutral.treePaths(github, assembly.sourceCommit);
   assert.deepEqual(current, original, 'Signed private payload source paths changed');
   return current;
 }
 function proofs(receipt, supplied) {
   const p = validate(supplied);
+  const privateSource = privateFor(p.assembly);
   keys(receipt, ['schemaVersion', 'product', 'platform', 'arch', 'hubVersion', 'assemblyCommit', 'privateSource',
     'handoffSha256', 'compiledFeatures', 'portableHostBuild', 'productionMigration', 'mcpMode',
     'privateModulesRecompiled', 'privateModulesResigned', 'nativeGuiAccepted', 'releaseReady']);
@@ -66,7 +88,15 @@ function proofs(receipt, supplied) {
   assert.equal(receipt.platform, 'linux'); assert.equal(receipt.arch, 'x86_64'); assert.equal(receipt.hubVersion, '0.1.16');
   assert.equal(receipt.assemblyCommit, p.assembly.sourceCommit); assert.equal(receipt.mcpMode, 'writable');
   for (const key of ['privateModulesRecompiled', 'privateModulesResigned', 'nativeGuiAccepted', 'releaseReady']) assert.equal(receipt[key], false);
-  for (const key of ['sourceCommit', 'runId', 'runAttempt']) assert.equal(receipt.privateSource[key], PRIVATE[key]);
+  for (const key of ['sourceCommit', 'runId', 'runAttempt']) assert.equal(receipt.privateSource[key], privateSource[key]);
+  if (privateSource === JOURNAL_A_PRIVATE) {
+    assert.equal(receipt.privateSource.repository, 'BOBWORKS-XR/CREATOR-HUB');
+    assert.equal(receipt.privateSource.repositoryId, 1364807512);
+    assert.equal(receipt.privateSource.workflow, '.github/workflows/unix-managed-payload.yml');
+    assert.equal(receipt.privateSource.event, 'workflow_dispatch');
+    assert.equal(receipt.privateSource.buildCommit, privateSource.sourceCommit);
+    assert.equal(receipt.privateSource.sourceTree, JOURNAL_A_PRIVATE_TREE);
+  }
   sha(receipt.handoffSha256);
   assert.deepEqual(receipt.compiledFeatures, FEATURES, 'Exact explicit production feature tuple required');
   build.validateProductionBuildProof(receipt.productionMigration, p.assembly.sourceCommit, FEATURES);
@@ -97,12 +127,17 @@ async function run({ github, context, profile, env = process.env, fetch_ = fetch
   admission(context, env);
   assert.ok(typeof profile === 'string' && Buffer.byteLength(profile) <= 16384);
   const p = validate(JSON.parse(profile));
-  const { data: privateRun } = await github.rest.actions.getWorkflowRun({ ...REPO, run_id: PRIVATE.runId });
-  neutral.producer(privateRun, PRIVATE, '.github/workflows/unix-managed-payload.yml', 'validation/unix-payload-016');
+  const privateSource = privateFor(p.assembly);
+  if (privateSource === JOURNAL_A_PRIVATE) assert.equal(hash(Buffer.from(profile)), JOURNAL_A_PROFILE_SHA, 'Fresh A profile bytes differ');
+  const { data: privateRun } = await github.rest.actions.getWorkflowRun({ ...REPO, run_id: privateSource.runId });
+  neutral.producer(privateRun, privateSource, '.github/workflows/unix-managed-payload.yml',
+    privateSource === JOURNAL_A_PRIVATE ? 'validation/journal-a-payload-016' : 'validation/unix-payload-016');
+  if (privateSource === JOURNAL_A_PRIVATE) assert.equal(privateRun.event, 'workflow_dispatch');
   const { data: assembly } = await github.rest.actions.getWorkflowRun({ ...REPO, run_id: p.assembly.runId });
   const { data: job } = await github.rest.actions.getJobForWorkflowRun({ ...REPO, job_id: p.assembly.jobId });
   const { data: artifact } = await github.rest.actions.getArtifact({ ...REPO, artifact_id: p.assembly.artifactId });
-  neutral.artifactBinding(assembly, job, artifact, p.assembly);
+  if (privateSource === JOURNAL_A_PRIVATE) neutral.journalAFreshArtifactBinding(assembly, job, artifact, p.assembly);
+  else neutral.artifactBinding(assembly, job, artifact, p.assembly);
   const paths = await sourceBinding(github, p.assembly);
   const { data } = await github.rest.actions.downloadArtifact({ ...REPO, artifact_id: p.assembly.artifactId, archive_format: 'zip' });
   assert.ok(Buffer.isBuffer(data) || data instanceof ArrayBuffer);
@@ -119,7 +154,7 @@ async function run({ github, context, profile, env = process.env, fetch_ = fetch
   // Keep original text: the strict offline decoder rejects duplicate keys.
   write('profile.json', profile);
   write('api-binding.json', JSON.stringify({ schemaVersion: 1, cohort: COHORT, harnessSource: context.sha,
-    assembly: p.assembly, privatePayload: PRIVATE, privateSourcePaths: paths, legacy, ...FLAGS }));
+    assembly: p.assembly, privatePayload: privateSource, privateSourcePaths: paths, legacy, ...FLAGS }));
 }
 function readOwned(file, maximum) {
   assert.equal(fs.realpathSync(file), file);
@@ -164,7 +199,7 @@ function verifyStaged(env) {
   return inspectBuffers(JSON.parse(receiptBytes), p,
     readOwned(path.join(stage, 'rawHub.bin'), p.pins.rawHub.size), readOwned(path.join(stage, 'hub.bin'), p.pins.hub.size));
 }
-module.exports = { COHORT, REF, PRIVATE, FEATURES, PINS, FLAGS, validate, admission, sourceBinding, proofs, inspectBuffers, run };
+module.exports = { COHORT, REF, PRIVATE, JOURNAL_A_PRIVATE, FEATURES, PINS, FLAGS, validate, admission, privateFor, sourceBinding, proofs, inspectBuffers, run };
 if (require.main === module) {
   try {
     assert.deepEqual(process.argv.slice(2), ['--verify-staged']);

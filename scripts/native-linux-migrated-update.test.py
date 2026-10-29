@@ -1473,6 +1473,60 @@ class TransitionHomeTests(unittest.TestCase):
         self.assertEqual(diagnostic["after"]["mode"], 0o644)
         self.assertEqual(set(diagnostic["before"]), {"kind", "dev", "uid", "gid", "mode"})
 
+    def test_existing_public_journal_can_be_tightened_without_losing_records(self):
+        self.metadata(self.home / M.JOURNAL, 0o644)
+        self.before["home"] = C.tree(self.home, M.UID)
+        guard = self.guard()
+        self.metadata(self.home / M.JOURNAL, 0o600)
+        guard.check()
+
+    def test_private_journal_cannot_gain_access(self):
+        guard = self.guard()
+        self.metadata(self.home / M.JOURNAL, 0o644)
+        with self.assertRaisesRegex(RuntimeError, "Journal ownership/mode/filesystem changed"):
+            guard.check()
+
+    def test_journal_cannot_widen_again_after_observed_tightening(self):
+        self.metadata(self.home / M.JOURNAL, 0o644)
+        self.before["home"] = C.tree(self.home, M.UID)
+        guard = self.guard()
+        self.metadata(self.home / M.JOURNAL, 0o600)
+        guard.check()
+        self.metadata(self.home / M.JOURNAL, 0o644)
+        with self.assertRaisesRegex(RuntimeError, "Journal ownership/mode/filesystem changed"):
+            guard.check()
+
+    def test_only_reviewed_legacy_modes_can_tighten(self):
+        for old in (0o644, 0o664, 0o666, 0o602, 0o620, 0o660, 0o755):
+            with self.subTest(old=oct(old)):
+                self.metadata(self.home / M.JOURNAL, old)
+                self.before["home"] = C.tree(self.home, M.UID)
+                guard = self.guard()
+                self.metadata(self.home / M.JOURNAL, 0o600)
+                if old in (0o644, 0o664, 0o666): guard.check()
+                else:
+                    with self.assertRaisesRegex(RuntimeError, "Journal ownership/mode/filesystem changed"):
+                        guard.check()
+
+    def test_tightening_does_not_allow_unrelated_data_changes(self):
+        self.metadata(self.home / M.JOURNAL, 0o644)
+        self.before["home"] = C.tree(self.home, M.UID)
+        guard = self.guard()
+        self.metadata(self.home / M.JOURNAL, 0o600)
+        self.put("config/launcher.json", b"changed", 0o600, replace=True)
+        with self.assertRaisesRegex(RuntimeError, "Original protected bytes/identity changed"):
+            guard.check()
+
+    def test_tightening_does_not_allow_journal_prefix_changes(self):
+        self.metadata(self.home / M.JOURNAL, 0o644)
+        self.before["home"] = C.tree(self.home, M.UID)
+        guard = self.guard()
+        changed = copy.deepcopy(self.journal)
+        changed["records"][0]["command"] = "different"
+        self.put(M.JOURNAL, self.f.encode(changed), 0o600, replace=True)
+        with self.assertRaisesRegex(RuntimeError, "journal prefix"):
+            guard.check()
+
     def test_old_gate_still_rejects_real_filesystem_a_to_b(self):
         self.complete_b()
         with self.assertRaisesRegex(RuntimeError, "Original protected bytes/identity changed"):
