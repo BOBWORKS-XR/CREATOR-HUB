@@ -412,7 +412,11 @@ class TransitionHomePreservation:
         for name, wanted in self.before.items():
             if name == self.active and complete: continue
             if name == M.JOURNAL:
-                require(all(after[name][k] == wanted[k] for k in ("kind", "dev", "uid", "gid", "mode")), "Journal ownership/mode/filesystem changed")
+                fields = ("kind", "dev", "uid", "gid", "mode")
+                require(all(after[name][k] == wanted[k] for k in fields),
+                        "Journal ownership/mode/filesystem changed: " + json.dumps(
+                            {"before": {k: wanted[k] for k in fields}, "after": {k: after[name][k] for k in fields}},
+                            sort_keys=True, separators=(",", ":")))
             else:
                 require(after[name] == wanted, "Original protected bytes/identity changed: " + name)
         additions = after.keys() - self.before.keys()

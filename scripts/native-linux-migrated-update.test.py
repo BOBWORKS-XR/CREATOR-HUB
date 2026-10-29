@@ -1461,6 +1461,18 @@ class TransitionHomeTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "Complete exact published generation"):
             self.guard()
 
+    def test_journal_metadata_refusal_records_both_exact_modes(self):
+        guard = self.guard()
+        self.metadata(self.home / M.JOURNAL, 0o644)
+        with self.assertRaises(RuntimeError) as caught: guard.check()
+        message = str(caught.exception)
+        prefix = "Journal ownership/mode/filesystem changed: "
+        self.assertTrue(message.startswith(prefix))
+        diagnostic = json.loads(message[len(prefix):])
+        self.assertEqual(diagnostic["before"]["mode"], 0o600)
+        self.assertEqual(diagnostic["after"]["mode"], 0o644)
+        self.assertEqual(set(diagnostic["before"]), {"kind", "dev", "uid", "gid", "mode"})
+
     def test_old_gate_still_rejects_real_filesystem_a_to_b(self):
         self.complete_b()
         with self.assertRaisesRegex(RuntimeError, "Original protected bytes/identity changed"):
