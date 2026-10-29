@@ -38,6 +38,33 @@ test('API binding rejects stale source, attempt, job, foreign repository or inco
   const foreign = clone(f); foreign.run.head_repository.id = 22;
   assert.throws(() => L.artifactBinding(foreign.run, foreign.job, foreign.artifact, foreign.p));
 });
+test('fresh journal A guard is separate, exact, and refuses incomplete or mismatched evidence', () => {
+  const f = fixture();
+  Object.assign(f.p, L.JOURNAL_A_ASSEMBLY);
+  Object.assign(f.run, { id: f.p.runId, head_sha: f.p.sourceCommit, head_branch: 'validation/journal-a-assembly-016' });
+  Object.assign(f.job, { id: f.p.jobId, run_id: f.p.runId, head_sha: f.p.sourceCommit,
+    head_branch: f.run.head_branch, name: 'assembly (linux, ubuntu-22.04, synthetic)' });
+  Object.assign(f.artifact, { id: f.p.artifactId, name: `signed-unix-hub-linux-${f.p.runId}-${f.p.runAttempt}`,
+    size_in_bytes: f.p.zipBytes, digest: `sha256:${f.p.zipSha256}` });
+  f.artifact.workflow_run.id = f.p.runId;
+  f.artifact.workflow_run.head_sha = f.p.sourceCommit;
+  L.journalAFreshArtifactBinding(f.run, f.job, f.artifact, f.p);
+  assert.throws(() => L.artifactBinding(f.run, f.job, f.artifact, f.p));
+  for (const [section, field, value] of [
+    ['p', 'runId', 40899552208], ['p', 'jobId', 123537944798], ['p', 'zipSha256', 'bad'],
+    ['p', 'sourceCommit', 'f'.repeat(40)], ['p', 'sourceTree', 'f'.repeat(40)], ['p', 'runAttempt', 2],
+    ['p', 'artifactId', 12909617949], ['p', 'zipBytes', 183999604], ['run', 'status', 'in_progress'],
+    ['run', 'conclusion', null], ['run', 'event', 'push'], ['run', 'head_branch', 'validation/journal-a-assembly-016-extra'],
+    ['run', 'head_sha', 'f'.repeat(40)], ['run', 'run_attempt', 2], ['job', 'id', 123537944798],
+    ['job', 'head_sha', 'f'.repeat(40)], ['job', 'head_branch', 'foreign'], ['job', 'status', 'in_progress'],
+    ['job', 'name', 'assembly (linux, ubuntu-24.04)'], ['artifact', 'expired', true],
+    ['artifact', 'digest', 'sha256:' + 'f'.repeat(64)], ['artifact', 'created_at', '2026-10-19T12:00:00Z'],
+  ]) {
+    const x = clone(f); x[section][field] = value;
+    assert.throws(() => L.journalAFreshArtifactBinding(x.run, x.job, x.artifact, x.p), `${section}.${field}`);
+  }
+  const old = fixture(); assert.throws(() => L.journalAFreshArtifactBinding(old.run, old.job, old.artifact, old.p));
+});
 test('PRIVATE_SOURCE_PATHS compare Git tree identities and reject absent or redirected types', async () => {
   const rows = { modules: '1'.repeat(40), native: '2'.repeat(40), 'src-tauri': '3'.repeat(40) };
   const fake = { rest: { git: { async getCommit() { return { data: { sha: 'a'.repeat(40), tree: { sha: '0'.repeat(40) } } }; },
@@ -74,7 +101,7 @@ test('pre-apt source contract uses current UI and canonical SDK lock, not Window
   const html = read('src/index.html'), guide = read('src/convergence.js');
   for (const id of ['view-projects', 'projects-home-title', 'unified-home-updater', 'suite-menu', 'suite-trigger', 'convergence-move'])
     assert.ok(html.includes(`id="${id}"`), id);
-  assert.match(guide, /'Move complete' : 'Move to Hub'/);
+  assert.match(guide, /stage === 'complete' \? 'Move complete' : current\?\.recoveryHelp \? 'Migration needs review' : 'Move to Hub'/);
   assert.match(guide, /prepare\.hidden = connections\.hidden = retire\.hidden = true/);
   assert.match(read('src/projects.js'), /MCP bridge not installed/);
   assert.match(read('src/features/mcp.js'), /aria-pressed/);

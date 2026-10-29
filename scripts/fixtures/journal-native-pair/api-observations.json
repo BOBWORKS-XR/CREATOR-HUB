@@ -1,0 +1,174 @@
+{
+  "aRun": {
+    "id": 40899552207,
+    "head_sha": "be0adef208c80a60f8599bd466a45b28bde73588",
+    "run_attempt": 1,
+    "status": "completed",
+    "conclusion": "success",
+    "path": ".github/workflows/unix-managed-assembly.yml",
+    "head_branch": "validation/journal-a-assembly-016",
+    "event": "workflow_dispatch",
+    "repository": {
+      "id": 1364807512,
+      "full_name": "BOBWORKS-XR/CREATOR-HUB"
+    },
+    "head_repository": {
+      "id": 1364807512,
+      "full_name": "BOBWORKS-XR/CREATOR-HUB"
+    }
+  },
+  "aJob": {
+    "id": 123537944797,
+    "run_id": 40899552207,
+    "run_attempt": 1,
+    "head_sha": "be0adef208c80a60f8599bd466a45b28bde73588",
+    "head_branch": "validation/journal-a-assembly-016",
+    "name": "assembly (linux, ubuntu-22.04, 688950974, 53919725, 2c3efcb4de89d3219ec443c192da057fdd5662950ddbf...",
+    "status": "completed",
+    "conclusion": "success",
+    "started_at": "2026-10-29T15:14:55Z",
+    "completed_at": "2026-10-29T15:28:32Z"
+  },
+  "aArtifact": {
+    "id": 12909617948,
+    "name": "signed-unix-hub-linux-40899552207-1",
+    "expired": false,
+    "size_in_bytes": 183999603,
+    "digest": "sha256:d6612027fded7b6163e8212453b853a08285f6551baaa1d0871f0121a040a2a7",
+    "created_at": "2026-10-29T15:28:29Z",
+    "workflow_run": {
+      "id": 40899552207,
+      "head_sha": "be0adef208c80a60f8599bd466a45b28bde73588",
+      "repository_id": 1364807512,
+      "head_repository_id": 1364807512
+    }
+  },
+  "aCommit": {
+    "sha": "be0adef208c80a60f8599bd466a45b28bde73588",
+    "tree": {
+      "sha": "8eb710826de448d820a3cee6d964e4a3f3a24e10"
+    }
+  },
+  "aProducerRun": {
+    "id": 40893082867,
+    "head_sha": "f9c6da1af4ea51fc0214fba058c3946c1cda255a",
+    "run_attempt": 1,
+    "status": "completed",
+    "conclusion": "success",
+    "path": ".github/workflows/unix-managed-payload.yml",
+    "head_branch": "validation/journal-a-payload-016",
+    "event": "workflow_dispatch",
+    "repository": {
+      "id": 1364807512,
+      "full_name": "BOBWORKS-XR/CREATOR-HUB"
+    },
+    "head_repository": {
+      "id": 1364807512,
+      "full_name": "BOBWORKS-XR/CREATOR-HUB"
+    }
+  },
+  "aProducerJob": {
+    "id": 123514798864,
+    "run_id": 40893082867,
+    "run_attempt": 1,
+    "head_sha": "f9c6da1af4ea51fc0214fba058c3946c1cda255a",
+    "head_branch": "validation/journal-a-payload-016",
+    "name": "payload (ubuntu-22.04)",
+    "status": "completed",
+    "conclusion": "success",
+    "started_at": "2026-10-29T14:36:01Z",
+    "completed_at": "2026-10-29T14:48:21Z"
+  },
+  "aProducerCommit": {
+    "sha": "f9c6da1af4ea51fc0214fba058c3946c1cda255a",
+    "tree": {
+      "sha": "c747ce8b9cd65169ba478162f9abb6c500be6186"
+    }
+  },
+  "donorRun": {
+    "id": 40891664484,
+    "head_sha": "c5bd13a5145aa54a50f28f073e1543826a210a4e",
+    "run_attempt": 1,
+    "status": "completed",
+    "conclusion": "success",
+    "path": ".github/workflows/unix-managed-payload.yml",
+    "head_branch": "validation/unix-payload-016",
+    "event": "push",
+    "repository": {
+      "id": 1364807512,
+      "full_name": "BOBWORKS-XR/CREATOR-HUB"
+    },
+    "head_repository": {
+      "id": 1364807512,
+      "full_name": "BOBWORKS-XR/CREATOR-HUB"
+    }
+  },
+  "donorJob": {
+    "id": 123509810248,
+    "run_id": 40891664484,
+    "run_attempt": 1,
+    "head_sha": "c5bd13a5145aa54a50f28f073e1543826a210a4e",
+    "head_branch": "validation/unix-payload-016",
+    "name": "payload (ubuntu-22.04)",
+    "status": "completed",
+    "conclusion": "success",
+    "started_at": "2026-10-29T14:27:37Z",
+    "completed_at": "2026-10-29T14:33:11Z"
+  },
+  "donorCommit": {
+    "sha": "c5bd13a5145aa54a50f28f073e1543826a210a4e",
+    "tree": {
+      "sha": "6c6953a0b4901b56eeadb4647d7dde34a375761a"
+    }
+  },
+  "bRun": {
+    "id": 40903331594,
+    "head_sha": "a61e7b0152689b7fa25fd0f4fe3e7d3894751cc5",
+    "run_attempt": 1,
+    "status": "completed",
+    "conclusion": "success",
+    "path": ".github/workflows/private-linux-update-fixture-017.yml",
+    "head_branch": "validation/linux-private-update-fixture-017",
+    "event": "workflow_dispatch",
+    "repository": {
+      "id": 1364807512,
+      "full_name": "BOBWORKS-XR/CREATOR-HUB"
+    },
+    "head_repository": {
+      "id": 1364807512,
+      "full_name": "BOBWORKS-XR/CREATOR-HUB"
+    }
+  },
+  "bJob": {
+    "id": 123551467029,
+    "run_id": 40903331594,
+    "run_attempt": 1,
+    "head_sha": "a61e7b0152689b7fa25fd0f4fe3e7d3894751cc5",
+    "head_branch": "validation/linux-private-update-fixture-017",
+    "name": "assemble",
+    "status": "completed",
+    "conclusion": "success",
+    "started_at": "2026-10-29T15:37:09Z",
+    "completed_at": "2026-10-29T15:48:42Z"
+  },
+  "bArtifact": {
+    "id": 12909839246,
+    "name": "private-linux-update-fixture-017-40903331594-1",
+    "expired": false,
+    "size_in_bytes": 128433738,
+    "digest": "sha256:2dcce20200c14fe88098a48ef5768cb63a91a01de14a2c82bf44a4672bf1a86a",
+    "created_at": "2026-10-29T15:48:30Z",
+    "workflow_run": {
+      "id": 40903331594,
+      "head_sha": "a61e7b0152689b7fa25fd0f4fe3e7d3894751cc5",
+      "repository_id": 1364807512,
+      "head_repository_id": 1364807512
+    }
+  },
+  "bCommit": {
+    "sha": "a61e7b0152689b7fa25fd0f4fe3e7d3894751cc5",
+    "tree": {
+      "sha": "ab48fbce32accb627a5f5e0de2f496699c2317b4"
+    }
+  }
+}

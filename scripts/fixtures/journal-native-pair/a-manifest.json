@@ -1,0 +1,108 @@
+{
+  "schemaVersion": 1,
+  "platform": "linux",
+  "arch": "x86_64",
+  "modules": {
+    "mcp": {
+      "executable": "mcp/creator-works-mcp-launcher",
+      "version": "2.7.7",
+      "files": {
+        "mcp/creator-works-mcp-launcher": "a0ba3e3ad57aa8a8a981b2daae5332f2125264a048b19ad765c860fc5da720d7",
+        "mcp/server/creator-works-mcp.mjs": "df0c83a8361d3e1e0ff12516900a8530bd0dd0234c97ed5651131dc152b3d832",
+        "mcp/server/runtime/node": "62d66443847de1f527f74afe715900b12884ace52136dc9cd8e91e61acc2f527",
+        "mcp/server/runtime/LICENSE": "4573185d56580da2b890ba34a85a409257640f1c5632eade4300137266194d18",
+        "mcp/server/runtime/VERSION": "98182b41c9ce3357797985cf12dc3b0124490ef88bc918a905373e7688e6aec9",
+        "mcp/server/unity-extension/Editor/BanterMCPBridge.cs": "eaa70b9696c05e3ebce0abe3d98d8ebb5188f37d0747e6b143fa43ae48f32aca",
+        "mcp/server/unity-extension/Editor/CreatorWorksMCPLogo.png": "f3f68baa0d887de92e6cf7aba8beae7ff8ea5c44b13444f018413041ade19ea7",
+        "mcp/server/LICENSE": "b1cfe8ff7191d3e9c6c6b0f832adcd2ebece8e6070ef72d2f7afc1c082fb757f",
+        "mcp/server/THIRD_PARTY_NOTICES.md": "5e9f0fe9b73afe7c6c056a33124ead3110fc03c309f845e9dd6c76b0a9b00560"
+      }
+    },
+    "setup": {
+      "executable": "setup/creator-project-setup",
+      "version": "0.3.7",
+      "files": {
+        "setup/creator-project-setup": "b2972b64fded6e91f7e06d0443534ce6c8a5a1f0a9001857a8cd77ea7fa95d80"
+      }
+    }
+  },
+  "managedRouting": {
+    "protocol": 1,
+    "files": {
+      "routing/creator-hub-mcp-router": "df24e58265a99b2833f38a50a0e0fb1707289d0dc891e89ea923c47c57bff4af",
+      "routing/router.json": "1315487222bd02492a502b59cea29c530a6ae77b66f11348d07fdcf7efb99eaa",
+      "routing/router.minisig": "882b398752e223c333a95ed4ef19045fdb04578041fc0264879ad3a48ce967d9",
+      "routing/runtime.json": "a41d5590ad1fc5147e848a96ff270bd4e22bfa6da9b4f48e4086dc7036dffa06",
+      "routing/runtime.minisig": "5df6a718d7f13d9bb3efa311b4af5b30458a9cd03d00a1be6a2658545d6e6bae"
+    }
+  },
+  "payloadArchive": {
+    "schemaVersion": 1,
+    "file": "modules.tar.gz",
+    "sha256": "248de103e40dabd032516c2d291099fb2f372deba9ab1a980ca65e570874f50e",
+    "size": 55580358,
+    "unpackedSize": 160449717,
+    "files": {
+      "mcp/creator-works-mcp-launcher": {
+        "size": 17369144,
+        "mode": 493
+      },
+      "mcp/server/LICENSE": {
+        "size": 1068,
+        "mode": 420
+      },
+      "mcp/server/THIRD_PARTY_NOTICES.md": {
+        "size": 9216,
+        "mode": 420
+      },
+      "mcp/server/creator-works-mcp.mjs": {
+        "size": 1640938,
+        "mode": 420
+      },
+      "mcp/server/runtime/LICENSE": {
+        "size": 156926,
+        "mode": 420
+      },
+      "mcp/server/runtime/VERSION": {
+        "size": 8,
+        "mode": 420
+      },
+      "mcp/server/runtime/node": {
+        "size": 123459976,
+        "mode": 493
+      },
+      "mcp/server/unity-extension/Editor/BanterMCPBridge.cs": {
+        "size": 358150,
+        "mode": 420
+      },
+      "mcp/server/unity-extension/Editor/CreatorWorksMCPLogo.png": {
+        "size": 52329,
+        "mode": 420
+      },
+      "routing/creator-hub-mcp-router": {
+        "size": 786256,
+        "mode": 493
+      },
+      "routing/router.json": {
+        "size": 187,
+        "mode": 420
+      },
+      "routing/router.minisig": {
+        "size": 305,
+        "mode": 420
+      },
+      "routing/runtime.json": {
+        "size": 1133,
+        "mode": 420
+      },
+      "routing/runtime.minisig": {
+        "size": 305,
+        "mode": 420
+      },
+      "setup/creator-project-setup": {
+        "size": 16613776,
+        "mode": 493
+      }
+    }
+  }
+}
