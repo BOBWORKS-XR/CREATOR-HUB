@@ -97,7 +97,8 @@ FLAGS = dict.fromkeys(("migrationAccepted", "signedUpdateAccepted", "automaticRe
                        "flatpakAccepted", "actualAiAccepted", "unityInteropAccepted", "releaseReady"), False)
 SOURCES = (Path(__file__).name, "native-linux-production-016-stage.py", "native-linux-016-stage.py",
            "linux-retirement-package-verify.py", "native-linux-integrated-pages.py",
-           "native-linux-root-probe.py", "native-unix-window.py", "native-linux-polkit-probe.py")
+           "native-linux-root-probe.py", "native-unix-window.py", "native-linux-polkit-probe.py",
+           "fixtures/journal-a-native-incoming.UNBOUND.json")
 ENVIRONMENT = ("GITHUB_ACTIONS", "GITHUB_REPOSITORY", "GITHUB_REPOSITORY_ID", "GITHUB_REF",
                "GITHUB_EVENT_NAME", "GITHUB_SHA", "GITHUB_WORKFLOW_REF", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT",
                "RUNNER_ENVIRONMENT", "RUNNER_OS", "RUNNER_ARCH", "RUNNER_TEMP", "GITHUB_WORKSPACE",
@@ -3074,7 +3075,7 @@ def protected_sources(env):
     for name, pin in binding["files"].items():
         raw = read_file(HERE / name, uid=0, mode=0o644)
         require(len(raw) == pin["size"] and digest(raw) == pin["sha256"], "Protected controller/neutral source changed")
-    for file in (BASE, HERE):
+    for file in (BASE, HERE, HERE / "fixtures"):
         for ancestor in (file, *file.parents):
             info = ancestor.lstat()
             require(ancestor.resolve() == ancestor and info.st_uid == info.st_gid == 0 and not info.st_mode & 0o7022,
@@ -3177,6 +3178,7 @@ def install_fixture(env):
     BASE.mkdir(mode=0o755)
     for name in ("scripts", "inputs", "bin", "sdk"):
         (BASE / name).mkdir(mode=0o755)
+    (BASE / "scripts/fixtures").mkdir(mode=0o755)
     source_pins = {}
     for name in SOURCES:
         body = read_file(HERE / name)

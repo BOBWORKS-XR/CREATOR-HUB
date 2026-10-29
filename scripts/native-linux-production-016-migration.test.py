@@ -195,6 +195,62 @@ def metadata_fixture(*, diversions=None, overrides=None):
         assert not fixture.fds, "Diagnostic leaked an FD"
 
 
+class SealedProfileTests(unittest.TestCase):
+    PROFILE = "fixtures/journal-a-native-incoming.UNBOUND.json"
+
+    def test_install_copies_and_binds_the_profile(self):
+        self.assertIn(self.PROFILE, M.SOURCES)
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary).resolve() / "base"
+            temp = Path(temporary).resolve()
+            env = {"GITHUB_WORKSPACE": str(HERE.parent), "RUNNER_TEMP": str(temp), "GITHUB_SHA": "f" * 40}
+            original_read = M.read_file
+            def read(file, *args, **kwargs):
+                if file.parent == temp or file.parent == temp / "native-linux-production-016-stage":
+                    return b"{}"
+                return original_read(file, *args, **kwargs)
+            receipt = {}
+            def save(file, value, mode=0o600):
+                receipt.update(value)
+                raise StopIteration
+            with patch.object(M, "BASE", base), patch.object(M.os, "getuid", return_value=0, create=True), \
+                    patch.object(M.os, "geteuid", return_value=0, create=True), patch.object(M, "read_file", side_effect=read), \
+                    patch.object(M, "check_request", return_value="migration-approve"), \
+                    patch.object(M, "secure_ancestry", return_value=[]), patch.object(M.subprocess, "run", return_value=SimpleNamespace(returncode=1, stdout=b"")), \
+                    patch.object(M, "save", side_effect=save), self.assertRaises(StopIteration):
+                M.install_fixture(env)
+            raw = (HERE / self.PROFILE).read_bytes()
+            self.assertEqual((base / "scripts" / self.PROFILE).read_bytes(), raw)
+            self.assertEqual(receipt["files"][self.PROFILE], {"size": len(raw), "sha256": M.digest(raw)})
+            self.assertEqual(set(receipt["files"]), set(M.SOURCES))
+
+    def test_missing_or_tampered_sealed_profile_is_refused(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary).resolve() / "base"
+            here = base / "scripts"
+            raw = {name: (HERE / name).read_bytes() for name in M.SOURCES}
+            pins = {name: {"size": len(body), "sha256": M.digest(body)} for name, body in raw.items()}
+            binding = json.dumps({"harnessSource": "f" * 40, "files": pins}).encode()
+            for fault in (None, "missing", "tampered", "unsafe-directory"):
+                with self.subTest(fault=fault):
+                    def read(file, *args, **kwargs):
+                        if file == base / "source-binding.json": return binding
+                        name = file.relative_to(here).as_posix()
+                        if name == self.PROFILE and fault == "missing": raise FileNotFoundError(name)
+                        if name == self.PROFILE and fault == "tampered": return bytes([raw[name][0] ^ 1]) + raw[name][1:]
+                        return raw[name]
+                    info = SimpleNamespace(st_uid=0, st_gid=0, st_mode=stat.S_IFDIR | 0o755)
+                    unsafe = SimpleNamespace(st_uid=0, st_gid=0, st_mode=stat.S_IFDIR | 0o777)
+                    with patch.object(M, "BASE", base), patch.object(M, "HERE", here), \
+                            patch.object(M, "read_file", side_effect=read), \
+                            patch.object(Path, "lstat", autospec=True, side_effect=lambda path: unsafe if fault == "unsafe-directory" and path == here / "fixtures" else info):
+                        if fault is None:
+                            M.protected_sources({"GITHUB_SHA": "f" * 40})
+                        else:
+                            with self.assertRaises((FileNotFoundError, RuntimeError)):
+                                M.protected_sources({"GITHUB_SHA": "f" * 40})
+
+
 class MetadataTests(unittest.TestCase):
     def test_all_record_paths_capture_unrelated_unsafe_parents_without_validation_authority(self):
         with metadata_fixture() as f:
