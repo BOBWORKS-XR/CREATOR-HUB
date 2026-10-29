@@ -65,3 +65,47 @@ test('0.1.16 payload admission is Linux-only and tied to its new exact producer 
     assert.throws(() => validateBinding(f));
   }
 });
+
+function journalAFixture() {
+  const f = fixture();
+  Object.assign(f.expected, { version: '0.1.16', producerBranch: 'validation/journal-a-payload-016', sourceTree: tree });
+  f.prepared.hubVersion = '0.1.16';
+  f.run.head_branch = f.expected.producerBranch;
+  f.run.event = f.prepared.source.event = 'workflow_dispatch';
+  return f;
+}
+
+test('journal A requires an independently pinned exact source and tree with manual-only provenance', () => {
+  const f = journalAFixture(), result = validateBinding(f);
+  assert.equal(result.sourceCommit, f.expected.sourceCommit);
+  assert.equal(result.sourceTree, f.expected.sourceTree);
+  assert.equal(result.producerBranch, 'validation/journal-a-payload-016');
+  assert.equal(result.releaseReady, false); assert.equal(result.nativeGuiTested, false);
+});
+
+test('journal A rejects foreign or mixed independent pins and all inherited provenance refusals', () => {
+  const changes = {
+    foreignBranch: f => { f.run.head_branch = 'validation/journal-b-payload-016'; },
+    nearBranch: f => { f.run.head_branch += '-other'; },
+    oldBranch: f => { f.run.head_branch = 'validation/unix-payload-016'; },
+    wrongExpectedBranch: f => { f.expected.producerBranch = 'validation/journal-b-payload-016'; },
+    push: f => { f.run.event = f.prepared.source.event = 'push'; },
+    missingBranch: f => { delete f.expected.producerBranch; },
+    missingTree: f => { delete f.expected.sourceTree; },
+    wrongPinTree: f => { f.expected.sourceTree = 'e'.repeat(40); },
+    wrongCommitTree: f => { f.commit.tree.sha = 'e'.repeat(40); },
+    wrongPreparedTree: f => { f.prepared.source.sourceTree = 'e'.repeat(40); },
+    wrongCommit: f => { f.expected.sourceCommit = 'e'.repeat(40); },
+    wrongPreparedCommit: f => { f.prepared.source.sourceCommit = 'e'.repeat(40); },
+    wrongBuildCommit: f => { f.prepared.source.buildCommit = 'e'.repeat(40); },
+    foreignExpected: f => { f.expected.extra = true; },
+    wrongVersion: f => { f.expected.version = f.prepared.hubVersion = '0.1.14'; },
+    ...refusals,
+  };
+  for (const [name, mutate] of Object.entries(changes)) {
+    const f = journalAFixture(); mutate(f);
+    assert.throws(() => validateBinding(f), undefined, name);
+  }
+  const historical = journalAFixture(); delete historical.expected.producerBranch; delete historical.expected.sourceTree;
+  assert.throws(() => validateBinding(historical), 'Historical pins must not authorize the new branch');
+});

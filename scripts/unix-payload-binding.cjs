@@ -45,12 +45,24 @@ function validatePrepared(p, target, version) {
   assert.ok(total <= 512 * 1024 * 1024, 'Preparation exceeds its transfer bound');
 }
 
-function validateBinding({ expected: e, run: r, artifact: a, commit, jobs, prepared: p }) {
-  exactKeys(e, 'target version sourceCommit runId runAttempt artifactId zipSha256', 'Independent pins');
-  const target = TARGETS[e.target]; assert.ok(target, 'Unknown target');
+function validateExpected(e) {
+  const journalA = e && Object.hasOwn(e, 'producerBranch');
+  exactKeys(e, journalA ? 'target version sourceCommit sourceTree producerBranch runId runAttempt artifactId zipSha256'
+    : 'target version sourceCommit runId runAttempt artifactId zipSha256', 'Independent pins');
+  assert.ok(Object.hasOwn(TARGETS, e.target), 'Unknown target');
+  const target = TARGETS[e.target];
   assert.ok(e.version === '0.1.14' || e.version === '0.1.16' && e.target === 'linux', 'Only finite reviewed validation targets are admitted');
   sha(e.sourceCommit, 40); sha(e.zipSha256);
   for (const value of [e.runId, e.runAttempt, e.artifactId]) id(value);
+  if (journalA) {
+    assert.equal(e.producerBranch, 'validation/journal-a-payload-016');
+    assert.equal(e.version, '0.1.16'); assert.equal(e.target, 'linux'); sha(e.sourceTree, 40);
+  }
+  return { target, journalA };
+}
+
+function validateBinding({ expected: e, run: r, artifact: a, commit, jobs, prepared: p }) {
+  const { target, journalA } = validateExpected(e);
   assert.equal(r.id, e.runId); assert.equal(r.head_sha, e.sourceCommit);
   assert.equal(r.run_attempt, e.runAttempt);
   assert.equal(r.status, 'completed'); assert.equal(r.conclusion, 'success');
@@ -58,10 +70,14 @@ function validateBinding({ expected: e, run: r, artifact: a, commit, jobs, prepa
   for (const repository of [r.repository, r.head_repository]) {
     assert.equal(repository.id, REPOSITORY_ID); assert.equal(repository.full_name, REPOSITORY);
   }
-  if (e.version === '0.1.16') assert.equal(r.head_branch, 'validation/unix-payload-016');
+  if (journalA) {
+    assert.equal(r.head_branch, e.producerBranch);
+    assert.equal(r.event, 'workflow_dispatch', 'Journal A requires a manual producer run');
+  } else if (e.version === '0.1.16') assert.equal(r.head_branch, 'validation/unix-payload-016');
   if (r.event === 'push') assert.equal(r.head_branch, e.version === '0.1.16' ? 'validation/unix-payload-016' : 'validation/unix-payload-014');
   else assert.equal(r.event, 'workflow_dispatch', 'PR merges are not supported by this producer');
   assert.equal(commit.sha, e.sourceCommit); sha(commit.tree.sha, 40);
+  if (journalA) assert.equal(commit.tree.sha, e.sourceTree, 'Independent journal A source tree differs');
   assert.equal(a.id, e.artifactId); assert.equal(a.expired, false);
   assert.equal(a.name, `unsigned-unix-payload-${target.os}-${target.runnerArch}-${e.sourceCommit}`);
   assert.equal(a.digest, `sha256:${e.zipSha256}`);
@@ -85,4 +101,4 @@ function validateBinding({ expected: e, run: r, artifact: a, commit, jobs, prepa
     scope: 'unsigned-native-payload-provenance-only', nativeGuiTested: false, releaseReady: false };
 }
 
-module.exports = { TARGETS, REPOSITORY, REPOSITORY_ID, WORKFLOW, validatePrepared, validateBinding };
+module.exports = { TARGETS, REPOSITORY, REPOSITORY_ID, WORKFLOW, validatePrepared, validateExpected, validateBinding };

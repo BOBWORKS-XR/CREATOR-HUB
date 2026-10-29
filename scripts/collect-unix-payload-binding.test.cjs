@@ -46,6 +46,30 @@ test('new Linux16 collection retains the fresh API and source binding rather tha
   }
 });
 
+test('journal A collection binds manual run and independently supplied tree across all evidence', t => {
+  const { file, value } = inputs(t);
+  Object.assign(value.expected, { version: '0.1.16', producerBranch: 'validation/journal-a-payload-016',
+    sourceTree: value.commit.tree.sha });
+  value.prepared.hubVersion = '0.1.16';
+  value.run.head_branch = value.expected.producerBranch;
+  value.run.event = value.prepared.source.event = 'workflow_dispatch';
+  fs.writeFileSync(file, JSON.stringify(value.prepared, null, 2));
+  const request = route => route.startsWith('actions/runs/101/attempts/') ? { jobs: value.jobs, total_count: 1 }
+    : route === 'actions/runs/101' ? value.run : route === 'actions/artifacts/202' ? value.artifact : value.commit;
+  const result = collect(value.expected, file, request);
+  assert.equal(result.verified.sourceTree, value.expected.sourceTree);
+  assert.equal(result.downloadedZipVerified, false); assert.equal(result.releaseReady, false);
+  value.commit.tree.sha = 'e'.repeat(40);
+  assert.throws(() => collect(value.expected, file, request), /source tree differs/);
+  value.commit.tree.sha = value.expected.sourceTree;
+  value.run.head_branch = 'validation/journal-b-payload-016';
+  assert.throws(() => collect(value.expected, file, request));
+  for (const change of [{ sourceTree: undefined }, { producerBranch: 'validation/journal-b-payload-016' },
+    { sourceCommit: '../source' }, { extra: true }]) {
+    assert.throws(() => collect({ ...value.expected, ...change }, file, () => assert.fail('No API call')));
+  }
+});
+
 test('malformed independent pins refuse before filesystem or API use', t => {
   const { file, value } = inputs(t);
   for (const change of [{ target: 'constructor' }, { runId: '101/path' }, { artifactId: 0 }, { runAttempt: NaN },

@@ -27,7 +27,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Bind the new Linux route before dependencies or compilation
-        if: github.ref == 'refs/heads/validation/unix-payload-016'
+        if: github.ref == 'refs/heads/validation/unix-payload-016' || github.ref == 'refs/heads/validation/journal-a-payload-016'
         shell: bash
         run: |
           set -euo pipefail
@@ -36,6 +36,9 @@ jobs:
           assert os.environ['GITHUB_REPOSITORY'] == 'BOBWORKS-XR/CREATOR-HUB'
           assert os.environ['GITHUB_REPOSITORY_ID'] == '1364807512'
           assert os.environ['RUNNER_OS'] == 'Linux' and os.environ['RUNNER_ARCH'] == 'X64'
+          if os.environ['GITHUB_REF'] == 'refs/heads/validation/journal-a-payload-016':
+              assert os.environ['GITHUB_EVENT_NAME'] == 'workflow_dispatch'
+              assert os.environ['GITHUB_WORKFLOW_REF'] == 'BOBWORKS-XR/CREATOR-HUB/.github/workflows/unix-managed-payload.yml@refs/heads/validation/journal-a-payload-016'
           for path in ('package.json', 'src-tauri/tauri.conf.json'):
               with open(path, encoding='utf-8') as stream:
                   assert json.load(stream)['version'] == '0.1.16'

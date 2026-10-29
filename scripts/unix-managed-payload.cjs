@@ -41,6 +41,7 @@ function git(root, args, execute) {
 function prepareAdmission(root, platform, arch, env, execute = execFileSync) {
   const os = { linux: 'Linux', macos: 'macOS' }[platform];
   const cpu = { x86_64: 'X64', aarch64: 'ARM64' }[arch];
+  const journalA = env.GITHUB_REF === 'refs/heads/validation/journal-a-payload-016';
   const validationPush = env.GITHUB_EVENT_NAME === 'push'
     && ['refs/heads/validation/unix-payload-014', 'refs/heads/validation/unix-payload-016'].includes(env.GITHUB_REF)
     && env.GITHUB_WORKFLOW_REF === `${REPOSITORY}/${WORKFLOW}@${env.GITHUB_REF}`;
@@ -50,6 +51,10 @@ function prepareAdmission(root, platform, arch, env, execute = execFileSync) {
     || typeof env.GITHUB_WORKFLOW_REF !== 'string'
     || !env.GITHUB_WORKFLOW_REF.startsWith(`${REPOSITORY}/${WORKFLOW}@refs/heads/`)) {
     throw Error('Managed Unix preparation requires its explicit native GitHub-hosted workflow dispatch.');
+  }
+  if (journalA && (env.GITHUB_EVENT_NAME !== 'workflow_dispatch'
+      || env.GITHUB_WORKFLOW_REF !== `${REPOSITORY}/${WORKFLOW}@${env.GITHUB_REF}`)) {
+    throw Error('Journal A preparation requires the exact manual producer workflow.');
   }
   if (Object.keys(env).some(name => name.startsWith('CREATOR_HUB_SIGNING_')
     || name.startsWith('APPLE_') || name.startsWith('TAURI_SIGNING_'))) {
@@ -70,7 +75,7 @@ function prepareAdmission(root, platform, arch, env, execute = execFileSync) {
   if (buildCommit !== env.GITHUB_SHA || !/^[a-f0-9]{40}$/.test(sourceTree)) {
     throw Error('Checkout does not match the dispatched source commit/tree.');
   }
-  if (env.GITHUB_REF === 'refs/heads/validation/unix-payload-016') {
+  if (env.GITHUB_REF === 'refs/heads/validation/unix-payload-016' || journalA) {
     if (platform !== 'linux' || arch !== 'x86_64'
       || ['package.json', 'src-tauri/tauri.conf.json'].some(name => JSON.parse(fs.readFileSync(path.join(realRoot, name), 'utf8')).version !== '0.1.16')) {
       throw Error('The 0.1.16 preparation route requires exact Linux x86_64 source version 0.1.16.');

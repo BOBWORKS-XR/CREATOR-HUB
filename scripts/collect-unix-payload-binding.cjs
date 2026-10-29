@@ -4,7 +4,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const assert = require('node:assert/strict');
 const { execFileSync } = require('node:child_process');
-const { TARGETS, REPOSITORY, validatePrepared, validateBinding } = require('./unix-payload-binding.cjs');
+const { TARGETS, REPOSITORY, validatePrepared, validateExpected, validateBinding } = require('./unix-payload-binding.cjs');
 const { snapshot } = require('./unix-managed-payload.cjs');
 
 function json(file) {
@@ -25,11 +25,7 @@ function api(route) {
   }));
 }
 function collect(expected, preparedFile, request = api) {
-  assert.ok(Object.hasOwn(TARGETS, expected.target), 'Unknown target');
-  assert.ok(expected.version === '0.1.14' || expected.version === '0.1.16' && expected.target === 'linux', 'Only finite native payload targets are admitted');
-  assert.match(expected.sourceCommit, /^[a-f0-9]{40}$/);
-  assert.match(expected.zipSha256, /^[a-f0-9]{64}$/);
-  for (const value of [expected.runId, expected.runAttempt, expected.artifactId]) assert.ok(Number.isSafeInteger(value) && value > 0);
+  validateExpected(expected);
   assert.equal(path.basename(preparedFile), 'prepared-unix.json');
   const prepared = json(preparedFile);
   validatePrepared(prepared, TARGETS[expected.target], expected.version);

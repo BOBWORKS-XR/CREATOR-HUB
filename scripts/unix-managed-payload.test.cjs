@@ -198,6 +198,37 @@ test('the new producer route binds Linux x86_64 and both exact 0.1.16 source ide
   } finally { cleanup(f); }
 });
 
+test('journal A producer is exact-ref manual-only and keeps the native 016 and source guards', () => {
+  const f = fixture();
+  try {
+    const ref = 'refs/heads/validation/journal-a-payload-016';
+    const env = { ...f.env, GITHUB_REF: ref,
+      GITHUB_WORKFLOW_REF: `BOBWORKS-XR/CREATOR-HUB/.github/workflows/unix-managed-payload.yml@${ref}` };
+    for (const file of ['package.json', 'src-tauri/tauri.conf.json']) {
+      fs.writeFileSync(path.join(f.root, file), JSON.stringify({ version: '0.1.16' }));
+    }
+    assert.equal(prepareAdmission(f.root, 'linux', 'x86_64', env, f.execute).event, 'workflow_dispatch');
+    for (const change of [{ GITHUB_EVENT_NAME: 'push' }, { GITHUB_EVENT_NAME: 'pull_request' },
+      { GITHUB_WORKFLOW_REF: f.env.GITHUB_WORKFLOW_REF }, { GITHUB_REPOSITORY: 'foreign/repo' },
+      { GITHUB_REPOSITORY_ID: '1' }, { RUNNER_ENVIRONMENT: 'self-hosted' },
+      { CREATOR_HUB_SIGNING_KEY_PATH: 'never-opened' }]) {
+      assert.throws(() => prepareAdmission(f.root, 'linux', 'x86_64', { ...env, ...change }, f.execute));
+    }
+    assert.throws(() => prepareAdmission(f.root, 'macos', 'x86_64', { ...env, RUNNER_OS: 'macOS' }, f.execute), /exact Linux/);
+    assert.throws(() => prepareAdmission(f.root, 'linux', 'aarch64', { ...env, RUNNER_ARCH: 'ARM64' }, f.execute), /exact Linux/);
+    for (const file of ['package.json', 'src-tauri/tauri.conf.json']) {
+      fs.writeFileSync(path.join(f.root, file), JSON.stringify({ version: '0.1.15' }));
+      assert.throws(() => prepareAdmission(f.root, 'linux', 'x86_64', env, f.execute), /source version/);
+      fs.writeFileSync(path.join(f.root, file), JSON.stringify({ version: '0.1.16' }));
+    }
+    f.dirty(' M protected-source.rs');
+    assert.throws(() => prepareAdmission(f.root, 'linux', 'x86_64', env, f.execute), /clean initial source/);
+    f.dirty(''); f.head('c'.repeat(40));
+    assert.throws(() => prepareAdmission(f.root, 'linux', 'x86_64', env, f.execute), /dispatched source/);
+    assert.equal(f.calls.every(c => c.command === 'git'), true);
+  } finally { cleanup(f); }
+});
+
 test('the generic unsigned producer remains Linux-only with the finite 016 preflight before tools and unchanged transfer workflow identity', () => {
   const { yaml } = require('../node_modules/playwright-core/lib/utilsBundle.js');
   const document = yaml.parseDocument(fs.readFileSync(path.join(__dirname, '../.github/workflows/unix-managed-payload.yml'), 'utf8'), { uniqueKeys: true });
@@ -206,9 +237,11 @@ test('the generic unsigned producer remains Linux-only with the finite 016 prefl
   assert.deepEqual(workflow.on.push.branches, ['validation/unix-payload-014', 'validation/unix-payload-016']);
   assert.deepEqual(workflow.jobs.payload.strategy.matrix.os, ['ubuntu-22.04']);
   const steps = workflow.jobs.payload.steps;
-  assert.equal(steps[1].if, "github.ref == 'refs/heads/validation/unix-payload-016'");
+  assert.equal(steps[1].if, "github.ref == 'refs/heads/validation/unix-payload-016' || github.ref == 'refs/heads/validation/journal-a-payload-016'");
   assert.match(steps[1].run, /'version'\] == '0\.1\.16'/);
   assert.match(steps[1].run, /RUNNER_OS.*Linux.*RUNNER_ARCH.*X64/);
+  assert.match(steps[1].run, /GITHUB_EVENT_NAME'\] == 'workflow_dispatch'/);
+  assert.match(steps[1].run, /GITHUB_WORKFLOW_REF'\].*unix-managed-payload\.yml@refs\/heads\/validation\/journal-a-payload-016/);
   assert.ok(steps[2].uses.startsWith('actions/setup-node@'));
   assert.match(steps.find(step => step.name?.startsWith('Prepare only')).run, /--prepare-managed-unix$/);
   assert.doesNotMatch(JSON.stringify(workflow), /secrets\.|APPLE_|TAURI_SIGNING_|CREATOR_HUB_SIGNING_/);
