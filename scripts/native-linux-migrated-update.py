@@ -276,6 +276,9 @@ def transition_home_closure(manifests, manifest_pins, archives, inventories, ver
     return expected, groups, release
 
 
+_HOME_PATH_REFUSAL_ORIGIN = object()
+
+
 class TransitionHomePreservation:
     """Read-only preservation only; no admission, activation or protocol writer."""
     def __init__(self, adopted, manifests, manifest_pins, archives, inventories, verifier):
@@ -386,15 +389,15 @@ class TransitionHomePreservation:
             self._refused = True
             raise
 
-    def check(self):
+    def check(self, *, checkpoint="unspecified"):
         require(not self._refused, "Preservation refusal is retained; no repair/retry")
         try:
-            self._check()
+            self._check(checkpoint)
         except Exception:
             self._refused = True
             raise
 
-    def _check(self):
+    def _check(self, checkpoint):
         after = tree(HOME, M.UID)
         require(self.before.keys() <= after.keys(), "An original protected entry disappeared")
         capture, phase = None, None
@@ -437,7 +440,22 @@ class TransitionHomePreservation:
             else:
                 require(after[name] == wanted, "Original protected bytes/identity changed: " + name)
         additions = after.keys() - self.before.keys()
-        require(additions <= self.allowed, "Unexpected new HOME path; no prefix exemption")
+        try:
+            require(additions <= self.allowed, "Unexpected new HOME path; no prefix exemption")
+        except RuntimeError as error:
+            try:
+                unknown = sorted(additions - self.allowed)
+                paths = [name for name in unknown if type(name) is str and 0 < len(name.encode("utf-8")) <= 256
+                         and not name.startswith("/") and "\\" not in name and all(ord(c) >= 32 and ord(c) != 127 for c in name)
+                         and all(part not in ("", ".", "..") for part in name.split("/"))][:8]
+                checkpoints = ("unspecified", "session-entry", "pre-update-input", "arm-before-input", "session-preservation", "broker-preservation")
+                handoff = "none" if phase is None else "ready" if phase == "Ready" else "attempting" if phase == {"Attempting": self.target} else "completed"
+                error.home_path_refusal = {"checkpoint": checkpoint if checkpoint in checkpoints else "unspecified", "handoffPhase": handoff,
+                                           "paths": paths, "omittedCount": len(unknown) - len(paths), "authorityGranted": False}
+                error._home_path_refusal_origin = _HOME_PATH_REFUSAL_ORIGIN
+            except Exception:
+                pass
+            raise
         if phase not in ({"Attempting": self.target}, {"Completed": self.target}):
             require(not additions.intersection(self.b_additions), "No B publication before actual Attempting")
         for prefix, rows in self.b_groups: self._group(after, prefix, rows, required=complete)
@@ -1579,9 +1597,9 @@ def _changed_migration_preservation(sealed, guard):
     require(U.parse(U.read(HOME / "data/CreatorHub/convergence/move-v1.json", 8192)) == sealed["batch"], "Original migration cleanup state changed")
 
 
-def changed_session_preservation(sealed, guard):
+def changed_session_preservation(sealed, guard, *, checkpoint="session-preservation"):
     require(os.getuid() == os.geteuid() == M.UID, "Ordinary-UID preservation only")
-    _changed_migration_preservation(sealed, guard); guard.check()
+    _changed_migration_preservation(sealed, guard); guard.check(checkpoint=checkpoint)
 
 
 def changed_broker_preservation(sealed, guard):
@@ -1589,7 +1607,7 @@ def changed_broker_preservation(sealed, guard):
     _changed_migration_preservation(sealed, guard)
     require(set(sealed["transactions"]) == {str(p) for p in TRANSACTIONS}, "Exact retirement paths required")
     for name, before in sealed["transactions"].items(): require(tree(Path(name), 0) == before, "Original retirement state changed")
-    guard.check()
+    guard.check(checkpoint="broker-preservation")
 
 
 def changed_resources(manifest_raw, archive_raw):
@@ -2080,7 +2098,7 @@ def changed_prepare_tls(env):
 
 
 def changed_arm_session(env, original, sealed, guard, protocol, deadline):
-    changed_session_preservation(sealed, guard)
+    changed_session_preservation(sealed, guard, checkpoint="arm-before-input")
     U.save(OUTPUT / "ready-arm.json", {"context": original["context"]})
     def acknowledged():
         if not os.path.lexists(CONTROL / "ready-armed.json"): return None
@@ -2168,6 +2186,18 @@ def changed_outcome(report, inventories, verifier, protected_paths):
     return True
 
 
+def changed_retain_home_path_refusal(record, error):
+    try:
+        if (type(error) is RuntimeError and str(error) == "Unexpected new HOME path; no prefix exemption"
+                and getattr(error, "_home_path_refusal_origin", None) is _HOME_PATH_REFUSAL_ORIGIN):
+            value = error.home_path_refusal
+            require(type(value) is dict and len(json.dumps(value, ensure_ascii=True).encode()) <= 4096,
+                    "Bounded HOME path diagnostic required")
+            record["homePathRefusal"] = copy.deepcopy(value)
+    except Exception:
+        pass
+
+
 def changed_session(env):
     changed_admission(env)
     original, sealed = changed_runtime_binding(env)
@@ -2175,7 +2205,7 @@ def changed_session(env):
             and all(env.get(k) == str(HOME / leaf) for k, leaf in (("XDG_CONFIG_HOME", "config"), ("XDG_DATA_HOME", "data"), ("XDG_CACHE_HOME", "cache"))),
             "Only the original ordinary UID/HOME/XDG may continue")
     verifier = (CONTROL / "scripts/verify-package-input", original["verifier"])
-    guard = changed_guard(sealed, verifier); changed_session_preservation(sealed, guard)
+    guard = changed_guard(sealed, verifier); changed_session_preservation(sealed, guard, checkpoint="session-entry")
     reviewed = U.parse(U.read(CONTROL / "review.json", 2 * 1024**2, uid=0, mode=0o644))
     require(reviewed["baseline"] == U.actual017_a1_data() and reviewed["privateTargetQualification"] == U.actual017_private_target_qualification()
             and reviewed["signaturesVerified"] is True, "Exact independent A1/actual017 review required")
@@ -2261,7 +2291,7 @@ def changed_session(env):
         html.home()
         U.wait(lambda: html.optional("#hub-update-status") in ("Version 0.1.17 is available.", "Version 0.1.17 is ready to install."), 90)
         require(html.d.read("#hub-update-button", "enabled") is True, "Actual completed signed update Check required")
-        changed_session_preservation(sealed, guard)
+        changed_session_preservation(sealed, guard, checkpoint="pre-update-input")
         watcher = changed_arm_session(env, original, sealed, guard, protocol, sealed["deadline"])
         baseline = U.children(os.getpid()); report["initial16Verified"] = True
         html.click("#hub-update-button", [], "hub-update-button")
@@ -2360,6 +2390,7 @@ def changed_session(env):
         failure = error
         report.update(scenarioPassed=False, disposableTeardownRequired=True, recovery="unknown-no-retry-disposable-runner-teardown",
                       refusal={"type": type(error).__name__, "message": str(error)[:1000]})
+        changed_retain_home_path_refusal(report, error)
     finally:
         M.wipe(secret)
         if watcher is not None:
@@ -2978,6 +3009,7 @@ def changed_broker(env):
         record["transport"] = U.validate_transport_report(transport_report, pins, "deb-approve"); record["transportClosed"] = True
     except Exception as error:
         failure = error; record["refusal"] = {"type": type(error).__name__, "message": str(error)[:1000]}
+        changed_retain_home_path_refusal(record, error)
         changed_retain_directory_refusal(record, error)
         if str(error) == "Original fixture processes remain; never adopt or signal" and "initialUidInventory" in record:
             try:
