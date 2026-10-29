@@ -298,7 +298,8 @@ class TransitionHomePreservation:
         self.static[self.history] = {"kind": "file", "mode": 0o600, **U.pin(self.previous)}
         self.pending, self.partial = self.E + "/" + release["version"] + ".pending", self.package[:-4] + ".part"
         require(self.pending not in self.before and self.partial not in self.before, "Existing transition temporary needs review")
-        for prefix, rows in self.groups["a"].values(): self._group(self.before, prefix, rows, required=True)
+        for name, (prefix, rows) in self.groups["a"].items():
+            self._group(self.before, prefix, rows, required=name != "setup")
         original = {self.R: {"kind": "directory", "mode": 0o700}, self.R + "/descriptors": {"kind": "directory", "mode": 0o700},
                     self.R + "/router-v1": {"kind": "directory", "mode": 0o700}}
         for name in ("creator-hub-mcp-router", "router.json", "router.minisig"):

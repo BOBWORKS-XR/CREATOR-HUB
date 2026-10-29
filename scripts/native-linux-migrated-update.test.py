@@ -1447,6 +1447,20 @@ class TransitionHomeTests(unittest.TestCase):
         self.complete_b()
         return guard
 
+    def test_setup_generation_may_be_absent_until_setup_is_opened(self):
+        setup_root = self.home / self.G / self.generation(self.contents["a"][2])
+        shutil.rmtree(setup_root)
+        self.before["home"] = C.tree(self.home, M.UID)
+        guard = self.guard()
+        guard.check()
+
+    def test_partial_setup_generation_remains_refused(self):
+        setup_root = self.home / self.G / self.generation(self.contents["a"][2])
+        (setup_root / "setup" / "creator-project-setup").unlink()
+        self.before["home"] = C.tree(self.home, M.UID)
+        with self.assertRaisesRegex(RuntimeError, "Complete exact published generation"):
+            self.guard()
+
     def test_old_gate_still_rejects_real_filesystem_a_to_b(self):
         self.complete_b()
         with self.assertRaisesRegex(RuntimeError, "Original protected bytes/identity changed"):
