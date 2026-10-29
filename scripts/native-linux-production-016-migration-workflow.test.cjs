@@ -300,16 +300,21 @@ test('draft access is confined to a separate data-only job with no package execu
   assert.equal(job.outputs.artifact, '${{ steps.upload.outputs.artifact-id }}');
   assert.equal(job.env.CREATOR_CHANGED_MCP_SOURCE_RECEIPT_SHA256, '${{ inputs.source_receipt_sha256 }}');
   assert.equal(job.env.CREATOR_CHANGED_MCP_DELIVERY_ARTIFACT, undefined);
-  assert.equal(job.steps.length, 6);
+  assert.equal(job.steps.length, 7);
   assert.equal(job.steps[0].uses, 'actions/checkout@v6');
   assert.equal(job.steps[0].with['persist-credentials'], false);
-  assert.match(job.steps[2].run, /c\.sourceReceipt\(/);
-  assert.match(job.steps[3].run, /^node --test scripts\/native-linux-changed-mcp-input\.test\.cjs$/);
-  const api = job.steps[4];
+  const gate = job.steps[1];
+  assert.equal(gate.uses, 'actions/github-script@v8'); assert.equal(gate.with.retries, 0);
+  assert.equal(gate.env.INPUT_PROFILE, '${{ inputs.profile }}');
+  assert.match(gate.with.script, /gate\.refuseFreshUntilDelivery\(profile, api\)/);
+  assert.doesNotMatch(gate.with.script, /downloadArtifact|collectDelivery|createRelease|updateRelease|deleteRelease|uploadRelease/);
+  assert.match(job.steps[3].run, /c\.sourceReceipt\(/);
+  assert.equal(job.steps[4].run, 'node --test scripts/native-linux-changed-mcp-input.test.cjs scripts/journal-native-pair.test.cjs scripts/journal-native-pair-lane.test.cjs');
+  const api = job.steps[5];
   assert.equal(api.uses, 'actions/github-script@v8'); assert.equal(api.with.retries, 0);
   assert.match(api.with.script, /await lane\.collectDelivery\(\{github, context, raw\}\)/);
   assert.doesNotMatch(api.with.script, /lane\.run\(|post|createRelease|updateRelease|deleteRelease|uploadRelease/);
-  const uploader = job.steps[5]; assert.equal(uploader.uses, 'actions/upload-artifact@v4');
+  const uploader = job.steps[6]; assert.equal(uploader.uses, 'actions/upload-artifact@v4');
   assert.equal(uploader.with.name, 'changed-mcp-delivery-${{ github.run_id }}-${{ github.run_attempt }}');
   assert.equal(uploader.with['compression-level'], 0); assert.equal(uploader.with['if-no-files-found'], 'error');
   assert.deepEqual(uploader.with.path.trim().split('\n'), [
@@ -325,6 +330,7 @@ test('draft access is confined to a separate data-only job with no package execu
         { input: step.run, encoding: 'utf8', timeout: 10000, maxBuffer: 65536 });
     }
   }
-  const { Script } = require('node:vm'); new Script('(async () => {\n' + api.with.script + '\n})');
+  const { Script } = require('node:vm');
+  for (const step of [gate, api]) new Script('(async () => {\n' + step.with.script + '\n})');
   assert.equal(workflow.permissions.contents, 'read');
 });

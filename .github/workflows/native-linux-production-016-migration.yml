@@ -207,6 +207,34 @@ jobs:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
+      - name: Bind fresh pair and refuse until its signed delivery is admitted
+        uses: actions/github-script@v8
+        env:
+          INPUT_PROFILE: ${{ inputs.profile }}
+        with:
+          retries: 0
+          script: |
+            const assert = require('node:assert/strict');
+            const gate = require('./scripts/journal-native-pair-lane.cjs');
+            const raw = Buffer.from(process.env.INPUT_PROFILE || '');
+            assert.ok(raw.length > 0 && raw.length <= 16384);
+            const profile = JSON.parse(raw);
+            if (gate.isFreshCandidate(profile)) {
+              const repo = {owner: 'BOBWORKS-XR', repo: 'CREATOR-HUB'};
+              const run = async id => (await github.rest.actions.getWorkflowRun({...repo, run_id: id})).data;
+              const job = async id => (await github.rest.actions.getJobForWorkflowRun({...repo, job_id: id})).data;
+              const artifact = async id => (await github.rest.actions.getArtifact({...repo, artifact_id: id})).data;
+              const commit = async sha => (await github.rest.git.getCommit({...repo, commit_sha: sha})).data;
+              const pair = require('./scripts/journal-native-pair.cjs');
+              const a = require('./scripts/fixtures/journal-a-native-incoming.UNBOUND.json').assembly;
+              const api = {
+                aRun: await run(a.runId), aJob: await job(a.jobId), aArtifact: await artifact(a.artifactId), aCommit: await commit(a.sourceCommit),
+                aProducerRun: await run(pair.A_PRODUCER.runId), aProducerJob: await job(pair.A_PRODUCER.jobId), aProducerCommit: await commit(pair.A_PRODUCER.sourceCommit),
+                donorRun: await run(pair.DONOR.runId), donorJob: await job(pair.DONOR.jobId), donorCommit: await commit(pair.DONOR.sourceCommit),
+                bRun: await run(pair.B.runId), bJob: await job(pair.B.jobId), bArtifact: await artifact(pair.B.artifactId), bCommit: await commit(pair.B.sourceCommit),
+              };
+              gate.refuseFreshUntilDelivery(profile, api);
+            }
       - uses: actions/setup-node@v6
         with:
           node-version: 24.17.0
@@ -220,7 +248,7 @@ jobs:
           assert.equal(c.hash(receipt), process.env.CREATOR_CHANGED_MCP_SOURCE_RECEIPT_SHA256);
           JS
       - name: Test data-only acquisition guards without executing any package
-        run: node --test scripts/native-linux-changed-mcp-input.test.cjs
+        run: node --test scripts/native-linux-changed-mcp-input.test.cjs scripts/journal-native-pair.test.cjs scripts/journal-native-pair-lane.test.cjs
       - name: Read the exact private draft carrier; no extraction or native authority
         uses: actions/github-script@v8
         with:

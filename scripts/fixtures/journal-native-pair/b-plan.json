@@ -1,0 +1,102 @@
+{
+  "schemaVersion": 1,
+  "product": "com.creatorworks.hub.private017-derived-handoff",
+  "hubVersion": "0.1.17",
+  "platform": "linux",
+  "arch": "x86_64",
+  "rootSource": {
+    "sourceCommit": "a61e7b0152689b7fa25fd0f4fe3e7d3894751cc5",
+    "sourceTree": "ab48fbce32accb627a5f5e0de2f496699c2317b4"
+  },
+  "original016": {
+    "modules.tar.gz": {
+      "size": 54400847,
+      "sha256": "29433d6f098f5b94e8f7d0c86e567a7631a3f323e888223d243f8304364196d6"
+    },
+    "prepared-unix.json": {
+      "size": 3221,
+      "sha256": "6e97e2554de1abbcc9244ab8a6108c4afa16eeb13aaa5f02f60c137b06e9760b"
+    },
+    "transfer-binding.json": {
+      "size": 1392,
+      "sha256": "f74bfdc54fb12ae00de16921d04a6b72cc4116815e5cacde5b1d5d260d3f3550"
+    },
+    "routing/router.json": {
+      "size": 187,
+      "sha256": "1315487222bd02492a502b59cea29c530a6ae77b66f11348d07fdcf7efb99eaa"
+    },
+    "routing/router.minisig": {
+      "size": 305,
+      "sha256": "678f812169d52b2ad1d1ecdc2a2a8a03bb756aec15018f19e1098f344bf422ea"
+    },
+    "routing/runtime.json": {
+      "size": 1133,
+      "sha256": "92f5d79667f81cec4933d4a0c4550a93a4477d47131a94959dad9cbaf0efbcc8"
+    },
+    "routing/runtime.minisig": {
+      "size": 305,
+      "sha256": "16e3d1502b5a5be54ced73b5e93eb95676fbe9844cc80785d29774c44660bbc2"
+    },
+    "handoff.json": {
+      "size": 8518,
+      "sha256": "b5cc32f560135d51ffe2cc405cb35968914e9bb4c323e4542378387530749bea"
+    },
+    "handoff.minisig": {
+      "size": 305,
+      "sha256": "a590cfb397d8a9d0bdebc3ac5e6c0553bead0622725ae965ee71d35e3580d2ac"
+    }
+  },
+  "baseline016": {
+    "assembly": {
+      "sourceCommit": "c5bd13a5145aa54a50f28f073e1543826a210a4e",
+      "sourceTree": "6c6953a0b4901b56eeadb4647d7dde34a375761a",
+      "runId": 40897895423,
+      "runAttempt": 1,
+      "jobId": 123532047652,
+      "artifactId": 12907149456,
+      "zipBytes": 184009187,
+      "zipSha256": "7e940fa78f6ad2f45b979136d964cb75bce35b0d6589683bca8751a06045f3af"
+    },
+    "pins": {
+      "deb": {
+        "size": 64519472,
+        "sha256": "9c7d0a1d5672468f7d31ddbf0c29f4ba2142b90e1d902fceb28d7453d796fd59"
+      },
+      "rawHub": {
+        "size": 29088152,
+        "sha256": "75b2f838a34dba3727e6aa49e532f19b24d1e9a05ac74fa4ba077666584a2628"
+      },
+      "manifest": {
+        "size": 3663,
+        "sha256": "557fefa294938c1cd6a29616f7c1d9cbd4828d94c865ab23c2768c9a21794a99"
+      },
+      "assemblyReceipt": {
+        "size": 3547,
+        "sha256": "63fe1d0d47a6d7879dc7cbb1926e7e0bbbdc25c33a8b005d8105ae0acc3683a2"
+      },
+      "hub": {
+        "size": 29088152,
+        "sha256": "d6c1515395df40fa67bdf09736be83613329dd8c15f42ada4474c7c8960be941"
+      },
+      "helper": {
+        "size": 1168536,
+        "sha256": "7f22822e50ee8b96829c64c95da9e1b098c3e080a1370f577ae2b69055eed94a"
+      },
+      "policy": {
+        "size": 878,
+        "sha256": "f4819f08e0a96e98d10a449a82a26b4f59d69714460eb9082387f746e1889bb4"
+      },
+      "service": {
+        "size": 92,
+        "sha256": "9a270a39c219b4f2d294cfaa2a849db84b1e1883fa532d2c90d7f95625780340"
+      }
+    }
+  },
+  "acceptanceOnly": true,
+  "nativeGuiAccepted": false,
+  "migrationAccepted": false,
+  "authenticationAccepted": false,
+  "signedUpdateAccepted": false,
+  "restartAccepted": false,
+  "releaseReady": false
+}
