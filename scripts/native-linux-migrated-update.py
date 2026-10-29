@@ -103,7 +103,19 @@ def context(env, boot):
 
 
 def sources():
-    return tuple(sorted(set(M.SOURCES) | set(U.SOURCES) | {Path(__file__).name}))
+    return tuple(sorted((set(M.SOURCES) - {"fixtures/journal-a-native-incoming.UNBOUND.json"}) | set(U.SOURCES) | {Path(__file__).name}))
+
+
+def changed_sources():
+    return tuple(sorted(set(sources()) | {"fixtures/journal-a-native-incoming.UNBOUND.json"}))
+
+
+def changed_seal_sources(scripts, pins):
+    require(set(pins) == set(changed_sources()), "Exact changed continuation source list required")
+    (scripts / "fixtures").mkdir(mode=0o755)
+    U.protected_ancestry(scripts / "fixtures")
+    for name, expected in pins.items():
+        U.write(scripts / name, U.bound(HERE / name, expected, 2 * 1024**2), 0o444)
 
 
 _DIRECTORY_DIAGNOSTIC_ORIGIN = object()
@@ -1489,7 +1501,7 @@ def changed_source_receipt(env):
     listed = U.run_tool(["/usr/bin/git", "-C", str(workspace), "ls-tree", "-r", "--name-only", "HEAD"], limit=512 * 1024).decode().splitlines()
     require(type(value["files"]) is dict and 0 < len(value["files"]) <= 4096 and set(value["files"]) == set(listed), "Complete finite source export receipt required")
     for name, expected in value["files"].items(): U.safe_name(name); U.bound(workspace / name, expected, 16 * 1024**2)
-    for name in sources(): require("scripts/" + name in value["files"], "Missing execution source")
+    for name in changed_sources(): require("scripts/" + name in value["files"], "Missing execution source")
     for name, expected in U.MCP_OBSERVER_PINS.items():
         require(value["files"].get("native/mcp-router/" + name) == expected, "Exact separately reviewed observer source missing")
     for name, expected in CHANGED_INSTALLER_SOURCES.items():
@@ -1522,7 +1534,7 @@ def changed_prepare(env):
     require(node[:4] == b"\x7fELF", "Exact provisioned native Node required")
     value = {"schemaVersion": 1, "context": changed_context(env), "inputs": pins, "incoming": U.pin(incoming_raw),
              "sourceReceipt": U.pin(source_raw), "sourceTree": source["tree"], "verifier": qualification, "installerVerifier": installer_qualification,
-             "sources": {name: source["files"]["scripts/" + name] for name in sources()},
+             "sources": {name: source["files"]["scripts/" + name] for name in changed_sources()},
              "observerSources": dict(U.MCP_OBSERVER_PINS), "driver": U.pin(U.read(driver, 64 * 1024**2, mode=0o755)), "node": U.pin(node)}
     U.save(INTENT, value, 0o644)
 
@@ -1531,7 +1543,7 @@ def changed_intent(env):
     changed_admission(env)
     value = U.parse(U.read(INTENT, 65536, uid=0, mode=0o644))
     require(type(value["schemaVersion"]) is int and value["schemaVersion"] == 1 and value["context"] == changed_context(env)
-            and set(value["sources"]) == set(sources()) and value["observerSources"] == U.MCP_OBSERVER_PINS,
+            and set(value["sources"]) == set(changed_sources()) and value["observerSources"] == U.MCP_OBSERVER_PINS,
             "Original changed-payload run/boot/source intent differs")
     for name, expected in value["sources"].items(): U.bound(HERE / name, expected, 2 * 1024**2)
     return value
@@ -2006,7 +2018,7 @@ def changed_guard(sealed, verifier):
 def changed_runtime_binding(env):
     original = changed_intent(env)
     require(HERE == CONTROL / "scripts", "Only exact sealed changed-payload scripts may run")
-    U.protected_ancestry(CONTROL)
+    U.protected_ancestry(HERE / "fixtures")
     for name, expected in original["sources"].items(): U.bound(HERE / name, expected, 2 * 1024**2, uid=0, mode=0o444)
     U.bound(CONTROL / "inputs/source-receipt.json", original["sourceReceipt"], 2 * 1024**2, uid=0, mode=0o444)
     sealed = U.parse(U.read(CONTROL / "state.json", 2 * 1024**2, uid=0, mode=0o644))
@@ -2017,6 +2029,7 @@ def changed_runtime_binding(env):
 
 def changed_recheck(env, original, sealed):
     require(changed_intent(env) == original, "Changed-payload source/context drift")
+    U.protected_ancestry(CONTROL / "scripts/fixtures")
     for name, expected in original["sources"].items(): U.bound(CONTROL / "scripts" / name, expected, 2 * 1024**2, uid=0, mode=0o444)
     require(U.parse(U.read(CONTROL / "state.json", 2 * 1024**2, uid=0, mode=0o644)) == sealed, "Protected original state drift")
     U.transition_observer_source()
@@ -2880,7 +2893,7 @@ def changed_broker(env):
             initial_uid_inventory = fixture_quiescence(initial_uid_inventory, prior, native, helper, evidence=record)
         require(initial_uid_inventory == {"processes": [], "terminalProcesses": []}, "Original fixture processes remain; never adopt or signal")
         scripts = CONTROL / "scripts"; scripts.mkdir(mode=0o755)
-        for name, expected in original["sources"].items(): U.write(scripts / name, U.bound(HERE / name, expected, 2 * 1024**2), 0o444)
+        changed_seal_sources(scripts, original["sources"])
         verifier_file, qualification = U.offline_verifier(env)
         require(qualification == original["verifier"], "Original verifier qualification changed")
         U.write(scripts / "verify-package-input", U.bound(verifier_file, qualification["tool"]["pin"], 64 * 1024**2), 0o755)

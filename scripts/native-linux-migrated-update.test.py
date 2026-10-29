@@ -601,6 +601,43 @@ class SourceBindingTests(unittest.TestCase):
                 C.profile(raw)
 
 
+class SealedContinuationSourcesTests(unittest.TestCase):
+    def pins(self):
+        return {name: U.pin((HERE / name).read_bytes()) for name in C.changed_sources()}
+
+    def test_exact_sources_include_and_copy_bound_profile(self):
+        pins = self.pins()
+        name = "fixtures/journal-a-native-incoming.UNBOUND.json"
+        self.assertIn(name, pins)
+        with tempfile.TemporaryDirectory() as temporary:
+            scripts = Path(temporary).resolve() / "scripts"; scripts.mkdir()
+            with patch.object(U, "protected_ancestry") as protected:
+                C.changed_seal_sources(scripts, pins)
+            protected.assert_called_once_with(scripts / "fixtures")
+            self.assertEqual(U.pin((scripts / name).read_bytes()), pins[name])
+            self.assertEqual({p.relative_to(scripts).as_posix() for p in scripts.rglob("*") if p.is_file()}, set(pins))
+
+    def test_missing_or_tampered_source_and_existing_directory_refuse(self):
+        pins = self.pins(); name = "fixtures/journal-a-native-incoming.UNBOUND.json"
+        for fault in ("missing-pin", "tampered-pin", "existing-directory"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as temporary:
+                scripts = Path(temporary).resolve() / "scripts"; scripts.mkdir()
+                selected = copy.deepcopy(pins)
+                if fault == "missing-pin": del selected[name]
+                if fault == "tampered-pin": selected[name]["sha256"] = "0" * 64
+                if fault == "existing-directory": (scripts / "fixtures").mkdir()
+                with patch.object(U, "protected_ancestry"), self.assertRaises((RuntimeError, FileExistsError)):
+                    C.changed_seal_sources(scripts, selected)
+
+    def test_changed_broker_seals_and_rechecks_fixture_ancestry(self):
+        tree = ast.parse(Path(C.__file__).read_bytes())
+        funcs = {n.name: ast.unparse(n) for n in tree.body if isinstance(n, ast.FunctionDef)}
+        self.assertIn("changed_seal_sources(scripts, original['sources'])", funcs["changed_broker"])
+        self.assertNotIn("changed_seal_sources", funcs["broker"])
+        for name in ("changed_runtime_binding", "changed_recheck"):
+            self.assertIn("fixtures", funcs[name]); self.assertIn("U.protected_ancestry", funcs[name])
+
+
 class SourceMenuTests(unittest.TestCase):
     def test_verified_phase_call_sites_bind_exact_source_and_image_before_html(self):
         tree = ast.parse(Path(C.__file__).read_text())
