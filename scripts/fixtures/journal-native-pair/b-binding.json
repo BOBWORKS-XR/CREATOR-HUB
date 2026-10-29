@@ -1,0 +1,110 @@
+{
+  "schemaVersion": 1,
+  "status": "UNBOUND_NOT_FOR_DISPATCH",
+  "incomingProfileSha256": "08f2df3b8139f00f5bd5b84619218228c7878d62ae0e4ec180fdcaaec6b87fc3",
+  "incomingAssembly": {
+    "sourceCommit": "be0adef208c80a60f8599bd466a45b28bde73588",
+    "sourceTree": "8eb710826de448d820a3cee6d964e4a3f3a24e10",
+    "runId": 40899552207,
+    "runAttempt": 1,
+    "jobId": 123537944797,
+    "artifactId": 12909617948,
+    "zipBytes": 183999603,
+    "zipSha256": "d6612027fded7b6163e8212453b853a08285f6551baaa1d0871f0121a040a2a7"
+  },
+  "assembly17": {
+    "source": "a61e7b0152689b7fa25fd0f4fe3e7d3894751cc5",
+    "tree": "ab48fbce32accb627a5f5e0de2f496699c2317b4",
+    "branch": "validation/linux-private-update-fixture-017",
+    "workflow": ".github/workflows/private-linux-update-fixture-017.yml",
+    "run": 40903331594,
+    "attempt": 1,
+    "job": 123551467029,
+    "artifact": 12909839246,
+    "name": "private-linux-update-fixture-017-40903331594-1",
+    "zip": {
+      "size": 128433738,
+      "sha256": "2dcce20200c14fe88098a48ef5768cb63a91a01de14a2c82bf44a4672bf1a86a"
+    },
+    "files": {
+      "_temp/private017-fresh-api.json": {
+        "size": 31805,
+        "sha256": "99531be5779e9502ac46772e85bd2babda948b4d8289632a8d33dbf43bf03caf"
+      },
+      "CREATOR-HUB/CREATOR-HUB/artifacts/unified/private-linux-update-fixture-017/native-packages/Creator Hub_0.1.17_amd64.deb": {
+        "size": 64519358,
+        "sha256": "61a32fe588280366c3d6f8b76323764867bca8c3537d30a45c33ed2302be4a43"
+      },
+      "CREATOR-HUB/CREATOR-HUB/artifacts/unified/private-linux-update-fixture-017/builtin-manifest.json": {
+        "size": 3663,
+        "sha256": "c37d3c6addc4d6f5b711a52677176c093ad5e4bba30021ce430d9f841026db15"
+      },
+      "CREATOR-HUB/CREATOR-HUB/artifacts/unified/private-linux-update-fixture-017/unix-package-integrity.json": {
+        "size": 2151,
+        "sha256": "93da197ce1590b49ce491cf4b5870987f3ed210b54183115c361cee51aefc208"
+      },
+      "CREATOR-HUB/CREATOR-HUB/artifacts/unified/private-linux-update-fixture-017/private017-package-expected.json": {
+        "size": 830,
+        "sha256": "0fcc205b8f964302805ddc9edd442cde34bf09d66f98da5a5a6419873b97eb1e"
+      },
+      "CREATOR-HUB/CREATOR-HUB/artifacts/unified/private-linux-update-fixture-017/private017-assembly.json": {
+        "size": 4996,
+        "sha256": "9b8a4d8b1383fa2d53c19f9a433ae0c64f93377206885ac32e21ec2c1abbd292"
+      },
+      "CREATOR-HUB/CREATOR-HUB/artifacts/unified/private-linux-update-fixture-017/creator-hub": {
+        "size": 29087688,
+        "sha256": "184160aaf17b1ad2535dbd08bf66b3a7aefc04b64ce6fe6f54365c4afc6c7674"
+      },
+      "CREATOR-HUB/CREATOR-HUB/artifacts/unified/private-linux-update-fixture-017/modules.tar.gz": {
+        "size": 55580353,
+        "sha256": "96c04c882a6c3826e096d8e04f78a1b1a1804ed563612634469cb596c869da75"
+      }
+    }
+  },
+  "targetPins": {
+    "raw": {
+      "sha256": "184160aaf17b1ad2535dbd08bf66b3a7aefc04b64ce6fe6f54365c4afc6c7674",
+      "size": 29087688
+    },
+    "deb": {
+      "sha256": "61a32fe588280366c3d6f8b76323764867bca8c3537d30a45c33ed2302be4a43",
+      "size": 64519358
+    },
+    "hub": {
+      "sha256": "822e46106d5caaf36890965d3020fb49b2235e91517eb33bd5d2f4210d5b5690",
+      "size": 29087688
+    },
+    "archive": {
+      "sha256": "96c04c882a6c3826e096d8e04f78a1b1a1804ed563612634469cb596c869da75",
+      "size": 55580353
+    },
+    "manifest": {
+      "sha256": "c37d3c6addc4d6f5b711a52677176c093ad5e4bba30021ce430d9f841026db15",
+      "size": 3663
+    }
+  },
+  "comparison": {
+    "packageFilesChanged": [
+      "usr/bin/creator-hub",
+      "usr/lib/Creator Hub/modules.tar.gz"
+    ],
+    "moduleFilesChanged": [
+      "mcp/creator-works-mcp-launcher",
+      "mcp/server/creator-works-mcp.mjs",
+      "routing/router.minisig",
+      "routing/runtime.json",
+      "routing/runtime.minisig"
+    ],
+    "controlFieldsUnchangedExceptVersionAndInstalledSize": true,
+    "retirementFilesIdentical": true
+  },
+  "missing": [
+    "signed 017 installer and descriptor delivery carrier",
+    "complete source-bound outgoing profile",
+    "reviewed final harness commit and complete source receipt",
+    "full Linux preflight"
+  ],
+  "nativeAccepted": false,
+  "releaseReady": false,
+  "dispatchAuthorized": false
+}
