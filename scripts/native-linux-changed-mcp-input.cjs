@@ -9,15 +9,15 @@ const { execFileSync } = require('node:child_process');
 const REPO = { owner: 'BOBWORKS-XR', repo: 'CREATOR-HUB' };
 const REF = 'refs/heads/validation/native-linux-production-016';
 const WORKFLOW = '.github/workflows/native-linux-production-016-migration.yml';
-const PROFILE_SHA = '1fd56c76f100422e2c380e19cfc5dfb9da4ecf05a6348efdba99bbaebb5cd792';
-const INCOMING_SHA = '8f3b6a07c0e7a93213a95782e9d5fac0a20026813faf493b033d8cbab72fcbc4';
+const PROFILE_SHA = 'ef2b5a589d934bf48306ddfd53d133513f3ab4d22b9622672f76887cb7acb095';
+const INCOMING_SHA = '08f2df3b8139f00f5bd5b84619218228c7878d62ae0e4ec180fdcaaec6b87fc3';
 const FALSE = Object.freeze({ publicDiscovery: false, flatpakAccepted: false, steamDeckAccepted: false,
   liveAiAccepted: false, unityAccepted: false, releaseReady: false });
 const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 const canonical = value => Buffer.from(JSON.stringify(value, null, 2) + '\n');
 
 function profile(raw) {
-  assert.ok(Buffer.isBuffer(raw) && raw.length === 11736);
+  assert.ok(Buffer.isBuffer(raw) && raw.length === 11728);
   assert.equal(hash(raw), PROFILE_SHA, 'Only the reviewed actual A1/017 profile is admitted');
   return JSON.parse(raw);
 }

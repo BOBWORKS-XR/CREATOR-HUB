@@ -23,17 +23,17 @@ const env = { GITHUB_ACTIONS: 'true', GITHUB_REPOSITORY: repo.full_name, GITHUB_
   GITHUB_RUN_ID: String(context.runId), GITHUB_RUN_ATTEMPT: '1' };
 
 test('exact reviewed profile keeps A1 separate from packaging donor', () => {
-  assert.equal(p.baseline.source, 'ee48f25905947e0795eccb9d1d6c67f28f270545');
-  assert.equal(p.artifacts.assembly17.source, 'dea67abb681ff99d3d0cd756954605a3c58627a6');
-  assert.equal(p.deliveries.signedDeb17.asset, 683714773);
+  assert.equal(p.baseline.source, 'be0adef208c80a60f8599bd466a45b28bde73588');
+  assert.equal(p.artifacts.assembly17.source, 'a61e7b0152689b7fa25fd0f4fe3e7d3894751cc5');
+  assert.equal(p.deliveries.signedDeb17.asset, 689113479);
   assert.equal(Object.keys(p.objects).length, 13);
-  assert.equal(c.hash(fs.readFileSync(path.join(__dirname, 'fixtures/native-linux-changed-mcp-incoming.json'))), c.INCOMING_SHA);
+  assert.equal(c.hash(fs.readFileSync(path.join(__dirname, 'fixtures/journal-a-native-incoming.UNBOUND.json'))), c.INCOMING_SHA);
   assert.equal(c.canonical(p).equals(raw), true);
 });
 
 for (const [name, changed] of [
   ['newline change', Buffer.concat([raw, Buffer.from('\n')])],
-  ['donor substitution', Buffer.from(raw.toString().replace('ee48f259', 'f00cd443'))],
+  ['donor substitution', Buffer.from(raw.toString().replace('be0adef2', 'c5bd13a5'))],
   ['single-byte mutation', Buffer.from(raw.map((x, i) => i === 100 ? x ^ 1 : x))],
 ]) test('profile refuses ' + name, () => assert.throws(() => c.profile(changed)));
 
@@ -462,7 +462,7 @@ test('native retained actual A1/B017/staged carrier keeps five C files and downl
   const f = routeFixture(t); f.state.forbidPrivate = true; f.state.successor = retainedB17;
   f.env.CREATOR_CHANGED_MCP_DELIVERY_ARTIFACT = '987654'; f.stage(retainedCarrier, 0o644);
   const incoming = path.join(f.temp, 'native-linux-production-016-input'); fs.mkdirSync(incoming, { mode: 0o700 });
-  f.put(path.join(incoming, 'profile.json'), fs.readFileSync(path.join(__dirname, 'fixtures/native-linux-changed-mcp-incoming.json')));
+  f.put(path.join(incoming, 'profile.json'), fs.readFileSync(path.join(__dirname, 'fixtures/journal-a-native-incoming.UNBOUND.json')));
   f.put(path.join(incoming, 'assembly.zip'), retainedA1);
   const result = await c.run({ github: f.github, context: f.context, raw, env: f.env });
   const output = path.join(f.temp, 'native-linux-migrated-update-input');

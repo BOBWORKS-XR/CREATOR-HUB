@@ -8345,6 +8345,20 @@ class B017SourceMenuAdmission(unittest.TestCase):
             self.assertEqual(surface.inputs, [])
 
 
+class FreshA1Fixture:
+    SOURCE = "be0adef208c80a60f8599bd466a45b28bde73588"
+    IMAGE = {"size": 29088440, "sha256": "f4b86cbceed7e81b9b871160f11a9dd126f2c1dae8e24ecbbf5014e00e588a33"}
+    RAW = {"size": 29088440, "sha256": "7a84da3326fbc41501c2a5415fdf6a6f82ccf9401ad203a9734d2c9025a5961e"}
+    DONOR_SOURCE = "c5bd13a5145aa54a50f28f073e1543826a210a4e"
+    DONOR = {"size": 29088152, "sha256": "d6c1515395df40fa67bdf09736be83613329dd8c15f42ada4474c7c8960be941"}
+
+
+class FreshB017Fixture:
+    SOURCE = "a61e7b0152689b7fa25fd0f4fe3e7d3894751cc5"
+    IMAGE = {"size": 29087688, "sha256": "822e46106d5caaf36890965d3020fb49b2235e91517eb33bd5d2f4210d5b5690"}
+    RAW = {"size": 29087688, "sha256": "184160aaf17b1ad2535dbd08bf66b3a7aefc04b64ce6fe6f54365c4afc6c7674"}
+
+
 class Actual017AdapterTests(unittest.TestCase):
     @staticmethod
     def packages():
@@ -8380,24 +8394,24 @@ class Actual017AdapterTests(unittest.TestCase):
         immutable(M.ACTUAL017_CASE)
         target, a1 = M.actual017_target_data(), M.actual017_a1_data()
         self.assertEqual((target["source"], target["tree"], target["run"], target["job"], target["artifact"]),
-            ("dea67abb681ff99d3d0cd756954605a3c58627a6", "db4ec3934a8b80014f418fb9ed5ad2e0fe581bc5", 40619538729, 122590023543, 12786602892))
-        self.assertEqual(target["hub"], B017SourceMenuAdmission.IMAGE)
-        self.assertEqual(target["raw"], B017SourceMenuAdmission.RAW)
-        self.assertEqual(target["deb"], {"size": 64516566, "sha256": "1bd69ef6ad81f6af396175e8d2ce74fdabc7df39c936bf8c8e3704a92260f222"})
-        self.assertEqual(target["archive"], {"size": 55576707, "sha256": "5a41b14f5b1ece0d772a5cf71d028517db7e0711891d16019f247b3362009828"})
-        self.assertEqual((a1["source"], a1["hub"]), (A1SourceMenuAdmission.SOURCE, A1SourceMenuAdmission.IMAGE))
+            ("a61e7b0152689b7fa25fd0f4fe3e7d3894751cc5", "ab48fbce32accb627a5f5e0de2f496699c2317b4", 40903331594, 123551467029, 12909839246))
+        self.assertEqual(target["hub"], FreshB017Fixture.IMAGE)
+        self.assertEqual(target["raw"], FreshB017Fixture.RAW)
+        self.assertEqual(target["deb"], {"size": 64519358, "sha256": "61a32fe588280366c3d6f8b76323764867bca8c3537d30a45c33ed2302be4a43"})
+        self.assertEqual(target["archive"], {"size": 55580353, "sha256": "96c04c882a6c3826e096d8e04f78a1b1a1804ed563612634469cb596c869da75"})
+        self.assertEqual((a1["source"], a1["hub"]), (FreshA1Fixture.SOURCE, FreshA1Fixture.IMAGE))
         target["hub"]["sha256"] = "f" * 64; a1["features"].clear()
-        self.assertEqual(M.actual017_target_data()["hub"], B017SourceMenuAdmission.IMAGE)
+        self.assertEqual(M.actual017_target_data()["hub"], FreshB017Fixture.IMAGE)
         self.assertEqual(M.actual017_a1_data()["features"], M.FEATURES)
 
     def test_actual_qualification_does_not_admit_actual_source_through_old_getter(self):
         expected = M.actual017_private_target_qualification()
-        self.assertEqual(expected["targetSource"], B017SourceMenuAdmission.SOURCE)
+        self.assertEqual(expected["targetSource"], FreshB017Fixture.SOURCE)
         self.assertEqual(expected["targetRetirementHelper"]["sha256"], "7f22822e50ee8b96829c64c95da9e1b098c3e080a1370f577ae2b69055eed94a")
         for name in ("privateDebApprovalRestoresOldRetirementHelper", "final016HelperFixRetained", "targetFixNativeAcceptance", "futurePublic017Qualified", "releaseReady"):
             self.assertIs(expected[name], False)
         before = copy.deepcopy(M.FIXED)
-        with patch.dict(M.FIXED["17"], source=B017SourceMenuAdmission.SOURCE, tree=M.actual017_target_data()["tree"]), self.assertRaisesRegex(RuntimeError, "Unreviewed target"):
+        with patch.dict(M.FIXED["17"], source=FreshB017Fixture.SOURCE, tree=M.actual017_target_data()["tree"]), self.assertRaisesRegex(RuntimeError, "Unreviewed target"):
             M.private_target_qualification()
         self.assertEqual(M.FIXED, before)
 
@@ -8415,11 +8429,11 @@ class Actual017AdapterTests(unittest.TestCase):
         self.assertEqual((old, new, a1, M.FIXED), before)
 
     def test_package_pair_rejects_mixed_source_raw_images_and_member_changes(self):
-        for field, bad in (("source", A1SourceMenuAdmission.DONOR_SOURCE), ("tree", "a" * 40),
-                           ("hub", B017SourceMenuAdmission.IMAGE), ("raw", B017SourceMenuAdmission.RAW)):
+        for field, bad in (("source", FreshA1Fixture.DONOR_SOURCE), ("tree", "a" * 40),
+                           ("hub", FreshB017Fixture.IMAGE), ("raw", FreshB017Fixture.RAW)):
             old, new, a1 = self.packages(); a1[field] = bad
             with self.subTest(field=field), self.assertRaises(RuntimeError): M.actual017_compare_update_packages(old, new, a1)
-        changes = (lambda value: value["files"][M.ROOT_ENTRY].update(B017SourceMenuAdmission.RAW),
+        changes = (lambda value: value["files"][M.ROOT_ENTRY].update(FreshB017Fixture.RAW),
                    lambda value: value["files"][M.RETIREMENT_HELPER].update(sha256="a" * 64),
                    lambda value: value["files"][M.ROOT_ENTRY].update(mode=0o777),
                    lambda value: value["fields"].update(Architecture="arm64"),
@@ -8446,7 +8460,7 @@ class Actual017AdapterTests(unittest.TestCase):
         review = self.review()
         with self.installed(review) as requested:
             value = M.actual017_verify_installed(review)
-        self.assertEqual(value, {"version": "0.1.17", "hub": B017SourceMenuAdmission.IMAGE, "dpkgVerified": True})
+        self.assertEqual(value, {"version": "0.1.17", "hub": FreshB017Fixture.IMAGE, "dpkgVerified": True})
         files = {name: row for name, row in review["deb17"].items() if row["kind"] == "file"}
         self.assertEqual(len(requested), len(files))
         for path, pin, options in requested:
@@ -8458,7 +8472,7 @@ class Actual017AdapterTests(unittest.TestCase):
         for field, bad in (("privateTargetQualification", M.private_target_qualification()), ("baseline", profile()["baseline"])):
             review = self.review(); review[field] = bad
             with self.subTest(field=field), self.assertRaises(RuntimeError): M.actual017_verify_installed(review)
-        review = self.review(); review["deb17"][M.ROOT_ENTRY].update(B017SourceMenuAdmission.RAW)
+        review = self.review(); review["deb17"][M.ROOT_ENTRY].update(FreshB017Fixture.RAW)
         with self.assertRaises(RuntimeError): M.actual017_verify_installed(review)
         for options in (dict(foreign=True), dict(verify=b"changed")):
             review = self.review()
@@ -8599,9 +8613,9 @@ class Actual017HtmlAdapterTests(unittest.TestCase):
     def initial(self):
         state = HtmlAttachmentTests().fixture()
         transport = state.html.d.http
-        image = A1SourceMenuAdmission.IMAGE
+        image = FreshA1Fixture.IMAGE
         state.surface.record.update(kernelImageSha256=image["sha256"], image={"st_size": str(image["size"])})
-        M.bind_source_menu(state.surface, A1SourceMenuAdmission.SOURCE, image)
+        M.bind_source_menu(state.surface, FreshA1Fixture.SOURCE, image)
         state.records[state.surface.pid] = copy.deepcopy(state.surface.record)
         self.bus_fixture.for_root(state.surface.record)
         with patch.object(M, "kernel_record", return_value=copy.deepcopy(state.surface.record)):
@@ -8618,8 +8632,8 @@ class Actual017HtmlAdapterTests(unittest.TestCase):
         transport = state.html.d.http
         state.surface.pid = 77
         state.surface.record = {**copy.deepcopy(old.surface.record), "pid": 77, "startTime": "101",
-            "kernelImageSha256": B017SourceMenuAdmission.IMAGE["sha256"], "image": {"st_size": str(B017SourceMenuAdmission.IMAGE["size"])}}
-        M.bind_source_menu(state.surface, B017SourceMenuAdmission.SOURCE, B017SourceMenuAdmission.IMAGE)
+            "kernelImageSha256": FreshB017Fixture.IMAGE["sha256"], "image": {"st_size": str(FreshB017Fixture.IMAGE["size"])}}
+        M.bind_source_menu(state.surface, FreshB017Fixture.SOURCE, FreshB017Fixture.IMAGE)
         state.child.pid = 61
         state.records = {61: {**state.records[51], "pid": 61}, 62: {**state.records[52], "pid": 62, "parentPid": 61},
                          77: copy.deepcopy(state.surface.record)}
@@ -8657,10 +8671,10 @@ class Actual017HtmlAdapterTests(unittest.TestCase):
 
     def test_actual_factory_rejects_raw_unknown_source_pid_uid_parent_and_size(self):
         for field, bad in (("pid", 1), ("parentPid", 99), ("uids", [0] * 4),
-                           ("kernelImageSha256", A1SourceMenuAdmission.RAW["sha256"]), ("image", {"st_size": "1"})):
-            state = HtmlAttachmentTests().fixture(); source = A1SourceMenuAdmission.SOURCE
-            state.surface.record.update(kernelImageSha256=A1SourceMenuAdmission.IMAGE["sha256"], image={"st_size": str(A1SourceMenuAdmission.IMAGE["size"])})
-            M.bind_source_menu(state.surface, source, A1SourceMenuAdmission.IMAGE); state.surface.record[field] = bad
+                           ("kernelImageSha256", FreshA1Fixture.RAW["sha256"]), ("image", {"st_size": "1"})):
+            state = HtmlAttachmentTests().fixture(); source = FreshA1Fixture.SOURCE
+            state.surface.record.update(kernelImageSha256=FreshA1Fixture.IMAGE["sha256"], image={"st_size": str(FreshA1Fixture.IMAGE["size"])})
+            M.bind_source_menu(state.surface, source, FreshA1Fixture.IMAGE); state.surface.record[field] = bad
             with self.subTest(field=field), self.assertRaises(RuntimeError):
                 M.actual017_html_pages(state.surface, state.original, state.pages, {}, 41000, {}, {})
         state = self.initial(); state.surface.menu_binding = ("f" * 40, *state.surface.menu_binding[1:])
@@ -8691,7 +8705,7 @@ class Actual017HtmlAdapterTests(unittest.TestCase):
             if defect == "start": state.surface.record["startTime"] = "102"
             if defect == "uid": state.surface.record["uids"] = [0] * 4
             if defect == "size": state.surface.record["image"]["st_size"] = "1"
-            if defect == "raw": state.surface.record["kernelImageSha256"] = B017SourceMenuAdmission.RAW["sha256"]
+            if defect == "raw": state.surface.record["kernelImageSha256"] = FreshB017Fixture.RAW["sha256"]
             with self.subTest(defect=defect), patch.object(M, "kernel_record", return_value=copy.deepcopy(state.surface.record)), \
                  patch.object(M, "windows", return_value=[20]), self.assertRaises(RuntimeError): state.html.endpoint_ready()
             self.assertEqual(state.requests, [])
@@ -8768,10 +8782,10 @@ class Actual017PendingProofTests(unittest.TestCase):
                 M.actual017_pending_proof(state.root, None, None, polkit, a1)
 
     def test_mixed_a1_or_donor_baseline_refuses_before_kernel_observation(self):
-        for field, bad in (("source", A1SourceMenuAdmission.DONOR_SOURCE), ("hub", A1SourceMenuAdmission.DONOR),
-                           ("raw", A1SourceMenuAdmission.RAW), ("zip", {"size": 1, "sha256": "a" * 64})):
+        for field, bad in (("source", FreshA1Fixture.DONOR_SOURCE), ("hub", FreshA1Fixture.DONOR),
+                           ("raw", FreshA1Fixture.RAW), ("zip", {"size": 1, "sha256": "a" * 64})):
             a1 = M.actual017_a1_data(); a1[field] = bad
-            if field == "raw": a1[field] = B017SourceMenuAdmission.RAW
+            if field == "raw": a1[field] = FreshB017Fixture.RAW
             with self.subTest(field=field), patch.object(M, "kernel_record", side_effect=AssertionError("No kernel read for mixed baseline")), self.assertRaises(RuntimeError):
                 M.actual017_pending_proof({}, None, None, None, a1)
 
@@ -8835,7 +8849,7 @@ class Actual017AuthorizationTests(unittest.TestCase):
         for defect in ("source", "raw"):
             with self.subTest(defect=defect), self.authentication() as (state, polkit, native, endpoint):
                 if defect == "source": state.surface.menu_binding = (LiveSourceMenuWiring.CURRENT[0], *state.surface.menu_binding[1:])
-                else: state.surface.record["kernelImageSha256"] = A1SourceMenuAdmission.RAW["sha256"]
+                else: state.surface.record["kernelImageSha256"] = FreshA1Fixture.RAW["sha256"]
                 with self.assertRaises(RuntimeError): self.call(state, polkit, native, endpoint)
                 polkit.own_agent.assert_not_called(); self.assertEqual(state.saved, [])
 
@@ -8847,9 +8861,9 @@ class Actual017OutcomeTests(unittest.TestCase):
     def report(self, protocol=None):
         value = self.f.root_outcome_report(self.f.value if protocol is None else protocol)
         value.update(privateTargetQualification=M.actual017_private_target_qualification(), oldRetirementHelperRestored=False,
-            fromSource=A1SourceMenuAdmission.SOURCE, toSource=B017SourceMenuAdmission.SOURCE,
-            installed16={"version": "0.1.16", "hub": A1SourceMenuAdmission.IMAGE, "dpkgVerified": True},
-            installed17={"version": "0.1.17", "hub": B017SourceMenuAdmission.IMAGE, "dpkgVerified": True})
+            fromSource=FreshA1Fixture.SOURCE, toSource=FreshB017Fixture.SOURCE,
+            installed16={"version": "0.1.16", "hub": FreshA1Fixture.IMAGE, "dpkgVerified": True},
+            installed17={"version": "0.1.17", "hub": FreshB017Fixture.IMAGE, "dpkgVerified": True})
         return value
 
     def consume(self, value):
@@ -8863,8 +8877,8 @@ class Actual017OutcomeTests(unittest.TestCase):
         with self.assertRaises(RuntimeError): M.outcome("deb-approve", value)
 
     def test_mixed_source_image_or_qualification_cannot_be_report_authority(self):
-        for field, bad in (("fromSource", A1SourceMenuAdmission.DONOR_SOURCE), ("toSource", LiveSourceMenuWiring.CURRENT[-1]),
-                           ("installed17", {"version": "0.1.17", "hub": B017SourceMenuAdmission.RAW, "dpkgVerified": True}),
+        for field, bad in (("fromSource", FreshA1Fixture.DONOR_SOURCE), ("toSource", LiveSourceMenuWiring.CURRENT[-1]),
+                           ("installed17", {"version": "0.1.17", "hub": FreshB017Fixture.RAW, "dpkgVerified": True}),
                            ("privateTargetQualification", M.private_target_qualification()), ("oldRetirementHelperRestored", True)):
             value = self.report(); value[field] = bad
             with self.subTest(field=field), self.assertRaises(RuntimeError): self.consume(value)
@@ -8985,8 +8999,8 @@ class Actual017ReopenedProjectsTests(unittest.TestCase):
         for defect in ("a1", "b16", "raw", "unknown", "pid", "start", "parent", "uid", "popen"):
             state = self.manual()
             if defect in ("a1", "b16", "raw", "unknown"):
-                hashes = {"a1": A1SourceMenuAdmission.IMAGE["sha256"], "b16": "6fb2983c212b6bcd79f616019eca1b7f2f1daa3454d72cee7e6dc19bdc0dd5c9",
-                          "raw": B017SourceMenuAdmission.RAW["sha256"], "unknown": "f" * 64}
+                hashes = {"a1": FreshA1Fixture.IMAGE["sha256"], "b16": "6fb2983c212b6bcd79f616019eca1b7f2f1daa3454d72cee7e6dc19bdc0dd5c9",
+                          "raw": FreshB017Fixture.RAW["sha256"], "unknown": "f" * 64}
                 state.surface.record["kernelImageSha256"] = hashes[defect]
             if defect == "pid": state.surface.pid = 77
             if defect == "start": state.surface.record["startTime"] = "101"
@@ -8997,7 +9011,7 @@ class Actual017ReopenedProjectsTests(unittest.TestCase):
 
     def test_previous_donor_raw_or_unknown_image_cannot_be_relabelled_as_retired_b(self):
         for source, image in (("f00cd4433e261f8d968b7c88c068dae59ec970a6", "6fb2983c212b6bcd79f616019eca1b7f2f1daa3454d72cee7e6dc19bdc0dd5c9"),
-                              (B017SourceMenuAdmission.SOURCE, B017SourceMenuAdmission.RAW["sha256"]), ("f" * 40, "f" * 64)):
+                              (FreshB017Fixture.SOURCE, FreshB017Fixture.RAW["sha256"]), ("f" * 40, "f" * 64)):
             state = self.manual(); old = state.previous.html
             old.surface.record["kernelImageSha256"] = image
             old.phase_record = json.dumps(old.surface.record, sort_keys=True)

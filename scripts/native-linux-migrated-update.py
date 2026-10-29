@@ -271,6 +271,7 @@ class TransitionHomePreservation:
                 "Exact original HOME/UID context required")
         self.expected, self.groups, release = transition_home_closure(manifests, manifest_pins, archives, inventories, verifier)
         self.before, self.journal = copy.deepcopy(adopted["home"]), copy.deepcopy(adopted["journal"])
+        self._journal_mode = self.before[M.JOURNAL]["mode"]
         require(tree(HOME, M.UID) == self.before, "Original adopted HOME drifted")
         self.R, self.E, self.D = "data/creator-hub/mcp-route-v1/linux-x86_64", "data/creator-hub-update-cache/deb/records", "data/creator-hub-update-cache/deb"
         self.active, self.handoff = self.R + "/active.json", self.E + "/mcp-route-update.json"
@@ -413,9 +414,13 @@ class TransitionHomePreservation:
             if name == self.active and complete: continue
             if name == M.JOURNAL:
                 fields = ("kind", "dev", "uid", "gid", "mode")
-                require(all(after[name][k] == wanted[k] for k in fields),
+                old_mode, new_mode = self._journal_mode, after[name]["mode"]
+                private_tightening = new_mode == 0o600 and old_mode in (0o644, 0o664, 0o666)
+                require(all(after[name][k] == wanted[k] for k in fields if k != "mode")
+                        and (new_mode == old_mode or private_tightening),
                         "Journal ownership/mode/filesystem changed: " + json.dumps(
-                            {"before": {k: wanted[k] for k in fields}, "after": {k: after[name][k] for k in fields}},
+                            {"before": {k: wanted[k] for k in fields}, "lastMode": old_mode,
+                             "after": {k: after[name][k] for k in fields}},
                             sort_keys=True, separators=(",", ":")))
             else:
                 require(after[name] == wanted, "Original protected bytes/identity changed: " + name)
@@ -448,6 +453,7 @@ class TransitionHomePreservation:
         self._seen.update({n: copy.deepcopy(after[n]) for n in additions if n not in (self.pending, self.partial, self.handoff)})
         if phase == "Ready" and self._ready is None: self._ready = copy.deepcopy(capture)
         if complete and self._active_b is None: self._active_b = copy.deepcopy(active)
+        self._journal_mode = after[M.JOURNAL]["mode"]
         self._phase, self._record = copy.deepcopy(phase), copy.deepcopy(capture)
 
     def finish(self):
@@ -1326,15 +1332,15 @@ def main():
         {"prepare": prepare, "broker": broker, "session": native_session, "export": export}[phase](env)
 
 
-CHANGED_PROFILE_SHA = "1fd56c76f100422e2c380e19cfc5dfb9da4ecf05a6348efdba99bbaebb5cd792"
-CHANGED_INCOMING_PROFILE_SHA = "8f3b6a07c0e7a93213a95782e9d5fac0a20026813faf493b033d8cbab72fcbc4"
+CHANGED_PROFILE_SHA = "ef2b5a589d934bf48306ddfd53d133513f3ab4d22b9622672f76887cb7acb095"
+CHANGED_INCOMING_PROFILE_SHA = "08f2df3b8139f00f5bd5b84619218228c7878d62ae0e4ec180fdcaaec6b87fc3"
 CHANGED_SOURCE_RECEIPT_ENV = "CREATOR_CHANGED_MCP_SOURCE_RECEIPT_SHA256"
-CHANGED_DELIVERY = (683714773, "signed-private-deb017-carrier-40619538729.zip", 64474918,
-                    "4aa2ffb8f7c43782e16f163253a570e1840ad2d5fe78edf16b80775ee187c476")
+CHANGED_DELIVERY = (689113479, "signed-private-deb017-carrier-40903331594.zip", 64479116,
+                    "9719b4d8d205b4d8a61c0b4bb77c056110a227e7f0a8aa9aba23f7787da7bbde")
 CHANGED_CASE = "a1-actual017-changed-mcp"
 CHANGED_PROTECTED = (U.CONFIG, M.LEGACY, U.PREFS, U.TERMS, ".claude.json", ".codex/config.toml")
 CHANGED_INSTALLER_SOURCES = {
-    "src-tauri/examples/private-deb017-dea67.rs": {"size": 20520, "sha256": "e9f6b5de863cb6c8004c0db741c58bcab1d6656e236b34c26429225263ca719f"},
+    "src-tauri/examples/private-deb017-dea67.rs": {"size": 20520, "sha256": "d7c8eab95b36846a7a8a1d1aed0745c91af37b73f5dbfeed2c453711f7566803"},
     "src-tauri/src/catalog-key.pub": {"size": 119, "sha256": "23b3eee2d1c8cb7d705120953cda67ff94a722a207d5be1679c250be8ca90308"},
     "src-tauri/src/catalog.rs": {"size": 21838, "sha256": "9274a9663878d8ba58557cb8175d483357ab10cf95f0b0818ceb78170febe666"},
     "src-tauri/src/update_target.rs": {"size": 12219, "sha256": "d02b0f173d7203e7e39b0ac1e2ef3b10d1738fcd5af7f2ce6a537d68110a26f9"},
@@ -1343,7 +1349,7 @@ CHANGED_INSTALLER_SOURCES = {
     "src-tauri/build.rs": {"size": 3499, "sha256": "4894c38042003c92d278055a00f2fe490ae7ea24485bce91ecfa5202d8b48680"},
     "src-tauri/tauri.conf.json": {"size": 1646, "sha256": "0e28e4262e8d259a08a9c0cf815f5af34b7ae1e0e361e47f3162e6d76bdf5e66"},
 }
-CHANGED_INSTALLER_GUARD = {"size": 26150, "sha256": "63bd2c759324be214143add315ab6a97e9b1ece6398d89e948950d1fbe38b4dd"}
+CHANGED_INSTALLER_GUARD = {"size": 26150, "sha256": "dfe54cfa1b93c380bc1ed3699a0696db683ea60890f186da61cfb8b7612dffc8"}
 
 
 def changed_require_bound():
@@ -1376,7 +1382,7 @@ def changed_context(env):
             "attempt": env["GITHUB_RUN_ATTEMPT"], "workflow": env["GITHUB_WORKFLOW_REF"], "boot": boot_id(),
             "incomingProfile": CHANGED_INCOMING_PROFILE_SHA, "outgoingProfile": CHANGED_PROFILE_SHA,
             "sourceReceipt": env[CHANGED_SOURCE_RECEIPT_ENV], "fromSource": U.actual017_a1_data()["source"],
-            "targetSource": U.actual017_target_data()["source"], "donorSource": "f00cd4433e261f8d968b7c88c068dae59ec970a6"}
+            "targetSource": U.actual017_target_data()["source"], "donorSource": "c5bd13a5145aa54a50f28f073e1543826a210a4e"}
 
 
 def changed_incoming_profile(raw):
@@ -1408,7 +1414,7 @@ def changed_profile(raw):
     U.keys(value["artifacts"], ("assembly16", "assembly17")); U.keys(value["deliveries"], ("signedDeb17",))
     U.keys(value["objects"], ("deb16", "deb17", "raw16", "raw17", "assemblyReceipt16", "debDescriptor17", "debSignature17", "latest17",
                             "installer17", "installerSignature17", "outerPlan17", "outerApi17", "outerReceipt17"))
-    for role, expected, branch, workflow in (("assembly16", baseline, "validation/linux-integrated-candidate-016", "unix-managed-assembly"),
+    for role, expected, branch, workflow in (("assembly16", baseline, "validation/journal-a-assembly-016", "unix-managed-assembly"),
             ("assembly17", target, "validation/linux-private-update-fixture-017", "private-linux-update-fixture-017")):
         row = value["artifacts"][role]
         U.keys(row, ("source", "tree", "branch", "workflow", "run", "attempt", "job", "artifact", "name", "zip", "files"))
@@ -1440,7 +1446,7 @@ def changed_profile(raw):
             require(row["artifact"] == ("assembly16" if name == "assemblyReceipt16" else "signedDeb17"), "Signed metadata/provenance role differs")
     require(len({(r["artifact"], r["member"]) for r in value["objects"].values()}) == len(value["objects"]), "Object aliases refused")
     require(U.object_pin(value, "installer17") == target["deb"], "Carrier installer must match actual original B017 DEB")
-    require(U.object_pin(value, "outerPlan17") == {"size": 4909, "sha256": "fcc6587c46677a59bcdfec35c74fdd2b21da6d207fc045e0169f92eec84425d4"}, "Exact canonical outer plan required")
+    require(U.object_pin(value, "outerPlan17") == {"size": 4789, "sha256": "bab785cdbce7faee4a9ab9cca9fea9b27ca9268b2f73483024286f03c1531401"}, "Exact canonical outer plan required")
     return value
 
 
@@ -1929,7 +1935,7 @@ def changed_packaging_provenance(folder, value):
     receipt = U.parse(U.bound(obj("outerReceipt17"), U.object_pin(value, "outerReceipt17"), 65536))
     target = U.actual017_target_data(); source = {"sourceCommit": target["source"], "sourceTree": target["tree"]}
     require(plan["profile"] == receipt["profile"] == "private-linux-deb-update-017" and plan["rootSource"] == receipt["rootSource"] == source
-            and plan["signed017"] == {"planSha256": "a010185f19de65a0a30f132caa3d5f3fbbda354bc2ad81940fa977983b53a3a9"}, "Exact actual017 outer/inner source plan required")
+            and plan["signed017"] == {"planSha256": "fa04b1e9b636acd0177ed7d5ffe3b40eab955e40768f5b7f74682fd84864de6b"}, "Exact actual017 outer/inner source plan required")
     U.keys(plan["files"], ("root", "archive", "manifest", "receipt", "expected", "integrity", "deb", "api"))
     files = value["artifacts"]["assembly17"]["files"]
     for row in plan["files"].values():
@@ -1945,21 +1951,27 @@ def changed_packaging_provenance(folder, value):
             and assembly["deb"] == target["deb"] and assembly["archive"] == target["archive"] and assembly["compiledFeatures"] == U.FEATURES,
             "Actual B017 assembly/image/resource evidence differs")
     donor = assembly["baseline016"]
-    expected_assembly = {"sourceCommit": "f00cd4433e261f8d968b7c88c068dae59ec970a6", "sourceTree": "55b571b376baa97dfedb9819386e8980c5c050dd",
-        "runId": 40614281877, "runAttempt": 1, "jobId": 122573110624, "artifactId": 12784389238, "zipBytes": 184004939,
-        "zipSha256": "e0c245d0c33ac18f94ed6b892620c9de0adfaa80e59b6de10a4e90b75e442822"}
-    require(donor["assembly"] == expected_assembly and donor["pins"]["hub"] == {"size": 29088616,
-            "sha256": "6fb2983c212b6bcd79f616019eca1b7f2f1daa3454d72cee7e6dc19bdc0dd5c9"}, "Separate f00/6fb packaging provenance missing")
+    expected_assembly = {"sourceCommit": "c5bd13a5145aa54a50f28f073e1543826a210a4e", "sourceTree": "6c6953a0b4901b56eeadb4647d7dde34a375761a",
+        "runId": 40897895423, "runAttempt": 1, "jobId": 123532047652, "artifactId": 12907149456, "zipBytes": 184009187,
+        "zipSha256": "7e940fa78f6ad2f45b979136d964cb75bce35b0d6589683bca8751a06045f3af"}
+    require(donor["assembly"] == expected_assembly and donor["pins"]["hub"] == {"size": 29088152,
+            "sha256": "d6c1515395df40fa67bdf09736be83613329dd8c15f42ada4474c7c8960be941"}, "Separate B016 packaging provenance missing")
     expected_api = {"source": expected_assembly["sourceCommit"], "tree": expected_assembly["sourceTree"], "run": expected_assembly["runId"],
         "job": expected_assembly["jobId"], "artifact": expected_assembly["artifactId"], "zip": {"size": expected_assembly["zipBytes"], "sha256": expected_assembly["zipSha256"]},
-        "name": "signed-unix-hub-linux-40614281877-1", "branch": "validation/linux-integrated-candidate-016", "workflow": ".github/workflows/unix-managed-assembly.yml"}
+        "name": "signed-unix-hub-linux-40897895423-1", "branch": "validation/linux-integrated-candidate-016", "workflow": ".github/workflows/unix-managed-assembly.yml"}
     U.validate_api(api["lineage"]["baseline"], expected_api)
     require(api["lineage"]["root"]["commit"]["sha"] == target["source"]
             and api["lineage"]["root"]["commit"]["tree"]["sha"] == target["tree"], "Root source lineage differs")
     original = assembly["original016"]["source"]
-    require(original["sourceCommit"] == "98245e258249dd2c4e1d72c77d957fd7b00bb573" and original["runId"] == 40580977821
-            and api["lineage"]["original"]["run"]["id"] == original["runId"]
-            and api["lineage"]["original"]["run"]["head_sha"] == original["sourceCommit"], "Original signed B payload provenance missing")
+    require(all(original.get(k) == v for k, v in {"repository": U.REPO, "repositoryId": 1364807512,
+            "workflow": ".github/workflows/unix-managed-payload.yml", "event": "push",
+            "sourceCommit": "c5bd13a5145aa54a50f28f073e1543826a210a4e", "buildCommit": "c5bd13a5145aa54a50f28f073e1543826a210a4e",
+            "sourceTree": "6c6953a0b4901b56eeadb4647d7dde34a375761a", "runId": 40891664484, "runAttempt": 1}.items())
+            and all(api["lineage"]["original"]["run"].get(k) == v for k, v in {"id": original["runId"], "run_attempt": 1,
+                "head_sha": original["sourceCommit"], "head_branch": "validation/unix-payload-016", "path": original["workflow"],
+                "event": "push", "status": "completed", "conclusion": "success"}.items())
+            and api["lineage"]["original"]["commit"]["sha"] == original["sourceCommit"]
+            and api["lineage"]["original"]["commit"]["tree"]["sha"] == original["sourceTree"], "Original signed B payload provenance missing")
     require(receipt["planSha256"] == U.object_pin(value, "outerPlan17")["sha256"] and receipt["descriptor"] == U.object_pin(value, "debDescriptor17")
             and receipt["installer"] == target["deb"] and receipt["installedHub"] == target["hub"] and receipt["latest"] == U.object_pin(value, "latest17")
             and type(receipt["authorizedBodiesSigned"]) is int and receipt["authorizedBodiesSigned"] == 2
