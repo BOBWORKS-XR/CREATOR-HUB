@@ -382,6 +382,57 @@ class FixturePropertyReaderTests(unittest.TestCase):
                 with self.assertRaises((RuntimeError, AssertionError)): self.run_client(output, status=status)
 
 
+class GenerationDirectoryModesTests(unittest.TestCase):
+    def setUp(self):
+        self.guard = object.__new__(C.TransitionHomePreservation)
+        self.guard.before = {".": {"dev": 2049}}
+        self.path = C.GENERATION_PARENT + "a" * 64 + "/mcp"
+        self.expected = {self.path: {"kind": "directory", "mode": 0o755}}
+
+    def row(self, mode, **changes):
+        return {self.path: {"kind": "directory", "mode": mode, "dev": 2049,
+            "uid": M.UID, "gid": M.UID, **changes}}
+
+    def test_runtime_directory_created_under_private_umask_is_valid(self):
+        self.guard._rows(self.row(0o700), self.expected, required=True)
+
+    def test_nested_directory_modes_may_only_be_more_restrictive_than_0755(self):
+        for bits in range(64):
+            mode = 0o700 | bits
+            if mode & ~0o755: continue
+            with self.subTest(mode=oct(mode)):
+                self.guard._rows(self.row(mode), self.expected, required=True)
+
+    def test_writable_wrong_owner_device_or_file_are_still_refused(self):
+        for row in (self.row(0o777), self.row(0o775), self.row(0o600), self.row(0o1700), self.row(0o2755), self.row(0o700, uid=0),
+                    self.row(0o700, gid=0), self.row(0o700, dev=9), self.row(0o700, kind="file")):
+            with self.subTest(row=row), self.assertRaises(RuntimeError):
+                self.guard._rows(row, self.expected, required=True)
+
+    def test_non_generation_directory_and_file_modes_remain_exact(self):
+        path = "config/other"
+        for kind in ("directory", "file"):
+            expected = {path: {"kind": kind, "mode": 0o755}}
+            snapshot = {path: {"kind": kind, "mode": 0o700, "dev": 2049, "uid": M.UID, "gid": M.UID}}
+            with self.subTest(kind=kind), self.assertRaises(RuntimeError):
+                self.guard._rows(snapshot, expected, required=True)
+
+    def test_generation_root_and_generation_files_remain_exact(self):
+        root = C.GENERATION_PARENT + "a" * 64
+        for name, kind, wanted, actual in ((root, "directory", 0o700, 0o755),
+                                            (self.path + "/launcher", "file", 0o755, 0o700)):
+            snapshot = {name: {"kind": kind, "mode": actual, "dev": 2049, "uid": M.UID, "gid": M.UID}}
+            with self.subTest(name=name), self.assertRaises(RuntimeError):
+                self.guard._rows(snapshot, {name: {"kind": kind, "mode": wanted}}, required=True)
+
+    def test_incomplete_generation_group_is_still_refused(self):
+        root = C.GENERATION_PARENT + "a" * 64
+        expected = {root: {"kind": "directory", "mode": 0o700}, self.path: {"kind": "directory", "mode": 0o755}}
+        snapshot = {root: {"kind": "directory", "mode": 0o700, "dev": 2049, "uid": M.UID, "gid": M.UID}}
+        with self.assertRaisesRegex(RuntimeError, "Complete exact published generation"):
+            self.guard._group(snapshot, root, expected, required=True)
+
+
 class WatcherKernel:
     """Only the Linux notification/FD boundary is replaced on Windows."""
     def __init__(self, parent):
@@ -1406,6 +1457,23 @@ class TransitionHomeTests(unittest.TestCase):
         after = C.tree(self.home, M.UID)
         for name, expected in self.before["home"].items():
             if name not in (M.JOURNAL, self.R + "/active.json"): self.assertEqual(after[name], expected, name)
+
+    def test_restrictive_original_directory_is_accepted_but_later_mode_drift_is_refused(self):
+        path = self.home / self.G / self.mcp["a"] / "mcp"
+        self.metadata(path, 0o700)
+        self.before["home"] = C.tree(self.home, M.UID)
+        guard = self.guard(); guard.check()
+        self.metadata(path, 0o755)
+        with self.assertRaisesRegex(RuntimeError, "Original protected bytes/identity changed"):
+            guard.check()
+
+    def test_new_generation_directory_metadata_cannot_change_after_observation(self):
+        guard = self.guard(); self.record("Ready"); guard.check()
+        self.record({"Attempting": self.f.target("b")}); self.publish_b(); guard.check()
+        path = self.home / self.G / self.mcp["b"] / "mcp"
+        self.metadata(path, 0o700)
+        with self.assertRaisesRegex(RuntimeError, "Published transition output identity changed"):
+            guard.check()
 
     def test_complete_mcp_without_routing_generation_refuses(self):
         guard = self.completed_guard()

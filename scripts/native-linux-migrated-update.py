@@ -327,7 +327,11 @@ class TransitionHomePreservation:
                 require(not required, "Missing exact transition member: " + name)
                 continue
             row = snapshot[name]
-            require(all(row.get(k) == v for k, v in wanted.items()) and row["dev"] == self.before["."]["dev"]
+            nested_generation = (name.startswith(GENERATION_PARENT) and wanted == {"kind": "directory", "mode": 0o755})
+            mode = row.get("mode")
+            secure_mode = (nested_generation and type(mode) is int and mode & 0o700 == 0o700 and mode & ~0o755 == 0)
+            require(all(row.get(k) == v or k == "mode" and secure_mode for k, v in wanted.items())
+                    and row["dev"] == self.before["."]["dev"]
                     and row["uid"] == row["gid"] == M.UID, "Transition bytes/mode/owner/filesystem differ: " + name)
 
     def _group(self, snapshot, prefix, expected, *, required):
