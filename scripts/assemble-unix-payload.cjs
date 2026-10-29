@@ -13,6 +13,9 @@ const TRANSFER = ['modules.tar.gz', 'prepared-unix.json', 'transfer-binding.json
 const ROUTING = ['routing/router.json', 'routing/router.minisig', 'routing/runtime.json', 'routing/runtime.minisig'];
 const INPUTS = [...TRANSFER, ...ROUTING, 'handoff.json', 'handoff.minisig'];
 const META = 128 * 1024;
+const JOURNAL_A = Object.freeze({ ref: 'refs/heads/validation/journal-a-assembly-016',
+  producerBranch: 'validation/journal-a-payload-016', sourceCommit: 'f9c6da1af4ea51fc0214fba058c3946c1cda255a',
+  sourceTree: 'c747ce8b9cd65169ba478162f9abb6c500be6186', runId: 40893082867 });
 const PRIVATE_SOURCE_PATHS = ['modules/mcp', 'modules/project-setup', 'native/mcp-router',
   'native/host_parent_macos.rs', 'native/plugins_retirement.rs', 'native/convergence-server-unix.rs',
   'src-tauri/src/module_archive.rs', 'src-tauri/src/catalog-key.pub'];
@@ -35,6 +38,7 @@ function inside(file, root) {
   assert.ok(relative && !path.isAbsolute(relative) && relative !== '..' && !relative.startsWith(`..${path.sep}`), 'Owned staging path required');
 }
 function admission(root, platform, arch, env, execute = execFileSync) {
+  const journalA = env.GITHUB_REF === JOURNAL_A.ref;
   const privateFixture = env.GITHUB_REF === 'refs/heads/validation/linux-private-update-fixture-017'
     || env.CREATOR_LINUX_PRIVATE_UPDATE_FIXTURE_017 !== undefined && env.CREATOR_LINUX_PRIVATE_UPDATE_FIXTURE_017 !== '0';
   const private017 = privateFixture ? require('./private-linux-update-fixture-017.cjs') : null;
@@ -57,18 +61,20 @@ function admission(root, platform, arch, env, execute = execFileSync) {
   assert.equal(git(['status', '--porcelain=v1', '--untracked-files=normal']), '', 'Clean initial assembly source required');
   if (privateFixture) return { commit: env.GITHUB_SHA, handoffSha256: env.CREATOR_UNIX_HANDOFF_SHA256,
     ...private017.source(root, execute) };
-  const version = env.GITHUB_REF === 'refs/heads/validation/linux-integrated-candidate-016' ? '0.1.16' : '0.1.14';
+  const version = env.GITHUB_REF === 'refs/heads/validation/linux-integrated-candidate-016' || journalA ? '0.1.16' : '0.1.14';
   if (version === '0.1.16') {
     const flags = ['CREATOR_LINUX_INTEGRATED_CANDIDATE', 'CREATOR_LINUX_PRODUCTION_MIGRATION_016',
       'CREATOR_LINUX_RETIREMENT_TEST_CANDIDATE'].map(name => env[name] ?? '0');
     assert.ok(flags.every(value => value === '0' || value === '1'), 'Explicit finite Linux profile flags required');
     assert.ok(platform === 'linux' && arch === 'x86_64' && flags[0] !== flags[1] && flags[2] === '0',
       '0.1.16 assembly requires exactly one direct Linux x86_64 profile, not a retirement test');
+    if (journalA) assert.ok(env.GITHUB_EVENT_NAME === 'workflow_dispatch' && flags[0] === '0' && flags[1] === '1'
+      && env.CREATOR_LINUX_PORTABLE_HOST_CANDIDATE === '1', 'Journal A requires the fixed manual production and portable profile');
     for (const name of ['package.json', 'src-tauri/tauri.conf.json']) {
       assert.equal(JSON.parse(fs.readFileSync(path.join(root, name), 'utf8')).version, version, '0.1.16 assembly source identity differs');
     }
   }
-  return { commit: env.GITHUB_SHA, handoffSha256: env.CREATOR_UNIX_HANDOFF_SHA256, version };
+  return { commit: env.GITHUB_SHA, handoffSha256: env.CREATOR_UNIX_HANDOFF_SHA256, version, ...(journalA ? { journalA: true } : {}) };
 }
 function inventory(root, names) {
   const found = [];
@@ -88,7 +94,7 @@ function inventory(root, names) {
   }
   walk(root); assert.deepEqual(found.sort(), [...names].sort(), 'Incomplete handoff');
 }
-function validateHandoff(h, prepared, records, platform, arch, expectedVersion = '0.1.14') {
+function validateHandoff(h, prepared, records, platform, arch, expectedVersion = '0.1.14', journalA = false) {
   keys(h, 'schemaVersion product hubVersion platform arch rustTarget mcpMode compiledFlags source apiProof transferFiles routingMetadata builtinManifest payloadFiles privateKeyIncluded nativeGuiAccepted releaseReady'.split(' '));
   assert.equal(h.schemaVersion, 1); assert.equal(h.product, 'com.creatorworks.hub.unix-signed-handoff');
   assert.ok(expectedVersion === '0.1.14' || expectedVersion === '0.1.16' && platform === 'linux' && arch === 'x86_64', 'Finite native assembly version required');
@@ -96,6 +102,10 @@ function validateHandoff(h, prepared, records, platform, arch, expectedVersion =
   assert.equal(h.privateKeyIncluded, false); assert.equal(h.nativeGuiAccepted, false); assert.equal(h.releaseReady, false);
   const binding = validateBinding({ ...h.apiProof, prepared });
   assert.equal(binding.platform, platform); assert.equal(binding.arch, arch);
+  if (journalA) {
+    assert.equal(expectedVersion, '0.1.16');
+    for (const key of ['producerBranch', 'sourceCommit', 'sourceTree', 'runId']) assert.equal(binding[key], JOURNAL_A[key], `Journal A ${key} differs`);
+  }
   for (const name of ['hubVersion', 'platform', 'arch', 'rustTarget', 'mcpMode', 'compiledFlags', 'source']) assert.deepEqual(h[name], prepared[name]);
   keys(h.transferFiles, TRANSFER); keys(h.routingMetadata, ROUTING);
   for (const name of TRANSFER) assert.deepEqual(h.transferFiles[name], records[name], 'Original carrier differs from signed handoff');
@@ -177,7 +187,7 @@ function assemble(input, output, platform, arch, context = {}) {
     recheck(); return value;
   }
   const handoff = read('handoff.json', true), prepared = read('prepared-unix.json', true);
-  const manifest = validateHandoff(handoff, prepared, records, platform, arch, accepted.version);
+  const manifest = validateHandoff(handoff, prepared, records, platform, arch, accepted.version, accepted.journalA);
   // Different assembly commits are permitted only when all private source is unchanged.
   verifyPrivateSource(handoff.source.sourceCommit, run);
   for (const name of ['mcp', 'setup']) {

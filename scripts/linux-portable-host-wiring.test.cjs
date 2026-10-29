@@ -6,6 +6,13 @@ const test = require('node:test');
 const { yaml } = require('playwright-core/lib/utilsBundle');
 const root = path.resolve(__dirname, '..');
 const read = name => fs.readFileSync(path.join(root, name), 'utf8').replace(/\r\n/g, '\n');
+const ignoredHelperTests = [
+  'cargo test --locked --manifest-path src-tauri/Cargo.toml --features integrated-features,experimental-flatpak-host,linux-production-migration,experimental-linux-portable-update projects::tests::live_linux_helper_preparation_umask_002 -- --exact --ignored --test-threads=1 --nocapture',
+  'cargo test --locked --manifest-path src-tauri/Cargo.toml --features integrated-features,experimental-flatpak-host,linux-production-migration,experimental-linux-portable-update projects::tests::live_linux_helper_preparation_default_acl -- --exact --ignored --test-threads=1 --nocapture',
+];
+function assertIgnoredHelperTests(scripts) {
+  assert.deepEqual(scripts.split('\n').filter(line => /--(?:include-)?ignored/.test(line)), ignoredHelperTests);
+}
 
 test('Linux source workflow actually compiles and tests the default-off portable host', () => {
   const workflow = yaml.parse(read('.github/workflows/linux-integrated-features.yml'), { uniqueKeys: true });
@@ -23,9 +30,23 @@ test('Linux source workflow actually compiles and tests the default-off portable
     assert.match(command, /--features [^\n ]*experimental-linux-portable-host/);
     assert.match(scripts, new RegExp(`cargo ${mode} --locked --manifest-path native/linux-portable-deployment/Cargo\\.toml `));
   }
-  assert.ok(!scripts.includes('--ignored'));
+  assertIgnoredHelperTests(scripts);
   for (const forbidden of ['cargo tauri build', 'publish-hub', 'gh release', 'flatpak install', 'dpkg --install', 'macos']) {
     assert.ok(!scripts.includes(forbidden), forbidden);
+  }
+});
+
+test('only the two exact ignored helper commands are permitted', () => {
+  const allowed = ignoredHelperTests.join('\n');
+  assert.doesNotThrow(() => assertIgnoredHelperTests(allowed));
+  for (const changed of [ignoredHelperTests[0], `${allowed}\ncargo test -- --ignored`,
+    `${allowed}\ncargo test -- --include-ignored`, `${allowed}\ncargo test -- --include-ignored=true`,
+    `${allowed}\ncargo test -- --ignored=true`, `${allowed}\ncargo test --include-ignored`,
+    allowed.replace('-- --exact --ignored', '-- --include-ignored --exact --ignored'),
+    allowed.replace('-- --exact --ignored', '-- --exact --include-ignored'),
+    `${allowed}\n${ignoredHelperTests[0]}`, allowed.replace('--test-threads=1', '--test-threads=2'),
+    allowed.replace('live_linux_helper_preparation_default_acl', 'foreign_test')]) {
+    assert.throws(() => assertIgnoredHelperTests(changed));
   }
 });
 

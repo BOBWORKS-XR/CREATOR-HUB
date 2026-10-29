@@ -45,11 +45,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [[ "${CREATOR_LINUX_PRODUCTION_MIGRATION_016:-0}" == 1 && ( "$CREATOR_LINUX_RETIREMENT_TEST_CANDIDATE" != 0 || "$CREATOR_LINUX_INTEGRATED_CANDIDATE" != 0 || "$GITHUB_REF" != refs/heads/validation/linux-integrated-candidate-016 || "$GITHUB_EVENT_NAME" != workflow_dispatch ) ]]; then
+          if [[ "${CREATOR_LINUX_PRODUCTION_MIGRATION_016:-0}" == 1 && ( "$CREATOR_LINUX_RETIREMENT_TEST_CANDIDATE" != 0 || "$CREATOR_LINUX_INTEGRATED_CANDIDATE" != 0 || ( "$GITHUB_REF" != refs/heads/validation/linux-integrated-candidate-016 && "$GITHUB_REF" != refs/heads/validation/journal-a-assembly-016 ) || "$GITHUB_EVENT_NAME" != workflow_dispatch ) ]]; then
             echo '::error::Production migration requires the explicit 016 profile, not either development profile.' >&2
             exit 64
           fi
-          if [[ "${CREATOR_LINUX_PORTABLE_HOST_CANDIDATE:-0}" == 1 && ( ( "$CREATOR_LINUX_INTEGRATED_CANDIDATE" != 1 && "${CREATOR_LINUX_PRODUCTION_MIGRATION_016:-0}" != 1 ) || "$CREATOR_LINUX_RETIREMENT_TEST_CANDIDATE" != 0 || "$GITHUB_REF" != refs/heads/validation/linux-integrated-candidate-016 || "$GITHUB_EVENT_NAME" != workflow_dispatch ) ]]; then
+          if [[ "${CREATOR_LINUX_PORTABLE_HOST_CANDIDATE:-0}" == 1 && ( ( "$CREATOR_LINUX_INTEGRATED_CANDIDATE" != 1 && "${CREATOR_LINUX_PRODUCTION_MIGRATION_016:-0}" != 1 ) || "$CREATOR_LINUX_RETIREMENT_TEST_CANDIDATE" != 0 || ( "$GITHUB_REF" != refs/heads/validation/linux-integrated-candidate-016 && "$GITHUB_REF" != refs/heads/validation/journal-a-assembly-016 ) || "$GITHUB_EVENT_NAME" != workflow_dispatch ) ]]; then
             echo '::error::Portable host compilation requires the explicit 016 integrated Linux profile.' >&2
             exit 64
           fi
@@ -57,7 +57,11 @@ jobs:
             echo '::error::Choose either the TEST ONLY retirement profile or the integrated candidate, not both.' >&2
             exit 64
           fi
-          if [[ "$GITHUB_REF" == refs/heads/validation/linux-integrated-candidate-016 ]]; then
+          if [[ "$GITHUB_REF" == refs/heads/validation/journal-a-assembly-016 && ( "$GITHUB_EVENT_NAME" != workflow_dispatch || "$CREATOR_LINUX_PRODUCTION_MIGRATION_016" != 1 || "$CREATOR_LINUX_PORTABLE_HOST_CANDIDATE" != 1 || "$CREATOR_LINUX_INTEGRATED_CANDIDATE" != 0 || "$CREATOR_LINUX_RETIREMENT_TEST_CANDIDATE" != 0 ) ]]; then
+            echo '::error::Journal A requires the fixed manual production and portable profile.' >&2
+            exit 64
+          fi
+          if [[ "$GITHUB_REF" == refs/heads/validation/linux-integrated-candidate-016 || "$GITHUB_REF" == refs/heads/validation/journal-a-assembly-016 ]]; then
             python3 - <<'PY'
           import json, os
           assert os.environ['GITHUB_REPOSITORY'] == 'BOBWORKS-XR/CREATOR-HUB'
@@ -91,13 +95,13 @@ jobs:
           ZIP_SHA256: ${{ matrix.zipSha256 }}
           HANDOFF_SHA256: ${{ matrix.handoffSha256 }}
           TARGET: ${{ matrix.target }}
-          HUB_VERSION: ${{ github.ref == 'refs/heads/validation/linux-integrated-candidate-016' && '0.1.16' || '0.1.14' }}
+          HUB_VERSION: ${{ (github.ref == 'refs/heads/validation/linux-integrated-candidate-016' || github.ref == 'refs/heads/validation/journal-a-assembly-016') && '0.1.16' || '0.1.14' }}
         with:
           script: |
             const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto');
             assert.equal(process.env.TARGET,'linux','macOS support is suspended');
             assert.ok(['0.1.14','0.1.16'].includes(process.env.HUB_VERSION));
-            if(process.env.HUB_VERSION==='0.1.16')assert.equal(context.ref,'refs/heads/validation/linux-integrated-candidate-016');
+            if(process.env.HUB_VERSION==='0.1.16')assert.ok(['refs/heads/validation/linux-integrated-candidate-016','refs/heads/validation/journal-a-assembly-016'].includes(context.ref));
             const id=Number(process.env.ASSET_ID),size=Number(process.env.ZIP_BYTES),digest=process.env.ZIP_SHA256;
             assert.ok(Number.isSafeInteger(id)&&id>0&&Number.isSafeInteger(size)&&size>0&&size<=300*1024*1024);
             assert.match(digest,/^[a-f0-9]{64}$/);assert.match(process.env.HANDOFF_SHA256,/^[a-f0-9]{64}$/);
@@ -174,6 +178,8 @@ jobs:
             patchelf rpm libarchive-tools python3-yaml
           for tool in patchelf rpm bsdtar dpkg-deb file; do command -v "$tool"; done
       - run: npm ci
+      - name: Check the journal A assembly workflow guards
+        run: node --test scripts/journal-a-assembly-workflow.test.cjs
       - name: Check the handoff and bounded native extraction contracts
         run: |
           node --test scripts/assemble-unix-payload.test.cjs scripts/sign-unix-payload.test.cjs scripts/unix-managed-payload.test.cjs scripts/linux-retirement-package.test.cjs scripts/build-unified.test.cjs scripts/linux-016-portable-package.test.cjs scripts/linux-portable-signed-controls.test.cjs scripts/linux-portable-restart-ci.test.cjs
@@ -206,12 +212,16 @@ jobs:
         run: |
           set -euo pipefail
           temp=$(python3 -B -c 'import os; print(os.path.realpath(os.environ["RUNNER_TEMP"]))')
-          if [[ "${CREATOR_LINUX_PRODUCTION_MIGRATION_016:-0}" == 1 && ( "$CREATOR_LINUX_RETIREMENT_TEST_CANDIDATE" != 0 || "$CREATOR_LINUX_INTEGRATED_CANDIDATE" != 0 || "$GITHUB_REF" != refs/heads/validation/linux-integrated-candidate-016 || "$GITHUB_EVENT_NAME" != workflow_dispatch ) ]]; then
+          if [[ "${CREATOR_LINUX_PRODUCTION_MIGRATION_016:-0}" == 1 && ( "$CREATOR_LINUX_RETIREMENT_TEST_CANDIDATE" != 0 || "$CREATOR_LINUX_INTEGRATED_CANDIDATE" != 0 || ( "$GITHUB_REF" != refs/heads/validation/linux-integrated-candidate-016 && "$GITHUB_REF" != refs/heads/validation/journal-a-assembly-016 ) || "$GITHUB_EVENT_NAME" != workflow_dispatch ) ]]; then
             echo '::error::Conflicting or non-016 production migration profile.' >&2
             exit 64
           fi
-          if [[ "${CREATOR_LINUX_PORTABLE_HOST_CANDIDATE:-0}" == 1 && ( ( "$CREATOR_LINUX_INTEGRATED_CANDIDATE" != 1 && "${CREATOR_LINUX_PRODUCTION_MIGRATION_016:-0}" != 1 ) || "$CREATOR_LINUX_RETIREMENT_TEST_CANDIDATE" != 0 || "$GITHUB_REF" != refs/heads/validation/linux-integrated-candidate-016 || "$GITHUB_EVENT_NAME" != workflow_dispatch ) ]]; then
+          if [[ "${CREATOR_LINUX_PORTABLE_HOST_CANDIDATE:-0}" == 1 && ( ( "$CREATOR_LINUX_INTEGRATED_CANDIDATE" != 1 && "${CREATOR_LINUX_PRODUCTION_MIGRATION_016:-0}" != 1 ) || "$CREATOR_LINUX_RETIREMENT_TEST_CANDIDATE" != 0 || ( "$GITHUB_REF" != refs/heads/validation/linux-integrated-candidate-016 && "$GITHUB_REF" != refs/heads/validation/journal-a-assembly-016 ) || "$GITHUB_EVENT_NAME" != workflow_dispatch ) ]]; then
             echo '::error::Portable host compilation requires the explicit 016 integrated Linux profile.' >&2
+            exit 64
+          fi
+          if [[ "$GITHUB_REF" == refs/heads/validation/journal-a-assembly-016 && ( "$GITHUB_EVENT_NAME" != workflow_dispatch || "$CREATOR_LINUX_PRODUCTION_MIGRATION_016" != 1 || "$CREATOR_LINUX_PORTABLE_HOST_CANDIDATE" != 1 || "$CREATOR_LINUX_INTEGRATED_CANDIDATE" != 0 || "$CREATOR_LINUX_RETIREMENT_TEST_CANDIDATE" != 0 ) ]]; then
+            echo '::error::Journal A requires the fixed manual production and portable profile.' >&2
             exit 64
           fi
           if [[ "$CREATOR_LINUX_RETIREMENT_TEST_CANDIDATE" == 1 && "$CREATOR_LINUX_INTEGRATED_CANDIDATE" == 1 ]]; then

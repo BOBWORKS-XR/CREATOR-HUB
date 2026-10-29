@@ -38,6 +38,19 @@ test('API binding rejects stale source, attempt, job, foreign repository or inco
   const foreign = clone(f); foreign.run.head_repository.id = 22;
   assert.throws(() => L.artifactBinding(foreign.run, foreign.job, foreign.artifact, foreign.p));
 });
+test('journal A downstream ref is explicit and retains the entire artifact binding', () => {
+  const f = fixture(); f.run.head_branch = 'validation/journal-a-assembly-016';
+  L.journalAArtifactBinding(f.run, f.job, f.artifact, f.p);
+  assert.throws(() => L.artifactBinding(f.run, f.job, f.artifact, f.p));
+  for (const [section, field, value] of [['run', 'head_branch', 'validation/journal-a-assembly-016-extra'],
+    ['run', 'event', 'push'], ['run', 'head_sha', 'd'.repeat(40)], ['run', 'run_attempt', 2],
+    ['job', 'id', 99], ['job', 'conclusion', 'failure'], ['artifact', 'id', 99],
+    ['artifact', 'digest', 'sha256:' + 'd'.repeat(64)], ['artifact', 'created_at', '2026-10-19T12:00:00Z']]) {
+    const x = clone(f); x[section][field] = value;
+    assert.throws(() => L.journalAArtifactBinding(x.run, x.job, x.artifact, x.p));
+  }
+  const old = fixture(); assert.throws(() => L.journalAArtifactBinding(old.run, old.job, old.artifact, old.p));
+});
 test('PRIVATE_SOURCE_PATHS compare Git tree identities and reject absent or redirected types', async () => {
   const rows = { modules: '1'.repeat(40), native: '2'.repeat(40), 'src-tauri': '3'.repeat(40) };
   const fake = { rest: { git: { async getCommit() { return { data: { sha: 'a'.repeat(40), tree: { sha: '0'.repeat(40) } } }; },

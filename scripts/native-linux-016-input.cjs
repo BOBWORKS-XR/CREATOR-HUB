@@ -55,7 +55,13 @@ function producer(run, expected, workflow, branch) {
   }
 }
 function artifactBinding(run, job, artifact, p) {
-  producer(run, p, '.github/workflows/unix-managed-assembly.yml', 'validation/linux-integrated-candidate-016');
+  return assemblyArtifactBinding(run, job, artifact, p, 'validation/linux-integrated-candidate-016');
+}
+function journalAArtifactBinding(run, job, artifact, p) {
+  return assemblyArtifactBinding(run, job, artifact, p, 'validation/journal-a-assembly-016');
+}
+function assemblyArtifactBinding(run, job, artifact, p, branch) {
+  producer(run, p, '.github/workflows/unix-managed-assembly.yml', branch);
   assert.equal(run.event, 'workflow_dispatch');
   assert.equal(job.id, p.jobId); assert.equal(job.run_id, p.runId); assert.equal(job.run_attempt, p.runAttempt);
   assert.equal(job.status, 'completed'); assert.equal(job.conclusion, 'success'); assert.ok(job.name.startsWith('assembly (linux,'));
@@ -135,4 +141,4 @@ async function run({ github, context, profile, env = process.env, fetch_ = fetch
   write('api-binding.json', JSON.stringify({ schemaVersion: 1, harnessSource: context.sha, assembly: p.assembly,
     privatePayload: PRIVATE, privateSourcePaths: assemblyTree, legacy, releaseReady: false }));
 }
-module.exports = { validate, admission, producer, artifactBinding, treePaths, publicDeb, run, PRIVATE, PRIVATE_PATHS, LEGACY, PINS, REF };
+module.exports = { validate, admission, producer, artifactBinding, journalAArtifactBinding, treePaths, publicDeb, run, PRIVATE, PRIVATE_PATHS, LEGACY, PINS, REF };

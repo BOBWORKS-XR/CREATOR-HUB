@@ -62,6 +62,36 @@ test('private017 does not relax original016 handoff or producer validation into 
   const original = data('linux', '0.1.16');
   assert.deepEqual(validateHandoff(original.h, original.prepared, original.records, 'linux', 'x86_64', '0.1.16'), original.h.builtinManifest);
 });
+function journalAData(overrides = {}) {
+  const f = data('linux', '0.1.16'), e = f.h.apiProof.expected, run = f.h.apiProof.run;
+  const { sourceCommit = 'f9c6da1af4ea51fc0214fba058c3946c1cda255a', sourceTree = 'c747ce8b9cd65169ba478162f9abb6c500be6186', runId = 40893082867 } = overrides;
+  Object.assign(e, { sourceCommit, sourceTree, producerBranch: 'validation/journal-a-payload-016', runId });
+  Object.assign(run, { id: runId, head_sha: sourceCommit, event: 'workflow_dispatch', head_branch: e.producerBranch });
+  Object.assign(f.h.apiProof.commit, { sha: sourceCommit, tree: { sha: sourceTree } });
+  Object.assign(f.h.apiProof.artifact, { name: `unsigned-unix-payload-Linux-X64-${sourceCommit}` });
+  Object.assign(f.h.apiProof.artifact.workflow_run, { id: runId, head_sha: sourceCommit });
+  f.h.apiProof.jobs[0].run_id = runId;
+  Object.assign(f.prepared.source, { sourceCommit, buildCommit: sourceCommit, sourceTree, runId, event: 'workflow_dispatch' });
+  return f;
+}
+test('journal A handoff requires the exact producer run, source tree and fully checked evidence', () => {
+  const f = journalAData();
+  assert.deepEqual(validateHandoff(f.h, f.prepared, f.records, 'linux', 'x86_64', '0.1.16', true), f.h.builtinManifest);
+  for (const mutate of [
+    x => x.h.apiProof.run.head_branch += '-foreign', x => x.h.apiProof.run.event = 'push',
+    x => x.h.apiProof.expected.sourceTree = 'f'.repeat(40), x => x.h.apiProof.expected.sourceCommit = 'f'.repeat(40),
+    x => x.h.apiProof.expected.runId++, x => x.h.apiProof.jobs[0].conclusion = 'failure',
+    x => x.h.apiProof.artifact.digest = 'sha256:' + 'f'.repeat(64), x => x.h.source = { ...x.h.source, buildCommit: 'f'.repeat(40) },
+    x => x.records['modules.tar.gz'] = { ...x.records['modules.tar.gz'], sha256: 'f'.repeat(64) }, x => x.h.releaseReady = true,
+    x => { delete x.h.apiProof.expected.producerBranch; delete x.h.apiProof.expected.sourceTree; },
+  ]) { const x = structuredClone(journalAData()); mutate(x); assert.throws(() => validateHandoff(x.h, x.prepared, x.records, 'linux', 'x86_64', '0.1.16', true)); }
+  const old = data('linux', '0.1.16'); assert.throws(() => validateHandoff(old.h, old.prepared, old.records, 'linux', 'x86_64', '0.1.16', true));
+  for (const other of [{ sourceCommit: 'f'.repeat(40) }, { sourceTree: 'e'.repeat(40) }, { runId: 40893082868 }]) {
+    const x = journalAData(other);
+    assert.doesNotThrow(() => validateHandoff(x.h, x.prepared, x.records, 'linux', 'x86_64', '0.1.16'));
+    assert.throws(() => validateHandoff(x.h, x.prepared, x.records, 'linux', 'x86_64', '0.1.16', true));
+  }
+});
 const faults = {
   target: f => { f.h.arch = 'wrong'; },
   source: f => { f.h.source = { ...f.h.source, sourceCommit: 'f'.repeat(40) }; },
@@ -134,6 +164,28 @@ test('016 assembly admission requires exact source, Linux x64 and the integrated
     assert.equal(path.dirname(root), fs.realpathSync(os.tmpdir()));
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+test('journal A admission is manual Linux x64 with the fixed production portable profile', () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'journal-a-assembly-test-')));
+  try {
+    fs.mkdirSync(path.join(root, 'src-tauri'));
+    for (const file of ['package.json', 'src-tauri/tauri.conf.json']) fs.writeFileSync(path.join(root, file), JSON.stringify({ version: '0.1.16' }));
+    const ref = 'refs/heads/validation/journal-a-assembly-016';
+    const env = { GITHUB_ACTIONS: 'true', RUNNER_ENVIRONMENT: 'github-hosted', RUNNER_OS: 'Linux', RUNNER_ARCH: 'X64',
+      GITHUB_REPOSITORY: 'BOBWORKS-XR/CREATOR-HUB', GITHUB_REPOSITORY_ID: '1364807512', GITHUB_EVENT_NAME: 'workflow_dispatch',
+      GITHUB_REF: ref, GITHUB_WORKFLOW_REF: `BOBWORKS-XR/CREATOR-HUB/${WORKFLOW}@${ref}`, GITHUB_SHA: 'a'.repeat(40),
+      CREATOR_UNIX_HANDOFF_SHA256: 'b'.repeat(64), CREATOR_LINUX_INTEGRATED_CANDIDATE: '0', CREATOR_LINUX_PRODUCTION_MIGRATION_016: '1',
+      CREATOR_LINUX_RETIREMENT_TEST_CANDIDATE: '0', CREATOR_LINUX_PORTABLE_HOST_CANDIDATE: '1' };
+    const execute = (_, args) => args.includes('--show-toplevel') ? root : args.includes('HEAD') ? env.GITHUB_SHA : '';
+    assert.equal(admission(root, 'linux', 'x86_64', env, execute).journalA, true);
+    for (const change of [{ GITHUB_EVENT_NAME: 'push' }, { CREATOR_LINUX_PRODUCTION_MIGRATION_016: '0' },
+      { CREATOR_LINUX_PORTABLE_HOST_CANDIDATE: '0' }, { CREATOR_LINUX_INTEGRATED_CANDIDATE: '1' },
+      { CREATOR_LINUX_RETIREMENT_TEST_CANDIDATE: '1' }, { GITHUB_REPOSITORY_ID: '1' }, { GITHUB_WORKFLOW_REF: 'foreign' }]) {
+      assert.throws(() => admission(root, 'linux', 'x86_64', { ...env, ...change }, execute));
+    }
+    assert.throws(() => admission(root, 'linux', 'aarch64', { ...env, RUNNER_ARCH: 'ARM64' }, execute));
+    assert.throws(() => admission(root, 'macos', 'x86_64', { ...env, RUNNER_OS: 'macOS' }, execute));
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 test('exact input inventory refuses incomplete or extra handoff files', () => {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'unix-handoff-test-')));
