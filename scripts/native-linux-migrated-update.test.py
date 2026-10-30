@@ -11,6 +11,7 @@ import json
 import os
 import queue
 from pathlib import Path
+import select
 import shutil
 import sqlite3
 import stat
@@ -1546,8 +1547,18 @@ class TransitionHomeTests(unittest.TestCase):
         con.executemany("INSERT INTO ItemTable VALUES (?,?)", [("one", b"original"), ("two", b"\x00\xff")])
         con.commit(); con.close(); os.chmod(db, 0o600)
         if existing:
-            writer = "import os,sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute(\"UPDATE ItemTable SET value=? WHERE key='one'\", (b'committed-in-wal',)); c.commit(); os._exit(0)"
-            subprocess.run([sys.executable, "-I", "-S", "-c", writer, str(db)], check=True, timeout=10)
+            writer = "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute(\"UPDATE ItemTable SET value=? WHERE key='one'\", (b'committed-in-wal',)); c.commit(); print('READY',flush=True); sys.stdin.buffer.readline(); c.close()"
+            process = subprocess.Popen([sys.executable, "-I", "-S", "-c", writer, str(db)], stdin=subprocess.PIPE,
+                                       stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+            def close_writer():
+                try:
+                    process.communicate(input=b"CLOSE\n", timeout=10)
+                    self.assertEqual(process.returncode, 0)
+                finally:
+                    if process.poll() is None: process.kill(); process.wait(timeout=10)
+            self.stack.callback(close_writer)
+            self.assertTrue(select.select([process.stdout], [], [], 10)[0])
+            self.assertEqual(process.stdout.readline(), b"READY\n")
         self.before["home"] = C.tree(self.home, uid)
         C.localstorage_baseline_gate(self.before["home"])
         self.before["localstorage"] = C.localstorage_observe(
@@ -1585,6 +1596,16 @@ class TransitionHomeTests(unittest.TestCase):
             return result
         with patch.object(guard, "_check_inventory", side_effect=commit):
             with self.assertRaisesRegex(RuntimeError, "database/WAL drift during callback"): guard.check()
+        with self.assertRaisesRegex(RuntimeError, "refusal is retained"): guard.check()
+
+    @unittest.skipUnless(sys.platform.startswith("linux") and os.getuid() != 0, "requires ordinary Linux UID")
+    def test_existing_wal_refuses_non_readmark_shm_tamper(self):
+        guard, db = self.real_localstorage_guard(existing=True)
+        shm = Path(str(db) + "-shm")
+        with shm.open("r+b") as handle:
+            handle.seek(-1, os.SEEK_END); byte = handle.read(1)
+            handle.seek(-1, os.SEEK_END); handle.write(bytes([byte[0] ^ 1]))
+        with self.assertRaisesRegex(RuntimeError, "localStorage pre-open identity/SHM drift"): guard.check()
         with self.assertRaisesRegex(RuntimeError, "refusal is retained"): guard.check()
 
     @unittest.skipUnless(sys.platform.startswith("linux") and os.getuid() != 0, "requires ordinary Linux UID")

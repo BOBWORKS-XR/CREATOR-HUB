@@ -3,6 +3,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import select
 import shutil
 import sqlite3
 import subprocess
@@ -24,9 +25,12 @@ class SealedAdoption(unittest.TestCase):
         self.adopt_fixture(existing=False)
 
     def test_actual_broker_adopts_committed_wal_as_synthetic_uid(self):
-        self.adopt_fixture(existing=True)
+        self.adopt_fixture(existing=True, live=True)
 
-    def adopt_fixture(self, existing):
+    def test_actual_broker_refuses_unclean_wal_index_drift(self):
+        self.adopt_fixture(existing=True, live=False)
+
+    def adopt_fixture(self, existing, live=False):
         uid = C.M.UID
         self.assertEqual(uid, 21314)
         with tempfile.TemporaryDirectory(prefix="sealed-adoption-", dir="/") as temp, ExitStack() as stack:
@@ -66,9 +70,23 @@ class SealedAdoption(unittest.TestCase):
             con.execute("INSERT INTO ItemTable VALUES (?,?)", ("synthetic", b"original")); con.commit(); con.close()
             os.chown(db, uid, uid); os.chmod(db, 0o600)
             if existing:
-                writer = "import os,sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute(\"UPDATE ItemTable SET value=? WHERE key='synthetic'\", (b'committed-in-wal',)); c.commit(); os._exit(0)"
-                subprocess.run([sys.executable, "-I", "-S", "-c", writer, str(db)], user=uid, group=uid,
-                               extra_groups=[], check=True, timeout=10)
+                if live:
+                    writer = "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute(\"UPDATE ItemTable SET value=? WHERE key='synthetic'\", (b'committed-in-wal',)); c.commit(); print('READY',flush=True); sys.stdin.buffer.readline(); c.close()"
+                    process = subprocess.Popen([sys.executable, "-I", "-S", "-c", writer, str(db)], user=uid, group=uid,
+                        extra_groups=[], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+                    def close_writer():
+                        try:
+                            process.communicate(input=b"CLOSE\n", timeout=10)
+                            self.assertEqual(process.returncode, 0)
+                        finally:
+                            if process.poll() is None: process.kill(); process.wait(timeout=10)
+                    stack.callback(close_writer)
+                    self.assertTrue(select.select([process.stdout], [], [], 10)[0])
+                    self.assertEqual(process.stdout.readline(), b"READY\n")
+                else:
+                    writer = "import os,sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute(\"UPDATE ItemTable SET value=? WHERE key='synthetic'\", (b'committed-in-wal',)); c.commit(); os._exit(0)"
+                    subprocess.run([sys.executable, "-I", "-S", "-c", writer, str(db)], user=uid, group=uid,
+                                   extra_groups=[], check=True, timeout=10)
                 self.assertGreater(Path(str(db) + "-wal").stat().st_size, 0)
                 main_only = sqlite3.connect(db.as_uri() + "?immutable=1", uri=True)
                 try: self.assertEqual(main_only.execute("SELECT value FROM ItemTable WHERE key='synthetic'").fetchone(), (b"original",))
@@ -109,14 +127,15 @@ class SealedAdoption(unittest.TestCase):
                         print("ancestry", str(directory), info.st_uid, info.st_gid, oct(info.st_mode & 0o7777), flush=True)
                     raise
             stack.enter_context(patch.object(C.U, "protected_ancestry", side_effect=ancestry_diagnostic))
-            with self.assertRaisesRegex(RuntimeError, "fixture-stop-after-adopt"): C.changed_broker(env)
+            refusal = "Existing baseline HOME drift" if existing and not live else "fixture-stop-after-adopt"
+            with self.assertRaisesRegex(RuntimeError, refusal): C.changed_broker(env)
             inventory.assert_called_once()
             sealed = control / "scripts/native-linux-localstorage-snapshot.py"
             self.assertEqual(sealed.stat().st_uid, 0); self.assertEqual(sealed.stat().st_mode & 0o777, 0o444)
             self.assertEqual(C.U.pin(sealed.read_bytes()), pins[sealed.name])
             record = json.loads((control / "broker.json").read_bytes())
             self.assertEqual(record["initialUidInventory"], {"processes": [], "terminalProcesses": []})
-            self.assertEqual(record["refusal"]["message"], "fixture-stop-after-adopt")
+            self.assertEqual(record["refusal"]["message"], refusal)
             self.assertFalse(record["scenarioPassed"])
 
 
