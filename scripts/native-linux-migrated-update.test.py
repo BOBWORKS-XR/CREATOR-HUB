@@ -41,6 +41,21 @@ T = module("native-linux-production-016-update.test")
 U, M = C.U, C.M
 
 
+def diagnose_existing_baseline(value, message):
+    if not value and message == "Existing baseline HOME drift":
+        scope = sys._getframe(1).f_locals
+        before, first = scope["baseline"], scope["first"]
+        names = (C._LOCAL_DB, C._LOCAL_WAL, C._LOCAL_SHM)
+        result = {"membership": set(first) == set(before),
+                  "main": first.get(names[0]) == before.get(names[0]),
+                  "wal": first.get(names[1]) == before.get(names[1]),
+                  "other": all(first.get(k) == row for k, row in before.items() if k not in names),
+                  "shmIdentity": scope["identities"][names[2]] == C.localstorage_identity(before[names[2]], names[2]),
+                  "shmNormalized": scope["shm_digest"] == scope["baseline_shm"]}
+        print("EXISTING_BASELINE_DIAGNOSTIC " + json.dumps(result, sort_keys=True), flush=True)
+    return U.require(value, message)
+
+
 @unittest.skipUnless(hasattr(C.select, "poll") and hasattr(os, "pidfd_open"), "Linux pidfd only")
 class RefusedProcessObservationTests(unittest.TestCase):
     def setUp(self):
@@ -1521,6 +1536,7 @@ class TransitionHomeTests(unittest.TestCase):
             self.assertNotEqual(C.localstorage_shm_digest(self.u.pin(bytes(outside))), expected)
 
     def real_localstorage_guard(self, existing=False):
+        if existing: self.stack.enter_context(patch.object(C, "require", new=diagnose_existing_baseline))
         uid = os.getuid()
         self.assertEqual(os.getgid(), uid)
         self.stack.enter_context(patch.object(M, "UID", uid))

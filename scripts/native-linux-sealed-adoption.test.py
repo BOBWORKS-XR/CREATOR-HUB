@@ -18,6 +18,21 @@ spec = importlib.util.spec_from_file_location("sealed_adoption_controller", HERE
 C = importlib.util.module_from_spec(spec); sys.modules[spec.name] = C; spec.loader.exec_module(C)
 
 
+def diagnose_existing_baseline(value, message):
+    if not value and message == "Existing baseline HOME drift":
+        scope = sys._getframe(1).f_locals
+        before, first = scope["baseline"], scope["first"]
+        names = (C._LOCAL_DB, C._LOCAL_WAL, C._LOCAL_SHM)
+        result = {"membership": set(first) == set(before),
+                  "main": first.get(names[0]) == before.get(names[0]),
+                  "wal": first.get(names[1]) == before.get(names[1]),
+                  "other": all(first.get(k) == row for k, row in before.items() if k not in names),
+                  "shmIdentity": scope["identities"][names[2]] == C.localstorage_identity(before[names[2]], names[2]),
+                  "shmNormalized": scope["shm_digest"] == scope["baseline_shm"]}
+        print("EXISTING_BASELINE_DIAGNOSTIC " + json.dumps(result, sort_keys=True), flush=True)
+    return C.U.require(value, message)
+
+
 @unittest.skipUnless(sys.platform.startswith("linux") and os.geteuid() == 0, "requires disposable Linux root runner")
 class SealedAdoption(unittest.TestCase):
     def test_actual_broker_adopts_with_uid_inaccessible_workspace(self):
@@ -30,6 +45,7 @@ class SealedAdoption(unittest.TestCase):
         uid = C.M.UID
         self.assertEqual(uid, 21314)
         with tempfile.TemporaryDirectory(prefix="sealed-adoption-", dir="/") as temp, ExitStack() as stack:
+            if existing: stack.enter_context(patch.object(C, "require", new=diagnose_existing_baseline))
             root = Path(temp).resolve(); os.chmod(root, 0o755)
             workspace = root / "workspace"; workspace.mkdir(mode=0o700)
             source = workspace / "scripts"; source.mkdir(mode=0o755)
