@@ -37,6 +37,7 @@ class SealedAdoption(unittest.TestCase):
         uid = C.M.UID
         self.assertEqual(uid, 21314)
         with tempfile.TemporaryDirectory(prefix="sealed-adoption-", dir="/") as temp, ExitStack() as stack:
+            stack.enter_context(patch.object(C, "diagnostic_synthetic_context"))
             root = Path(temp).resolve(); os.chmod(root, 0o755)
             workspace = root / "workspace"; workspace.mkdir(mode=0o700)
             source = workspace / "scripts"; source.mkdir(mode=0o755)
@@ -142,6 +143,10 @@ class SealedAdoption(unittest.TestCase):
             sealed = control / "scripts/native-linux-localstorage-snapshot.py"
             self.assertEqual(sealed.stat().st_uid, 0); self.assertEqual(sealed.stat().st_mode & 0o777, 0o444)
             self.assertEqual(C.U.pin(sealed.read_bytes()), pins[sealed.name])
+            if not (existing and not live):
+                fingerprint = control / C._SHM_DIAGNOSTIC_FILE
+                self.assertEqual(fingerprint.stat().st_uid, uid)
+                self.assertEqual(fingerprint.stat().st_mode & 0o777, 0o400)
             record = json.loads((control / "broker.json").read_bytes())
             if real_inventory:
                 observed = record["initialUidInventory"]

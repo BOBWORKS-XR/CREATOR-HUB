@@ -1605,7 +1605,10 @@ class TransitionHomeTests(unittest.TestCase):
         with shm.open("r+b") as handle:
             handle.seek(-1, os.SEEK_END); byte = handle.read(1)
             handle.seek(-1, os.SEEK_END); handle.write(bytes([byte[0] ^ 1]))
-        with self.assertRaisesRegex(RuntimeError, "localStorage pre-open identity/SHM drift"): guard.check()
+        with self.assertRaisesRegex(RuntimeError, "localStorage pre-open identity/SHM drift") as caught: guard.check()
+        record = {}; C.changed_retain_preopen_refusal(record, caught.exception)
+        self.assertIn("preopenLocalStorageComparison", record)
+        self.assertFalse(record["preopenLocalStorageComparison"]["offsetsAvailable"])
         with self.assertRaisesRegex(RuntimeError, "refusal is retained"): guard.check()
 
     @unittest.skipUnless(sys.platform.startswith("linux") and os.getuid() != 0, "requires ordinary Linux UID")
@@ -3849,6 +3852,71 @@ class ProjectsFilterTests(unittest.TestCase):
         with patch.object(C.U, "wait", side_effect=lambda check: check()), patch.object(C.U, "read", return_value=b"{}"), \
                 patch.object(C.U, "parse", return_value={"restoreHostedViews": False}):
             with self.assertRaisesRegex(RuntimeError, "inventory differs"): C.projects(html, home, {}, "initialProjects")
+
+
+class PreopenDiagnosticTests(unittest.TestCase):
+    @unittest.skipUnless(sys.platform.startswith("linux"), "requires Linux UID and modes")
+    def test_private_fingerprint_reports_exact_offsets_and_no_contents(self):
+        uid = os.getuid()
+        with tempfile.TemporaryDirectory() as temp, ExitStack() as stack:
+            root = Path(temp).resolve(); home = root / "home"; home.mkdir(); control = root / "control"; control.mkdir()
+            file = home / C._LOCAL_SHM; file.parent.mkdir(parents=True); original = bytes(32768); file.write_bytes(original)
+            stack.enter_context(patch.object(C, "HOME", home)); stack.enter_context(patch.object(C, "CONTROL", control))
+            stack.enter_context(patch.object(M, "UID", uid)); stack.enter_context(patch.object(C, "diagnostic_synthetic_context"))
+            row = {"kind": "file", "dev": 1, "ino": 2, "uid": uid, "gid": uid, "mode": 0o600, **U.pin(original)}
+            normalized = C.localstorage_shm_digest(row)
+            pin = C.capture_shm_fingerprints(row, normalized)
+            fingerprint = control / C._SHM_DIAGNOSTIC_FILE
+            self.assertEqual(stat.S_IMODE(fingerprint.stat().st_mode), 0o400)
+            self.assertNotEqual(fingerprint.read_bytes()[32:], original)
+            changed = bytearray(original)
+            for offset in (8, 104, 128): changed[offset] = 1
+            file.write_bytes(changed)
+            prior = {C._LOCAL_WAL: dict(row), C._LOCAL_SHM: {**row, **U.pin(bytes(changed))}}
+            identities = {name: C.localstorage_identity(prior[name], name) for name in C._LOCAL_SIDECARS}
+            expected = {"identities": identities, "shmSha256": normalized, "diagnosticFingerprint": pin}
+            error = RuntimeError("localStorage pre-open identity/SHM drift")
+            C.preopen_diagnostic(error, prior, expected)
+            record = {}; C.changed_retain_preopen_refusal(record, error)
+            value = record["preopenLocalStorageComparison"]
+            self.assertEqual(value, {"walIdentity": True, "shmIdentity": True, "shmNormalized": False,
+                                     "offsetsAvailable": True, "changedOffsets": [8, 104, 128]})
+            os.chmod(fingerprint, 0o600); fingerprint.write_bytes(b"tampered"); os.chmod(fingerprint, 0o400)
+            error = RuntimeError("localStorage pre-open identity/SHM drift")
+            C.preopen_diagnostic(error, prior, expected); record = {}; C.changed_retain_preopen_refusal(record, error)
+            self.assertFalse(record["preopenLocalStorageComparison"]["offsetsAvailable"])
+            self.assertEqual(record["preopenLocalStorageComparison"]["changedOffsets"], [])
+            self.assertFalse(record["preopenLocalStorageComparison"]["shmNormalized"])
+
+    def test_fingerprint_exactness_and_bounds(self):
+        raw = bytes(32768); key = b"x" * 32
+        altered = bytearray(raw); altered[0] = 1; altered[-1] = 255
+        old = C.diagnostic_shm_fingerprints(raw, key); new = C.diagnostic_shm_fingerprints(bytes(altered), key)
+        self.assertEqual([i for i, (a, b) in enumerate(zip(old, new)) if a != b], [0, 32767])
+        for data, secret in ((b"", key), (raw, b"")):
+            with self.assertRaises(RuntimeError): C.diagnostic_shm_fingerprints(data, secret)
+
+    def test_forged_and_malformed_diagnostics_are_ignored(self):
+        error = RuntimeError("localStorage pre-open identity/SHM drift")
+        value = {"walIdentity": True, "shmIdentity": True, "shmNormalized": False,
+                 "offsetsAvailable": True, "changedOffsets": [8, 104]}
+        error.preopen_comparison = value
+        record = {}; C.changed_retain_preopen_refusal(record, error); self.assertEqual(record, {})
+        error._preopen_diagnostic_origin = C._PREOPEN_DIAGNOSTIC_ORIGIN
+        for bad in (dict(value, walIdentity=1), dict(value, changedOffsets=[104, 8]),
+                    dict(value, changedOffsets=[32768]), dict(value, offsetsAvailable=False)):
+            error.preopen_comparison = bad; C.changed_retain_preopen_refusal(record, error); self.assertEqual(record, {})
+
+    def test_diagnostic_context_rejects_nonfixture_home(self):
+        with patch.object(C, "HOME", Path("/tmp/not-the-fixture")):
+            with self.assertRaisesRegex(RuntimeError, "Exact disposable synthetic HOME required"):
+                C.diagnostic_synthetic_context()
+
+    def test_private_fingerprint_is_not_in_fixed_export(self):
+        tree = ast.parse((HERE / "native-linux-migrated-update.py").read_text(encoding="utf-8"))
+        export = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "changed_export")
+        self.assertNotIn(C._SHM_DIAGNOSTIC_FILE, ast.unparse(export))
+        self.assertNotIn("_SHM_DIAGNOSTIC_FILE", ast.unparse(export))
 
 
 class ExistingBaselineDiagnosticTests(unittest.TestCase):

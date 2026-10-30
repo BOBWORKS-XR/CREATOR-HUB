@@ -284,6 +284,10 @@ _LOCAL_SIDECARS = frozenset((_LOCAL_WAL, _LOCAL_SHM))
 _LOCAL_IDENTITY = ("kind", "dev", "ino", "uid", "gid", "mode")
 _COLD_LOCALSTORAGE_DIAGNOSTIC_ORIGIN = object()
 _EXISTING_BASELINE_DIAGNOSTIC_ORIGIN = object()
+_PREOPEN_DIAGNOSTIC_ORIGIN = object()
+_SHM_DIAGNOSTIC_FILE = "shm-offset-fingerprints.bin"
+_SHM_DIAGNOSTIC_SIZE = 32768
+_SHM_DIAGNOSTIC_MAX_OFFSETS = 4096
 
 
 def cold_localstorage_gate(before):
@@ -370,6 +374,83 @@ def changed_retain_existing_baseline_refusal(record, error):
         pass
 
 
+def diagnostic_synthetic_context():
+    require(U.BASE == Path("/opt/creator-polkit-fixture") and HOME == U.BASE / "result/home"
+            and CONTROL == U.BASE / "migrated-update" and M.UID == U.UID,
+            "Exact disposable synthetic HOME required")
+    U.protected_ancestry(CONTROL)
+
+
+def diagnostic_shm_fingerprints(raw, key):
+    require(type(raw) is bytes and len(raw) == _SHM_DIAGNOSTIC_SIZE and type(key) is bytes and len(key) == 32,
+            "Fixed synthetic SHM diagnostic bounds required")
+    return bytes(value ^ hashlib.blake2s(struct.pack(">I", i), key=key, digest_size=1).digest()[0]
+                 for i, value in enumerate(raw))
+
+
+def capture_shm_fingerprints(row, normalized):
+    diagnostic_synthetic_context()
+    raw = U.read(HOME / _LOCAL_SHM, _SHM_DIAGNOSTIC_SIZE, uid=M.UID)
+    require(len(raw) == _SHM_DIAGNOSTIC_SIZE and U.pin(raw) == {key: row[key] for key in ("size", "sha256")}
+            and hashlib.sha256(b"synthetic-wal-index-v1\0" + raw[:100] + raw[120:]).hexdigest() == normalized,
+            "Diagnostic SHM observation drift")
+    key = secrets.token_bytes(32)
+    data = key + diagnostic_shm_fingerprints(raw, key)
+    file = CONTROL / _SHM_DIAGNOSTIC_FILE
+    U.write(file, data, 0o400); os.chown(file, M.UID, M.UID)
+    require(U.bound(file, U.pin(data), len(data), uid=M.UID, mode=0o400) == data, "Diagnostic fingerprint drift")
+    return U.pin(data)
+
+
+def preopen_diagnostic(error, prior, expected):
+    try:
+        if (type(error) is not RuntimeError or str(error) != "localStorage pre-open identity/SHM drift"
+                or type(prior) is not dict or type(expected) is not dict): return
+        value = {"walIdentity": localstorage_identity(prior[_LOCAL_WAL], _LOCAL_WAL) == expected["identities"][_LOCAL_WAL],
+                 "shmIdentity": localstorage_identity(prior[_LOCAL_SHM], _LOCAL_SHM) == expected["identities"][_LOCAL_SHM],
+                 "shmNormalized": None, "offsetsAvailable": False, "changedOffsets": []}
+        try:
+            diagnostic_synthetic_context()
+            row = prior[_LOCAL_SHM]
+            raw = U.read(HOME / _LOCAL_SHM, _SHM_DIAGNOSTIC_SIZE, uid=M.UID)
+            require(len(raw) == _SHM_DIAGNOSTIC_SIZE and U.pin(raw) == {key: row[key] for key in ("size", "sha256")},
+                    "Diagnostic SHM changed")
+            value["shmNormalized"] = hashlib.sha256(b"synthetic-wal-index-v1\0" + raw[:100] + raw[120:]).hexdigest() == expected["shmSha256"]
+            pin = expected.get("diagnosticFingerprint")
+            require(type(pin) is dict, "Diagnostic fingerprint unavailable")
+            file = CONTROL / _SHM_DIAGNOSTIC_FILE
+            data = U.bound(file, pin, 32 + _SHM_DIAGNOSTIC_SIZE, uid=M.UID, mode=0o400)
+            require(len(data) == 32 + _SHM_DIAGNOSTIC_SIZE, "Diagnostic fingerprint size differs")
+            fresh = diagnostic_shm_fingerprints(raw, data[:32]); baseline = data[32:]
+            offsets = [i for i in range(_SHM_DIAGNOSTIC_SIZE) if baseline[i] != fresh[i]]
+            if len(offsets) <= _SHM_DIAGNOSTIC_MAX_OFFSETS:
+                value["offsetsAvailable"], value["changedOffsets"] = True, offsets
+        except Exception:
+            pass
+        error.preopen_comparison = value
+        error._preopen_diagnostic_origin = _PREOPEN_DIAGNOSTIC_ORIGIN
+    except Exception:
+        pass
+
+
+def changed_retain_preopen_refusal(record, error):
+    try:
+        value = getattr(error, "preopen_comparison", None)
+        keys = {"walIdentity", "shmIdentity", "shmNormalized", "offsetsAvailable", "changedOffsets"}
+        if (type(error) is RuntimeError and str(error) == "localStorage pre-open identity/SHM drift"
+                and getattr(error, "_preopen_diagnostic_origin", None) is _PREOPEN_DIAGNOSTIC_ORIGIN
+                and type(value) is dict and set(value) == keys
+                and all(type(value[k]) is bool for k in ("walIdentity", "shmIdentity", "offsetsAvailable"))
+                and (value["shmNormalized"] is None or type(value["shmNormalized"]) is bool)
+                and type(value["changedOffsets"]) is list and len(value["changedOffsets"]) <= _SHM_DIAGNOSTIC_MAX_OFFSETS
+                and all(type(i) is int and 0 <= i < _SHM_DIAGNOSTIC_SIZE for i in value["changedOffsets"])
+                and value["changedOffsets"] == sorted(set(value["changedOffsets"]))
+                and (value["offsetsAvailable"] or not value["changedOffsets"])):
+            record.setdefault("preopenLocalStorageComparison", dict(value))
+    except Exception:
+        pass
+
+
 def localstorage_observe(callback, *, baseline=None, expected=None, helper_pin=None):
     """Hold the SQLite read transaction across the guard's full HOME inventory."""
     require((baseline is None) != (expected is None), "Exact localStorage observation phase required")
@@ -383,8 +464,12 @@ def localstorage_observe(callback, *, baseline=None, expected=None, helper_pin=N
     if expected is not None:
         prior = tree(HOME, M.UID)
         require(all(name in prior for name in (_LOCAL_DB, _LOCAL_WAL, _LOCAL_SHM)), "localStorage entry missing before open")
-        require(all(localstorage_identity(prior[name], name) == expected["identities"][name] for name in _LOCAL_SIDECARS)
-                and localstorage_shm_digest(prior[_LOCAL_SHM]) == expected["shmSha256"], "localStorage pre-open identity/SHM drift")
+        try:
+            require(all(localstorage_identity(prior[name], name) == expected["identities"][name] for name in _LOCAL_SIDECARS)
+                    and localstorage_shm_digest(prior[_LOCAL_SHM]) == expected["shmSha256"], "localStorage pre-open identity/SHM drift")
+        except RuntimeError as error:
+            preopen_diagnostic(error, prior, expected)
+            raise
     scripts = CONTROL / "scripts"
     helper = scripts / "native-linux-localstorage-snapshot.py"
     pin = helper_pin if baseline is not None else expected["helper"]
@@ -1777,9 +1862,12 @@ def changed_adopt(env, original):
     before = tree(HOME, M.UID)
     localstorage_baseline_gate(before)
     helper_pin = original["sources"]["native-linux-localstorage-snapshot.py"]
-    localstorage = localstorage_observe(lambda after, value, identities, shm: {"sha256": value, "identities": identities,
-                                                                              "shmSha256": shm, "helper": helper_pin},
-                                        baseline=before, helper_pin=helper_pin)
+    def capture_baseline(after, value, identities, shm):
+        result = {"sha256": value, "identities": identities, "shmSha256": shm, "helper": helper_pin}
+        try: result["diagnosticFingerprint"] = capture_shm_fingerprints(after[_LOCAL_SHM], shm)
+        except Exception: pass
+        return result
+    localstorage = localstorage_observe(capture_baseline, baseline=before, helper_pin=helper_pin)
     require(any(".creator-hub-settings-backups/" in n for n in before) and any("client-migrations-v1/" in n for n in before), "Original backups/client histories missing")
     journal = M.journal(HOME)
     require(report["operationJournals"]["reopened"]["file"] == U.pin(U.read(HOME / M.JOURNAL, 65536)), "Final original migration journal changed")
@@ -2589,6 +2677,7 @@ def changed_session(env):
         report.update(scenarioPassed=False, disposableTeardownRequired=True, recovery="unknown-no-retry-disposable-runner-teardown",
                       refusal={"type": type(error).__name__, "message": str(error)[:1000]})
         changed_retain_home_path_refusal(report, error)
+        changed_retain_preopen_refusal(report, error)
     finally:
         M.wipe(secret)
         if watcher is not None:
@@ -3211,6 +3300,7 @@ def changed_broker(env):
         changed_retain_directory_refusal(record, error)
         changed_retain_cold_localstorage_refusal(record, error)
         changed_retain_existing_baseline_refusal(record, error)
+        changed_retain_preopen_refusal(record, error)
         if str(error) == "Original fixture processes remain; never adopt or signal" and "initialUidInventory" in record:
             try:
                 record["refusedProcessObservation"] = observe_refused_fixture_processes(record["initialUidInventory"], native, helper)
