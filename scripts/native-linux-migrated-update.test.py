@@ -1485,9 +1485,9 @@ class TransitionHomeTests(unittest.TestCase):
         self.put(C._LOCAL_WAL, b"", 0o600); self.put(C._LOCAL_SHM, b"synthetic-shm", 0o600)
         current = C.tree(self.home, M.UID)
         identities = {name: C.localstorage_identity(current[name], name) for name in C._LOCAL_SIDECARS}
-        self.before["localstorage"] = {"sha256": "a" * 64, "identities": identities}
+        self.before["localstorage"] = {"sha256": "a" * 64, "identities": identities, "shmSha256": "c" * 64}
         guard = self.guard()
-        def observe(callback, **kwargs): return callback(C.tree(self.home, M.UID), "a" * 64, identities)
+        def observe(callback, **kwargs): return callback(C.tree(self.home, M.UID), "a" * 64, identities, "c" * 64)
         self.stack.enter_context(patch.object(C, "localstorage_observe", side_effect=observe))
         return guard
 
@@ -1507,6 +1507,17 @@ class TransitionHomeTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "localStorage logical contents or identity changed"): guard.check()
         with self.assertRaisesRegex(RuntimeError, "refusal is retained"): guard.check()
 
+    def test_shm_normalization_only_ignores_documented_readmark_bytes(self):
+        original = bytes(32768)
+        readmark = bytearray(original); readmark[104] = 1
+        outside = bytearray(original); outside[200] = 1
+        with patch.object(C.U, "read", return_value=original):
+            expected = C.localstorage_shm_digest(self.u.pin(original))
+        with patch.object(C.U, "read", return_value=bytes(readmark)):
+            self.assertEqual(C.localstorage_shm_digest(self.u.pin(bytes(readmark))), expected)
+        with patch.object(C.U, "read", return_value=bytes(outside)):
+            self.assertNotEqual(C.localstorage_shm_digest(self.u.pin(bytes(outside))), expected)
+
     def real_localstorage_guard(self):
         uid = os.getuid()
         self.assertEqual(os.getgid(), uid)
@@ -1520,7 +1531,7 @@ class TransitionHomeTests(unittest.TestCase):
         con.commit(); con.close(); os.chmod(db, 0o600)
         self.before["home"] = C.tree(self.home, uid)
         self.before["localstorage"] = C.localstorage_observe(
-            lambda after, value, identities: {"sha256": value, "identities": identities}, baseline=self.before["home"])
+            lambda after, value, identities, shm: {"sha256": value, "identities": identities, "shmSha256": shm}, baseline=self.before["home"])
         return self.guard(), db
 
     @unittest.skipUnless(sys.platform.startswith("linux") and os.getuid() != 0, "requires ordinary Linux UID")
@@ -1571,6 +1582,16 @@ class TransitionHomeTests(unittest.TestCase):
             return module
         with patch.object(C, "load", side_effect=load_with_replacement):
             with self.assertRaisesRegex(RuntimeError, "database/WAL drift"): guard.check()
+        with self.assertRaisesRegex(RuntimeError, "refusal is retained"): guard.check()
+
+    @unittest.skipUnless(sys.platform.startswith("linux") and os.getuid() != 0, "requires ordinary Linux UID")
+    def test_real_guard_refuses_non_readmark_shm_tamper(self):
+        guard, db = self.real_localstorage_guard(); guard.check()
+        shm = Path(str(db) + "-shm")
+        with shm.open("r+b") as handle:
+            handle.seek(-1, os.SEEK_END)
+            value = handle.read(1); handle.seek(-1, os.SEEK_END); handle.write(bytes([value[0] ^ 1]))
+        with self.assertRaisesRegex(RuntimeError, "localStorage pre-open identity/SHM drift"): guard.check()
         with self.assertRaisesRegex(RuntimeError, "refusal is retained"): guard.check()
 
     def completed_guard(self):

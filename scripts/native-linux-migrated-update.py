@@ -293,13 +293,33 @@ def localstorage_identity(row, name):
     return result
 
 
-def localstorage_observe(callback, *, baseline=None):
+def localstorage_shm_digest(row):
+    """Only SQLite WAL-index read-mark integers may vary in the synthetic SHM."""
+    raw = U.read(HOME / _LOCAL_SHM, 16 * 1024**2, uid=M.UID)
+    require(len(raw) >= 32768 and len(raw) % 32768 == 0 and U.pin(raw) == {k: row[k] for k in ("size", "sha256")},
+            "localStorage SHM changed during observation")
+    return hashlib.sha256(b"synthetic-wal-index-v1\0" + raw[:100] + raw[120:]).hexdigest()
+
+
+def localstorage_observe(callback, *, baseline=None, expected=None):
     """Hold the SQLite read transaction across the guard's full HOME inventory."""
+    require((baseline is None) != (expected is None), "Exact localStorage observation phase required")
+    prior = None
+    if expected is not None:
+        prior = tree(HOME, M.UID)
+        require(all(name in prior for name in (_LOCAL_DB, _LOCAL_WAL, _LOCAL_SHM)), "localStorage entry missing before open")
+        require(all(localstorage_identity(prior[name], name) == expected["identities"][name] for name in _LOCAL_SIDECARS)
+                and localstorage_shm_digest(prior[_LOCAL_SHM]) == expected["shmSha256"], "localStorage pre-open identity/SHM drift")
     module = load("native-linux-localstorage-snapshot")
     with module.HeldReader(HOME / _LOCAL_DB, M.UID, HERE / "native-linux-localstorage-snapshot.py") as reader:
         first = tree(HOME, M.UID)
         require(all(name in first for name in (_LOCAL_DB, _LOCAL_WAL, _LOCAL_SHM)), "Exact localStorage files required")
         identities = {name: localstorage_identity(first[name], name) for name in _LOCAL_SIDECARS}
+        shm_digest = localstorage_shm_digest(first[_LOCAL_SHM])
+        if prior is not None:
+            require(prior[_LOCAL_DB] == first[_LOCAL_DB] and prior[_LOCAL_WAL] == first[_LOCAL_WAL]
+                    and identities == expected["identities"] and shm_digest == expected["shmSha256"],
+                    "localStorage changed while opening reader")
         opened = [(first[name]["dev"], first[name]["ino"]) for name in (_LOCAL_DB, _LOCAL_WAL)]
         reader.require_open_files(opened)
         if baseline is not None:
@@ -314,11 +334,12 @@ def localstorage_observe(callback, *, baseline=None):
                 "localStorage database/WAL drift")
         require(all(localstorage_identity(after[name], name) == identities[name] for name in _LOCAL_SIDECARS),
                 "localStorage sidecar identity drift")
+        require(localstorage_shm_digest(after[_LOCAL_SHM]) == shm_digest, "localStorage SHM non-readmark drift")
         reader.require_open_files(opened)
         if baseline is not None:
             require(set(after) == set(baseline) | _LOCAL_SIDECARS
                     and all(after[name] == row for name, row in baseline.items()), "Cold baseline HOME changed")
-        return callback(after, result, identities)
+        return callback(after, result, identities, shm_digest)
 
 
 class TransitionHomePreservation:
@@ -452,11 +473,12 @@ class TransitionHomePreservation:
     def _check(self, checkpoint):
         if self.localstorage is None:
             return self._check_inventory(checkpoint, tree(HOME, M.UID))
-        def verify(after, result, identities):
-            require(result == self.localstorage["sha256"] and identities == self.localstorage["identities"],
+        def verify(after, result, identities, shm_digest):
+            require(result == self.localstorage["sha256"] and identities == self.localstorage["identities"]
+                    and shm_digest == self.localstorage["shmSha256"],
                     "Original localStorage logical contents or identity changed")
             return self._check_inventory(checkpoint, after)
-        return localstorage_observe(verify)
+        return localstorage_observe(verify, expected=self.localstorage)
 
     def _check_inventory(self, checkpoint, after):
         require(self.before.keys() <= after.keys(), "An original protected entry disappeared")
@@ -1644,7 +1666,8 @@ def changed_adopt(env, original):
     require(U.parse(U.read(HOME / U.PREFS))["restoreHostedViews"] is False, "Original migrated Projects startup required")
     before = tree(HOME, M.UID)
     require(_LOCAL_DB in before and not set(before) & _LOCAL_SIDECARS, "Cold localStorage baseline required")
-    localstorage = localstorage_observe(lambda after, value, identities: {"sha256": value, "identities": identities}, baseline=before)
+    localstorage = localstorage_observe(lambda after, value, identities, shm: {"sha256": value, "identities": identities,
+                                                                              "shmSha256": shm}, baseline=before)
     require(any(".creator-hub-settings-backups/" in n for n in before) and any("client-migrations-v1/" in n for n in before), "Original backups/client histories missing")
     journal = M.journal(HOME)
     require(report["operationJournals"]["reopened"]["file"] == U.pin(U.read(HOME / M.JOURNAL, 65536)), "Final original migration journal changed")
