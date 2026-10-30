@@ -3881,6 +3881,21 @@ class PreopenDiagnosticTests(unittest.TestCase):
             value = record["preopenLocalStorageComparison"]
             self.assertEqual(value, {"walIdentity": True, "shmIdentity": True, "shmNormalized": False,
                                      "offsetsAvailable": True, "changedOffsets": [8, 104, 128]})
+            foreign = copy.deepcopy(expected); foreign["identities"][C._LOCAL_WAL]["ino"] += 1
+            error = RuntimeError("localStorage pre-open identity/SHM drift")
+            C.preopen_diagnostic(error, prior, foreign); record = {}; C.changed_retain_preopen_refusal(record, error)
+            self.assertFalse(record["preopenLocalStorageComparison"]["walIdentity"])
+            self.assertTrue(record["preopenLocalStorageComparison"]["shmIdentity"])
+            foreign = copy.deepcopy(expected); foreign["identities"][C._LOCAL_SHM]["ino"] += 1
+            error = RuntimeError("localStorage pre-open identity/SHM drift")
+            C.preopen_diagnostic(error, prior, foreign); record = {}; C.changed_retain_preopen_refusal(record, error)
+            self.assertFalse(record["preopenLocalStorageComparison"]["shmIdentity"])
+            many = bytes([1]) * (C._SHM_DIAGNOSTIC_MAX_OFFSETS + 1) + original[C._SHM_DIAGNOSTIC_MAX_OFFSETS + 1:]
+            file.write_bytes(many); prior[C._LOCAL_SHM] = {**row, **U.pin(many)}
+            error = RuntimeError("localStorage pre-open identity/SHM drift")
+            C.preopen_diagnostic(error, prior, expected); record = {}; C.changed_retain_preopen_refusal(record, error)
+            self.assertFalse(record["preopenLocalStorageComparison"]["offsetsAvailable"])
+            self.assertEqual(record["preopenLocalStorageComparison"]["changedOffsets"], [])
             os.chmod(fingerprint, 0o600); fingerprint.write_bytes(b"tampered"); os.chmod(fingerprint, 0o400)
             error = RuntimeError("localStorage pre-open identity/SHM drift")
             C.preopen_diagnostic(error, prior, expected); record = {}; C.changed_retain_preopen_refusal(record, error)
@@ -3904,7 +3919,8 @@ class PreopenDiagnosticTests(unittest.TestCase):
         record = {}; C.changed_retain_preopen_refusal(record, error); self.assertEqual(record, {})
         error._preopen_diagnostic_origin = C._PREOPEN_DIAGNOSTIC_ORIGIN
         for bad in (dict(value, walIdentity=1), dict(value, changedOffsets=[104, 8]),
-                    dict(value, changedOffsets=[32768]), dict(value, offsetsAvailable=False)):
+                    dict(value, changedOffsets=[32768]), dict(value, offsetsAvailable=False),
+                    dict(value, changedOffsets=[True])):
             error.preopen_comparison = bad; C.changed_retain_preopen_refusal(record, error); self.assertEqual(record, {})
 
     def test_diagnostic_context_rejects_nonfixture_home(self):
