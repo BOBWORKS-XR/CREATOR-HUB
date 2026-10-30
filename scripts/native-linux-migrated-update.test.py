@@ -3792,5 +3792,66 @@ class ProjectsFilterTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "inventory differs"): C.projects(html, home, {}, "initialProjects")
 
 
+class ColdLocalStorageDiagnosticTests(unittest.TestCase):
+    def test_all_presence_cases_preserve_gate_and_exactly_three_booleans(self):
+        for main in (False, True):
+            for wal in (False, True):
+                for shm in (False, True):
+                    with self.subTest(main=main, wal=wal, shm=shm):
+                        before = {"unrelated": {}}
+                        for name, present in ((C._LOCAL_DB, main), (C._LOCAL_WAL, wal), (C._LOCAL_SHM, shm)):
+                            if present: before[name] = {}
+                        if main and not wal and not shm:
+                            self.assertIsNone(C.cold_localstorage_gate(before))
+                            continue
+                        with self.assertRaisesRegex(RuntimeError, "^Cold localStorage baseline required$") as caught:
+                            C.cold_localstorage_gate(before)
+                        record = {"refusal": {"message": str(caught.exception)}}
+                        C.changed_retain_cold_localstorage_refusal(record, caught.exception)
+                        self.assertEqual(record["coldLocalStoragePresence"], {"main": main, "wal": wal, "shm": shm})
+                        self.assertEqual(record["refusal"]["message"], "Cold localStorage baseline required")
+
+    def test_forged_or_malformed_diagnostics_are_not_retained(self):
+        for value in ({"main": False, "wal": False, "shm": 1},
+                      {"main": True, "wal": False, "shm": False},
+                      {"main": False, "wal": False, "shm": False, "extra": True}):
+            error = RuntimeError("Cold localStorage baseline required")
+            error.cold_localstorage_presence = value
+            error._cold_localstorage_diagnostic_origin = C._COLD_LOCALSTORAGE_DIAGNOSTIC_ORIGIN
+            record = {}; C.changed_retain_cold_localstorage_refusal(record, error)
+            self.assertEqual(record, {})
+        error = RuntimeError("Cold localStorage baseline required")
+        error.cold_localstorage_presence = {"main": False, "wal": False, "shm": False}
+        record = {}; C.changed_retain_cold_localstorage_refusal(record, error)
+        self.assertEqual(record, {})
+
+    def test_capture_does_not_read_files_or_overwrite_existing_record(self):
+        before = {C._LOCAL_DB: {}, C._LOCAL_SHM: {}}
+        with patch.object(C.U, "read", side_effect=AssertionError("unexpected read")), \
+                patch.object(C.os.path, "lexists", side_effect=AssertionError("unexpected stat")):
+            with self.assertRaises(RuntimeError) as caught: C.cold_localstorage_gate(before)
+            record = {"coldLocalStoragePresence": {"main": False, "wal": False, "shm": False}}
+            C.changed_retain_cold_localstorage_refusal(record, caught.exception)
+        self.assertEqual(record["coldLocalStoragePresence"], {"main": False, "wal": False, "shm": False})
+
+    def test_original_exception_is_reraised_and_diagnostic_failure_is_ignored(self):
+        original = RuntimeError("Cold localStorage baseline required")
+        with patch.object(C, "require", side_effect=original):
+            with self.assertRaises(RuntimeError) as caught: C.cold_localstorage_gate({})
+        self.assertIs(caught.exception, original)
+        class RefusingRecord(dict):
+            def setdefault(self, *args): raise RuntimeError("diagnostic sink unavailable")
+        C.changed_retain_cold_localstorage_refusal(RefusingRecord(), original)
+
+    def test_changed_adoption_and_broker_wire_diagnostic_without_bypassing_gate(self):
+        tree = ast.parse((HERE / "native-linux-migrated-update.py").read_text(encoding="utf-8"))
+        funcs = {node.name: ast.unparse(node) for node in tree.body if isinstance(node, ast.FunctionDef)}
+        adopt, broker = funcs["changed_adopt"], funcs["changed_broker"]
+        self.assertLess(adopt.index("before = tree(HOME, M.UID)"), adopt.index("cold_localstorage_gate(before)"))
+        self.assertLess(adopt.index("cold_localstorage_gate(before)"), adopt.index("localstorage_observe("))
+        self.assertIn("changed_retain_cold_localstorage_refusal(record, error)", broker)
+        self.assertIn("if failure is not None:\n        raise failure", broker)
+
+
 if __name__ == "__main__":
     unittest.main()

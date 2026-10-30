@@ -282,6 +282,33 @@ _LOCAL_DB = "data/com.creatorworks.hub/localstorage/tauri_localhost_0.localstora
 _LOCAL_WAL, _LOCAL_SHM = _LOCAL_DB + "-wal", _LOCAL_DB + "-shm"
 _LOCAL_SIDECARS = frozenset((_LOCAL_WAL, _LOCAL_SHM))
 _LOCAL_IDENTITY = ("kind", "dev", "ino", "uid", "gid", "mode")
+_COLD_LOCALSTORAGE_DIAGNOSTIC_ORIGIN = object()
+
+
+def cold_localstorage_gate(before):
+    try:
+        require(_LOCAL_DB in before and not set(before) & _LOCAL_SIDECARS, "Cold localStorage baseline required")
+    except RuntimeError as error:
+        try:
+            if type(error) is RuntimeError and type(before) is dict and str(error) == "Cold localStorage baseline required":
+                error.cold_localstorage_presence = {"main": _LOCAL_DB in before, "wal": _LOCAL_WAL in before, "shm": _LOCAL_SHM in before}
+                error._cold_localstorage_diagnostic_origin = _COLD_LOCALSTORAGE_DIAGNOSTIC_ORIGIN
+        except Exception:
+            pass
+        raise
+
+
+def changed_retain_cold_localstorage_refusal(record, error):
+    try:
+        value = getattr(error, "cold_localstorage_presence", None)
+        if (type(error) is RuntimeError and str(error) == "Cold localStorage baseline required"
+                and getattr(error, "_cold_localstorage_diagnostic_origin", None) is _COLD_LOCALSTORAGE_DIAGNOSTIC_ORIGIN
+                and type(value) is dict and set(value) == {"main", "wal", "shm"}
+                and all(type(value[key]) is bool for key in value)
+                and (not value["main"] or value["wal"] or value["shm"])):
+            record.setdefault("coldLocalStoragePresence", dict(value))
+    except Exception:
+        pass
 
 
 def localstorage_identity(row, name):
@@ -1682,7 +1709,7 @@ def changed_adopt(env, original):
     require(U.load("native-linux-polkit-probe").fixture_credential("status") == "L", "Original migration account must be locked")
     require(U.parse(U.read(HOME / U.PREFS))["restoreHostedViews"] is False, "Original migrated Projects startup required")
     before = tree(HOME, M.UID)
-    require(_LOCAL_DB in before and not set(before) & _LOCAL_SIDECARS, "Cold localStorage baseline required")
+    cold_localstorage_gate(before)
     helper_pin = original["sources"]["native-linux-localstorage-snapshot.py"]
     localstorage = localstorage_observe(lambda after, value, identities, shm: {"sha256": value, "identities": identities,
                                                                               "shmSha256": shm, "helper": helper_pin},
@@ -3116,6 +3143,7 @@ def changed_broker(env):
         failure = error; record["refusal"] = {"type": type(error).__name__, "message": str(error)[:1000]}
         changed_retain_home_path_refusal(record, error)
         changed_retain_directory_refusal(record, error)
+        changed_retain_cold_localstorage_refusal(record, error)
         if str(error) == "Original fixture processes remain; never adopt or signal" and "initialUidInventory" in record:
             try:
                 record["refusedProcessObservation"] = observe_refused_fixture_processes(record["initialUidInventory"], native, helper)
