@@ -30,7 +30,10 @@ class SealedAdoption(unittest.TestCase):
     def test_actual_broker_refuses_unclean_wal_index_drift(self):
         self.adopt_fixture(existing=True, live=False)
 
-    def adopt_fixture(self, existing, live=False):
+    def test_real_inventory_refuses_live_existing_wal_writer(self):
+        self.adopt_fixture(existing=True, live=True, real_inventory=True)
+
+    def adopt_fixture(self, existing, live=False, real_inventory=False):
         uid = C.M.UID
         self.assertEqual(uid, 21314)
         with tempfile.TemporaryDirectory(prefix="sealed-adoption-", dir="/") as temp, ExitStack() as stack:
@@ -111,9 +114,12 @@ class SealedAdoption(unittest.TestCase):
             stack.enter_context(patch.object(C.M, "journal", return_value={"revision": 1, "records": []}))
             stack.enter_context(patch.object(C, "captured_reports", return_value={})); stack.enter_context(patch.object(C, "legacy_state", return_value={}))
             polkit = SimpleNamespace(fixture_credential=Mock(return_value="L"))
+            native = C.U.load("native-linux-root-probe") if real_inventory else SimpleNamespace()
+            helper = C.U.load("native-unix-window") if real_inventory else SimpleNamespace()
             stack.enter_context(patch.object(C.U, "load", side_effect=lambda name: {"native-linux-polkit-probe": polkit,
-                "native-linux-root-probe": SimpleNamespace(), "native-unix-window": SimpleNamespace()}[name]))
-            inventory = stack.enter_context(patch.object(C.M, "native_process_inventory", return_value={"processes": [], "terminalProcesses": []}))
+                "native-linux-root-probe": native, "native-unix-window": helper}[name]))
+            inventory = stack.enter_context(patch.object(C.M, "native_process_inventory", wraps=C.M.native_process_inventory)) if real_inventory else \
+                stack.enter_context(patch.object(C.M, "native_process_inventory", return_value={"processes": [], "terminalProcesses": []}))
             stack.enter_context(patch.object(C.U, "offline_verifier", side_effect=RuntimeError("fixture-stop-after-adopt")))
             stack.enter_context(patch.object(C.U, "tls_cleanup", return_value={}))
             env = {"GITHUB_WORKSPACE": str(workspace), "GITHUB_SHA": "a" * 40, "RUNNER_TEMP": str(root / "runner")}
@@ -127,15 +133,23 @@ class SealedAdoption(unittest.TestCase):
                         print("ancestry", str(directory), info.st_uid, info.st_gid, oct(info.st_mode & 0o7777), flush=True)
                     raise
             stack.enter_context(patch.object(C.U, "protected_ancestry", side_effect=ancestry_diagnostic))
-            refusal = "Existing baseline HOME drift" if existing and not live else "fixture-stop-after-adopt"
+            refusal = ("Only the original live fixture manager pair may settle" if real_inventory else
+                       "Existing baseline HOME drift" if existing and not live else "fixture-stop-after-adopt")
             with self.assertRaisesRegex(RuntimeError, refusal): C.changed_broker(env)
+            if real_inventory: self.assertIsNone(process.poll(), "Broker must not signal unknown writer")
             if existing and not live: inventory.assert_not_called()
             else: inventory.assert_called_once()
             sealed = control / "scripts/native-linux-localstorage-snapshot.py"
             self.assertEqual(sealed.stat().st_uid, 0); self.assertEqual(sealed.stat().st_mode & 0o777, 0o444)
             self.assertEqual(C.U.pin(sealed.read_bytes()), pins[sealed.name])
             record = json.loads((control / "broker.json").read_bytes())
-            if existing and not live: self.assertNotIn("initialUidInventory", record)
+            if real_inventory:
+                observed = record["initialUidInventory"]
+                self.assertEqual(observed["terminalProcesses"], [])
+                self.assertEqual([row["pid"] for row in observed["processes"]], [process.pid])
+                self.assertEqual(record["fixtureQuiescence"]["status"], "refused")
+                self.assertEqual(record["fixtureQuiescence"]["stage"], "eligibility")
+            elif existing and not live: self.assertNotIn("initialUidInventory", record)
             else: self.assertEqual(record["initialUidInventory"], {"processes": [], "terminalProcesses": []})
             self.assertEqual(record["refusal"]["message"], refusal)
             self.assertFalse(record["scenarioPassed"])
