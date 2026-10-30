@@ -3,6 +3,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import select
 import shutil
 import sqlite3
 import subprocess
@@ -41,15 +42,20 @@ class SealedAdoption(unittest.TestCase):
     def test_actual_broker_adopts_committed_wal_as_synthetic_uid(self):
         self.adopt_fixture(existing=True)
 
-    def adopt_fixture(self, existing):
+    def test_existing_wal_with_live_cooperating_writer(self):
+        self.adopt_fixture(existing=True, cooperating=True)
+
+    def adopt_fixture(self, existing, cooperating=False):
         uid = C.M.UID
         self.assertEqual(uid, 21314)
         with tempfile.TemporaryDirectory(prefix="sealed-adoption-", dir="/") as temp, ExitStack() as stack:
+            writer_process = None
             if existing: stack.enter_context(patch.object(C, "require", new=diagnose_existing_baseline))
             if existing:
                 original_digest = C.localstorage_shm_digest
                 samples = []
                 def capture_offsets(row):
+                    if cooperating: self.assertIsNone(writer_process.poll())
                     result = original_digest(row)
                     raw = C.U.read(C.HOME / C._LOCAL_SHM, 32768, uid=uid)
                     self.assertEqual(C.U.pin(raw), {key: row[key] for key in ("size", "sha256")})
@@ -97,9 +103,23 @@ class SealedAdoption(unittest.TestCase):
             con.execute("INSERT INTO ItemTable VALUES (?,?)", ("synthetic", b"original")); con.commit(); con.close()
             os.chown(db, uid, uid); os.chmod(db, 0o600)
             if existing:
-                writer = "import os,sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute(\"UPDATE ItemTable SET value=? WHERE key='synthetic'\", (b'committed-in-wal',)); c.commit(); os._exit(0)"
-                subprocess.run([sys.executable, "-I", "-S", "-c", writer, str(db)], user=uid, group=uid,
-                               extra_groups=[], check=True, timeout=10)
+                if cooperating:
+                    writer = "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute(\"UPDATE ItemTable SET value=? WHERE key='synthetic'\", (b'committed-in-wal',)); c.commit(); print('READY',flush=True); sys.stdin.buffer.readline(); c.close()"
+                    writer_process = subprocess.Popen([sys.executable, "-I", "-S", "-c", writer, str(db)], user=uid,
+                        group=uid, extra_groups=[], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+                    def close_writer():
+                        try:
+                            writer_process.communicate(input=b"CLOSE\n", timeout=10)
+                            self.assertEqual(writer_process.returncode, 0)
+                        finally:
+                            if writer_process.poll() is None: writer_process.kill(); writer_process.wait(timeout=10)
+                    stack.callback(close_writer)
+                    self.assertTrue(select.select([writer_process.stdout], [], [], 10)[0])
+                    self.assertEqual(writer_process.stdout.readline(), b"READY\n")
+                else:
+                    writer = "import os,sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute(\"UPDATE ItemTable SET value=? WHERE key='synthetic'\", (b'committed-in-wal',)); c.commit(); os._exit(0)"
+                    subprocess.run([sys.executable, "-I", "-S", "-c", writer, str(db)], user=uid, group=uid,
+                                   extra_groups=[], check=True, timeout=10)
                 self.assertGreater(Path(str(db) + "-wal").stat().st_size, 0)
                 main_only = sqlite3.connect(db.as_uri() + "?immutable=1", uri=True)
                 try: self.assertEqual(main_only.execute("SELECT value FROM ItemTable WHERE key='synthetic'").fetchone(), (b"original",))
