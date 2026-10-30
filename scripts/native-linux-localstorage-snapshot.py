@@ -127,6 +127,10 @@ class HeldReader:
                 require(proc.poll() is None, "SQLite helper exited during inventory")
                 proc.stdin.write(b"CLOSE\n"); proc.stdin.flush()
                 require(proc.wait(timeout=self.timeout) == 0, "SQLite helper exit refused")
+                with selectors.DefaultSelector() as selector:
+                    selector.register(proc.stdout, selectors.EVENT_READ)
+                    require(not self.buffer and selector.select(self.timeout)
+                            and os.read(proc.stdout.fileno(), 1) == b"", "SQLite helper output/EOF refused")
         finally:
             if proc.poll() is None:
                 proc.kill(); proc.wait(timeout=self.timeout)

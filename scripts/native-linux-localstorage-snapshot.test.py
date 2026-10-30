@@ -3,6 +3,7 @@ import importlib.util
 import os
 from pathlib import Path
 import sqlite3
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -40,8 +41,11 @@ class HeldReaderTests(unittest.TestCase):
     def test_missing_or_replaced_wal_descriptor_refuses_and_reaps(self):
         with self.assertRaisesRegex(RuntimeError, "descriptor differs"):
             with module.HeldReader(self.db, self.uid, SCRIPT) as reader:
-                identities = self.identities()
-                reader.require_open_files([(identities[0][0], identities[0][1] + 1000000)])
+                identities = self.identities(); reader.require_open_files(identities)
+                wal = Path(str(self.db) + "-wal")
+                replacement = self.root / "replacement"; replacement.write_bytes(wal.read_bytes())
+                os.replace(replacement, wal)
+                reader.require_open_files(self.identities())
         self.assertIsNone(reader.process)
 
     def test_concurrent_commit_changes_wal_while_reader_is_held(self):
@@ -69,23 +73,47 @@ class HeldReaderTests(unittest.TestCase):
             with reader: reader.capture()
         self.assertIsNone(reader.process)
 
+    def test_sqlite_lock_failure_refuses_and_reaps(self):
+        lock = sqlite3.connect(self.db, timeout=1)
+        lock.execute("PRAGMA locking_mode=EXCLUSIVE")
+        lock.execute("BEGIN EXCLUSIVE")
+        reader = module.HeldReader(self.db, self.uid, SCRIPT, timeout=3)
+        try:
+            with self.assertRaises(RuntimeError):
+                with reader: reader.capture()
+            self.assertIsNone(reader.process)
+        finally:
+            lock.rollback(); lock.close()
+
 
 @unittest.skipUnless(sys.platform.startswith("linux") and os.geteuid() == 0, "requires disposable Linux root runner")
 class RootToSyntheticUidTests(unittest.TestCase):
     def test_root_reader_drops_uid_gid_and_reaps(self):
         uid = 21314
         with tempfile.TemporaryDirectory(prefix="root-held-reader-") as temporary:
-            root = Path(temporary).resolve(); os.chown(root, uid, uid); os.chmod(root, 0o700)
-            db = root / "tauri_localhost_0.localstorage"
+            root = Path(temporary).resolve(); os.chmod(root, 0o755)
+            sealed = root / "sealed-helper.py"; shutil.copyfile(SCRIPT, sealed); os.chmod(sealed, 0o444)
+            home = root / "home"; home.mkdir(mode=0o700); os.chown(home, uid, uid)
+            db = home / "tauri_localhost_0.localstorage"
             con = sqlite3.connect(db); con.execute("PRAGMA journal_mode=WAL"); con.execute(module.TABLE)
             con.execute("INSERT INTO ItemTable VALUES (?,?)", ("synthetic", b"preserved")); con.commit(); con.close()
             os.chown(db, uid, uid); os.chmod(db, 0o600)
-            with module.HeldReader(db, uid, SCRIPT) as reader:
-                proc = Path("/proc") / str(reader.process.pid)
-                self.assertEqual(proc.stat().st_uid, uid)
-                self.assertEqual(len(reader.capture()), 64)
-                for suffix in ("-wal", "-shm"):
-                    self.assertEqual(Path(str(db) + suffix).stat().st_uid, uid)
+            try:
+                with module.HeldReader(db, uid, sealed) as reader:
+                    proc = Path("/proc") / str(reader.process.pid)
+                    self.assertEqual(proc.stat().st_uid, uid)
+                    paths = (db, Path(str(db) + "-wal"))
+                    reader.require_open_files([(p.stat().st_dev, p.stat().st_ino) for p in paths])
+                    self.assertEqual(len(reader.capture()), 64)
+                    reader.require_open_files([(p.stat().st_dev, p.stat().st_ino) for p in paths])
+                    for suffix in ("-wal", "-shm"):
+                        self.assertEqual(Path(str(db) + suffix).stat().st_uid, uid)
+            except Exception:
+                diagnostic = subprocess.run([sys.executable, "-I", "-S", "-B", str(sealed), "reader", str(db), str(uid)],
+                    input=b"CAPTURE\nCLOSE\n", stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5,
+                    user=uid, group=uid, extra_groups=[])
+                print("fixture child diagnostic:", diagnostic.returncode, diagnostic.stderr.decode(errors="replace")[:2000], flush=True)
+                raise
             self.assertIsNone(reader.process)
 
 

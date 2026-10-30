@@ -284,10 +284,13 @@ _LOCAL_SIDECARS = frozenset((_LOCAL_WAL, _LOCAL_SHM))
 _LOCAL_IDENTITY = ("kind", "dev", "ino", "uid", "gid", "mode")
 
 
-def localstorage_identity(row):
+def localstorage_identity(row, name):
     require(row["kind"] == "file" and row["uid"] == row["gid"] == M.UID and not row["mode"] & 0o022,
             "Owned localStorage sidecar required")
-    return {key: row[key] for key in _LOCAL_IDENTITY}
+    require(name in _LOCAL_SIDECARS, "Unknown localStorage sidecar")
+    result = {key: row[key] for key in _LOCAL_IDENTITY}
+    if name == _LOCAL_SHM: result["size"] = row["size"]
+    return result
 
 
 def localstorage_observe(callback, *, baseline=None):
@@ -296,7 +299,7 @@ def localstorage_observe(callback, *, baseline=None):
     with module.HeldReader(HOME / _LOCAL_DB, M.UID, HERE / "native-linux-localstorage-snapshot.py") as reader:
         first = tree(HOME, M.UID)
         require(all(name in first for name in (_LOCAL_DB, _LOCAL_WAL, _LOCAL_SHM)), "Exact localStorage files required")
-        identities = {name: localstorage_identity(first[name]) for name in _LOCAL_SIDECARS}
+        identities = {name: localstorage_identity(first[name], name) for name in _LOCAL_SIDECARS}
         opened = [(first[name]["dev"], first[name]["ino"]) for name in (_LOCAL_DB, _LOCAL_WAL)]
         reader.require_open_files(opened)
         if baseline is not None:
@@ -309,7 +312,7 @@ def localstorage_observe(callback, *, baseline=None):
         require(all(name in after for name in (_LOCAL_DB, _LOCAL_WAL, _LOCAL_SHM)), "localStorage entry disappeared")
         require(first[_LOCAL_DB] == after[_LOCAL_DB] and first[_LOCAL_WAL] == after[_LOCAL_WAL],
                 "localStorage database/WAL drift")
-        require(all(localstorage_identity(after[name]) == identities[name] for name in _LOCAL_SIDECARS),
+        require(all(localstorage_identity(after[name], name) == identities[name] for name in _LOCAL_SIDECARS),
                 "localStorage sidecar identity drift")
         reader.require_open_files(opened)
         if baseline is not None:
@@ -334,7 +337,7 @@ class TransitionHomePreservation:
             require(set(initial) == set(self.before) | _LOCAL_SIDECARS
                     and not set(self.before) & _LOCAL_SIDECARS
                     and all(initial[name] == row for name, row in self.before.items()), "Original adopted HOME drifted")
-            require(all(localstorage_identity(initial[name]) == self.localstorage["identities"][name]
+            require(all(localstorage_identity(initial[name], name) == self.localstorage["identities"][name]
                         for name in _LOCAL_SIDECARS), "Original sidecar identity drift")
         self.R, self.E, self.D = "data/creator-hub/mcp-route-v1/linux-x86_64", "data/creator-hub-update-cache/deb/records", "data/creator-hub-update-cache/deb"
         self.active, self.handoff = self.R + "/active.json", self.E + "/mcp-route-update.json"
