@@ -129,12 +129,14 @@ class SealedAdoption(unittest.TestCase):
             stack.enter_context(patch.object(C.U, "protected_ancestry", side_effect=ancestry_diagnostic))
             refusal = "Existing baseline HOME drift" if existing and not live else "fixture-stop-after-adopt"
             with self.assertRaisesRegex(RuntimeError, refusal): C.changed_broker(env)
-            inventory.assert_called_once()
+            if existing and not live: inventory.assert_not_called()
+            else: inventory.assert_called_once()
             sealed = control / "scripts/native-linux-localstorage-snapshot.py"
             self.assertEqual(sealed.stat().st_uid, 0); self.assertEqual(sealed.stat().st_mode & 0o777, 0o444)
             self.assertEqual(C.U.pin(sealed.read_bytes()), pins[sealed.name])
             record = json.loads((control / "broker.json").read_bytes())
-            self.assertEqual(record["initialUidInventory"], {"processes": [], "terminalProcesses": []})
+            if existing and not live: self.assertNotIn("initialUidInventory", record)
+            else: self.assertEqual(record["initialUidInventory"], {"processes": [], "terminalProcesses": []})
             self.assertEqual(record["refusal"]["message"], refusal)
             self.assertFalse(record["scenarioPassed"])
 
