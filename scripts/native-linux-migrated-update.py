@@ -298,6 +298,14 @@ def cold_localstorage_gate(before):
         raise
 
 
+def localstorage_baseline_gate(before):
+    if _LOCAL_DB in before and _LOCAL_SIDECARS <= set(before):
+        for name in _LOCAL_SIDECARS:
+            localstorage_identity(before[name], name)
+        return
+    cold_localstorage_gate(before)
+
+
 def changed_retain_cold_localstorage_refusal(record, error):
     try:
         value = getattr(error, "cold_localstorage_presence", None)
@@ -332,6 +340,12 @@ def localstorage_observe(callback, *, baseline=None, expected=None, helper_pin=N
     """Hold the SQLite read transaction across the guard's full HOME inventory."""
     require((baseline is None) != (expected is None), "Exact localStorage observation phase required")
     prior = None
+    existing = baseline is not None and _LOCAL_SIDECARS <= set(baseline)
+    baseline_shm = None
+    if existing:
+        require(_LOCAL_DB in baseline, "Existing localStorage database required")
+        for name in _LOCAL_SIDECARS: localstorage_identity(baseline[name], name)
+        baseline_shm = localstorage_shm_digest(baseline[_LOCAL_SHM])
     if expected is not None:
         prior = tree(HOME, M.UID)
         require(all(name in prior for name in (_LOCAL_DB, _LOCAL_WAL, _LOCAL_SHM)), "localStorage entry missing before open")
@@ -355,10 +369,16 @@ def localstorage_observe(callback, *, baseline=None, expected=None, helper_pin=N
         opened = [(first[name]["dev"], first[name]["ino"]) for name in (_LOCAL_DB, _LOCAL_WAL)]
         reader.require_open_files(opened)
         if baseline is not None:
-            require(set(first) == set(baseline) | _LOCAL_SIDECARS and not set(baseline) & _LOCAL_SIDECARS,
-                    "Cold baseline sidecars differ")
-            require(all(first[name] == row for name, row in baseline.items()), "Cold baseline HOME drift")
-            require(first[_LOCAL_WAL]["size"] == 0, "Cold baseline WAL is not empty")
+            if existing:
+                require(set(first) == set(baseline)
+                        and all(first[name] == row for name, row in baseline.items() if name != _LOCAL_SHM)
+                        and identities[_LOCAL_SHM] == localstorage_identity(baseline[_LOCAL_SHM], _LOCAL_SHM)
+                        and shm_digest == baseline_shm, "Existing baseline HOME drift")
+            else:
+                require(set(first) == set(baseline) | _LOCAL_SIDECARS and not set(baseline) & _LOCAL_SIDECARS,
+                        "Cold baseline sidecars differ")
+                require(all(first[name] == row for name, row in baseline.items()), "Cold baseline HOME drift")
+                require(first[_LOCAL_WAL]["size"] == 0, "Cold baseline WAL is not empty")
         result = reader.capture()
         after = tree(HOME, M.UID)
         require(all(name in after for name in (_LOCAL_DB, _LOCAL_WAL, _LOCAL_SHM)), "localStorage entry disappeared")
@@ -370,7 +390,8 @@ def localstorage_observe(callback, *, baseline=None, expected=None, helper_pin=N
         reader.require_open_files(opened)
         if baseline is not None:
             require(set(after) == set(baseline) | _LOCAL_SIDECARS
-                    and all(after[name] == row for name, row in baseline.items()), "Cold baseline HOME changed")
+                    and all(after[name] == row for name, row in baseline.items() if not existing or name != _LOCAL_SHM),
+                    "Baseline HOME changed")
         outcome = callback(after, result, identities, shm_digest)
         final = tree(HOME, M.UID)
         require(set(final) == set(after), "HOME inventory changed during callback")
@@ -383,7 +404,11 @@ def localstorage_observe(callback, *, baseline=None, expected=None, helper_pin=N
         require(all(final[name] == row for name, row in after.items() if name != _LOCAL_SHM),
                 "Protected HOME entry changed during callback")
         reader.require_open_files(opened)
-        return outcome
+    closed = tree(HOME, M.UID)
+    require(set(closed) == set(final) and all(closed[name] == row for name, row in final.items() if name != _LOCAL_SHM)
+            and localstorage_identity(closed[_LOCAL_SHM], _LOCAL_SHM) == identities[_LOCAL_SHM]
+            and localstorage_shm_digest(closed[_LOCAL_SHM]) == shm_digest, "localStorage or HOME drift after reader close")
+    return outcome
 
 
 class TransitionHomePreservation:
@@ -399,11 +424,13 @@ class TransitionHomePreservation:
         if self.localstorage is None:
             require(initial == self.before, "Original adopted HOME drifted")
         else:
-            require(set(initial) == set(self.before) | _LOCAL_SIDECARS
-                    and not set(self.before) & _LOCAL_SIDECARS
-                    and all(initial[name] == row for name, row in self.before.items()), "Original adopted HOME drifted")
+            require(set(self.before) & _LOCAL_SIDECARS in (set(), set(_LOCAL_SIDECARS))
+                    and set(initial) == set(self.before) | _LOCAL_SIDECARS
+                    and all(initial[name] == row for name, row in self.before.items() if name != _LOCAL_SHM),
+                    "Original adopted HOME drifted")
             require(all(localstorage_identity(initial[name], name) == self.localstorage["identities"][name]
-                        for name in _LOCAL_SIDECARS), "Original sidecar identity drift")
+                        for name in _LOCAL_SIDECARS)
+                    and localstorage_shm_digest(initial[_LOCAL_SHM]) == self.localstorage["shmSha256"], "Original sidecar identity drift")
         self.R, self.E, self.D = "data/creator-hub/mcp-route-v1/linux-x86_64", "data/creator-hub-update-cache/deb/records", "data/creator-hub-update-cache/deb"
         self.active, self.handoff = self.R + "/active.json", self.E + "/mcp-route-update.json"
         require(not os.path.lexists(HOME / self.handoff), "Fresh gate refuses prior handoff; no supersession")
@@ -553,6 +580,7 @@ class TransitionHomePreservation:
             require(active == self.a_capture, "Only original A is allowed before actual Completed")
         for name, wanted in self.before.items():
             if name == self.active and complete: continue
+            if name == _LOCAL_SHM and self.localstorage is not None: continue
             if name == M.JOURNAL:
                 fields = ("kind", "dev", "uid", "gid", "mode")
                 old_mode, new_mode = self._journal_mode, after[name]["mode"]
@@ -1709,7 +1737,7 @@ def changed_adopt(env, original):
     require(U.load("native-linux-polkit-probe").fixture_credential("status") == "L", "Original migration account must be locked")
     require(U.parse(U.read(HOME / U.PREFS))["restoreHostedViews"] is False, "Original migrated Projects startup required")
     before = tree(HOME, M.UID)
-    cold_localstorage_gate(before)
+    localstorage_baseline_gate(before)
     helper_pin = original["sources"]["native-linux-localstorage-snapshot.py"]
     localstorage = localstorage_observe(lambda after, value, identities, shm: {"sha256": value, "identities": identities,
                                                                               "shmSha256": shm, "helper": helper_pin},

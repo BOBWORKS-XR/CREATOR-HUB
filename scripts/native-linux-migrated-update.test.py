@@ -15,6 +15,7 @@ import shutil
 import sqlite3
 import stat
 import struct
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -1486,6 +1487,7 @@ class TransitionHomeTests(unittest.TestCase):
         current = C.tree(self.home, M.UID)
         identities = {name: C.localstorage_identity(current[name], name) for name in C._LOCAL_SIDECARS}
         self.before["localstorage"] = {"sha256": "a" * 64, "identities": identities, "shmSha256": "c" * 64, "helper": {}}
+        self.stack.enter_context(patch.object(C, "localstorage_shm_digest", return_value="c" * 64))
         guard = self.guard()
         def observe(callback, **kwargs): return callback(C.tree(self.home, M.UID), "a" * 64, identities, "c" * 64)
         self.stack.enter_context(patch.object(C, "localstorage_observe", side_effect=observe))
@@ -1518,7 +1520,7 @@ class TransitionHomeTests(unittest.TestCase):
         with patch.object(C.U, "read", return_value=bytes(outside)):
             self.assertNotEqual(C.localstorage_shm_digest(self.u.pin(bytes(outside))), expected)
 
-    def real_localstorage_guard(self):
+    def real_localstorage_guard(self, existing=False):
         uid = os.getuid()
         self.assertEqual(os.getgid(), uid)
         self.stack.enter_context(patch.object(M, "UID", uid))
@@ -1543,11 +1545,47 @@ class TransitionHomeTests(unittest.TestCase):
         con.execute("CREATE TABLE ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB NOT NULL ON CONFLICT FAIL)")
         con.executemany("INSERT INTO ItemTable VALUES (?,?)", [("one", b"original"), ("two", b"\x00\xff")])
         con.commit(); con.close(); os.chmod(db, 0o600)
+        if existing:
+            writer = "import os,sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute(\"UPDATE ItemTable SET value=? WHERE key='one'\", (b'committed-in-wal',)); c.commit(); os._exit(0)"
+            subprocess.run([sys.executable, "-I", "-S", "-c", writer, str(db)], check=True, timeout=10)
         self.before["home"] = C.tree(self.home, uid)
+        C.localstorage_baseline_gate(self.before["home"])
         self.before["localstorage"] = C.localstorage_observe(
             lambda after, value, identities, shm: {"sha256": value, "identities": identities, "shmSha256": shm, "helper": helper_pin},
             baseline=self.before["home"], helper_pin=helper_pin)
         return self.guard(), db
+
+    @unittest.skipUnless(sys.platform.startswith("linux") and os.getuid() != 0, "requires ordinary Linux UID")
+    def test_existing_committed_wal_integrates_with_complete_home_guard(self):
+        guard, db = self.real_localstorage_guard(existing=True)
+        self.assertGreater(self.before["home"][C._LOCAL_WAL]["size"], 0)
+        main_only = sqlite3.connect(db.as_uri() + "?immutable=1", uri=True)
+        try: self.assertEqual(main_only.execute("SELECT value FROM ItemTable WHERE key='one'").fetchone(), (b"original",))
+        finally: main_only.close()
+        snapshot = C.load("native-linux-localstorage-snapshot", base=C.CONTROL / "scripts")
+        expected = sqlite3.connect(":memory:")
+        try:
+            expected.execute(snapshot.TABLE)
+            expected.executemany("INSERT INTO ItemTable VALUES (?,?)", [("one", b"committed-in-wal"), ("two", b"\x00\xff")])
+            self.assertEqual(guard.localstorage["sha256"], snapshot.digest(expected))
+        finally: expected.close()
+        guard.check()
+        self.put("config/launcher.json", b"tampered", 0o600)
+        with self.assertRaisesRegex(RuntimeError, "Original protected bytes/identity changed"): guard.check()
+        with self.assertRaisesRegex(RuntimeError, "refusal is retained"): guard.check()
+
+    @unittest.skipUnless(sys.platform.startswith("linux") and os.getuid() != 0, "requires ordinary Linux UID")
+    def test_existing_wal_refuses_commit_during_callback(self):
+        guard, db = self.real_localstorage_guard(existing=True)
+        check = guard._check_inventory
+        def commit(checkpoint, inventory):
+            result = check(checkpoint, inventory)
+            writer = "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute(\"UPDATE ItemTable SET value=? WHERE key='one'\", (b'drift',)); c.commit(); c.close()"
+            subprocess.run([sys.executable, "-I", "-S", "-c", writer, str(db)], check=True, timeout=10)
+            return result
+        with patch.object(guard, "_check_inventory", side_effect=commit):
+            with self.assertRaisesRegex(RuntimeError, "database/WAL drift during callback"): guard.check()
+        with self.assertRaisesRegex(RuntimeError, "refusal is retained"): guard.check()
 
     @unittest.skipUnless(sys.platform.startswith("linux") and os.getuid() != 0, "requires ordinary Linux UID")
     def test_real_held_reader_integrates_with_complete_home_guard(self):
@@ -3793,6 +3831,20 @@ class ProjectsFilterTests(unittest.TestCase):
 
 
 class ColdLocalStorageDiagnosticTests(unittest.TestCase):
+    def test_baseline_gate_accepts_only_cold_or_owned_complete_pair(self):
+        row = {"kind": "file", "dev": 1, "ino": 2, "uid": M.UID, "gid": M.UID, "mode": 0o600, "size": 32768}
+        for main in (False, True):
+            for wal in (False, True):
+                for shm in (False, True):
+                    before = {name: dict(row) for name, present in ((C._LOCAL_DB, main), (C._LOCAL_WAL, wal), (C._LOCAL_SHM, shm)) if present}
+                    if main and wal == shm: C.localstorage_baseline_gate(before)
+                    else:
+                        with self.assertRaisesRegex(RuntimeError, "Cold localStorage baseline required"): C.localstorage_baseline_gate(before)
+        for field, value in (("kind", "symlink"), ("uid", M.UID + 1), ("gid", M.UID + 1), ("mode", 0o622)):
+            before = {name: dict(row) for name in (C._LOCAL_DB, C._LOCAL_WAL, C._LOCAL_SHM)}
+            before[C._LOCAL_WAL][field] = value
+            with self.assertRaisesRegex(RuntimeError, "Owned localStorage sidecar required"): C.localstorage_baseline_gate(before)
+
     def test_all_presence_cases_preserve_gate_and_exactly_three_booleans(self):
         for main in (False, True):
             for wal in (False, True):
@@ -3847,8 +3899,8 @@ class ColdLocalStorageDiagnosticTests(unittest.TestCase):
         tree = ast.parse((HERE / "native-linux-migrated-update.py").read_text(encoding="utf-8"))
         funcs = {node.name: ast.unparse(node) for node in tree.body if isinstance(node, ast.FunctionDef)}
         adopt, broker = funcs["changed_adopt"], funcs["changed_broker"]
-        self.assertLess(adopt.index("before = tree(HOME, M.UID)"), adopt.index("cold_localstorage_gate(before)"))
-        self.assertLess(adopt.index("cold_localstorage_gate(before)"), adopt.index("localstorage_observe("))
+        self.assertLess(adopt.index("before = tree(HOME, M.UID)"), adopt.index("localstorage_baseline_gate(before)"))
+        self.assertLess(adopt.index("localstorage_baseline_gate(before)"), adopt.index("localstorage_observe("))
         self.assertIn("changed_retain_cold_localstorage_refusal(record, error)", broker)
         self.assertIn("if failure is not None:\n        raise failure", broker)
 
