@@ -23,7 +23,7 @@ class SealedAdoption(unittest.TestCase):
     def test_actual_broker_adopts_with_uid_inaccessible_workspace(self):
         uid = C.M.UID
         self.assertEqual(uid, 21314)
-        with tempfile.TemporaryDirectory(prefix="sealed-adoption-", dir="/opt") as temp, ExitStack() as stack:
+        with tempfile.TemporaryDirectory(prefix="sealed-adoption-", dir="/") as temp, ExitStack() as stack:
             root = Path(temp).resolve(); os.chmod(root, 0o755)
             workspace = root / "workspace"; workspace.mkdir(mode=0o700)
             source = workspace / "scripts"; source.mkdir(mode=0o755)
@@ -85,6 +85,16 @@ class SealedAdoption(unittest.TestCase):
             stack.enter_context(patch.object(C.U, "offline_verifier", side_effect=RuntimeError("fixture-stop-after-adopt")))
             stack.enter_context(patch.object(C.U, "tls_cleanup", return_value={}))
             env = {"GITHUB_WORKSPACE": str(workspace), "GITHUB_SHA": "a" * 40, "RUNNER_TEMP": str(root / "runner")}
+            original_ancestry = C.U.protected_ancestry
+            def ancestry_diagnostic(path):
+                try:
+                    return original_ancestry(path)
+                except Exception:
+                    for directory in (Path(path), *Path(path).parents):
+                        info = directory.lstat()
+                        print("ancestry", str(directory), info.st_uid, info.st_gid, oct(info.st_mode & 0o7777), flush=True)
+                    raise
+            stack.enter_context(patch.object(C.U, "protected_ancestry", side_effect=ancestry_diagnostic))
             with self.assertRaisesRegex(RuntimeError, "fixture-stop-after-adopt"): C.changed_broker(env)
             inventory.assert_called_once()
             sealed = control / "scripts/native-linux-localstorage-snapshot.py"
