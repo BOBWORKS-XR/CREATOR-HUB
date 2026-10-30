@@ -12,6 +12,7 @@ import os
 import queue
 from pathlib import Path
 import shutil
+import sqlite3
 import stat
 import struct
 import sys
@@ -1477,6 +1478,121 @@ class TransitionHomeTests(unittest.TestCase):
 
     def guard(self):
         return C.TransitionHomePreservation(self.before, self.manifests, self.manifest_pins, self.archives, self.f.inventories, None)
+
+    def localstorage_guard(self):
+        self.put(C._LOCAL_DB, b"synthetic-main", 0o600)
+        self.before["home"] = C.tree(self.home, M.UID)
+        self.put(C._LOCAL_WAL, b"", 0o600); self.put(C._LOCAL_SHM, b"synthetic-shm", 0o600)
+        current = C.tree(self.home, M.UID)
+        identities = {name: C.localstorage_identity(current[name], name) for name in C._LOCAL_SIDECARS}
+        self.before["localstorage"] = {"sha256": "a" * 64, "identities": identities, "shmSha256": "c" * 64}
+        guard = self.guard()
+        def observe(callback, **kwargs): return callback(C.tree(self.home, M.UID), "a" * 64, identities, "c" * 64)
+        self.stack.enter_context(patch.object(C, "localstorage_observe", side_effect=observe))
+        return guard
+
+    def test_localstorage_digest_guard_preserves_unrelated_and_latches_refusal(self):
+        guard = self.localstorage_guard(); guard.check()
+        self.put("config/launcher.json", b"tampered", 0o600)
+        with self.assertRaisesRegex(RuntimeError, "Original protected bytes/identity changed"): guard.check()
+        with self.assertRaisesRegex(RuntimeError, "refusal is retained"): guard.check()
+
+    def test_localstorage_guard_refuses_unknown_addition(self):
+        guard = self.localstorage_guard(); self.put("data/unrelated-new", b"unknown", 0o600)
+        with self.assertRaisesRegex(RuntimeError, "Unexpected new HOME path"): guard.check()
+
+    def test_localstorage_guard_refuses_logical_digest_mismatch(self):
+        guard = self.localstorage_guard(); self.before["localstorage"]["sha256"] = "b" * 64
+        guard.localstorage["sha256"] = "b" * 64
+        with self.assertRaisesRegex(RuntimeError, "localStorage logical contents or identity changed"): guard.check()
+        with self.assertRaisesRegex(RuntimeError, "refusal is retained"): guard.check()
+
+    def test_shm_normalization_only_ignores_documented_readmark_bytes(self):
+        original = bytes(32768)
+        readmark = bytearray(original); readmark[104] = 1
+        outside = bytearray(original); outside[200] = 1
+        with patch.object(C.U, "read", return_value=original):
+            expected = C.localstorage_shm_digest(self.u.pin(original))
+        with patch.object(C.U, "read", return_value=bytes(readmark)):
+            self.assertEqual(C.localstorage_shm_digest(self.u.pin(bytes(readmark))), expected)
+        with patch.object(C.U, "read", return_value=bytes(outside)):
+            self.assertNotEqual(C.localstorage_shm_digest(self.u.pin(bytes(outside))), expected)
+
+    def real_localstorage_guard(self):
+        uid = os.getuid()
+        self.assertEqual(os.getgid(), uid)
+        self.stack.enter_context(patch.object(M, "UID", uid))
+        self.stack.enter_context(patch.object(T.M, "UID", uid))
+        for info in self.f.linux_files.values(): info.update(st_uid=uid, st_gid=uid)
+        db = self.put(C._LOCAL_DB, b"", 0o600)
+        con = sqlite3.connect(db); con.execute("PRAGMA journal_mode=WAL")
+        con.execute("CREATE TABLE ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB NOT NULL ON CONFLICT FAIL)")
+        con.executemany("INSERT INTO ItemTable VALUES (?,?)", [("one", b"original"), ("two", b"\x00\xff")])
+        con.commit(); con.close(); os.chmod(db, 0o600)
+        self.before["home"] = C.tree(self.home, uid)
+        self.before["localstorage"] = C.localstorage_observe(
+            lambda after, value, identities, shm: {"sha256": value, "identities": identities, "shmSha256": shm}, baseline=self.before["home"])
+        return self.guard(), db
+
+    @unittest.skipUnless(sys.platform.startswith("linux") and os.getuid() != 0, "requires ordinary Linux UID")
+    def test_real_held_reader_integrates_with_complete_home_guard(self):
+        guard, db = self.real_localstorage_guard(); guard.check()
+        self.put("config/launcher.json", b"tampered", 0o600)
+        with self.assertRaisesRegex(RuntimeError, "Original protected bytes/identity changed"): guard.check()
+        with self.assertRaisesRegex(RuntimeError, "refusal is retained"): guard.check()
+
+    @unittest.skipUnless(sys.platform.startswith("linux") and os.getuid() != 0, "requires ordinary Linux UID")
+    def test_real_guard_refuses_wal_commit_during_held_inventory(self):
+        guard, db = self.real_localstorage_guard()
+        original_load = C.load
+        def load_with_writer(name):
+            module = original_load(name)
+            if name == "native-linux-localstorage-snapshot":
+                capture = module.HeldReader.capture
+                def commit_during(reader):
+                    result = capture(reader)
+                    writer = sqlite3.connect(db)
+                    try:
+                        writer.execute("UPDATE ItemTable SET value=? WHERE key='one'", (b"changed",))
+                        writer.commit()
+                    finally: writer.close()
+                    return result
+                module.HeldReader.capture = commit_during
+            return module
+        with patch.object(C, "load", side_effect=load_with_writer):
+            with self.assertRaisesRegex(RuntimeError, "database/WAL drift"): guard.check()
+        with self.assertRaisesRegex(RuntimeError, "refusal is retained"): guard.check()
+
+    @unittest.skipUnless(sys.platform.startswith("linux") and os.getuid() != 0, "requires ordinary Linux UID")
+    def test_real_guard_refuses_wal_replacement_during_held_inventory(self):
+        guard, db = self.real_localstorage_guard()
+        original_load = C.load
+        def load_with_replacement(name):
+            module = original_load(name)
+            if name == "native-linux-localstorage-snapshot":
+                capture = module.HeldReader.capture
+                def replace_during(reader):
+                    result = capture(reader)
+                    wal = Path(str(db) + "-wal")
+                    replacement = self.f.directory / "replacement-wal"
+                    replacement.write_bytes(wal.read_bytes()); os.chmod(replacement, 0o600)
+                    os.replace(replacement, wal)
+                    return result
+                module.HeldReader.capture = replace_during
+            return module
+        with patch.object(C, "load", side_effect=load_with_replacement):
+            with self.assertRaisesRegex(RuntimeError, "database/WAL drift"): guard.check()
+        with self.assertRaisesRegex(RuntimeError, "refusal is retained"): guard.check()
+
+    @unittest.skipUnless(sys.platform.startswith("linux") and os.getuid() != 0, "requires ordinary Linux UID")
+    def test_real_guard_refuses_non_readmark_shm_tamper(self):
+        guard, db = self.real_localstorage_guard(); guard.check()
+        shm = Path(str(db) + "-shm")
+        with shm.open("r+b") as handle:
+            handle.seek(-1, os.SEEK_END)
+            value = handle.read(1); handle.seek(-1, os.SEEK_END); handle.write(bytes([value[0] ^ 1]))
+        with self.assertRaisesRegex(RuntimeError, "localStorage pre-open identity/SHM drift"): guard.check()
+        with self.assertRaisesRegex(RuntimeError, "refusal is retained"): guard.check()
 
     def completed_guard(self):
         guard = self.guard(); self.record("Ready"); guard.check()
