@@ -285,6 +285,7 @@ _LOCAL_IDENTITY = ("kind", "dev", "ino", "uid", "gid", "mode")
 _COLD_LOCALSTORAGE_DIAGNOSTIC_ORIGIN = object()
 _EXISTING_BASELINE_DIAGNOSTIC_ORIGIN = object()
 _PREOPEN_DIAGNOSTIC_ORIGIN = object()
+_ADOPTION_OFFSETS_DIAGNOSTIC_ORIGIN = object()
 _SHM_DIAGNOSTIC_FILE = "shm-offset-fingerprints.bin"
 _SHM_DIAGNOSTIC_SIZE = 32768
 _SHM_DIAGNOSTIC_MAX_OFFSETS = 4096
@@ -381,6 +382,49 @@ def diagnostic_synthetic_context():
     U.protected_ancestry(CONTROL)
 
 
+def diagnostic_shm_snapshot(row, normalized):
+    diagnostic_synthetic_context()
+    raw = U.read(HOME / _LOCAL_SHM, _SHM_DIAGNOSTIC_SIZE, uid=M.UID)
+    require(len(raw) == _SHM_DIAGNOSTIC_SIZE and U.pin(raw) == {key: row[key] for key in ("size", "sha256")}
+            and hashlib.sha256(b"synthetic-wal-index-v1\0" + raw[:100] + raw[120:]).hexdigest() == normalized,
+            "Diagnostic SHM observation drift")
+    return raw
+
+
+def adoption_shm_offset_diagnostic(error, before, first, normalized):
+    try:
+        if type(error) is not RuntimeError or str(error) != "Existing baseline HOME drift": return
+        value = {"available": False, "changedOffsets": []}
+        try:
+            require(type(before) is bytes and len(before) == _SHM_DIAGNOSTIC_SIZE, "Diagnostic baseline unavailable")
+            after = diagnostic_shm_snapshot(first[_LOCAL_SHM], normalized)
+            offsets = [i for i, (a, b) in enumerate(zip(before, after)) if a != b]
+            if len(offsets) <= _SHM_DIAGNOSTIC_MAX_OFFSETS:
+                value = {"available": True, "changedOffsets": offsets}
+        except Exception:
+            pass
+        error.adoption_shm_offsets = value
+        error._adoption_offsets_diagnostic_origin = _ADOPTION_OFFSETS_DIAGNOSTIC_ORIGIN
+    except Exception:
+        pass
+
+
+def changed_retain_adoption_offsets(record, error):
+    try:
+        value = getattr(error, "adoption_shm_offsets", None)
+        if (type(error) is RuntimeError and str(error) == "Existing baseline HOME drift"
+                and getattr(error, "_adoption_offsets_diagnostic_origin", None) is _ADOPTION_OFFSETS_DIAGNOSTIC_ORIGIN
+                and type(value) is dict and set(value) == {"available", "changedOffsets"}
+                and type(value["available"]) is bool and type(value["changedOffsets"]) is list
+                and len(value["changedOffsets"]) <= _SHM_DIAGNOSTIC_MAX_OFFSETS
+                and all(type(i) is int and 0 <= i < _SHM_DIAGNOSTIC_SIZE for i in value["changedOffsets"])
+                and value["changedOffsets"] == sorted(set(value["changedOffsets"]))
+                and (value["available"] or not value["changedOffsets"])):
+            record.setdefault("adoptionShmOffsets", {"available": value["available"], "changedOffsets": list(value["changedOffsets"])})
+    except Exception:
+        pass
+
+
 def diagnostic_shm_fingerprints(raw, key):
     require(type(raw) is bytes and len(raw) == _SHM_DIAGNOSTIC_SIZE and type(key) is bytes and len(key) == 32,
             "Fixed synthetic SHM diagnostic bounds required")
@@ -457,10 +501,13 @@ def localstorage_observe(callback, *, baseline=None, expected=None, helper_pin=N
     prior = None
     existing = baseline is not None and _LOCAL_SIDECARS <= set(baseline)
     baseline_shm = None
+    adoption_snapshot = None
     if existing:
         require(_LOCAL_DB in baseline, "Existing localStorage database required")
         for name in _LOCAL_SIDECARS: localstorage_identity(baseline[name], name)
         baseline_shm = localstorage_shm_digest(baseline[_LOCAL_SHM])
+        try: adoption_snapshot = diagnostic_shm_snapshot(baseline[_LOCAL_SHM], baseline_shm)
+        except Exception: pass
     if expected is not None:
         prior = tree(HOME, M.UID)
         require(all(name in prior for name in (_LOCAL_DB, _LOCAL_WAL, _LOCAL_SHM)), "localStorage entry missing before open")
@@ -496,6 +543,7 @@ def localstorage_observe(callback, *, baseline=None, expected=None, helper_pin=N
                             and shm_digest == baseline_shm, "Existing baseline HOME drift")
                 except RuntimeError as error:
                     existing_baseline_diagnostic(error, baseline, first, identities, shm_digest, baseline_shm)
+                    adoption_shm_offset_diagnostic(error, adoption_snapshot, first, shm_digest)
                     raise
             else:
                 require(set(first) == set(baseline) | _LOCAL_SIDECARS and not set(baseline) & _LOCAL_SIDECARS,
@@ -3300,6 +3348,7 @@ def changed_broker(env):
         changed_retain_directory_refusal(record, error)
         changed_retain_cold_localstorage_refusal(record, error)
         changed_retain_existing_baseline_refusal(record, error)
+        changed_retain_adoption_offsets(record, error)
         changed_retain_preopen_refusal(record, error)
         if str(error) == "Original fixture processes remain; never adopt or signal" and "initialUidInventory" in record:
             try:

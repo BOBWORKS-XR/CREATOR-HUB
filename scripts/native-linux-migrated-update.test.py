@@ -3854,6 +3854,41 @@ class ProjectsFilterTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "inventory differs"): C.projects(html, home, {}, "initialProjects")
 
 
+class AdoptionOffsetDiagnosticTests(unittest.TestCase):
+    def test_exact_offsets_are_bounded_and_retain_no_bytes(self):
+        before = bytes(32768); after = bytearray(before)
+        for offset in (8, 104, 128): after[offset] = 1
+        error = RuntimeError("Existing baseline HOME drift")
+        with patch.object(C, "diagnostic_shm_snapshot", return_value=bytes(after)):
+            C.adoption_shm_offset_diagnostic(error, before, {C._LOCAL_SHM: {}}, "digest")
+        record = {}; C.changed_retain_adoption_offsets(record, error)
+        self.assertEqual(record, {"adoptionShmOffsets": {"available": True, "changedOffsets": [8, 104, 128]}})
+
+    def test_unavailable_race_and_offset_overflow_are_non_authoritative(self):
+        before = bytes(32768)
+        for initial, result in ((None, before), (before, RuntimeError("changed during read")),
+                                (before, bytes([1]) * (C._SHM_DIAGNOSTIC_MAX_OFFSETS + 1) + before[C._SHM_DIAGNOSTIC_MAX_OFFSETS + 1:])):
+            error = RuntimeError("Existing baseline HOME drift")
+            with patch.object(C, "diagnostic_shm_snapshot", side_effect=result if isinstance(result, Exception) else None,
+                              return_value=result if isinstance(result, bytes) else None):
+                C.adoption_shm_offset_diagnostic(error, initial, {C._LOCAL_SHM: {}}, "digest")
+            record = {}; C.changed_retain_adoption_offsets(record, error)
+            self.assertEqual(record, {"adoptionShmOffsets": {"available": False, "changedOffsets": []}})
+
+    def test_forged_malformed_and_sink_failures_are_ignored(self):
+        error = RuntimeError("Existing baseline HOME drift")
+        value = {"available": True, "changedOffsets": [8, 104]}
+        error.adoption_shm_offsets = value; record = {}; C.changed_retain_adoption_offsets(record, error); self.assertEqual(record, {})
+        error._adoption_offsets_diagnostic_origin = C._ADOPTION_OFFSETS_DIAGNOSTIC_ORIGIN
+        for bad in (dict(value, available=1), dict(value, changedOffsets=[104, 8]), dict(value, changedOffsets=[True]),
+                    dict(value, changedOffsets=[32768]), dict(value, available=False)):
+            error.adoption_shm_offsets = bad; C.changed_retain_adoption_offsets(record, error); self.assertEqual(record, {})
+        error.adoption_shm_offsets = value
+        class RefusingRecord(dict):
+            def setdefault(self, *args): raise RuntimeError("unavailable")
+        C.changed_retain_adoption_offsets(RefusingRecord(), error)
+
+
 class PreopenDiagnosticTests(unittest.TestCase):
     @unittest.skipUnless(sys.platform.startswith("linux"), "requires Linux UID and modes")
     def test_private_fingerprint_reports_exact_offsets_and_no_contents(self):

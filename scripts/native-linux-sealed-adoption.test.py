@@ -95,6 +95,9 @@ class SealedAdoption(unittest.TestCase):
                 main_only = sqlite3.connect(db.as_uri() + "?immutable=1", uri=True)
                 try: self.assertEqual(main_only.execute("SELECT value FROM ItemTable WHERE key='synthetic'").fetchone(), (b"original",))
                 finally: main_only.close()
+                if not live:
+                    main_pin = C.U.pin(C.U.read(db, 16 * 1024**2, uid=uid))
+                    wal_pin = C.U.pin(C.U.read(Path(str(db) + "-wal"), 16 * 1024**2, uid=uid))
             binding_raw = encode({"profile": {}})
             (base / "binding.json").write_bytes(binding_raw); os.chmod(base / "binding.json", 0o644)
             (base / "execution-request.json").write_bytes(encode({})); os.chmod(base / "execution-request.json", 0o644)
@@ -160,6 +163,19 @@ class SealedAdoption(unittest.TestCase):
             if existing and not live:
                 self.assertEqual(record["existingBaselineComparison"], {"membership": True, "main": True, "wal": True,
                     "other": True, "walIdentity": True, "shmIdentity": True, "shmNormalized": False})
+                observed = record["adoptionShmOffsets"]
+                self.assertTrue(observed["available"])
+                offsets = observed["changedOffsets"]
+                print("SYNTHETIC_ADOPTION_OFFSETS " + json.dumps(offsets), flush=True)
+                print("SYNTHETIC_SQLITE_VERSION " + sqlite3.sqlite_version, flush=True)
+                self.assertTrue(any(i < 100 or i >= 120 for i in offsets))
+                observed_fields = set(range(8, 12)) | set(range(40, 48)) | set(range(56, 60)) | set(range(88, 96)) | set(range(100, 120)) | set(range(128, 132))
+                self.assertTrue(set(offsets) <= observed_fields)
+                check = "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]+'?mode=ro',uri=True); assert c.execute('PRAGMA quick_check').fetchall()==[('ok',)]; assert c.execute(\"SELECT key,value FROM ItemTable\").fetchall()==[('synthetic',b'committed-in-wal')]; c.close()"
+                subprocess.run([sys.executable, "-I", "-S", "-c", check, db.as_uri()], user=uid, group=uid,
+                               extra_groups=[], check=True, timeout=10, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                self.assertEqual(C.U.pin(C.U.read(db, 16 * 1024**2, uid=uid)), main_pin)
+                self.assertEqual(C.U.pin(C.U.read(Path(str(db) + "-wal"), 16 * 1024**2, uid=uid)), wal_pin)
             self.assertFalse(record["scenarioPassed"])
 
 
