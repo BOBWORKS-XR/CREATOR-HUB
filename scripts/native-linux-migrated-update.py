@@ -283,6 +283,7 @@ _LOCAL_WAL, _LOCAL_SHM = _LOCAL_DB + "-wal", _LOCAL_DB + "-shm"
 _LOCAL_SIDECARS = frozenset((_LOCAL_WAL, _LOCAL_SHM))
 _LOCAL_IDENTITY = ("kind", "dev", "ino", "uid", "gid", "mode")
 _COLD_LOCALSTORAGE_DIAGNOSTIC_ORIGIN = object()
+_EXISTING_BASELINE_DIAGNOSTIC_ORIGIN = object()
 
 
 def cold_localstorage_gate(before):
@@ -336,6 +337,39 @@ def localstorage_shm_digest(row):
     return hashlib.sha256(b"synthetic-wal-index-v1\0" + raw[:100] + raw[120:]).hexdigest()
 
 
+def existing_baseline_diagnostic(error, baseline, first, identities, shm_digest, baseline_shm):
+    try:
+        if (type(error) is RuntimeError and str(error) == "Existing baseline HOME drift"
+                and type(baseline) is dict and type(first) is dict and type(identities) is dict
+                and all(name in baseline and name in first for name in (_LOCAL_DB, _LOCAL_WAL, _LOCAL_SHM))):
+            excluded = {_LOCAL_DB, _LOCAL_WAL, _LOCAL_SHM}
+            value = {"membership": set(first) == set(baseline),
+                     "main": first[_LOCAL_DB] == baseline[_LOCAL_DB],
+                     "wal": first[_LOCAL_WAL] == baseline[_LOCAL_WAL],
+                     "other": all(name in first and first[name] == row for name, row in baseline.items() if name not in excluded),
+                     "walIdentity": identities[_LOCAL_WAL] == localstorage_identity(baseline[_LOCAL_WAL], _LOCAL_WAL),
+                     "shmIdentity": identities[_LOCAL_SHM] == localstorage_identity(baseline[_LOCAL_SHM], _LOCAL_SHM),
+                     "shmNormalized": shm_digest == baseline_shm}
+            if all(type(item) is bool for item in value.values()) and not all(value.values()):
+                error.existing_baseline_comparison = value
+                error._existing_baseline_diagnostic_origin = _EXISTING_BASELINE_DIAGNOSTIC_ORIGIN
+    except Exception:
+        pass
+
+
+def changed_retain_existing_baseline_refusal(record, error):
+    try:
+        value = getattr(error, "existing_baseline_comparison", None)
+        keys = {"membership", "main", "wal", "other", "walIdentity", "shmIdentity", "shmNormalized"}
+        if (type(error) is RuntimeError and str(error) == "Existing baseline HOME drift"
+                and getattr(error, "_existing_baseline_diagnostic_origin", None) is _EXISTING_BASELINE_DIAGNOSTIC_ORIGIN
+                and type(value) is dict and set(value) == keys and all(type(value[k]) is bool for k in keys)
+                and not all(value.values())):
+            record.setdefault("existingBaselineComparison", dict(value))
+    except Exception:
+        pass
+
+
 def localstorage_observe(callback, *, baseline=None, expected=None, helper_pin=None):
     """Hold the SQLite read transaction across the guard's full HOME inventory."""
     require((baseline is None) != (expected is None), "Exact localStorage observation phase required")
@@ -370,10 +404,14 @@ def localstorage_observe(callback, *, baseline=None, expected=None, helper_pin=N
         reader.require_open_files(opened)
         if baseline is not None:
             if existing:
-                require(set(first) == set(baseline)
-                        and all(first[name] == row for name, row in baseline.items() if name != _LOCAL_SHM)
-                        and identities[_LOCAL_SHM] == localstorage_identity(baseline[_LOCAL_SHM], _LOCAL_SHM)
-                        and shm_digest == baseline_shm, "Existing baseline HOME drift")
+                try:
+                    require(set(first) == set(baseline)
+                            and all(first[name] == row for name, row in baseline.items() if name != _LOCAL_SHM)
+                            and identities[_LOCAL_SHM] == localstorage_identity(baseline[_LOCAL_SHM], _LOCAL_SHM)
+                            and shm_digest == baseline_shm, "Existing baseline HOME drift")
+                except RuntimeError as error:
+                    existing_baseline_diagnostic(error, baseline, first, identities, shm_digest, baseline_shm)
+                    raise
             else:
                 require(set(first) == set(baseline) | _LOCAL_SIDECARS and not set(baseline) & _LOCAL_SIDECARS,
                         "Cold baseline sidecars differ")
@@ -3172,6 +3210,7 @@ def changed_broker(env):
         changed_retain_home_path_refusal(record, error)
         changed_retain_directory_refusal(record, error)
         changed_retain_cold_localstorage_refusal(record, error)
+        changed_retain_existing_baseline_refusal(record, error)
         if str(error) == "Original fixture processes remain; never adopt or signal" and "initialUidInventory" in record:
             try:
                 record["refusedProcessObservation"] = observe_refused_fixture_processes(record["initialUidInventory"], native, helper)

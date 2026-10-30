@@ -3851,6 +3851,63 @@ class ProjectsFilterTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "inventory differs"): C.projects(html, home, {}, "initialProjects")
 
 
+class ExistingBaselineDiagnosticTests(unittest.TestCase):
+    def fixture(self):
+        row = {"kind": "file", "dev": 1, "ino": 2, "uid": M.UID, "gid": M.UID, "mode": 0o600, "size": 32768, "sha256": "a" * 64}
+        before = {name: dict(row) for name in (C._LOCAL_DB, C._LOCAL_WAL, C._LOCAL_SHM, "unrelated")}
+        first = copy.deepcopy(before)
+        identities = {name: C.localstorage_identity(first[name], name) for name in C._LOCAL_SIDECARS}
+        return before, first, identities
+
+    def test_exact_comparisons_and_no_new_reads(self):
+        for case in ("membership", "main", "wal", "other", "walIdentity", "shmIdentity", "shmNormalized"):
+            before, first, identities = self.fixture()
+            if case == "membership": first["new"] = {}
+            if case == "main": first[C._LOCAL_DB]["sha256"] = "b" * 64
+            if case == "wal": first[C._LOCAL_WAL]["sha256"] = "b" * 64
+            if case == "other": first["unrelated"]["sha256"] = "b" * 64
+            if case == "walIdentity": identities[C._LOCAL_WAL]["ino"] += 1
+            if case == "shmIdentity": identities[C._LOCAL_SHM]["ino"] += 1
+            error = RuntimeError("Existing baseline HOME drift")
+            with patch.object(C.U, "read", side_effect=AssertionError("unexpected read")), \
+                    patch.object(C.os.path, "lexists", side_effect=AssertionError("unexpected stat")):
+                C.existing_baseline_diagnostic(error, before, first, identities, "b" if case == "shmNormalized" else "a", "a")
+                record = {}; C.changed_retain_existing_baseline_refusal(record, error)
+            value = record["existingBaselineComparison"]
+            self.assertEqual(set(value), {"membership", "main", "wal", "other", "walIdentity", "shmIdentity", "shmNormalized"})
+            self.assertFalse(value[case]); self.assertTrue(all(type(item) is bool for item in value.values()))
+            self.assertTrue(all(item for name, item in value.items() if name != case))
+
+    def test_forged_malformed_and_success_cases_are_ignored(self):
+        before, first, identities = self.fixture()
+        error = RuntimeError("Existing baseline HOME drift")
+        C.existing_baseline_diagnostic(error, before, first, identities, "a", "a")
+        self.assertFalse(hasattr(error, "existing_baseline_comparison"))
+        value = {key: True for key in ("membership", "main", "wal", "other", "walIdentity", "shmIdentity", "shmNormalized")}
+        value["main"] = False
+        error.existing_baseline_comparison = value
+        record = {}; C.changed_retain_existing_baseline_refusal(record, error); self.assertEqual(record, {})
+        error._existing_baseline_diagnostic_origin = C._EXISTING_BASELINE_DIAGNOSTIC_ORIGIN
+        for bad in (dict(value, main=0), dict(value, extra=True), {k: True for k in value}):
+            error.existing_baseline_comparison = bad
+            C.changed_retain_existing_baseline_refusal(record, error)
+            self.assertEqual(record, {})
+
+    def test_capture_failure_does_not_replace_refusal_or_overwrite(self):
+        before, first, identities = self.fixture(); first[C._LOCAL_DB]["sha256"] = "b" * 64
+        error = RuntimeError("Existing baseline HOME drift")
+        with patch.object(C, "localstorage_identity", side_effect=RuntimeError("diagnostic unavailable")):
+            C.existing_baseline_diagnostic(error, before, first, identities, "a", "a")
+        self.assertFalse(hasattr(error, "existing_baseline_comparison"))
+        C.existing_baseline_diagnostic(error, before, first, identities, "a", "a")
+        record = {"existingBaselineComparison": {"retained": True}}
+        C.changed_retain_existing_baseline_refusal(record, error)
+        self.assertEqual(record, {"existingBaselineComparison": {"retained": True}})
+        class RefusingRecord(dict):
+            def setdefault(self, *args): raise RuntimeError("sink unavailable")
+        C.changed_retain_existing_baseline_refusal(RefusingRecord(), error)
+
+
 class ColdLocalStorageDiagnosticTests(unittest.TestCase):
     def test_baseline_gate_accepts_only_cold_or_owned_complete_pair(self):
         row = {"kind": "file", "dev": 1, "ino": 2, "uid": M.UID, "gid": M.UID, "mode": 0o600, "size": 32768}

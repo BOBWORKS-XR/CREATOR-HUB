@@ -152,6 +152,9 @@ class SealedAdoption(unittest.TestCase):
             elif existing and not live: self.assertNotIn("initialUidInventory", record)
             else: self.assertEqual(record["initialUidInventory"], {"processes": [], "terminalProcesses": []})
             self.assertEqual(record["refusal"]["message"], refusal)
+            if existing and not live:
+                self.assertEqual(record["existingBaselineComparison"], {"membership": True, "main": True, "wal": True,
+                    "other": True, "walIdentity": True, "shmIdentity": True, "shmNormalized": False})
             self.assertFalse(record["scenarioPassed"])
 
 
