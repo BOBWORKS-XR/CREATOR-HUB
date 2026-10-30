@@ -12,6 +12,7 @@ import os
 import queue
 from pathlib import Path
 import shutil
+import sqlite3
 import stat
 import struct
 import sys
@@ -1477,6 +1478,54 @@ class TransitionHomeTests(unittest.TestCase):
 
     def guard(self):
         return C.TransitionHomePreservation(self.before, self.manifests, self.manifest_pins, self.archives, self.f.inventories, None)
+
+    def localstorage_guard(self):
+        self.put(C._LOCAL_DB, b"synthetic-main", 0o600)
+        self.before["home"] = C.tree(self.home, M.UID)
+        self.put(C._LOCAL_WAL, b"", 0o600); self.put(C._LOCAL_SHM, b"synthetic-shm", 0o600)
+        current = C.tree(self.home, M.UID)
+        identities = {name: C.localstorage_identity(current[name]) for name in C._LOCAL_SIDECARS}
+        self.before["localstorage"] = {"sha256": "a" * 64, "identities": identities}
+        guard = self.guard()
+        def observe(callback, **kwargs): return callback(C.tree(self.home, M.UID), "a" * 64, identities)
+        self.stack.enter_context(patch.object(C, "localstorage_observe", side_effect=observe))
+        return guard
+
+    def test_localstorage_digest_guard_preserves_unrelated_and_latches_refusal(self):
+        guard = self.localstorage_guard(); guard.check()
+        self.put("config/launcher.json", b"tampered", 0o600)
+        with self.assertRaisesRegex(RuntimeError, "Original protected bytes/identity changed"): guard.check()
+        with self.assertRaisesRegex(RuntimeError, "refusal is retained"): guard.check()
+
+    def test_localstorage_guard_refuses_unknown_addition(self):
+        guard = self.localstorage_guard(); self.put("data/unrelated-new", b"unknown", 0o600)
+        with self.assertRaisesRegex(RuntimeError, "Unexpected new HOME path"): guard.check()
+
+    def test_localstorage_guard_refuses_logical_digest_mismatch(self):
+        guard = self.localstorage_guard(); self.before["localstorage"]["sha256"] = "b" * 64
+        guard.localstorage["sha256"] = "b" * 64
+        with self.assertRaisesRegex(RuntimeError, "localStorage logical contents or identity changed"): guard.check()
+        with self.assertRaisesRegex(RuntimeError, "refusal is retained"): guard.check()
+
+    @unittest.skipUnless(sys.platform.startswith("linux") and os.getuid() != 0, "requires ordinary Linux UID")
+    def test_real_held_reader_integrates_with_complete_home_guard(self):
+        uid = os.getuid()
+        self.assertEqual(os.getgid(), uid)
+        self.stack.enter_context(patch.object(M, "UID", uid))
+        self.stack.enter_context(patch.object(T.M, "UID", uid))
+        for info in self.f.linux_files.values(): info.update(st_uid=uid, st_gid=uid)
+        db = self.put(C._LOCAL_DB, b"", 0o600)
+        con = sqlite3.connect(db); con.execute("PRAGMA journal_mode=WAL")
+        con.execute("CREATE TABLE ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB NOT NULL ON CONFLICT FAIL)")
+        con.executemany("INSERT INTO ItemTable VALUES (?,?)", [("one", b"original"), ("two", b"\x00\xff")])
+        con.commit(); con.close(); os.chmod(db, 0o600)
+        self.before["home"] = C.tree(self.home, uid)
+        self.before["localstorage"] = C.localstorage_observe(
+            lambda after, value, identities: {"sha256": value, "identities": identities}, baseline=self.before["home"])
+        guard = self.guard(); guard.check()
+        self.put("config/launcher.json", b"tampered", 0o600)
+        with self.assertRaisesRegex(RuntimeError, "Original protected bytes/identity changed"): guard.check()
+        with self.assertRaisesRegex(RuntimeError, "refusal is retained"): guard.check()
 
     def completed_guard(self):
         guard = self.guard(); self.record("Ready"); guard.check()
