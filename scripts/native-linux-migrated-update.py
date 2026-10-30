@@ -48,8 +48,8 @@ TRANSACTIONS = (Path("/var/lib/creator-hub-deb-retirement"), Path("/var/lib/crea
 MAX_ENTRIES, MAX_TOTAL = 4096, 512 * 1024**2
 
 
-def load(name):
-    spec = importlib.util.spec_from_file_location("migrated_" + name.replace("-", "_"), HERE / (name + ".py"))
+def load(name, *, base=None):
+    spec = importlib.util.spec_from_file_location("migrated_" + name.replace("-", "_"), (HERE if base is None else base) / (name + ".py"))
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
@@ -301,7 +301,7 @@ def localstorage_shm_digest(row):
     return hashlib.sha256(b"synthetic-wal-index-v1\0" + raw[:100] + raw[120:]).hexdigest()
 
 
-def localstorage_observe(callback, *, baseline=None, expected=None):
+def localstorage_observe(callback, *, baseline=None, expected=None, helper_pin=None):
     """Hold the SQLite read transaction across the guard's full HOME inventory."""
     require((baseline is None) != (expected is None), "Exact localStorage observation phase required")
     prior = None
@@ -310,8 +310,13 @@ def localstorage_observe(callback, *, baseline=None, expected=None):
         require(all(name in prior for name in (_LOCAL_DB, _LOCAL_WAL, _LOCAL_SHM)), "localStorage entry missing before open")
         require(all(localstorage_identity(prior[name], name) == expected["identities"][name] for name in _LOCAL_SIDECARS)
                 and localstorage_shm_digest(prior[_LOCAL_SHM]) == expected["shmSha256"], "localStorage pre-open identity/SHM drift")
-    module = load("native-linux-localstorage-snapshot")
-    with module.HeldReader(HOME / _LOCAL_DB, M.UID, HERE / "native-linux-localstorage-snapshot.py") as reader:
+    scripts = CONTROL / "scripts"
+    helper = scripts / "native-linux-localstorage-snapshot.py"
+    pin = helper_pin if baseline is not None else expected["helper"]
+    U.protected_ancestry(scripts)
+    U.bound(helper, pin, 2 * 1024**2, uid=0, mode=0o444)
+    module = load("native-linux-localstorage-snapshot", base=scripts)
+    with module.HeldReader(HOME / _LOCAL_DB, M.UID, helper) as reader:
         first = tree(HOME, M.UID)
         require(all(name in first for name in (_LOCAL_DB, _LOCAL_WAL, _LOCAL_SHM)), "Exact localStorage files required")
         identities = {name: localstorage_identity(first[name], name) for name in _LOCAL_SIDECARS}
@@ -339,7 +344,16 @@ def localstorage_observe(callback, *, baseline=None, expected=None):
         if baseline is not None:
             require(set(after) == set(baseline) | _LOCAL_SIDECARS
                     and all(after[name] == row for name, row in baseline.items()), "Cold baseline HOME changed")
-        return callback(after, result, identities, shm_digest)
+        outcome = callback(after, result, identities, shm_digest)
+        final = tree(HOME, M.UID)
+        require(all(name in final for name in (_LOCAL_DB, _LOCAL_WAL, _LOCAL_SHM)), "localStorage entry disappeared during callback")
+        require(after[_LOCAL_DB] == final[_LOCAL_DB] and after[_LOCAL_WAL] == final[_LOCAL_WAL],
+                "localStorage database/WAL drift during callback")
+        require(all(localstorage_identity(final[name], name) == identities[name] for name in _LOCAL_SIDECARS)
+                and localstorage_shm_digest(final[_LOCAL_SHM]) == shm_digest,
+                "localStorage sidecar drift during callback")
+        reader.require_open_files(opened)
+        return outcome
 
 
 class TransitionHomePreservation:
@@ -1666,8 +1680,10 @@ def changed_adopt(env, original):
     require(U.parse(U.read(HOME / U.PREFS))["restoreHostedViews"] is False, "Original migrated Projects startup required")
     before = tree(HOME, M.UID)
     require(_LOCAL_DB in before and not set(before) & _LOCAL_SIDECARS, "Cold localStorage baseline required")
+    helper_pin = original["sources"]["native-linux-localstorage-snapshot.py"]
     localstorage = localstorage_observe(lambda after, value, identities, shm: {"sha256": value, "identities": identities,
-                                                                              "shmSha256": shm}, baseline=before)
+                                                                              "shmSha256": shm, "helper": helper_pin},
+                                        baseline=before, helper_pin=helper_pin)
     require(any(".creator-hub-settings-backups/" in n for n in before) and any("client-migrations-v1/" in n for n in before), "Original backups/client histories missing")
     journal = M.journal(HOME)
     require(report["operationJournals"]["reopened"]["file"] == U.pin(U.read(HOME / M.JOURNAL, 65536)), "Final original migration journal changed")
@@ -3002,6 +3018,8 @@ def changed_broker(env):
     secret = payload = tls = lab = child = logs = sealed = home_guard = watcher = result = None
     relock, failure = False, None
     try:
+        scripts = CONTROL / "scripts"; scripts.mkdir(mode=0o755)
+        changed_seal_sources(scripts, original["sources"])
         sealed = changed_adopt(env, original)
         initial_uid_inventory = M.native_process_inventory(native, helper)
         record["initialUidInventory"] = initial_uid_inventory
@@ -3009,8 +3027,6 @@ def changed_broker(env):
             prior = U.parse(U.read(BASE / "broker.json", 1048576, uid=0, mode=0o644))
             initial_uid_inventory = fixture_quiescence(initial_uid_inventory, prior, native, helper, evidence=record)
         require(initial_uid_inventory == {"processes": [], "terminalProcesses": []}, "Original fixture processes remain; never adopt or signal")
-        scripts = CONTROL / "scripts"; scripts.mkdir(mode=0o755)
-        changed_seal_sources(scripts, original["sources"])
         verifier_file, qualification = U.offline_verifier(env)
         require(qualification == original["verifier"], "Original verifier qualification changed")
         U.write(scripts / "verify-package-input", U.bound(verifier_file, qualification["tool"]["pin"], 64 * 1024**2), 0o755)
