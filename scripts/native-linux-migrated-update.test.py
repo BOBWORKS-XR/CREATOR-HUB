@@ -1616,6 +1616,30 @@ class TransitionHomeTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "refusal is retained"): guard.check()
 
     @unittest.skipUnless(sys.platform.startswith("linux") and os.getuid() != 0, "requires ordinary Linux UID")
+    def test_real_guard_refuses_unrelated_change_during_guard_callback(self):
+        guard, db = self.real_localstorage_guard()
+        check = guard._check_inventory
+        def change_during_callback(checkpoint, inventory):
+            result = check(checkpoint, inventory)
+            self.put("config/launcher.json", b"callback-tamper", 0o600)
+            return result
+        with patch.object(guard, "_check_inventory", side_effect=change_during_callback):
+            with self.assertRaisesRegex(RuntimeError, "Protected HOME entry changed during callback"): guard.check()
+        with self.assertRaisesRegex(RuntimeError, "refusal is retained"): guard.check()
+
+    @unittest.skipUnless(sys.platform.startswith("linux") and os.getuid() != 0, "requires ordinary Linux UID")
+    def test_real_guard_refuses_unknown_path_during_guard_callback(self):
+        guard, db = self.real_localstorage_guard()
+        check = guard._check_inventory
+        def add_during_callback(checkpoint, inventory):
+            result = check(checkpoint, inventory)
+            self.put("data/callback-unexpected", b"unexpected", 0o600)
+            return result
+        with patch.object(guard, "_check_inventory", side_effect=add_during_callback):
+            with self.assertRaisesRegex(RuntimeError, "HOME inventory changed during callback"): guard.check()
+        with self.assertRaisesRegex(RuntimeError, "refusal is retained"): guard.check()
+
+    @unittest.skipUnless(sys.platform.startswith("linux") and os.getuid() != 0, "requires ordinary Linux UID")
     def test_real_guard_refuses_non_readmark_shm_tamper(self):
         guard, db = self.real_localstorage_guard(); guard.check()
         shm = Path(str(db) + "-shm")

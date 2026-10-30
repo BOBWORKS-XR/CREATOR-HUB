@@ -346,12 +346,15 @@ def localstorage_observe(callback, *, baseline=None, expected=None, helper_pin=N
                     and all(after[name] == row for name, row in baseline.items()), "Cold baseline HOME changed")
         outcome = callback(after, result, identities, shm_digest)
         final = tree(HOME, M.UID)
+        require(set(final) == set(after), "HOME inventory changed during callback")
         require(all(name in final for name in (_LOCAL_DB, _LOCAL_WAL, _LOCAL_SHM)), "localStorage entry disappeared during callback")
         require(after[_LOCAL_DB] == final[_LOCAL_DB] and after[_LOCAL_WAL] == final[_LOCAL_WAL],
                 "localStorage database/WAL drift during callback")
         require(all(localstorage_identity(final[name], name) == identities[name] for name in _LOCAL_SIDECARS)
                 and localstorage_shm_digest(final[_LOCAL_SHM]) == shm_digest,
                 "localStorage sidecar drift during callback")
+        require(all(final[name] == row for name, row in after.items() if name != _LOCAL_SHM),
+                "Protected HOME entry changed during callback")
         reader.require_open_files(opened)
         return outcome
 
