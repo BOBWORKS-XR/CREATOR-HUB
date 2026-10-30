@@ -107,7 +107,7 @@ def sources():
 
 
 def changed_sources():
-    return tuple(sorted(set(sources()) | {"fixtures/journal-a-native-incoming.UNBOUND.json"}))
+    return tuple(sorted(set(sources()) | {"fixtures/journal-a-native-incoming.UNBOUND.json", "native-linux-localstorage-snapshot.py"}))
 
 
 def changed_seal_sources(scripts, pins):
@@ -278,6 +278,58 @@ def transition_home_closure(manifests, manifest_pins, archives, inventories, ver
 
 _HOME_PATH_REFUSAL_ORIGIN = object()
 
+_LOCAL_DB = "data/com.creatorworks.hub/localstorage/tauri_localhost_0.localstorage"
+_LOCAL_WAL, _LOCAL_SHM = _LOCAL_DB + "-wal", _LOCAL_DB + "-shm"
+_LOCAL_SIDECARS = frozenset((_LOCAL_WAL, _LOCAL_SHM))
+_LOCAL_IDENTITY = ("kind", "dev", "ino", "uid", "gid", "mode")
+
+
+def localstorage_identity(row, name):
+    require(row["kind"] == "file" and row["uid"] == row["gid"] == M.UID and not row["mode"] & 0o022,
+            "Owned localStorage sidecar required")
+    require(name in _LOCAL_SIDECARS, "Unknown localStorage sidecar")
+    result = {key: row[key] for key in _LOCAL_IDENTITY}
+    if name == _LOCAL_SHM: result["size"] = row["size"]
+    return result
+
+
+def localstorage_shm_digest(row):
+    """Only SQLite WAL-index read-mark integers may vary in the synthetic SHM."""
+    raw = U.read(HOME / _LOCAL_SHM, 16 * 1024**2, uid=M.UID)
+    require(len(raw) >= 32768 and len(raw) % 32768 == 0 and U.pin(raw) == {k: row[k] for k in ("size", "sha256")},
+            "localStorage SHM changed during observation")
+    return hashlib.sha256(b"synthetic-wal-index-v1\0" + raw[:100] + raw[120:]).hexdigest()
+
+
+def localstorage_observe(callback, *, baseline=None):
+    """Hold the SQLite read transaction across the guard's full HOME inventory."""
+    module = load("native-linux-localstorage-snapshot")
+    with module.HeldReader(HOME / _LOCAL_DB, M.UID, HERE / "native-linux-localstorage-snapshot.py") as reader:
+        first = tree(HOME, M.UID)
+        require(all(name in first for name in (_LOCAL_DB, _LOCAL_WAL, _LOCAL_SHM)), "Exact localStorage files required")
+        identities = {name: localstorage_identity(first[name], name) for name in _LOCAL_SIDECARS}
+        shm_digest = localstorage_shm_digest(first[_LOCAL_SHM])
+        opened = [(first[name]["dev"], first[name]["ino"]) for name in (_LOCAL_DB, _LOCAL_WAL)]
+        reader.require_open_files(opened)
+        if baseline is not None:
+            require(set(first) == set(baseline) | _LOCAL_SIDECARS and not set(baseline) & _LOCAL_SIDECARS,
+                    "Cold baseline sidecars differ")
+            require(all(first[name] == row for name, row in baseline.items()), "Cold baseline HOME drift")
+            require(first[_LOCAL_WAL]["size"] == 0, "Cold baseline WAL is not empty")
+        result = reader.capture()
+        after = tree(HOME, M.UID)
+        require(all(name in after for name in (_LOCAL_DB, _LOCAL_WAL, _LOCAL_SHM)), "localStorage entry disappeared")
+        require(first[_LOCAL_DB] == after[_LOCAL_DB] and first[_LOCAL_WAL] == after[_LOCAL_WAL],
+                "localStorage database/WAL drift")
+        require(all(localstorage_identity(after[name], name) == identities[name] for name in _LOCAL_SIDECARS),
+                "localStorage sidecar identity drift")
+        require(localstorage_shm_digest(after[_LOCAL_SHM]) == shm_digest, "localStorage SHM non-readmark drift")
+        reader.require_open_files(opened)
+        if baseline is not None:
+            require(set(after) == set(baseline) | _LOCAL_SIDECARS
+                    and all(after[name] == row for name, row in baseline.items()), "Cold baseline HOME changed")
+        return callback(after, result, identities, shm_digest)
+
 
 class TransitionHomePreservation:
     """Read-only preservation only; no admission, activation or protocol writer."""
@@ -286,8 +338,17 @@ class TransitionHomePreservation:
                 "Exact original HOME/UID context required")
         self.expected, self.groups, release = transition_home_closure(manifests, manifest_pins, archives, inventories, verifier)
         self.before, self.journal = copy.deepcopy(adopted["home"]), copy.deepcopy(adopted["journal"])
+        self.localstorage = copy.deepcopy(adopted.get("localstorage"))
         self._journal_mode = self.before[M.JOURNAL]["mode"]
-        require(tree(HOME, M.UID) == self.before, "Original adopted HOME drifted")
+        initial = tree(HOME, M.UID)
+        if self.localstorage is None:
+            require(initial == self.before, "Original adopted HOME drifted")
+        else:
+            require(set(initial) == set(self.before) | _LOCAL_SIDECARS
+                    and not set(self.before) & _LOCAL_SIDECARS
+                    and all(initial[name] == row for name, row in self.before.items()), "Original adopted HOME drifted")
+            require(all(localstorage_identity(initial[name], name) == self.localstorage["identities"][name]
+                        for name in _LOCAL_SIDECARS), "Original sidecar identity drift")
         self.R, self.E, self.D = "data/creator-hub/mcp-route-v1/linux-x86_64", "data/creator-hub-update-cache/deb/records", "data/creator-hub-update-cache/deb"
         self.active, self.handoff = self.R + "/active.json", self.E + "/mcp-route-update.json"
         require(not os.path.lexists(HOME / self.handoff), "Fresh gate refuses prior handoff; no supersession")
@@ -333,6 +394,7 @@ class TransitionHomePreservation:
         self._rows(self.before, self.static, required=False)
         self._journal()
         self.allowed = set(self.static) | {self.handoff, self.pending, self.partial}
+        if self.localstorage is not None: self.allowed.update(_LOCAL_SIDECARS)
         for _, rows in self.b_groups: self.allowed.update(rows)
         self.b_additions = set().union(*(set(rows) for _, rows in self.b_groups), {self.R + "/history", self.history})
         self._ready = self._record = self._active_b = None
@@ -398,7 +460,16 @@ class TransitionHomePreservation:
             raise
 
     def _check(self, checkpoint):
-        after = tree(HOME, M.UID)
+        if self.localstorage is None:
+            return self._check_inventory(checkpoint, tree(HOME, M.UID))
+        def verify(after, result, identities, shm_digest):
+            require(result == self.localstorage["sha256"] and identities == self.localstorage["identities"]
+                    and shm_digest == self.localstorage["shmSha256"],
+                    "Original localStorage logical contents or identity changed")
+            return self._check_inventory(checkpoint, after)
+        return localstorage_observe(verify)
+
+    def _check_inventory(self, checkpoint, after):
         require(self.before.keys() <= after.keys(), "An original protected entry disappeared")
         capture, phase = None, None
         if os.path.lexists(HOME / self.handoff):
@@ -480,7 +551,8 @@ class TransitionHomePreservation:
         require(U.transition_file(HOME / self.active, 16384, mode=0o600) == active, "Active changed during snapshot")
         require(os.path.lexists(HOME / self.handoff) == (capture is not None), "Handoff changed during snapshot")
         if capture is not None: require(U.transition_file(HOME / self.handoff, mode=0o600) == capture, "Handoff changed during snapshot")
-        self._seen.update({n: copy.deepcopy(after[n]) for n in additions if n not in (self.pending, self.partial, self.handoff)})
+        self._seen.update({n: copy.deepcopy(after[n]) for n in additions
+                           if n not in (self.pending, self.partial, self.handoff) and n not in _LOCAL_SIDECARS})
         if phase == "Ready" and self._ready is None: self._ready = copy.deepcopy(capture)
         if complete and self._active_b is None: self._active_b = copy.deepcopy(active)
         self._journal_mode = after[M.JOURNAL]["mode"]
@@ -1582,11 +1654,14 @@ def changed_adopt(env, original):
     require(U.load("native-linux-polkit-probe").fixture_credential("status") == "L", "Original migration account must be locked")
     require(U.parse(U.read(HOME / U.PREFS))["restoreHostedViews"] is False, "Original migrated Projects startup required")
     before = tree(HOME, M.UID)
+    require(_LOCAL_DB in before and not set(before) & _LOCAL_SIDECARS, "Cold localStorage baseline required")
+    localstorage = localstorage_observe(lambda after, value, identities, shm: {"sha256": value, "identities": identities,
+                                                                              "shmSha256": shm}, baseline=before)
     require(any(".creator-hub-settings-backups/" in n for n in before) and any("client-migrations-v1/" in n for n in before), "Original backups/client histories missing")
     journal = M.journal(HOME)
     require(report["operationJournals"]["reopened"]["file"] == U.pin(U.read(HOME / M.JOURNAL, 65536)), "Final original migration journal changed")
     require(not os.path.lexists(HOME / "data/creator-hub-update-cache/deb/records/mcp-route-update.json"), "No seeded/prior handoff may be adopted")
-    return {"schemaVersion": 1, "context": original["context"], "reports": captured_reports(), "home": before, "journal": journal,
+    return {"schemaVersion": 1, "context": original["context"], "reports": captured_reports(), "home": before, "journal": journal, "localstorage": localstorage,
             "transactions": {str(p): tree(p, 0) for p in TRANSACTIONS}, "batch": batch, "binding": binding, "accountUid": M.UID, "legacy": legacy_state()}
 
 
