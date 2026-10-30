@@ -21,6 +21,12 @@ C = importlib.util.module_from_spec(spec); sys.modules[spec.name] = C; spec.load
 @unittest.skipUnless(sys.platform.startswith("linux") and os.geteuid() == 0, "requires disposable Linux root runner")
 class SealedAdoption(unittest.TestCase):
     def test_actual_broker_adopts_with_uid_inaccessible_workspace(self):
+        self.adopt_fixture(existing=False)
+
+    def test_actual_broker_adopts_committed_wal_as_synthetic_uid(self):
+        self.adopt_fixture(existing=True)
+
+    def adopt_fixture(self, existing):
         uid = C.M.UID
         self.assertEqual(uid, 21314)
         with tempfile.TemporaryDirectory(prefix="sealed-adoption-", dir="/") as temp, ExitStack() as stack:
@@ -59,6 +65,14 @@ class SealedAdoption(unittest.TestCase):
             con.execute("CREATE TABLE ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB NOT NULL ON CONFLICT FAIL)")
             con.execute("INSERT INTO ItemTable VALUES (?,?)", ("synthetic", b"original")); con.commit(); con.close()
             os.chown(db, uid, uid); os.chmod(db, 0o600)
+            if existing:
+                writer = "import os,sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute(\"UPDATE ItemTable SET value=? WHERE key='synthetic'\", (b'committed-in-wal',)); c.commit(); os._exit(0)"
+                subprocess.run([sys.executable, "-I", "-S", "-c", writer, str(db)], user=uid, group=uid,
+                               extra_groups=[], check=True, timeout=10)
+                self.assertGreater(Path(str(db) + "-wal").stat().st_size, 0)
+                main_only = sqlite3.connect(db.as_uri() + "?immutable=1", uri=True)
+                try: self.assertEqual(main_only.execute("SELECT value FROM ItemTable WHERE key='synthetic'").fetchone(), (b"original",))
+                finally: main_only.close()
             binding_raw = encode({"profile": {}})
             (base / "binding.json").write_bytes(binding_raw); os.chmod(base / "binding.json", 0o644)
             (base / "execution-request.json").write_bytes(encode({})); os.chmod(base / "execution-request.json", 0o644)
