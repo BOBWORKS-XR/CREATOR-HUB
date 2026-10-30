@@ -1478,6 +1478,34 @@ class TransitionHomeTests(unittest.TestCase):
     def guard(self):
         return C.TransitionHomePreservation(self.before, self.manifests, self.manifest_pins, self.archives, self.f.inventories, None)
 
+    def localstorage_guard(self):
+        self.put(C._LOCAL_DB, b"synthetic-main", 0o600)
+        self.before["home"] = C.tree(self.home, M.UID)
+        self.put(C._LOCAL_WAL, b"", 0o600); self.put(C._LOCAL_SHM, b"synthetic-shm", 0o600)
+        current = C.tree(self.home, M.UID)
+        identities = {name: C.localstorage_identity(current[name]) for name in C._LOCAL_SIDECARS}
+        self.before["localstorage"] = {"sha256": "a" * 64, "identities": identities}
+        guard = self.guard()
+        def observe(callback, **kwargs): return callback(C.tree(self.home, M.UID), "a" * 64, identities)
+        self.stack.enter_context(patch.object(C, "localstorage_observe", side_effect=observe))
+        return guard
+
+    def test_localstorage_digest_guard_preserves_unrelated_and_latches_refusal(self):
+        guard = self.localstorage_guard(); guard.check()
+        self.put("config/launcher.json", b"tampered", 0o600)
+        with self.assertRaisesRegex(RuntimeError, "Original protected bytes/identity changed"): guard.check()
+        with self.assertRaisesRegex(RuntimeError, "refusal is retained"): guard.check()
+
+    def test_localstorage_guard_refuses_unknown_addition(self):
+        guard = self.localstorage_guard(); self.put("data/unrelated-new", b"unknown", 0o600)
+        with self.assertRaisesRegex(RuntimeError, "Unexpected new HOME path"): guard.check()
+
+    def test_localstorage_guard_refuses_logical_digest_mismatch(self):
+        guard = self.localstorage_guard(); self.before["localstorage"]["sha256"] = "b" * 64
+        guard.localstorage["sha256"] = "b" * 64
+        with self.assertRaisesRegex(RuntimeError, "localStorage logical contents or identity changed"): guard.check()
+        with self.assertRaisesRegex(RuntimeError, "refusal is retained"): guard.check()
+
     def completed_guard(self):
         guard = self.guard(); self.record("Ready"); guard.check()
         self.record({"Attempting": self.f.target("b")}); guard.check()
