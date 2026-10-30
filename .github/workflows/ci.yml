@@ -1,13 +1,13 @@
-name: Private held SQLite guard focused tests
+name: Private sealed-adoption and callback guard checks
 on:
   workflow_dispatch:
 permissions:
   contents: read
 jobs:
-  tests:
+  checks:
     if: >-
       github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.repository_id == '1364807512' &&
-      github.ref == 'refs/heads/validation/journal-held-guard-95' && github.event_name == 'workflow_dispatch'
+      github.ref == 'refs/heads/validation/journal-sealed-adoption-97' && github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-22.04
     timeout-minutes: 8
     steps:
@@ -15,23 +15,24 @@ jobs:
         with:
           fetch-depth: 2
           persist-credentials: false
-      - name: Verify parent and exact focused sources
+      - name: Verify candidate source
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD^)" = 856c55970353821d85c66376e895e86322896910
+          test "$(git rev-parse HEAD^)" = b304f14e772906267124e30b9a83cced0b933da2
+          test "$(sha256sum scripts/native-linux-migrated-update.py | cut -d' ' -f1)" = 047820f5de0a7ec9b03a801178d41066b111ed09e3af44792b8afe8f93068ce5
+          test "$(sha256sum scripts/native-linux-migrated-update.test.py | cut -d' ' -f1)" = a57a2af6ae0940440c1bd96e02b6000d41a33e33b96dbf3e360cd6ae707f8c59
+          test "$(sha256sum scripts/native-linux-sealed-adoption.test.py | cut -d' ' -f1)" = cd4ffd19ac648067526ab137c145ee61eb71770246dd5f546bbff4e1d6c10258
           test "$(sha256sum scripts/native-linux-localstorage-snapshot.py | cut -d' ' -f1)" = 6722616d0e186dcbdb45db2936cb1f02f7785b43f7f1ebdcc10b6682ed7af45a
           test "$(sha256sum scripts/native-linux-localstorage-snapshot.test.py | cut -d' ' -f1)" = b45fb3b8a73c20aa3351537149ff4123dade4b181e29c97f27cbe1efa54ca5f7
-          test "$(sha256sum scripts/native-linux-migrated-update.py | cut -d' ' -f1)" = 5dd3c5d23da6ca525b9a8861089683a95934d01433c897a7974cfb8f86cc38dd
-          test "$(sha256sum scripts/native-linux-migrated-update.test.py | cut -d' ' -f1)" = e35d09930c5ed0bf3758f367c960a2702da19cec1aa869eb854bb089616dde1e
-          mkdir "$RUNNER_TEMP/held-guard"
-          git rev-parse HEAD > "$RUNNER_TEMP/held-guard/commit.txt"
+          mkdir "$RUNNER_TEMP/sealed-adoption"
+          git rev-parse HEAD > "$RUNNER_TEMP/sealed-adoption/commit.txt"
       - uses: actions/setup-python@v6
         id: python
         with:
           python-version: '3.11.17'
           update-environment: false
-      - name: Run bounded UID, process and guard tests
+      - name: Run focused source, process and adoption tests
         shell: bash
         env:
           P: ${{ steps.python.outputs.python-path }}
@@ -40,19 +41,20 @@ jobs:
           failed=0
           run_case() {
             local name="$1"; shift
-            if timeout 120 "$@" > "$RUNNER_TEMP/held-guard/$name.log" 2>&1; then status=0; else status=$?; fi
-            printf '%s %s\n' "$name" "$status" | tee -a "$RUNNER_TEMP/held-guard/status.txt"
-            if [[ "$status" != 0 ]]; then tail -n 80 "$RUNNER_TEMP/held-guard/$name.log"; failed=1; fi
+            if timeout 120 "$@" > "$RUNNER_TEMP/sealed-adoption/$name.log" 2>&1; then status=0; else status=$?; fi
+            printf '%s %s\n' "$name" "$status" | tee -a "$RUNNER_TEMP/sealed-adoption/status.txt"
+            if [[ "$status" != 0 ]]; then tail -n 100 "$RUNNER_TEMP/sealed-adoption/$name.log"; failed=1; fi
           }
           run_case reader "$P" -I -S -B scripts/native-linux-localstorage-snapshot.test.py HeldReaderTests
-          run_case root sudo -n "$P" -I -S -B scripts/native-linux-localstorage-snapshot.test.py RootToSyntheticUidTests
-          run_case guard "$P" -I -S -B scripts/native-linux-migrated-update.test.py TransitionHomeTests SealedContinuationSourcesTests
+          run_case root-reader sudo -n "$P" -I -S -B scripts/native-linux-localstorage-snapshot.test.py RootToSyntheticUidTests
+          run_case actual-adoption sudo -n "$P" -I -S -B scripts/native-linux-sealed-adoption.test.py
+          run_case guard "$P" -I -S -B scripts/native-linux-migrated-update.test.py TransitionHomeTests SealedContinuationSourcesTests ChangedCaseSourceTests SourceBindingTests
           exit "$failed"
       - name: Retain focused evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: held-guard-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/held-guard
+          name: sealed-adoption-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/sealed-adoption
           if-no-files-found: warn
           retention-days: 7

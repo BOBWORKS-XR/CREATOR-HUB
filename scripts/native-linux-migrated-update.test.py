@@ -1485,7 +1485,7 @@ class TransitionHomeTests(unittest.TestCase):
         self.put(C._LOCAL_WAL, b"", 0o600); self.put(C._LOCAL_SHM, b"synthetic-shm", 0o600)
         current = C.tree(self.home, M.UID)
         identities = {name: C.localstorage_identity(current[name], name) for name in C._LOCAL_SIDECARS}
-        self.before["localstorage"] = {"sha256": "a" * 64, "identities": identities, "shmSha256": "c" * 64}
+        self.before["localstorage"] = {"sha256": "a" * 64, "identities": identities, "shmSha256": "c" * 64, "helper": {}}
         guard = self.guard()
         def observe(callback, **kwargs): return callback(C.tree(self.home, M.UID), "a" * 64, identities, "c" * 64)
         self.stack.enter_context(patch.object(C, "localstorage_observe", side_effect=observe))
@@ -1524,6 +1524,20 @@ class TransitionHomeTests(unittest.TestCase):
         self.stack.enter_context(patch.object(M, "UID", uid))
         self.stack.enter_context(patch.object(T.M, "UID", uid))
         for info in self.f.linux_files.values(): info.update(st_uid=uid, st_gid=uid)
+        control = self.f.directory / "sealed-control"; scripts = control / "scripts"; scripts.mkdir(parents=True)
+        helper = scripts / "native-linux-localstorage-snapshot.py"
+        helper.write_bytes((HERE / helper.name).read_bytes()); os.chmod(helper, 0o444)
+        helper_pin = C.U.pin(helper.read_bytes())
+        self.stack.enter_context(patch.object(C, "CONTROL", control))
+        self.stack.enter_context(patch.object(C.U, "protected_ancestry"))
+        bound = C.U.bound
+        def fixture_bound(path, pin, *args, **kwargs):
+            if path == helper:
+                raw = helper.read_bytes()
+                if C.U.pin(raw) != pin: raise RuntimeError("fixture helper pin differs")
+                return raw
+            return bound(path, pin, *args, **kwargs)
+        self.stack.enter_context(patch.object(C.U, "bound", side_effect=fixture_bound))
         db = self.put(C._LOCAL_DB, b"", 0o600)
         con = sqlite3.connect(db); con.execute("PRAGMA journal_mode=WAL")
         con.execute("CREATE TABLE ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB NOT NULL ON CONFLICT FAIL)")
@@ -1531,7 +1545,8 @@ class TransitionHomeTests(unittest.TestCase):
         con.commit(); con.close(); os.chmod(db, 0o600)
         self.before["home"] = C.tree(self.home, uid)
         self.before["localstorage"] = C.localstorage_observe(
-            lambda after, value, identities, shm: {"sha256": value, "identities": identities, "shmSha256": shm}, baseline=self.before["home"])
+            lambda after, value, identities, shm: {"sha256": value, "identities": identities, "shmSha256": shm, "helper": helper_pin},
+            baseline=self.before["home"], helper_pin=helper_pin)
         return self.guard(), db
 
     @unittest.skipUnless(sys.platform.startswith("linux") and os.getuid() != 0, "requires ordinary Linux UID")
@@ -1545,8 +1560,8 @@ class TransitionHomeTests(unittest.TestCase):
     def test_real_guard_refuses_wal_commit_during_held_inventory(self):
         guard, db = self.real_localstorage_guard()
         original_load = C.load
-        def load_with_writer(name):
-            module = original_load(name)
+        def load_with_writer(name, **kwargs):
+            module = original_load(name, **kwargs)
             if name == "native-linux-localstorage-snapshot":
                 capture = module.HeldReader.capture
                 def commit_during(reader):
@@ -1567,8 +1582,8 @@ class TransitionHomeTests(unittest.TestCase):
     def test_real_guard_refuses_wal_replacement_during_held_inventory(self):
         guard, db = self.real_localstorage_guard()
         original_load = C.load
-        def load_with_replacement(name):
-            module = original_load(name)
+        def load_with_replacement(name, **kwargs):
+            module = original_load(name, **kwargs)
             if name == "native-linux-localstorage-snapshot":
                 capture = module.HeldReader.capture
                 def replace_during(reader):
@@ -1582,6 +1597,22 @@ class TransitionHomeTests(unittest.TestCase):
             return module
         with patch.object(C, "load", side_effect=load_with_replacement):
             with self.assertRaisesRegex(RuntimeError, "database/WAL drift"): guard.check()
+        with self.assertRaisesRegex(RuntimeError, "refusal is retained"): guard.check()
+
+    @unittest.skipUnless(sys.platform.startswith("linux") and os.getuid() != 0, "requires ordinary Linux UID")
+    def test_real_guard_refuses_wal_commit_during_guard_callback(self):
+        guard, db = self.real_localstorage_guard()
+        check = guard._check_inventory
+        def write_during_callback(checkpoint, inventory):
+            result = check(checkpoint, inventory)
+            writer = sqlite3.connect(db)
+            try:
+                writer.execute("UPDATE ItemTable SET value=? WHERE key='one'", (b"during-callback",))
+                writer.commit()
+            finally: writer.close()
+            return result
+        with patch.object(guard, "_check_inventory", side_effect=write_during_callback):
+            with self.assertRaisesRegex(RuntimeError, "database/WAL drift during callback"): guard.check()
         with self.assertRaisesRegex(RuntimeError, "refusal is retained"): guard.check()
 
     @unittest.skipUnless(sys.platform.startswith("linux") and os.getuid() != 0, "requires ordinary Linux UID")
