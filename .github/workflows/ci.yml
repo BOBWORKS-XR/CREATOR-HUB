@@ -7,7 +7,7 @@ jobs:
   checks:
     if: >-
       github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.repository_id == '1364807512' &&
-      github.ref == 'refs/heads/validation/journal-existing-sidecars-diagnostic-108' && github.event_name == 'workflow_dispatch'
+      github.ref == 'refs/heads/validation/journal-wal-index-diagnostic-109' && github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-22.04
     timeout-minutes: 8
     steps:
@@ -19,10 +19,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD^)" = d6761c95df5d7b623dec516569291b0b5c27535c
+          test "$(git rev-parse HEAD^)" = a261b1aa0ba1851e03357f1817573a49b89f3034
           test "$(sha256sum scripts/native-linux-migrated-update.py | cut -d' ' -f1)" = b25285d6654c7ae1329326b8c11b56ad8ab8381b3bc18a26580bff75a5e3ea7f
           test "$(sha256sum scripts/native-linux-migrated-update.test.py | cut -d' ' -f1)" = ba143b3a4b160a86fc96e4e1238592e2d28e10b5fa31746b068916911e13ae16
-          test "$(sha256sum scripts/native-linux-sealed-adoption.test.py | cut -d' ' -f1)" = 16c17a8114ea5992dbbbee5ccf3651532ec4aa1f30e5286e034ab817274493e2
+          test "$(sha256sum scripts/native-linux-sealed-adoption.test.py | cut -d' ' -f1)" = 291e967d774083dcc4c7abca4e16ae858136d68cb59bb8b04db68bb5d4aa0608
           test "$(sha256sum scripts/native-linux-localstorage-snapshot.py | cut -d' ' -f1)" = 6722616d0e186dcbdb45db2936cb1f02f7785b43f7f1ebdcc10b6682ed7af45a
           test "$(sha256sum scripts/native-linux-localstorage-snapshot.test.py | cut -d' ' -f1)" = b45fb3b8a73c20aa3351537149ff4123dade4b181e29c97f27cbe1efa54ca5f7
           mkdir "$RUNNER_TEMP/sealed-adoption"
@@ -46,7 +46,6 @@ jobs:
             if [[ "$status" != 0 ]]; then tail -n 100 "$RUNNER_TEMP/sealed-adoption/$name.log"; failed=1; fi
           }
           run_case actual-adoption sudo -n "$P" -I -S -B scripts/native-linux-sealed-adoption.test.py SealedAdoption.test_actual_broker_adopts_committed_wal_as_synthetic_uid
-          run_case guard "$P" -I -S -B scripts/native-linux-migrated-update.test.py TransitionHomeTests.test_existing_committed_wal_integrates_with_complete_home_guard TransitionHomeTests.test_existing_wal_refuses_commit_during_callback
           exit "$failed"
       - name: Retain focused evidence
         if: always()

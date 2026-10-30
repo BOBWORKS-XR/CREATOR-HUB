@@ -46,6 +46,21 @@ class SealedAdoption(unittest.TestCase):
         self.assertEqual(uid, 21314)
         with tempfile.TemporaryDirectory(prefix="sealed-adoption-", dir="/") as temp, ExitStack() as stack:
             if existing: stack.enter_context(patch.object(C, "require", new=diagnose_existing_baseline))
+            if existing:
+                original_digest = C.localstorage_shm_digest
+                samples = []
+                def capture_offsets(row):
+                    result = original_digest(row)
+                    raw = C.U.read(C.HOME / C._LOCAL_SHM, 32768, uid=uid)
+                    self.assertEqual(C.U.pin(raw), {key: row[key] for key in ("size", "sha256")})
+                    self.assertEqual(len(raw), 32768)
+                    samples.append(raw)
+                    if len(samples) == 2:
+                        offsets = [i for i, (a, b) in enumerate(zip(*samples)) if a != b]
+                        self.assertLessEqual(len(offsets), 4096)
+                        print("SHM_CHANGED_OFFSETS " + json.dumps(offsets), flush=True)
+                    return result
+                stack.enter_context(patch.object(C, "localstorage_shm_digest", new=capture_offsets))
             root = Path(temp).resolve(); os.chmod(root, 0o755)
             workspace = root / "workspace"; workspace.mkdir(mode=0o700)
             source = workspace / "scripts"; source.mkdir(mode=0o755)
