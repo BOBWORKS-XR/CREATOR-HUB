@@ -27,6 +27,9 @@ class CanonicalDigestTests(unittest.TestCase):
             database.execute("PRAGMA user_version=0")
             database.execute("PRAGMA application_id=1234")
             self.assertNotEqual(original, module.digest(database))
+            database.execute("PRAGMA application_id=0")
+            database.execute("PRAGMA default_cache_size=1234")
+            self.assertNotEqual(original, module.digest(database))
         finally: database.close()
 
     def test_unknown_schema_or_row_type_is_refused(self):
@@ -101,8 +104,9 @@ class HeldReaderTests(unittest.TestCase):
     def test_scratch_rejects_different_logical_snapshot(self):
         with module.HeldReader(self.db, self.uid, SCRIPT) as reader:
             reader.capture()
-            with self.assertRaisesRegex(RuntimeError, "Independent SQLite snapshot differs"):
-                module.independent_digest(None, self.db, self.uid, "0" * 64)
+            with tempfile.TemporaryDirectory(dir=self.root) as scratch:
+                with self.assertRaisesRegex(RuntimeError, "Independent SQLite snapshot differs"):
+                    module.independent_digest(self.db, self.uid, "0" * 64, Path(scratch))
 
     def test_scratch_rejects_same_bytes_wal_replacement(self):
         with module.HeldReader(self.db, self.uid, SCRIPT) as reader:
@@ -116,10 +120,73 @@ class HeldReaderTests(unittest.TestCase):
                     replacement.write_bytes(result[1]); os.chmod(replacement, 0o600)
                     os.replace(replacement, path); replaced.append(True)
                 return result
-            with patch.object(module, "stable_file", side_effect=replace_after_read):
-                with self.assertRaisesRegex(RuntimeError, "SQLite source changed during independent snapshot"):
-                    module.independent_digest(None, self.db, self.uid, expected)
+            with tempfile.TemporaryDirectory(dir=self.root) as scratch:
+                with patch.object(module, "stable_file", side_effect=replace_after_read):
+                    with self.assertRaisesRegex(RuntimeError, "SQLite source changed during independent snapshot"):
+                        module.independent_digest(self.db, self.uid, expected, Path(scratch))
             self.assertEqual(replaced, [True])
+
+    def test_persistent_cache_metadata_matches_backup_and_scratch(self):
+        writer = sqlite3.connect(self.db)
+        try:
+            before = module.digest(writer)
+            writer.execute("PRAGMA default_cache_size=1234"); writer.commit()
+            expected = module.digest(writer)
+            self.assertNotEqual(before, expected)
+            with module.HeldReader(self.db, self.uid, SCRIPT) as reader:
+                self.assertEqual(reader.capture(), expected)
+        finally: writer.close()
+
+    def probe_main_read_lock(self):
+        code = ("import errno,fcntl,os,sys; fd=os.open(sys.argv[1],os.O_RDWR); "
+                "exec(\"try:\\n fcntl.lockf(fd,fcntl.LOCK_EX|fcntl.LOCK_NB,1,0x40000002,os.SEEK_SET)\\n"
+                "except OSError as e:\\n sys.exit(73 if e.errno in (errno.EACCES,errno.EAGAIN) else 74)\\n\"); sys.exit(0)")
+        return subprocess.run([sys.executable, "-I", "-S", "-c", code, str(self.db)],
+                              timeout=5, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode
+
+    def test_main_lock_survives_distinct_copier(self):
+        with module.HeldReader(self.db, self.uid, SCRIPT) as reader:
+            copy_snapshot = reader._copy_snapshot
+            def probe_around(result):
+                self.assertEqual(self.probe_main_read_lock(), 73)
+                copy_snapshot(result)
+                self.assertEqual(self.probe_main_read_lock(), 73)
+            with patch.object(reader, "_copy_snapshot", side_effect=probe_around): reader.capture()
+        self.assertEqual(self.probe_main_read_lock(), 0)
+
+    def test_distinct_writer_commit_during_held_transaction_refuses_copy(self):
+        writer = ("import sqlite3,sys; c=sqlite3.connect(sys.argv[1],timeout=3); "
+                  "c.execute(\"UPDATE ItemTable SET value=? WHERE key='one'\",(b'concurrent',)); c.commit(); c.close()")
+        reader = module.HeldReader(self.db, self.uid, SCRIPT)
+        with self.assertRaisesRegex(RuntimeError, "Independent SQLite snapshot refused"):
+            with reader:
+                copy_snapshot = reader._copy_snapshot
+                def commit_before_copy(result):
+                    self.assertEqual(self.probe_main_read_lock(), 73)
+                    subprocess.run([sys.executable, "-I", "-S", "-c", writer, str(self.db)], check=True, timeout=5)
+                    self.assertEqual(self.probe_main_read_lock(), 73)
+                    return copy_snapshot(result)
+                with patch.object(reader, "_copy_snapshot", side_effect=commit_before_copy): reader.capture()
+        self.assertIsNone(reader.process)
+
+    def test_timed_out_copier_is_reaped_and_scratch_removed(self):
+        reader = module.HeldReader(self.db, self.uid, SCRIPT, timeout=1)
+        real_popen = subprocess.Popen
+        slow = ("import pathlib,sys,time; (pathlib.Path(sys.argv[1])/'tauri_localhost_0.localstorage')"
+                ".write_bytes(b'synthetic'); time.sleep(30)")
+        scratch = container = None
+        with reader:
+            def slow_copier(args, **kwargs):
+                return real_popen([sys.executable, "-I", "-S", "-c", slow, str(reader.scratch)], **kwargs)
+            with patch.object(module.subprocess, "Popen", side_effect=slow_copier):
+                with self.assertRaises(subprocess.TimeoutExpired): reader.capture()
+                scratch = reader.scratch
+                container = reader.scratch_container
+        self.assertIsNotNone(scratch)
+        self.assertFalse(scratch.exists())
+        self.assertFalse(container.exists())
+        self.assertIsNotNone(reader.copier.returncode)
+        self.assertIsNone(reader.process)
 
     def test_missing_or_replaced_wal_descriptor_refuses_and_reaps(self):
         with self.assertRaisesRegex(RuntimeError, "descriptor differs"):

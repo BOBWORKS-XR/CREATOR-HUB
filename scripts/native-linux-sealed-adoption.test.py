@@ -21,6 +21,22 @@ C = importlib.util.module_from_spec(spec); sys.modules[spec.name] = C; spec.load
 
 @unittest.skipUnless(sys.platform.startswith("linux") and os.geteuid() == 0, "requires disposable Linux root runner")
 class SealedAdoption(unittest.TestCase):
+    def test_inventory_and_helper_exclusion_crosses_uid_boundary(self):
+        uid = C.M.UID
+        with tempfile.TemporaryDirectory(prefix="inventory-lock-", dir="/") as temporary:
+            root = Path(temporary); os.chmod(root, 0o755)
+            lock = root / "localstorage-inventory.lock"
+            C.U.write(lock, b"", 0o444)
+            code = ("import errno,fcntl,os,sys; fd=os.open(sys.argv[1],os.O_RDONLY); "
+                    "exec(\"try:\\n fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)\\n"
+                    "except OSError as e:\\n sys.exit(73 if e.errno in (errno.EACCES,errno.EAGAIN) else 74)\\n\"); sys.exit(0)")
+            def probe():
+                return subprocess.run([sys.executable, "-I", "-S", "-c", code, str(lock)], user=uid, group=uid,
+                                      extra_groups=[], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5).returncode
+            with patch.object(C, "CONTROL", root):
+                with C.localstorage_inventory_exclusion(): self.assertEqual(probe(), 73)
+                self.assertEqual(probe(), 0)
+
     def test_actual_broker_adopts_with_uid_inaccessible_workspace(self):
         self.adopt_fixture(existing=False)
 

@@ -6,6 +6,7 @@ Inputs are independently pinned original ZIPs; this module never downloads them.
 """
 import ctypes
 import copy
+from contextlib import contextmanager
 import hashlib
 import importlib.util
 import io
@@ -23,6 +24,10 @@ import subprocess
 import sys
 import threading
 import time
+try:
+    import fcntl
+except ModuleNotFoundError:
+    fcntl = None
 
 sys.dont_write_bytecode = True
 HERE = Path(__file__).resolve().parent
@@ -502,7 +507,37 @@ def changed_retain_preopen_refusal(record, error):
         pass
 
 
+@contextmanager
+def localstorage_inventory_exclusion():
+    require(fcntl is not None, "Linux inventory exclusion required")
+    path = CONTROL / "localstorage-inventory.lock"
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    locked = False
+    try:
+        info = os.fstat(fd)
+        require(stat.S_ISREG(info.st_mode) and info.st_uid == info.st_gid == 0 and info.st_nlink == 1 and info.st_size == 0
+                and stat.S_IMODE(info.st_mode) == 0o444 and U.stamp(path.lstat()) == U.stamp(info),
+                "Root-owned inventory exclusion lock required")
+        deadline = time.monotonic() + 20
+        while not locked:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB); locked = True
+            except BlockingIOError:
+                require(time.monotonic() < deadline, "Inventory exclusion deadline")
+                time.sleep(0.02)
+        require(U.stamp(path.lstat()) == U.stamp(info), "Inventory exclusion lock changed")
+        yield
+    finally:
+        if locked: fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
 def localstorage_observe(callback, *, baseline=None, expected=None, helper_pin=None):
+    with localstorage_inventory_exclusion():
+        return _localstorage_observe(callback, baseline=baseline, expected=expected, helper_pin=helper_pin)
+
+
+def _localstorage_observe(callback, *, baseline=None, expected=None, helper_pin=None):
     """Hold the SQLite read transaction across the guard's full HOME inventory."""
     require((baseline is None) != (expected is None), "Exact localStorage observation phase required")
     prior = baseline if baseline is not None else tree(HOME, M.UID)
@@ -3224,6 +3259,7 @@ def changed_broker(env):
     secret = payload = tls = lab = child = logs = sealed = home_guard = watcher = result = None
     relock, failure = False, None
     try:
+        U.write(CONTROL / "localstorage-inventory.lock", b"", 0o444)
         scripts = CONTROL / "scripts"; scripts.mkdir(mode=0o755)
         changed_seal_sources(scripts, original["sources"])
         sealed = changed_adopt(env, original)
@@ -3281,7 +3317,8 @@ def changed_broker(env):
         state, index = {"sequence": 1, "nonces": set()}, 1
         while child.poll() is None and time.monotonic() < sealed["deadline"]:
             logs.pump(0.02); require(not any(row["truncated"] for row in logs.metadata().values()), "Continuation output exceeded bound")
-            M.serve_inventory(state, record, env["GITHUB_SHA"], "deb-approve", native, helper, cohort="update", channel="migrated-update")
+            with localstorage_inventory_exclusion():
+                M.serve_inventory(state, record, env["GITHUB_SHA"], "deb-approve", native, helper, cohort="update", channel="migrated-update")
             if watcher is None and os.path.lexists(OUTPUT / "ready-arm.json"):
                 request = U.parse(U.read(OUTPUT / "ready-arm.json", 16384, uid=M.UID, mode=0o600))
                 require(request == {"context": original["context"]}, "Foreign Ready arm request")

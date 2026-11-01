@@ -5,7 +5,7 @@ import copy
 import gzip
 import hashlib
 import io
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, contextmanager, nullcontext
 import importlib.util
 import json
 import os
@@ -1524,6 +1524,7 @@ class TransitionHomeTests(unittest.TestCase):
     def real_localstorage_guard(self, existing=False):
         uid = os.getuid()
         self.assertEqual(os.getgid(), uid)
+        self.stack.enter_context(patch.object(C, "localstorage_inventory_exclusion", side_effect=nullcontext))
         self.stack.enter_context(patch.object(M, "UID", uid))
         self.stack.enter_context(patch.object(T.M, "UID", uid))
         for info in self.f.linux_files.values(): info.update(st_uid=uid, st_gid=uid)
