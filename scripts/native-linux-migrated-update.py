@@ -334,6 +334,12 @@ def localstorage_identity(row, name):
     return result
 
 
+def localstorage_main_identity(row):
+    require(row["kind"] == "file" and row["uid"] == row["gid"] == M.UID and not row["mode"] & 0o022,
+            "Owned localStorage database required")
+    return {key: row[key] for key in _LOCAL_IDENTITY}
+
+
 def localstorage_shm_digest(row):
     """Only SQLite WAL-index read-mark integers may vary in the synthetic SHM."""
     raw = U.read(HOME / _LOCAL_SHM, 16 * 1024**2, uid=M.UID)
@@ -498,25 +504,11 @@ def changed_retain_preopen_refusal(record, error):
 def localstorage_observe(callback, *, baseline=None, expected=None, helper_pin=None):
     """Hold the SQLite read transaction across the guard's full HOME inventory."""
     require((baseline is None) != (expected is None), "Exact localStorage observation phase required")
-    prior = None
-    existing = baseline is not None and _LOCAL_SIDECARS <= set(baseline)
-    baseline_shm = None
-    adoption_snapshot = None
-    if existing:
-        require(_LOCAL_DB in baseline, "Existing localStorage database required")
-        for name in _LOCAL_SIDECARS: localstorage_identity(baseline[name], name)
-        baseline_shm = localstorage_shm_digest(baseline[_LOCAL_SHM])
-        try: adoption_snapshot = diagnostic_shm_snapshot(baseline[_LOCAL_SHM], baseline_shm)
-        except Exception: pass
-    if expected is not None:
-        prior = tree(HOME, M.UID)
-        require(all(name in prior for name in (_LOCAL_DB, _LOCAL_WAL, _LOCAL_SHM)), "localStorage entry missing before open")
-        try:
-            require(all(localstorage_identity(prior[name], name) == expected["identities"][name] for name in _LOCAL_SIDECARS)
-                    and localstorage_shm_digest(prior[_LOCAL_SHM]) == expected["shmSha256"], "localStorage pre-open identity/SHM drift")
-        except RuntimeError as error:
-            preopen_diagnostic(error, prior, expected)
-            raise
+    prior = baseline if baseline is not None else tree(HOME, M.UID)
+    require(_LOCAL_DB in prior and set(prior) & _LOCAL_SIDECARS in (set(), set(_LOCAL_SIDECARS)),
+            "Exact localStorage database and complete sidecar pair required")
+    localstorage_main_identity(prior[_LOCAL_DB])
+    for name in set(prior) & _LOCAL_SIDECARS: localstorage_identity(prior[name], name)
     scripts = CONTROL / "scripts"
     helper = scripts / "native-linux-localstorage-snapshot.py"
     pin = helper_pin if baseline is not None else expected["helper"]
@@ -528,41 +520,24 @@ def localstorage_observe(callback, *, baseline=None, expected=None, helper_pin=N
         require(all(name in first for name in (_LOCAL_DB, _LOCAL_WAL, _LOCAL_SHM)), "Exact localStorage files required")
         identities = {name: localstorage_identity(first[name], name) for name in _LOCAL_SIDECARS}
         shm_digest = localstorage_shm_digest(first[_LOCAL_SHM])
-        if prior is not None:
-            require(prior[_LOCAL_DB] == first[_LOCAL_DB] and prior[_LOCAL_WAL] == first[_LOCAL_WAL]
-                    and identities == expected["identities"] and shm_digest == expected["shmSha256"],
-                    "localStorage changed while opening reader")
+        require(set(first) == set(prior) | _LOCAL_SIDECARS
+                and all(first[name] == row for name, row in prior.items() if name != _LOCAL_SHM)
+                and (_LOCAL_SHM not in prior or identities[_LOCAL_SHM] == localstorage_identity(prior[_LOCAL_SHM], _LOCAL_SHM)),
+                "HOME changed while opening localStorage reader")
+        if _LOCAL_WAL not in prior: require(first[_LOCAL_WAL]["size"] == 0, "New localStorage WAL is not empty")
         opened = [(first[name]["dev"], first[name]["ino"]) for name in (_LOCAL_DB, _LOCAL_WAL)]
         reader.require_open_files(opened)
-        if baseline is not None:
-            if existing:
-                try:
-                    require(set(first) == set(baseline)
-                            and all(first[name] == row for name, row in baseline.items() if name != _LOCAL_SHM)
-                            and identities[_LOCAL_SHM] == localstorage_identity(baseline[_LOCAL_SHM], _LOCAL_SHM)
-                            and shm_digest == baseline_shm, "Existing baseline HOME drift")
-                except RuntimeError as error:
-                    existing_baseline_diagnostic(error, baseline, first, identities, shm_digest, baseline_shm)
-                    adoption_shm_offset_diagnostic(error, adoption_snapshot, first, shm_digest)
-                    raise
-            else:
-                require(set(first) == set(baseline) | _LOCAL_SIDECARS and not set(baseline) & _LOCAL_SIDECARS,
-                        "Cold baseline sidecars differ")
-                require(all(first[name] == row for name, row in baseline.items()), "Cold baseline HOME drift")
-                require(first[_LOCAL_WAL]["size"] == 0, "Cold baseline WAL is not empty")
         result = reader.capture()
         after = tree(HOME, M.UID)
         require(all(name in after for name in (_LOCAL_DB, _LOCAL_WAL, _LOCAL_SHM)), "localStorage entry disappeared")
         require(first[_LOCAL_DB] == after[_LOCAL_DB] and first[_LOCAL_WAL] == after[_LOCAL_WAL],
                 "localStorage database/WAL drift")
+        require(set(first) == set(after) and all(after[name] == row for name, row in first.items() if name != _LOCAL_SHM),
+                "Protected HOME changed during localStorage capture")
         require(all(localstorage_identity(after[name], name) == identities[name] for name in _LOCAL_SIDECARS),
                 "localStorage sidecar identity drift")
         require(localstorage_shm_digest(after[_LOCAL_SHM]) == shm_digest, "localStorage SHM non-readmark drift")
         reader.require_open_files(opened)
-        if baseline is not None:
-            require(set(after) == set(baseline) | _LOCAL_SIDECARS
-                    and all(after[name] == row for name, row in baseline.items() if not existing or name != _LOCAL_SHM),
-                    "Baseline HOME changed")
         outcome = callback(after, result, identities, shm_digest)
         final = tree(HOME, M.UID)
         require(set(final) == set(after), "HOME inventory changed during callback")
@@ -596,12 +571,12 @@ class TransitionHomePreservation:
             require(initial == self.before, "Original adopted HOME drifted")
         else:
             require(set(self.before) & _LOCAL_SIDECARS in (set(), set(_LOCAL_SIDECARS))
-                    and set(initial) == set(self.before) | _LOCAL_SIDECARS
-                    and all(initial[name] == row for name, row in self.before.items() if name != _LOCAL_SHM),
+                    and set(initial) & _LOCAL_SIDECARS in (set(), set(_LOCAL_SIDECARS))
+                    and set(initial) - _LOCAL_SIDECARS == set(self.before) - _LOCAL_SIDECARS
+                    and all(initial[name] == row for name, row in self.before.items() if name not in _LOCAL_SIDECARS | {_LOCAL_DB})
+                    and localstorage_main_identity(initial[_LOCAL_DB]) == localstorage_main_identity(self.before[_LOCAL_DB]),
                     "Original adopted HOME drifted")
-            require(all(localstorage_identity(initial[name], name) == self.localstorage["identities"][name]
-                        for name in _LOCAL_SIDECARS)
-                    and localstorage_shm_digest(initial[_LOCAL_SHM]) == self.localstorage["shmSha256"], "Original sidecar identity drift")
+            for name in set(initial) & _LOCAL_SIDECARS: localstorage_identity(initial[name], name)
         self.R, self.E, self.D = "data/creator-hub/mcp-route-v1/linux-x86_64", "data/creator-hub-update-cache/deb/records", "data/creator-hub-update-cache/deb"
         self.active, self.handoff = self.R + "/active.json", self.E + "/mcp-route-update.json"
         require(not os.path.lexists(HOME / self.handoff), "Fresh gate refuses prior handoff; no supersession")
@@ -716,14 +691,13 @@ class TransitionHomePreservation:
         if self.localstorage is None:
             return self._check_inventory(checkpoint, tree(HOME, M.UID))
         def verify(after, result, identities, shm_digest):
-            require(result == self.localstorage["sha256"] and identities == self.localstorage["identities"]
-                    and shm_digest == self.localstorage["shmSha256"],
-                    "Original localStorage logical contents or identity changed")
+            require(result == self.localstorage["sha256"], "Original localStorage logical contents or identity changed")
             return self._check_inventory(checkpoint, after)
         return localstorage_observe(verify, expected=self.localstorage)
 
     def _check_inventory(self, checkpoint, after):
-        require(self.before.keys() <= after.keys(), "An original protected entry disappeared")
+        required = set(self.before) - (_LOCAL_SIDECARS if self.localstorage is not None else set())
+        require(required <= after.keys(), "An original protected entry disappeared")
         capture, phase = None, None
         if os.path.lexists(HOME / self.handoff):
             capture = U.transition_file(HOME / self.handoff, mode=0o600)
@@ -751,7 +725,11 @@ class TransitionHomePreservation:
             require(active == self.a_capture, "Only original A is allowed before actual Completed")
         for name, wanted in self.before.items():
             if name == self.active and complete: continue
-            if name == _LOCAL_SHM and self.localstorage is not None: continue
+            if self.localstorage is not None and name in _LOCAL_SIDECARS: continue
+            if self.localstorage is not None and name == _LOCAL_DB:
+                require(localstorage_main_identity(after[name]) == localstorage_main_identity(wanted),
+                        "Original localStorage database identity changed")
+                continue
             if name == M.JOURNAL:
                 fields = ("kind", "dev", "uid", "gid", "mode")
                 old_mode, new_mode = self._journal_mode, after[name]["mode"]
@@ -1911,10 +1889,7 @@ def changed_adopt(env, original):
     localstorage_baseline_gate(before)
     helper_pin = original["sources"]["native-linux-localstorage-snapshot.py"]
     def capture_baseline(after, value, identities, shm):
-        result = {"sha256": value, "identities": identities, "shmSha256": shm, "helper": helper_pin}
-        try: result["diagnosticFingerprint"] = capture_shm_fingerprints(after[_LOCAL_SHM], shm)
-        except Exception: pass
-        return result
+        return {"sha256": value, "identities": identities, "shmSha256": shm, "helper": helper_pin}
     localstorage = localstorage_observe(capture_baseline, baseline=before, helper_pin=helper_pin)
     require(any(".creator-hub-settings-backups/" in n for n in before) and any("client-migrations-v1/" in n for n in before), "Original backups/client histories missing")
     journal = M.journal(HOME)

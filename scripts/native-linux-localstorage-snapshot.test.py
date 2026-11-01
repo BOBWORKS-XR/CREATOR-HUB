@@ -14,6 +14,32 @@ spec = importlib.util.spec_from_file_location("localstorage_snapshot", SCRIPT)
 module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
 
 
+class CanonicalDigestTests(unittest.TestCase):
+    def test_persistent_metadata_is_bound(self):
+        database = sqlite3.connect(":memory:")
+        try:
+            database.execute(module.TABLE)
+            database.execute("INSERT INTO ItemTable VALUES (?,?)", ("one", b"value"))
+            original = module.digest(database)
+            database.execute("PRAGMA user_version=1")
+            self.assertNotEqual(original, module.digest(database))
+            database.execute("PRAGMA user_version=0")
+            database.execute("PRAGMA application_id=1234")
+            self.assertNotEqual(original, module.digest(database))
+        finally: database.close()
+
+    def test_unknown_schema_or_row_type_is_refused(self):
+        database = sqlite3.connect(":memory:")
+        try:
+            database.execute(module.TABLE)
+            database.execute("INSERT INTO ItemTable VALUES (?,?)", ("one", "not-a-blob"))
+            with self.assertRaisesRegex(RuntimeError, "Unknown localStorage value type"): module.digest(database)
+            database.execute("DELETE FROM ItemTable")
+            database.execute("CREATE TABLE unknown (data BLOB)")
+            with self.assertRaisesRegex(RuntimeError, "Unknown localStorage schema"): module.digest(database)
+        finally: database.close()
+
+
 @unittest.skipUnless(sys.platform.startswith("linux"), "Linux-only fixture")
 class HeldReaderTests(unittest.TestCase):
     def setUp(self):
@@ -37,6 +63,21 @@ class HeldReaderTests(unittest.TestCase):
             first = reader.capture(); reader.require_open_files(identities)
             self.assertEqual(len(first), 64)
         self.assertIsNone(reader.process)
+
+    def test_scratch_recovers_committed_wal_and_matches_live(self):
+        writer = sqlite3.connect(self.db)
+        try:
+            writer.execute("UPDATE ItemTable SET value=? WHERE key='one'", (b"wal-value",)); writer.commit()
+            wal = Path(str(self.db) + "-wal")
+            self.assertGreater(wal.stat().st_size, 0)
+            with module.HeldReader(self.db, self.uid, SCRIPT) as reader:
+                value = reader.capture()
+                expected = sqlite3.connect(":memory:")
+                try:
+                    writer.backup(expected)
+                    self.assertEqual(value, module.digest(expected))
+                finally: expected.close()
+        finally: writer.close()
 
     def test_missing_or_replaced_wal_descriptor_refuses_and_reaps(self):
         with self.assertRaisesRegex(RuntimeError, "descriptor differs"):

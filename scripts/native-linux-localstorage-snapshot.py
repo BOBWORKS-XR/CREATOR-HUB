@@ -5,8 +5,10 @@ import os
 from pathlib import Path
 import selectors
 import sqlite3
+import stat
 import subprocess
 import sys
+import tempfile
 import time
 
 TABLE = "CREATE TABLE ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB NOT NULL ON CONFLICT FAIL)"
@@ -23,8 +25,14 @@ def digest(database):
     require(database.execute("PRAGMA quick_check").fetchall() == [("ok",)], "SQLite integrity refused")
     schema = database.execute("SELECT type,name,tbl_name,sql FROM sqlite_schema ORDER BY type,name").fetchall()
     require(schema == SCHEMA, "Unknown localStorage schema")
-    state = hashlib.sha256(b"synthetic-localstorage-schema-rows-v1\0")
-    canonical = json.dumps(schema, ensure_ascii=True, separators=(",", ":")).encode("ascii")
+    metadata = {name: database.execute("PRAGMA " + name).fetchone()[0]
+                for name in ("application_id", "user_version", "schema_version", "encoding", "page_size", "auto_vacuum")}
+    require(type(metadata["application_id"]) is int and type(metadata["user_version"]) is int
+            and type(metadata["schema_version"]) is int and type(metadata["page_size"]) is int
+            and type(metadata["auto_vacuum"]) is int and type(metadata["encoding"]) is str,
+            "Unknown persistent SQLite metadata")
+    state = hashlib.sha256(b"synthetic-localstorage-schema-rows-metadata-v2\0")
+    canonical = json.dumps([schema, metadata], sort_keys=True, ensure_ascii=True, separators=(",", ":")).encode("ascii")
     state.update(len(canonical).to_bytes(8, "big")); state.update(canonical)
     count = total = 0
     for key, value in database.execute("SELECT key,value FROM ItemTable ORDER BY key"):
@@ -34,6 +42,53 @@ def digest(database):
                 "localStorage row bound exceeded")
         for item in (key, value): state.update(len(item).to_bytes(8, "big")); state.update(item)
     return state.hexdigest()
+
+
+def stable_file(path, uid):
+    fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    try:
+        before = os.fstat(fd)
+        require(stat.S_ISREG(before.st_mode) and before.st_nlink == 1 and before.st_uid == before.st_gid == uid
+                and not stat.S_IMODE(before.st_mode) & 0o022 and 0 <= before.st_size <= 64 * 1024 * 1024,
+                "Synthetic SQLite source identity refused")
+        def stamp(value):
+            return (value.st_dev, value.st_ino, value.st_mode, value.st_uid, value.st_gid, value.st_nlink,
+                    value.st_size, value.st_mtime_ns, value.st_ctime_ns)
+        require(stamp(path.lstat()) == stamp(before), "SQLite source replaced at open")
+        chunks = []
+        while True:
+            chunk = os.read(fd, 1024 * 1024)
+            if not chunk: break
+            chunks.append(chunk)
+        data = b"".join(chunks)
+        require(len(data) == before.st_size and stamp(os.fstat(fd)) == stamp(before)
+                and stamp(path.lstat()) == stamp(before), "SQLite source changed while copying")
+        return stamp(before), data
+    finally:
+        os.close(fd)
+
+
+def independent_digest(source, path, uid, expected):
+    wal = Path(str(path) + "-wal")
+    main_identity, main = stable_file(path, uid)
+    wal_identity, wal_bytes = stable_file(wal, uid)
+    with tempfile.TemporaryDirectory(prefix="synthetic-localstorage-copy-") as directory:
+        scratch = Path(directory) / path.name
+        for dest, raw in ((scratch, main), (Path(str(scratch) + "-wal"), wal_bytes)):
+            fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, 0o600)
+            with os.fdopen(fd, "wb") as handle: handle.write(raw)
+        require(not os.path.lexists(str(scratch) + "-shm"), "Scratch SHM unexpectedly exists")
+        copy = sqlite3.connect(scratch.as_uri() + "?mode=ro", uri=True, timeout=1)
+        try:
+            copy.execute("PRAGMA query_only=ON")
+            copy.execute("PRAGMA trusted_schema=OFF")
+            require(digest(copy) == expected, "Independent SQLite snapshot differs")
+        finally:
+            copy.close()
+    after_main, after_main_bytes = stable_file(path, uid)
+    after_wal, after_wal_bytes = stable_file(wal, uid)
+    require((main_identity, main, wal_identity, wal_bytes) ==
+            (after_main, after_main_bytes, after_wal, after_wal_bytes), "SQLite source changed during independent snapshot")
 
 
 def child(path, uid):
@@ -56,7 +111,9 @@ def child(path, uid):
         target = sqlite3.connect(":memory:")
         target.execute("PRAGMA trusted_schema=OFF")
         source.backup(target, pages=64, sleep=0.01)
-        print("DIGEST " + digest(target), flush=True)
+        result = digest(target)
+        independent_digest(source, path, uid, result)
+        print("DIGEST " + result, flush=True)
         require(sys.stdin.buffer.readline(32) == b"CLOSE\n", "Close request refused")
     finally:
         if target is not None: target.close()

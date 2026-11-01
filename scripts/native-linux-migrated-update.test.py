@@ -1601,14 +1601,46 @@ class TransitionHomeTests(unittest.TestCase):
     @unittest.skipUnless(sys.platform.startswith("linux") and os.getuid() != 0, "requires ordinary Linux UID")
     def test_existing_wal_refuses_non_readmark_shm_tamper(self):
         guard, db = self.real_localstorage_guard(existing=True)
-        shm = Path(str(db) + "-shm")
-        with shm.open("r+b") as handle:
-            handle.seek(-1, os.SEEK_END); byte = handle.read(1)
-            handle.seek(-1, os.SEEK_END); handle.write(bytes([byte[0] ^ 1]))
-        with self.assertRaisesRegex(RuntimeError, "localStorage pre-open identity/SHM drift") as caught: guard.check()
-        record = {}; C.changed_retain_preopen_refusal(record, caught.exception)
-        self.assertIn("preopenLocalStorageComparison", record)
-        self.assertFalse(record["preopenLocalStorageComparison"]["offsetsAvailable"])
+        check = guard._check_inventory
+        def tamper(checkpoint, inventory):
+            result = check(checkpoint, inventory)
+            with Path(str(db) + "-shm").open("r+b") as handle:
+                handle.seek(-1, os.SEEK_END); byte = handle.read(1)
+                handle.seek(-1, os.SEEK_END); handle.write(bytes([byte[0] ^ 1]))
+            return result
+        with patch.object(guard, "_check_inventory", side_effect=tamper):
+            with self.assertRaisesRegex(RuntimeError, "localStorage sidecar drift during callback"): guard.check()
+        with self.assertRaisesRegex(RuntimeError, "refusal is retained"): guard.check()
+
+    @unittest.skipUnless(sys.platform.startswith("linux") and os.getuid() != 0, "requires ordinary Linux UID")
+    def test_checkpoint_representation_change_preserves_logical_state(self):
+        guard, db = self.real_localstorage_guard(existing=True)
+        guard.check()
+        before = C.tree(self.home, M.UID)
+        connection = sqlite3.connect(db, timeout=3)
+        try: result = connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        finally: connection.close()
+        self.assertEqual(result[0], 0)
+        after = C.tree(self.home, M.UID)
+        self.assertNotEqual(before[C._LOCAL_WAL]["sha256"], after[C._LOCAL_WAL]["sha256"])
+        guard.check()
+
+    @unittest.skipUnless(sys.platform.startswith("linux") and os.getuid() != 0, "requires ordinary Linux UID")
+    def test_logical_change_latches(self):
+        guard, db = self.real_localstorage_guard(existing=True)
+        connection = sqlite3.connect(db, timeout=3)
+        try: connection.execute("UPDATE ItemTable SET value=x'0102' WHERE key='one'"); connection.commit()
+        finally: connection.close()
+        with self.assertRaisesRegex(RuntimeError, "logical contents or identity changed"): guard.check()
+        with self.assertRaisesRegex(RuntimeError, "refusal is retained"): guard.check()
+
+    @unittest.skipUnless(sys.platform.startswith("linux") and os.getuid() != 0, "requires ordinary Linux UID")
+    def test_persistent_metadata_change_latches(self):
+        guard, db = self.real_localstorage_guard(existing=True)
+        connection = sqlite3.connect(db, timeout=3)
+        try: connection.execute("PRAGMA user_version=7"); connection.commit()
+        finally: connection.close()
+        with self.assertRaisesRegex(RuntimeError, "logical contents or identity changed"): guard.check()
         with self.assertRaisesRegex(RuntimeError, "refusal is retained"): guard.check()
 
     @unittest.skipUnless(sys.platform.startswith("linux") and os.getuid() != 0, "requires ordinary Linux UID")
@@ -1704,11 +1736,15 @@ class TransitionHomeTests(unittest.TestCase):
     @unittest.skipUnless(sys.platform.startswith("linux") and os.getuid() != 0, "requires ordinary Linux UID")
     def test_real_guard_refuses_non_readmark_shm_tamper(self):
         guard, db = self.real_localstorage_guard(); guard.check()
-        shm = Path(str(db) + "-shm")
-        with shm.open("r+b") as handle:
-            handle.seek(-1, os.SEEK_END)
-            value = handle.read(1); handle.seek(-1, os.SEEK_END); handle.write(bytes([value[0] ^ 1]))
-        with self.assertRaisesRegex(RuntimeError, "localStorage pre-open identity/SHM drift"): guard.check()
+        check = guard._check_inventory
+        def tamper(checkpoint, inventory):
+            result = check(checkpoint, inventory)
+            with Path(str(db) + "-shm").open("r+b") as handle:
+                handle.seek(-1, os.SEEK_END)
+                value = handle.read(1); handle.seek(-1, os.SEEK_END); handle.write(bytes([value[0] ^ 1]))
+            return result
+        with patch.object(guard, "_check_inventory", side_effect=tamper):
+            with self.assertRaisesRegex(RuntimeError, "localStorage sidecar drift during callback"): guard.check()
         with self.assertRaisesRegex(RuntimeError, "refusal is retained"): guard.check()
 
     def completed_guard(self):

@@ -27,7 +27,7 @@ class SealedAdoption(unittest.TestCase):
     def test_actual_broker_adopts_committed_wal_as_synthetic_uid(self):
         self.adopt_fixture(existing=True, live=True)
 
-    def test_actual_broker_refuses_unclean_wal_index_drift(self):
+    def test_actual_broker_checks_unclean_wal_against_scratch(self):
         self.adopt_fixture(existing=True, live=False)
 
     def test_real_inventory_refuses_live_existing_wal_writer(self):
@@ -137,19 +137,14 @@ class SealedAdoption(unittest.TestCase):
                         print("ancestry", str(directory), info.st_uid, info.st_gid, oct(info.st_mode & 0o7777), flush=True)
                     raise
             stack.enter_context(patch.object(C.U, "protected_ancestry", side_effect=ancestry_diagnostic))
-            refusal = ("Only the original live fixture manager pair may settle" if real_inventory else
-                       "Existing baseline HOME drift" if existing and not live else "fixture-stop-after-adopt")
+            refusal = "Only the original live fixture manager pair may settle" if real_inventory else "fixture-stop-after-adopt"
             with self.assertRaisesRegex(RuntimeError, refusal): C.changed_broker(env)
             if real_inventory: self.assertIsNone(process.poll(), "Broker must not signal unknown writer")
-            if existing and not live: inventory.assert_not_called()
-            else: inventory.assert_called_once()
+            inventory.assert_called_once()
             sealed = control / "scripts/native-linux-localstorage-snapshot.py"
             self.assertEqual(sealed.stat().st_uid, 0); self.assertEqual(sealed.stat().st_mode & 0o777, 0o444)
             self.assertEqual(C.U.pin(sealed.read_bytes()), pins[sealed.name])
-            if not (existing and not live):
-                fingerprint = control / C._SHM_DIAGNOSTIC_FILE
-                self.assertEqual(fingerprint.stat().st_uid, uid)
-                self.assertEqual(fingerprint.stat().st_mode & 0o777, 0o400)
+            self.assertFalse((control / C._SHM_DIAGNOSTIC_FILE).exists())
             record = json.loads((control / "broker.json").read_bytes())
             if real_inventory:
                 observed = record["initialUidInventory"]
@@ -157,20 +152,9 @@ class SealedAdoption(unittest.TestCase):
                 self.assertEqual([row["pid"] for row in observed["processes"]], [process.pid])
                 self.assertEqual(record["fixtureQuiescence"]["status"], "refused")
                 self.assertEqual(record["fixtureQuiescence"]["stage"], "eligibility")
-            elif existing and not live: self.assertNotIn("initialUidInventory", record)
             else: self.assertEqual(record["initialUidInventory"], {"processes": [], "terminalProcesses": []})
             self.assertEqual(record["refusal"]["message"], refusal)
             if existing and not live:
-                self.assertEqual(record["existingBaselineComparison"], {"membership": True, "main": True, "wal": True,
-                    "other": True, "walIdentity": True, "shmIdentity": True, "shmNormalized": False})
-                observed = record["adoptionShmOffsets"]
-                self.assertTrue(observed["available"])
-                offsets = observed["changedOffsets"]
-                print("SYNTHETIC_ADOPTION_OFFSETS " + json.dumps(offsets), flush=True)
-                print("SYNTHETIC_SQLITE_VERSION " + sqlite3.sqlite_version, flush=True)
-                self.assertTrue(any(i < 100 or i >= 120 for i in offsets))
-                observed_fields = set(range(8, 12)) | set(range(40, 48)) | set(range(56, 60)) | set(range(88, 96)) | set(range(100, 120)) | set(range(128, 132))
-                self.assertTrue(set(offsets) <= observed_fields)
                 check = "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]+'?mode=ro',uri=True); assert c.execute('PRAGMA quick_check').fetchall()==[('ok',)]; assert c.execute(\"SELECT key,value FROM ItemTable\").fetchall()==[('synthetic',b'committed-in-wal')]; c.close()"
                 subprocess.run([sys.executable, "-I", "-S", "-c", check, db.as_uri()], user=uid, group=uid,
                                extra_groups=[], check=True, timeout=10, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
