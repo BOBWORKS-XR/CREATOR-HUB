@@ -80,6 +80,24 @@ class HeldReaderTests(unittest.TestCase):
                 finally: expected.close()
         finally: writer.close()
 
+    def test_missing_shm_is_reconstructed_without_changing_main_or_wal(self):
+        writer = "import os,sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute(\"UPDATE ItemTable SET value=? WHERE key='one'\", (b'wal-only',)); c.commit(); os._exit(0)"
+        subprocess.run([sys.executable, "-I", "-S", "-c", writer, str(self.db)], check=True, timeout=10)
+        wal = Path(str(self.db) + "-wal"); shm = Path(str(self.db) + "-shm")
+        self.assertGreater(wal.stat().st_size, 0)
+        main_before = module.stable_file(self.db, self.uid); wal_before = module.stable_file(wal, self.uid)
+        shm.unlink()
+        with module.HeldReader(self.db, self.uid, SCRIPT) as reader:
+            actual = reader.capture()
+            expected = sqlite3.connect(":memory:")
+            try:
+                expected.execute(module.TABLE)
+                expected.executemany("INSERT INTO ItemTable VALUES (?,?)", [("one", b"wal-only"), ("two", b"\x00\xff")])
+                self.assertEqual(actual, module.digest(expected))
+            finally: expected.close()
+        self.assertEqual(module.stable_file(self.db, self.uid), main_before)
+        self.assertEqual(module.stable_file(wal, self.uid), wal_before)
+
     def test_scratch_rejects_different_logical_snapshot(self):
         with module.HeldReader(self.db, self.uid, SCRIPT) as reader:
             reader.capture()

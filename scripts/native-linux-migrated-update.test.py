@@ -4064,13 +4064,13 @@ class ExistingBaselineDiagnosticTests(unittest.TestCase):
 
 
 class ColdLocalStorageDiagnosticTests(unittest.TestCase):
-    def test_baseline_gate_accepts_only_cold_or_owned_complete_pair(self):
+    def test_baseline_gate_accepts_owned_exact_sidecar_lifecycle(self):
         row = {"kind": "file", "dev": 1, "ino": 2, "uid": M.UID, "gid": M.UID, "mode": 0o600, "size": 32768}
         for main in (False, True):
             for wal in (False, True):
                 for shm in (False, True):
                     before = {name: dict(row) for name, present in ((C._LOCAL_DB, main), (C._LOCAL_WAL, wal), (C._LOCAL_SHM, shm)) if present}
-                    if main and wal == shm: C.localstorage_baseline_gate(before)
+                    if main: C.localstorage_baseline_gate(before)
                     else:
                         with self.assertRaisesRegex(RuntimeError, "Cold localStorage baseline required"): C.localstorage_baseline_gate(before)
         for field, value in (("kind", "symlink"), ("uid", M.UID + 1), ("gid", M.UID + 1), ("mode", 0o622)):

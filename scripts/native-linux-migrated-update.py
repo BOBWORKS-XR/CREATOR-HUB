@@ -305,8 +305,9 @@ def cold_localstorage_gate(before):
 
 
 def localstorage_baseline_gate(before):
-    if _LOCAL_DB in before and _LOCAL_SIDECARS <= set(before):
-        for name in _LOCAL_SIDECARS:
+    if _LOCAL_DB in before:
+        localstorage_main_identity(before[_LOCAL_DB])
+        for name in set(before) & _LOCAL_SIDECARS:
             localstorage_identity(before[name], name)
         return
     cold_localstorage_gate(before)
@@ -505,8 +506,7 @@ def localstorage_observe(callback, *, baseline=None, expected=None, helper_pin=N
     """Hold the SQLite read transaction across the guard's full HOME inventory."""
     require((baseline is None) != (expected is None), "Exact localStorage observation phase required")
     prior = baseline if baseline is not None else tree(HOME, M.UID)
-    require(_LOCAL_DB in prior and set(prior) & _LOCAL_SIDECARS in (set(), set(_LOCAL_SIDECARS)),
-            "Exact localStorage database and complete sidecar pair required")
+    require(_LOCAL_DB in prior, "Exact localStorage database required")
     localstorage_main_identity(prior[_LOCAL_DB])
     for name in set(prior) & _LOCAL_SIDECARS: localstorage_identity(prior[name], name)
     scripts = CONTROL / "scripts"
@@ -570,9 +570,7 @@ class TransitionHomePreservation:
         if self.localstorage is None:
             require(initial == self.before, "Original adopted HOME drifted")
         else:
-            require(set(self.before) & _LOCAL_SIDECARS in (set(), set(_LOCAL_SIDECARS))
-                    and set(initial) & _LOCAL_SIDECARS in (set(), set(_LOCAL_SIDECARS))
-                    and set(initial) - _LOCAL_SIDECARS == set(self.before) - _LOCAL_SIDECARS
+            require(set(initial) - _LOCAL_SIDECARS == set(self.before) - _LOCAL_SIDECARS
                     and all(initial[name] == row for name, row in self.before.items() if name not in _LOCAL_SIDECARS | {_LOCAL_DB})
                     and localstorage_main_identity(initial[_LOCAL_DB]) == localstorage_main_identity(self.before[_LOCAL_DB]),
                     "Original adopted HOME drifted")

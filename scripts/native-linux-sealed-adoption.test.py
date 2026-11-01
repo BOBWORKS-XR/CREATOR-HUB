@@ -30,10 +30,13 @@ class SealedAdoption(unittest.TestCase):
     def test_actual_broker_checks_unclean_wal_against_scratch(self):
         self.adopt_fixture(existing=True, live=False)
 
+    def test_actual_broker_reconstructs_missing_synthetic_shm(self):
+        self.adopt_fixture(existing=True, live=False, missing_shm=True)
+
     def test_real_inventory_refuses_live_existing_wal_writer(self):
         self.adopt_fixture(existing=True, live=True, real_inventory=True)
 
-    def adopt_fixture(self, existing, live=False, real_inventory=False):
+    def adopt_fixture(self, existing, live=False, real_inventory=False, missing_shm=False):
         uid = C.M.UID
         self.assertEqual(uid, 21314)
         with tempfile.TemporaryDirectory(prefix="sealed-adoption-", dir="/") as temp, ExitStack() as stack:
@@ -98,6 +101,7 @@ class SealedAdoption(unittest.TestCase):
                 if not live:
                     main_pin = C.U.pin(C.U.read(db, 16 * 1024**2, uid=uid))
                     wal_pin = C.U.pin(C.U.read(Path(str(db) + "-wal"), 16 * 1024**2, uid=uid))
+                    if missing_shm: Path(str(db) + "-shm").unlink()
             binding_raw = encode({"profile": {}})
             (base / "binding.json").write_bytes(binding_raw); os.chmod(base / "binding.json", 0o644)
             (base / "execution-request.json").write_bytes(encode({})); os.chmod(base / "execution-request.json", 0o644)
