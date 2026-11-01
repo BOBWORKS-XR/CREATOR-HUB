@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 SCRIPT = Path(__file__).with_name("native-linux-localstorage-snapshot.py")
 spec = importlib.util.spec_from_file_location("localstorage_snapshot", SCRIPT)
@@ -78,6 +79,29 @@ class HeldReaderTests(unittest.TestCase):
                     self.assertEqual(value, module.digest(expected))
                 finally: expected.close()
         finally: writer.close()
+
+    def test_scratch_rejects_different_logical_snapshot(self):
+        with module.HeldReader(self.db, self.uid, SCRIPT) as reader:
+            reader.capture()
+            with self.assertRaisesRegex(RuntimeError, "Independent SQLite snapshot differs"):
+                module.independent_digest(None, self.db, self.uid, "0" * 64)
+
+    def test_scratch_rejects_same_bytes_wal_replacement(self):
+        with module.HeldReader(self.db, self.uid, SCRIPT) as reader:
+            expected = reader.capture()
+            stable = module.stable_file
+            replaced = []
+            def replace_after_read(path, uid):
+                result = stable(path, uid)
+                if path.name.endswith("-wal") and not replaced:
+                    replacement = self.root / "replacement-wal"
+                    replacement.write_bytes(result[1]); os.chmod(replacement, 0o600)
+                    os.replace(replacement, path); replaced.append(True)
+                return result
+            with patch.object(module, "stable_file", side_effect=replace_after_read):
+                with self.assertRaisesRegex(RuntimeError, "SQLite source changed during independent snapshot"):
+                    module.independent_digest(None, self.db, self.uid, expected)
+            self.assertEqual(replaced, [True])
 
     def test_missing_or_replaced_wal_descriptor_refuses_and_reaps(self):
         with self.assertRaisesRegex(RuntimeError, "descriptor differs"):

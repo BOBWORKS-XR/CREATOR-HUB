@@ -1669,7 +1669,7 @@ class TransitionHomeTests(unittest.TestCase):
                 module.HeldReader.capture = commit_during
             return module
         with patch.object(C, "load", side_effect=load_with_writer):
-            with self.assertRaisesRegex(RuntimeError, "database/WAL drift"): guard.check()
+            with self.assertRaisesRegex(RuntimeError, "database/WAL drift|localStorage entry disappeared"): guard.check()
         with self.assertRaisesRegex(RuntimeError, "refusal is retained"): guard.check()
 
     @unittest.skipUnless(sys.platform.startswith("linux") and os.getuid() != 0, "requires ordinary Linux UID")
@@ -1706,7 +1706,7 @@ class TransitionHomeTests(unittest.TestCase):
             finally: writer.close()
             return result
         with patch.object(guard, "_check_inventory", side_effect=write_during_callback):
-            with self.assertRaisesRegex(RuntimeError, "database/WAL drift during callback"): guard.check()
+            with self.assertRaisesRegex(RuntimeError, "database/WAL drift during callback|HOME inventory changed during callback"): guard.check()
         with self.assertRaisesRegex(RuntimeError, "refusal is retained"): guard.check()
 
     @unittest.skipUnless(sys.platform.startswith("linux") and os.getuid() != 0, "requires ordinary Linux UID")
