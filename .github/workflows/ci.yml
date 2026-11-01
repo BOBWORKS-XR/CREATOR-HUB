@@ -16,7 +16,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir "$RUNNER_TEMP/webkit-close-evidence"
-          test "$(sha256sum scripts/native-linux-webkit-close-repro.py | cut -d' ' -f1)" = 85b5865aef1124f12ef6b8cd2b716178c58569fe908b13e0661e043eb04d4962
+          test "$(sha256sum scripts/native-linux-webkit-close-repro.py | cut -d' ' -f1)" = 4eb9f9b4d565eb77307ed763986daac4ffad7cbcdd47b277b11cddaa53a61160
           git rev-parse HEAD > "$RUNNER_TEMP/webkit-close-evidence/commit.txt"
       - name: Install exact WebKit fixture dependencies
         run: |
