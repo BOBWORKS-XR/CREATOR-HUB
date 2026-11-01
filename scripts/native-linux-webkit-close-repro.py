@@ -84,6 +84,37 @@ def logical(db):
         dest.close(); source.close()
 
 
+def scratch_crosscheck(db, label):
+    source = sqlite3.connect(db.as_uri() + "?mode=ro", uri=True, timeout=3)
+    try:
+        source.execute("PRAGMA query_only=ON"); source.execute("BEGIN")
+        source.execute("SELECT count(*) FROM sqlite_schema").fetchone()
+        main, main_data = file_state(db)
+        wal_path = Path(str(db) + "-wal")
+        wal, wal_data = file_state(wal_path)
+        with tempfile.TemporaryDirectory(prefix="sqlite-owned-scratch-") as temp:
+            scratch = Path(temp) / NAME
+            scratch.write_bytes(main_data); Path(str(scratch) + "-wal").write_bytes(wal_data)
+            if Path(str(scratch) + "-shm").exists(): raise RuntimeError("scratch SHM unexpectedly exists")
+            if file_state(db)[0] != main or file_state(wal_path)[0] != wal:
+                raise RuntimeError("source main/WAL changed during scratch copy")
+            scratch_logical = logical(scratch)
+            target = sqlite3.connect(":memory:")
+            try:
+                source.backup(target, pages=64, sleep=0.01)
+                live = {"integrity": target.execute("PRAGMA quick_check").fetchall(),
+                        "schema": target.execute("SELECT type,name,tbl_name,sql FROM sqlite_schema ORDER BY type,name").fetchall(),
+                        "rows": [[k, bytes(v).hex()] for k,v in target.execute("SELECT key,value FROM ItemTable ORDER BY key").fetchall()]}
+            finally: target.close()
+            if file_state(db)[0] != main or file_state(wal_path)[0] != wal:
+                raise RuntimeError("source main/WAL changed during scratch validation")
+            emit("scratch-crosscheck", checkpoint=label, source_main=main, source_wal=wal,
+                 scratch_shm_initially_absent=True, scratch=scratch_logical, live=live, equal=scratch_logical==live)
+            if scratch_logical != live: raise RuntimeError("scratch and live logical snapshots differ")
+            return scratch_logical
+    finally: source.close()
+
+
 def start(root, seed):
     p = subprocess.Popen([sys.executable, "-I", "-B", __file__, "child", str(root), "seed" if seed else "reopen"],
                          stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
@@ -123,16 +154,20 @@ def main():
             before = logical(db); preopen, shm_preopen = capture(db)
             emit("observer-close", files=preopen, main_equal=baseline["main"]==preopen["main"], wal_equal=baseline["wal"]==preopen["wal"],
                  shm_offsets=[i for i,(a,b) in enumerate(zip(shm_before,shm_preopen)) if a!=b])
+            scratch_before = scratch_crosscheck(db, "before-reopen")
+            preopen, shm_preopen = capture(db)
             p, reopened_db = start(root, False)
             if reopened_db != db: raise RuntimeError("WebKit origin/database changed")
             reopened, shm_reopened = capture(db)
             emit("after-reopen-before-observer", files=reopened, main_equal=preopen["main"]==reopened["main"],
                  wal_equal=preopen["wal"]==reopened["wal"], shm_offsets=[i for i,(a,b) in enumerate(zip(shm_preopen,shm_reopened)) if a!=b])
             after = logical(db); post, shm_post = capture(db)
+            scratch_after = scratch_crosscheck(db, "after-reopen")
             emit("logical-comparison", before=before, after=after, equal=before==after, seed_equal=seeded==before,
                  main_equal=reopened["main"]==post["main"], wal_equal=reopened["wal"]==post["wal"],
-                 shm_offsets=[i for i,(a,b) in enumerate(zip(shm_reopened,shm_post)) if a!=b])
-            if before != after: raise RuntimeError("logical contents drift")
+                 shm_offsets=[i for i,(a,b) in enumerate(zip(shm_reopened,shm_post)) if a!=b],
+                 scratch_before_after_equal=scratch_before==scratch_after)
+            if before != after or scratch_before != before or scratch_after != after: raise RuntimeError("logical contents drift")
             stop(p); p = None
             emit("done", scope="standalone synthetic WebKit only")
         finally:
