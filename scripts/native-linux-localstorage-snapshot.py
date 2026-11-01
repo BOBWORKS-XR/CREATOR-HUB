@@ -57,10 +57,12 @@ def stable_file(path, uid):
                     value.st_size, value.st_mtime_ns, value.st_ctime_ns)
         require(stamp(path.lstat()) == stamp(before), "SQLite source replaced at open")
         chunks = []
-        while True:
-            chunk = os.read(fd, 1024 * 1024)
+        remaining = before.st_size + 1
+        while remaining:
+            chunk = os.read(fd, min(1024 * 1024, remaining))
             if not chunk: break
             chunks.append(chunk)
+            remaining -= len(chunk)
         data = b"".join(chunks)
         require(len(data) == before.st_size and stamp(os.fstat(fd)) == stamp(before)
                 and stamp(path.lstat()) == stamp(before), "SQLite source changed while copying")

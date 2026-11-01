@@ -126,6 +126,22 @@ class HeldReaderTests(unittest.TestCase):
                         module.independent_digest(self.db, self.uid, expected, Path(scratch))
             self.assertEqual(replaced, [True])
 
+    def test_growing_source_is_read_only_up_to_initial_size_plus_one(self):
+        source = self.root / "growing-synthetic-file"
+        source.write_bytes(b"x"); os.chmod(source, 0o600)
+        original_read = os.read
+        requests = []
+        def grow_before_read(fd, size):
+            requests.append(size)
+            if len(requests) == 1:
+                with source.open("ab") as handle: handle.write(b"y" * 8192)
+            if len(requests) > 2: raise AssertionError("unbounded source reads")
+            return original_read(fd, size)
+        with patch.object(module.os, "read", side_effect=grow_before_read):
+            with self.assertRaisesRegex(RuntimeError, "SQLite source changed while copying"):
+                module.stable_file(source, self.uid)
+        self.assertEqual(requests, [2])
+
     def test_persistent_cache_metadata_matches_backup_and_scratch(self):
         writer = sqlite3.connect(self.db)
         try:
