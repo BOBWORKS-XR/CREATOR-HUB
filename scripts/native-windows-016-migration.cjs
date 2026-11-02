@@ -14,7 +14,7 @@ const crypto = require('node:crypto');
 const { spawn, execFileSync } = require('node:child_process');
 const { createRequire } = require('node:module');
 
-const { TARGET, productProvenance } = require('./windows-incoming-016.cjs');
+const { TARGET, productProvenance } = require('./windows-migration-r2-candidate.cjs');
 const CONTEXT = Object.freeze({ GITHUB_ACTIONS: 'true', RUNNER_ENVIRONMENT: 'github-hosted',
   RUNNER_OS: 'Windows', RUNNER_ARCH: 'X64', GITHUB_REPOSITORY: 'BOBWORKS-XR/CREATOR-HUB',
   GITHUB_EVENT_NAME: 'workflow_dispatch',
@@ -22,15 +22,15 @@ const CONTEXT = Object.freeze({ GITHUB_ACTIONS: 'true', RUNNER_ENVIRONMENT: 'git
 const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
-// Independently frozen from the settings-build-v5 installer payload. The signed runtime
+// Independently frozen from the R2 installer payload. The signed runtime
 // descriptor binds all nine MCP files; these pins also bind Setup and routing.
 const RESOURCE_PINS = Object.freeze({
-  'routing/runtime.json': 'a75073747ab35d1e9073760e29e4028948d952be7db16a9f76855f8f49a83259',
-  'routing/runtime.minisig': '83c8bb76eca9adf31c480e43f876d74b08be64c88e917b3869d0acfccfae16fb',
-  'routing/router.json': '4138e47641b11c3a154577bbc13ec58afcb3a9f97430679a9c51fbcde81f3a00',
-  'routing/router.minisig': 'f9fb497a5ea5e2a0cceceffad8efccd3e14e57cfa7d3af1763afc858eaecabb1',
-  'routing/creator-hub-mcp-router.exe': 'e03924ba3db7d2331c7d0f5e33f270e220dc720d4d67340e6edd1be573b6cde4',
-  'setup/creator-project-setup.exe': '1ef1266ce57b28bf5b0dc9972a1f6c9ea6e95ef7e373a80fcca75a2965339ff4',
+  'routing/runtime.json': '2bd6e4f9c80a051b9b4dd4c57a253a30d325136c6cd2605e81c603dad65fcb3d',
+  'routing/runtime.minisig': 'a802f40dc93cb94e478e44008b3dedd6dd033c8297359ad6d5aa63db6c2e053b',
+  'routing/router.json': 'ed08b422781e3d88a5d17e11363b83d55e86008132c2b6e64899e68cc2f738e7',
+  'routing/router.minisig': '52792098952f5b1f42a70e3bcf21ebedac8f69f349638f50b8b1962331e0cc1b',
+  'routing/creator-hub-mcp-router.exe': '8d93886cd7a588d6419fa0e559cbfabfc1483ecbb816bc50719999237b4dc978',
+  'setup/creator-project-setup.exe': '8d9a0b7ad8baca7164db759a08f809eae802c1713949b29d8150daf8f3c5e82a',
 });
 const MCP_FILES = Object.freeze(['mcp/creator-works-mcp-launcher.exe', 'mcp/server/creator-works-mcp.mjs',
   'mcp/server/runtime/node.exe', 'mcp/server/runtime/LICENSE', 'mcp/server/runtime/VERSION',
@@ -368,7 +368,7 @@ async function main(args = process.argv.slice(2)) {
   const { baselines } = require('./native-installed-baseline.cjs');
   const provenanceFile = path.resolve('artifacts/incoming-016/input-binding.json'); rejectLinks(provenanceFile);
   const provenance = validateProvenance(JSON.parse(regular(provenanceFile, 4096)), process.env.GITHUB_SHA);
-  const pins = require('./windows-incoming-016.cjs'); assert.deepEqual(pins.TARGET, TARGET);
+  const pins = require('./windows-migration-r2-candidate.cjs'); assert.deepEqual(pins.TARGET, TARGET);
   assert.equal(hash(regular(installer, TARGET.bytes)), TARGET.installer);
   assert.equal(fs.statSync(installer).size, TARGET.bytes);
   for (const baseline of baselines) assert.equal(hash(regular(path.join(input.baselines, baseline.asset), 200 * 1024 * 1024)), baseline.sha256);

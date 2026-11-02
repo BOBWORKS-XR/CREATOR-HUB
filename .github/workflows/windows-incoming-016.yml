@@ -28,7 +28,7 @@ permissions:
   actions: read
 jobs:
   acceptance:
-    if: github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.event_name == 'workflow_dispatch' && (inputs.mode == 'fresh' || inputs.mode == 'guarded')
+    if: github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.event_name == 'workflow_dispatch' && ((inputs.mode == 'fresh' || inputs.mode == 'guarded') || inputs.mode == 'migration')
     runs-on: windows-latest
     timeout-minutes: 20
     steps:
@@ -87,6 +87,9 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Native scenario/signature contract refused; no native work started.' }
       - name: Focused refusal/transport/direct-feature regressions before any native operation
         run: node --test --test-concurrency=1 scripts/windows-incoming-016.test.cjs scripts/native-self-update-direct.test.cjs scripts/self-update-lab-feed.test.cjs scripts/native-self-update-lab.test.cjs scripts/native-unified-outgoing-target.test.cjs
+      - name: Migration admission, fixture and workflow regressions before baseline staging
+        if: inputs.mode == 'migration'
+        run: node --test --test-concurrency=1 scripts/native-windows-016-migration.test.cjs scripts/windows-migration-workflow.test.cjs
       - name: Parse native lifecycle before execution
         shell: pwsh
         run: |

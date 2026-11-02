@@ -6,7 +6,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 const { spawnSync } = require('node:child_process');
 const driver = require('./native-windows-016-settings-only.cjs');
-const candidate = require('./windows-incoming-016.cjs');
+const candidate = require('./windows-migration-r2-candidate.cjs');
 const migration = require('./native-windows-016-migration.cjs');
 const root = path.resolve(__dirname, '..');
 const source = fs.readFileSync(__filename.replace('.test.cjs', '.cjs'), 'utf8');
@@ -307,7 +307,7 @@ test('workflow is manual, two-job, read-only and candidate-pinned, with serializ
   assert.match(workflow, /contents: read\s+actions: read/); assert.doesNotMatch(workflow, /: write|gh release|cargo |npm run build|sign-reviewed/);
   assert.ok(workflow.includes('node --test --test-concurrency=1 scripts/native-windows-016-settings-only.test.cjs'));
   assert.ok(workflow.indexOf('node --test') < workflow.indexOf('actions/download-artifact'));
-  assert.ok(workflow.indexOf('inspect-installer') < workflow.indexOf('Native isolated settings case'));
+  assert.ok(workflow.indexOf('node scripts/windows-migration-r2-candidate.cjs $directory') < workflow.indexOf('Native isolated settings case'));
   const inputs = workflow.split('    inputs:')[1].split('permissions:')[0];
   assert.doesNotMatch(inputs, /default:|40431905266|12702061918|9ed19a0a/);
   assert.deepEqual([...inputs.matchAll(/^      ([a-z_][a-z0-9_]*):$/gm)].map(match => match[1]), ['artifact_run', 'artifact_id', 'archive_sha256']);

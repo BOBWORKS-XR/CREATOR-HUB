@@ -69,7 +69,7 @@ jobs:
           foreach ($file in Get-ChildItem -LiteralPath $directory -Recurse -Force) {
             if ($file.Attributes -band [IO.FileAttributes]::ReparsePoint -or $file.PSIsContainer -or $file.Name -cnotin $allowed -or $file.DirectoryName -cne $directory) { throw 'Only flat reviewed data files are admitted.' }
           }
-          node scripts/windows-incoming-016.cjs inspect-installer $directory
+          node scripts/windows-migration-r2-candidate.cjs $directory
           if ($LASTEXITCODE -ne 0) { throw 'Candidate installer hash refused; no native action started.' }
       - run: npm ci
       - name: Native isolated settings case on exact installed candidate
