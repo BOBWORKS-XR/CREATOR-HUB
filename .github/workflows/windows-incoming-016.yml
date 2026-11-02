@@ -6,7 +6,7 @@ on:
     inputs:
       mode:
         type: choice
-        options: [fresh, guarded, incoming, migration]
+        options: [fresh, guarded, incoming, migration, signed012]
         default: fresh
       artifact_run:
         description: Completed run containing the reviewed data-only windows-016-acceptance-input artifact
@@ -20,7 +20,7 @@ on:
         type: string
         required: true
       signed_pins:
-        description: Incoming only, JSON with descriptor/descriptorSignature/installer/manifest/executable SHA256 pins
+        description: Incoming or signed012 only, independent descriptor/descriptorSignature/installer/manifest/executable SHA256 pins
         type: string
         required: false
 permissions:
@@ -173,3 +173,98 @@ jobs:
             artifacts/native-016-fresh-*/*.json
             artifacts/native-016-fresh-*/*.png
             artifacts/native-016-guarded-*/*.json
+  signed012:
+    if: github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/validation/windows-menu-merge-20261027' && inputs.mode == 'signed012'
+    runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      CREATOR_PUBLIC12_R2_LAB: '1'
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - name: Require independent signed R2 pins before artifact access
+        shell: pwsh
+        env:
+          SIGNED_PINS: ${{ inputs.signed_pins }}
+        run: |
+          node scripts/windows-incoming-016.cjs validate-pins $env:SIGNED_PINS
+          if ($LASTEXITCODE -ne 0) { throw 'Independent signed pins refused.' }
+      - name: Bind immutable signed012 data to its reviewed stager run
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_RUN: ${{ inputs.artifact_run }}
+          INPUT_ARTIFACT: ${{ inputs.artifact_id }}
+          INPUT_SHA256: ${{ inputs.archive_sha256 }}
+        run: |
+          if ($env:INPUT_RUN -cnotmatch '^[1-9][0-9]{0,19}$' -or $env:INPUT_ARTIFACT -cnotmatch '^[1-9][0-9]{0,19}$' -or $env:INPUT_SHA256 -cnotmatch '^[a-f0-9]{64}$') { throw 'Invalid input identity.' }
+          $artifact = gh api --method GET "repos/BOBWORKS-XR/CREATOR-HUB/actions/artifacts/$env:INPUT_ARTIFACT" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $artifact.id.ToString() -cne $env:INPUT_ARTIFACT -or $artifact.name -cne 'windows-016-acceptance-input' -or $artifact.expired -ne $false -or $artifact.size_in_bytes -lt 1 -or $artifact.size_in_bytes -gt 64MB -or $artifact.digest -cne "sha256:$env:INPUT_SHA256" -or $artifact.workflow_run.id.ToString() -cne $env:INPUT_RUN) { throw 'Reviewed artifact identity differs.' }
+          $run = gh api --method GET "repos/BOBWORKS-XR/CREATOR-HUB/actions/runs/$env:INPUT_RUN" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $run.id.ToString() -cne $env:INPUT_RUN -or $run.status -cne 'completed' -or $run.conclusion -cne 'success' -or $run.event -cne 'workflow_dispatch' -or $run.head_branch -cne 'validation/windows-menu-merge-20261027' -or $run.path -cne '.github/workflows/windows-016-input.yml' -or $run.repository.id -ne 1364807512 -or $run.head_repository.id -ne 1364807512 -or $run.head_sha -cnotmatch '^[a-f0-9]{40}$' -or $artifact.workflow_run.head_sha -cne $run.head_sha) { throw 'Reviewed stager provenance differs.' }
+          New-Item -ItemType Directory -Path artifacts/public12-r2-control | Out-Null
+          @{artifactId=$artifact.id;runId=$run.id;artifactSource=$run.head_sha;archiveSha256=$env:INPUT_SHA256;harnessSource=$env:GITHUB_SHA;testOnlyDescriptor=$true;nativeAcceptance=$false;releaseReady=$false} | ConvertTo-Json | Set-Content -LiteralPath artifacts/public12-r2-control/input-binding.json -Encoding utf8NoBOM
+      - uses: actions/download-artifact@v4
+        with:
+          artifact-ids: ${{ inputs.artifact_id }}
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.artifact_run }}
+          path: artifacts/public12-r2-data
+          merge-multiple: true
+      - name: Refuse extra files and bind the independent signed pins
+        shell: pwsh
+        env:
+          SIGNED_PINS: ${{ inputs.signed_pins }}
+        run: |
+          $dir = (Get-Item -LiteralPath artifacts/public12-r2-data).FullName
+          $allowed = @('Creator.Hub_0.1.16_x64-setup.exe','creator-hub-windows-x86_64.json','creator-hub-windows-x86_64.json.minisig','latest.json')
+          $items = @(Get-ChildItem -LiteralPath $dir -Recurse -Force)
+          if ($items.Count -ne 4) { throw 'Exactly four input files required.' }
+          foreach ($item in $items) { if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $item.DirectoryName -cne $dir -or $item.Name -cnotin $allowed) { throw 'Non-flat or unexpected input refused.' } }
+          $pins = $env:SIGNED_PINS | ConvertFrom-Json -AsHashtable
+          if (@(Compare-Object @('descriptor','descriptorSignature','installer','manifest','executable') @($pins.Keys) -CaseSensitive).Count -ne 0) { throw 'Exact five independent pins required.' }
+          @{schemaVersion=1;targetVersion='0.1.16';directory=$dir;pins=$pins} | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath artifacts/public12-r2-control/config.json -Encoding utf8NoBOM
+      - run: npm ci
+      - run: npm --prefix modules/mcp ci
+      - name: Test refusal, contract and process ownership guards
+        run: node --test --test-concurrency=1 scripts/windows-public12-r2-lab.test.cjs scripts/self-update-lab-feed.test.cjs scripts/native-self-update-lab.test.cjs scripts/native-self-update-direct.test.cjs
+      - name: Bind exact signed data before baseline or trust setup
+        shell: pwsh
+        run: |
+          node scripts/windows-public12-r2-lab.cjs check (Join-Path $PWD artifacts/public12-r2-control/config.json)
+          if ($LASTEXITCODE -ne 0) { throw 'Exact public12 R2 test contract refused.' }
+          $tokens=$null; $errors=$null
+          [void][Management.Automation.Language.Parser]::ParseFile((Join-Path $PWD scripts/native-self-update-lab.ps1),[ref]$tokens,[ref]$errors)
+          if ($errors.Count) { throw 'Native lifecycle parse failed.' }
+          node --check scripts/native-self-update-smoke.cjs
+          if ($LASTEXITCODE -ne 0) { throw 'Native driver parse failed.' }
+      - name: Stage the exact original public 0.1.12 installer
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri 'https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/download/v0.1.12/Creator.Hub_0.1.12_x64-setup.exe' -OutFile artifacts/public12-r2-control/baseline.exe -TimeoutSec 180
+          if ((Get-FileHash -LiteralPath artifacts/public12-r2-control/baseline.exe -Algorithm SHA256).Hash.ToLowerInvariant() -cne '0cd8a4493dd9a5b77fbc5fe160582a2b2698fea43aedd9118b2d5b3bd3c51a18') { throw 'Exact public12 installer required.' }
+      - name: Disposable controlled-feed update and restart, not release
+        shell: pwsh
+        run: |
+          ./scripts/native-self-update-lab.ps1 -ContractPath (Join-Path $PWD artifacts/public12-r2-control/config.json) -BaselineInstallerPath (Join-Path $PWD artifacts/public12-r2-control/baseline.exe) -TimeoutSeconds 480 | Tee-Object -FilePath artifacts/public12-r2-control/lifecycle.jsonl
+          if ($LASTEXITCODE -ne 0) { throw 'Lab lifecycle failed.' }
+          $reports = @(Get-ChildItem -LiteralPath artifacts -Directory -Filter 'native-suite-*' | ForEach-Object { Get-ChildItem -LiteralPath $_.FullName -File -Filter self-update-report.json })
+          if ($reports.Count -ne 1) { throw 'Expected one native receipt.' }
+          node scripts/windows-public12-r2-receipt.cjs $reports[0].FullName (Join-Path $PWD artifacts/public12-r2-control/lifecycle.jsonl) (Join-Path $PWD artifacts/public12-r2-control/config.json)
+          if ($LASTEXITCODE -ne 0) { throw 'Lab receipt refused.' }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-016-signed012-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            artifacts/public12-r2-control/config.json
+            artifacts/public12-r2-control/input-binding.json
+            artifacts/public12-r2-control/lifecycle.jsonl
+            artifacts/native-suite-*/*.json
+            artifacts/native-suite-*/*.png

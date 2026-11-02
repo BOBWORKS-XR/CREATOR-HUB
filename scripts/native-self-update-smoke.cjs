@@ -13,6 +13,8 @@ const { verifyPluginsIcon } = require('./verify-plugins-icon.cjs');
 const { selectBaseline, assertPreviousStable } = require('./self-update-baselines.cjs');
 const { managedLocations } = require('./native-managed-target.cjs');
 const direct = require('./native-self-update-direct.cjs');
+const public12Lab = process.env.CREATOR_PUBLIC12_R2_LAB === '1' ? require('./windows-public12-r2-lab.cjs') : null;
+if (public12Lab) public12Lab.assertHost();
 const to = {
   version: process.env.CREATOR_SELF_UPDATE_TARGET_VERSION || require('../package.json').version,
   installer: process.env.CREATOR_SELF_UPDATE_INSTALLER_SHA256,
@@ -20,14 +22,15 @@ const to = {
 };
 assert.equal(to.version, require('../package.json').version, 'Update acceptance pins for the intended release; testing an older update is not sufficient');
 const directTarget = direct.directTarget(to.version, require('../package.json').version);
-const from = selectBaseline(to.version);
+const from = public12Lab ? { ...public12Lab.BASELINE } : selectBaseline(to.version);
 assert.match(to.installer || '', /^[a-f0-9]{64}$/, 'Supply the exact published target installer SHA-256');
 assert.match(to.exe || '', /^[a-f0-9]{64}$/, 'Supply the exact packaged target executable SHA-256');
 const fixture = process.env.CREATOR_HOSTED_UPDATE_FIXTURE ? JSON.parse(fs.readFileSync(process.env.CREATOR_HOSTED_UPDATE_FIXTURE, 'utf8')) : null;
-const labTarget = directTarget ? require('./windows-incoming-016.cjs') : require('./self-update-lab-target.cjs');
+const labTarget = public12Lab || (directTarget ? require('./windows-incoming-016.cjs') : require('./self-update-lab-target.cjs'));
 const lab = process.env.CREATOR_SELF_UPDATE_LAB_CONFIG
   ? labTarget.selectLab(process.env.CREATOR_SELF_UPDATE_LAB_CONFIG, to, fixture)
   : null;
+if (public12Lab) assert.ok(lab && directTarget, 'Exact public12 R2 signed lab contract is required');
 if (fixture) {
   assert.equal(fixture.testOnly, true);
   assert.equal(fixture.fromVersion, from.version);
@@ -45,7 +48,8 @@ report.discoveryKind = lab ? 'controlled-lab-not-public-discovery' : 'public-git
 report.labDiscovery = Boolean(lab);
 report.publicDiscovery = !lab;
 if (lab) report.releaseReady = false;
-report.sourceKind = fixture ? 'version-only-runtime-fixture-not-public-stable' : 'unmodified-public-stable';
+report.sourceKind = public12Lab ? 'targeted-public-0.1.12-not-previous-stable' : fixture ? 'version-only-runtime-fixture-not-public-stable' : 'unmodified-public-stable';
+if (public12Lab) Object.assign(report, { testOnlyDescriptor: true, nativeAcceptance: false, publicDiscovery: false, releaseReady: false });
 if (fixture) report.fixture = fixture;
 const policyState = path.join(out, 'webview-policy.json');
 const hash = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
@@ -73,6 +77,7 @@ const configPath = path.join(process.env.APPDATA, 'creator-works-mcp', 'launcher
 const backends = {}, frames = {};
 let configHash, directRequests, directSettings;
 async function connect(waitReady = true, updated = false) {
+  if (public12Lab) await retry(() => public12Lab.assertOwnedDebugging(diagnostics(), ownedPid, hub), 90);
   browser = await retry(() => chromium.connectOverCDP('http://127.0.0.1:9238'), 90);
   page = await retry(() => {
     const found = browser.contexts().flatMap(context => context.pages()).find(p => p.url().includes('tauri.localhost'));
@@ -100,6 +105,7 @@ async function connect(waitReady = true, updated = false) {
   }
   if (waitReady) await page.waitForFunction(() => !document.querySelector('#check-updates').disabled, null, { timeout: 180000 });
   const state = diagnostics();
+  if (public12Lab) public12Lab.assertOwnedDebugging(state, ownedPid, hub);
   assert.ok(state.listeners.length);
   assert.ok(state.listeners.every(listener => ['127.0.0.1', '::1'].includes(listener.LocalAddress)));
   return state;
