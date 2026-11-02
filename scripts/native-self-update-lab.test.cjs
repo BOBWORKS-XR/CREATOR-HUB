@@ -565,11 +565,12 @@ test('bounded 404 paths survive the adapter and lifecycle without changing rejec
   try {
     a.mockProxy.report = () => ({ requests: [], rejectedRequestCount: 2,
       rejectedPaths: [{ host: 'api.github.com', path: '/repos/BOBWORKS-XR/CREATOR-PROJECT-SETUP/releases', queryPresent: true, count: 2 }],
-      rejectedPathOverflow: 0 });
+      rejectedPathOverflow: 0, syntheticDiscovery: { mcp: 1, setup: 1 } });
     a.stdin.emit('data', frame(tlsFixture)); await turn(); a.stdin.emit('end'); await a.completion;
     assert.equal(a.output[1].rejectedRequestCount, 2);
     assert.deepEqual(a.output[1].rejectedPaths, [{ host: 'api.github.com', path: '/repos/BOBWORKS-XR/CREATOR-PROJECT-SETUP/releases', queryPresent: true, count: 2 }]);
     assert.equal(a.output[1].rejectedPathOverflow, 0);
+    assert.deepEqual(a.output[1].syntheticDiscovery, { mcp: 1, setup: 1 });
     assert.match(source, /rejectedPaths=\$\(if \(\$feedResult -and \$env:CREATOR_PUBLIC12_R2_PATH_DIAGNOSTIC -ceq '1'\)/);
     assert.doesNotMatch(JSON.stringify(a.output), /NEVER-LOG-SECRET|NOT A CERTIFICATE/);
   } finally { a.dispose(); }

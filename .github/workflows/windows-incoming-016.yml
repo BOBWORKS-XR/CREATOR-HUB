@@ -180,6 +180,7 @@ jobs:
     env:
       CREATOR_PUBLIC12_R2_LAB: '1'
       CREATOR_PUBLIC12_R2_PATH_DIAGNOSTIC: '1'
+      CREATOR_PUBLIC12_R2_EMPTY_DISCOVERY: '1'
     steps:
       - uses: actions/checkout@v6
         with:

@@ -311,7 +311,7 @@ test('signed012-only 404 path diagnostics remain bounded and never record privat
 test('path diagnostics require the exact signed012 runner and R2 contract', () => {
   const env = { CREATOR_PUBLIC12_R2_PATH_DIAGNOSTIC: '1', CREATOR_PUBLIC12_R2_LAB: '1', GITHUB_ACTIONS: 'true',
     RUNNER_ENVIRONMENT: 'github-hosted', RUNNER_OS: 'Windows', RUNNER_ARCH: 'X64', GITHUB_REPOSITORY: 'BOBWORKS-XR/CREATOR-HUB',
-    GITHUB_REPOSITORY_ID: '1364807512', GITHUB_EVENT_NAME: 'workflow_dispatch', GITHUB_REF: 'refs/heads/validation/windows-menu-merge-20261027',
+    GITHUB_REPOSITORY_ID: '1364807512', GITHUB_EVENT_NAME: 'workflow_dispatch', GITHUB_JOB: 'signed012', GITHUB_REF: 'refs/heads/validation/windows-menu-merge-20261027',
     GITHUB_WORKFLOW_REF: 'BOBWORKS-XR/CREATOR-HUB/.github/workflows/windows-incoming-016.yml@refs/heads/validation/windows-menu-merge-20261027' };
   const contract = { targetVersion: '0.1.16', baseline: { version: '0.1.12' }, pins: {
     installer: '7326d054ac23b7ac560e2c3488933203a33f0033586b1c33988ce7f316e4c51a',
@@ -321,6 +321,51 @@ test('path diagnostics require the exact signed012 runner and R2 contract', () =
   assert.equal(lab.allowPathDiagnostics(env, { ...contract, targetVersion: '0.1.17' }), false);
   assert.equal(lab.allowPathDiagnostics(env, { ...contract, pins: { ...contract.pins, installer: 'a'.repeat(64) } }), false);
 });
+
+const signed012Directory = process.env.CREATOR_TEST_SIGNED012_DIR;
+const signed012ConfigPath = path.resolve(__dirname, '../artifacts/public12-r2-control/config.json');
+test('signed012 synthetic responses admit only the two exact public GET endpoints',
+  { skip: !signed012Directory && !fs.existsSync(signed012ConfigPath) }, () => {
+    const config = signed012Directory ? { schemaVersion: 1, targetVersion: '0.1.16', directory: path.resolve(signed012Directory),
+      pins: { ...lab.SIGNED012_PINS } } : JSON.parse(fs.readFileSync(signed012ConfigPath));
+    const contract = lab.loadContract(config);
+    const env = { CREATOR_PUBLIC12_R2_EMPTY_DISCOVERY: '1', CREATOR_PUBLIC12_R2_PATH_DIAGNOSTIC: '1', CREATOR_PUBLIC12_R2_LAB: '1',
+      GITHUB_ACTIONS: 'true', RUNNER_ENVIRONMENT: 'github-hosted', RUNNER_OS: 'Windows', RUNNER_ARCH: 'X64',
+      GITHUB_REPOSITORY: 'BOBWORKS-XR/CREATOR-HUB', GITHUB_REPOSITORY_ID: '1364807512', GITHUB_EVENT_NAME: 'workflow_dispatch', GITHUB_JOB: 'signed012',
+      GITHUB_REF: 'refs/heads/validation/windows-menu-merge-20261027',
+      GITHUB_WORKFLOW_REF: 'BOBWORKS-XR/CREATOR-HUB/.github/workflows/windows-incoming-016.yml@refs/heads/validation/windows-menu-merge-20261027' };
+    assert.equal(contract.routes.length, 5); assert.strictEqual(lab.bindSigned012EmptyDiscovery(contract, {}), contract);
+    for (const url of Object.values(lab.SIGNED012_EMPTY_PATHS)) {
+      assert.equal(request(contract, { host: 'api.github.com', path: url }).res.status, 404, 'Original public transport remains unchanged');
+    }
+    const public12 = require('./windows-public12-r2-lab.cjs');
+    assert.strictEqual(public12.requireReviewedDiscovery(contract, env), contract);
+    assert.throws(() => public12.requireReviewedDiscovery(contract, { ...env, CREATOR_PUBLIC12_R2_EMPTY_DISCOVERY: undefined }));
+    for (const key of Object.keys(env)) {
+      if (key === 'CREATOR_PUBLIC12_R2_EMPTY_DISCOVERY') continue;
+      assert.throws(() => lab.bindSigned012EmptyDiscovery(contract, { ...env, [key]: 'foreign' }), key);
+    }
+    assert.throws(() => lab.bindSigned012EmptyDiscovery({ ...contract }, env), /validated lab contract/);
+    const other = lab.createContract(input()); assert.throws(() => lab.bindSigned012EmptyDiscovery(other, env));
+    const bound = lab.bindSigned012EmptyDiscovery(contract, env), state = lab.newState(true);
+    assert.equal(bound.routes.length, 7); assert.equal(contract.routes.length, 5);
+    for (const route of bound.routes) {
+      const result = request(bound, route, {}, state).res;
+      assert.equal(result.status, 200);
+      if (Object.values(lab.SIGNED012_EMPTY_PATHS).includes(route.path)) assert.equal(result.bytes.toString(), '[]');
+    }
+    assert.deepEqual(lab.labReport(bound, state).syntheticDiscovery, { mcp: 1, setup: 1 });
+    assert.equal(lab.labReport(bound, state).requests.length, 7);
+    const route = { host: 'api.github.com', path: lab.SIGNED012_EMPTY_PATHS.mcp };
+    for (const overrides of [{ method: 'POST' }, { url: route.path.replace('=10', '=100') },
+      { url: route.path.replace('?per_page=10', '') }, { url: route.path + '&token=secret' },
+      { url: route.path.replace('CREATOR-WORKS-UNITY-MCP', 'creator-works-unity-mcp') },
+      { headers: { host: route.host, authorization: 'secret' } }, { socket: { labHost: 'github.com' } }]) {
+      assert.notEqual(request(bound, route, overrides, state).res.status, 200);
+    }
+    assert.equal(lab.labReport(bound, state).rejectedRequestCount, 7);
+    assert.doesNotMatch(JSON.stringify(lab.labReport(bound, state).rejectedPaths), /secret/);
+  });
 
 test('request and byte budgets refuse further data', () => {
   const contract = lab.createContract(input()), route = contract.routes[0];

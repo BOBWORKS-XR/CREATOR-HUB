@@ -28,6 +28,15 @@ const UNIFIED_OUTGOING_SCOPE = Object.freeze({ kind: 'unified-outgoing-14-15',
   labDiscovery: true, publicDiscovery: false, liveAiAcceptance: false, productAcceptance: false, releaseReady: false });
 const contracts = new WeakMap();
 const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
+const SIGNED012_PINS = Object.freeze({
+  descriptor: '818bcb983490e20ade5816b4dbb2f5ea98bcaa33484faefa7b9747d12d64b788',
+  descriptorSignature: 'c8cc58a35b6b8f8461e078110cbd72462566b19974ac13c547ca80edf5f860da',
+  installer: '7326d054ac23b7ac560e2c3488933203a33f0033586b1c33988ce7f316e4c51a',
+  manifest: '986745ff133fbd8a4d4c5dc3de17cecafbc500e4af06badb323bf3a632476eea',
+  executable: 'fac846563720eb4dae665a814ea28d0556800ebaf75aba7e8ee0be7f1979a5cd' });
+const SIGNED012_EMPTY_PATHS = Object.freeze({
+  mcp: '/repos/BOBWORKS-XR/CREATOR-WORKS-UNITY-MCP/releases?per_page=10',
+  setup: '/repos/BOBWORKS-XR/CREATOR-PROJECT-SETUP/releases?per_page=10' });
 
 function assertRunner(env = process.env) {
   if (env.GITHUB_ACTIONS !== 'true' || env.RUNNER_ENVIRONMENT !== 'github-hosted' || env.RUNNER_OS !== 'Windows') {
@@ -209,14 +218,36 @@ function singleHost(request) {
 function allowPathDiagnostics(env, contract) {
   return env.CREATOR_PUBLIC12_R2_PATH_DIAGNOSTIC === '1' && env.CREATOR_PUBLIC12_R2_LAB === '1'
     && env.GITHUB_ACTIONS === 'true' && env.RUNNER_ENVIRONMENT === 'github-hosted' && env.RUNNER_OS === 'Windows' && env.RUNNER_ARCH === 'X64'
-    && env.GITHUB_REPOSITORY === 'BOBWORKS-XR/CREATOR-HUB' && env.GITHUB_REPOSITORY_ID === '1364807512' && env.GITHUB_EVENT_NAME === 'workflow_dispatch'
+    && env.GITHUB_REPOSITORY === 'BOBWORKS-XR/CREATOR-HUB' && env.GITHUB_REPOSITORY_ID === '1364807512' && env.GITHUB_EVENT_NAME === 'workflow_dispatch' && env.GITHUB_JOB === 'signed012'
     && env.GITHUB_REF === 'refs/heads/validation/windows-menu-merge-20261027'
     && env.GITHUB_WORKFLOW_REF === 'BOBWORKS-XR/CREATOR-HUB/.github/workflows/windows-incoming-016.yml@refs/heads/validation/windows-menu-merge-20261027'
     && contract.targetVersion === '0.1.16' && contract.baseline.version === '0.1.12'
     && contract.pins.installer === '7326d054ac23b7ac560e2c3488933203a33f0033586b1c33988ce7f316e4c51a'
     && contract.pins.executable === 'fac846563720eb4dae665a814ea28d0556800ebaf75aba7e8ee0be7f1979a5cd';
 }
+function bindSigned012EmptyDiscovery(contract, env) {
+  if (env.CREATOR_PUBLIC12_R2_EMPTY_DISCOVERY !== '1') return contract;
+  assert.ok(allowPathDiagnostics(env, contract), 'Synthetic discovery requires the exact signed012 runner');
+  assert.ok(contracts.has(contract), 'Use a validated lab contract');
+  assert.deepEqual(contract.pins, SIGNED012_PINS, 'Only the independently reviewed signed012 metadata is admitted');
+  assert.equal(contract.baseline.installer, '0cd8a4493dd9a5b77fbc5fe160582a2b2698fea43aedd9118b2d5b3bd3c51a18');
+  assert.equal(contract.baseline.exe, '34c6f05548f469ac23b4faee7aa8355d5cca083c444c4f7b0942426a9c76a7ac');
+  const routes = contracts.get(contract);
+  const descriptorRoute = routes.find(row => row.host === 'github.com' && row.path.endsWith(`/${DESCRIPTOR}`));
+  assert.ok(descriptorRoute); const descriptor = json(descriptorRoute.bytes, 'signed012 descriptor');
+  assert.equal(descriptor.minHubVersion, '0.1.12'); assert.equal(descriptor.identityProtocol, 0); assert.equal(descriptor.lifecycleProtocol, 0);
+  const empty = Buffer.from('[]');
+  const extra = Object.entries(SIGNED012_EMPTY_PATHS).map(([key, routePath]) => ({ host: 'api.github.com', path: routePath,
+    bytes: Buffer.from(empty), type: 'application/json', sha256: hash(empty), syntheticKey: key }));
+  assert.equal(routes.length, 5);
+  const combined = [...routes, ...extra];
+  const bound = Object.freeze({ ...contract, syntheticDiscovery: true,
+    routes: Object.freeze(combined.map(({ host, path: routePath, sha256 }) => Object.freeze({ host, path: routePath, sha256 }))) });
+  contracts.set(bound, combined);
+  return bound;
+}
 function newState(pathDiagnostics = false) { return { requests: 0, bytes: 0, rejected: 0, served: new Map(), rejections: new Map(), rejectionOverflow: 0,
+  syntheticDiscovery: { mcp: 0, setup: 0 },
   pathDiagnostics, rejectedPaths: new Map(), rejectedPathOverflow: 0,
   connectionResetEvents: 0, connectionResets: new Map() }; }
 
@@ -287,6 +318,7 @@ function requestHandler(contract, state) {
       'Cache-Control': 'no-store', Connection: 'close' });
     res.once('finish', () => {
       state.served.set(`${route.host}${route.path}`, { host: route.host, path: route.path, sha256: route.sha256 });
+      if (route.syntheticKey) state.syntheticDiscovery[route.syntheticKey]++;
     });
     state.bytes += route.bytes.length;
     res.end(route.bytes);
@@ -302,12 +334,14 @@ function labReport(contract, state) {
     requests: [...state.served.values()], rejectedRequestCount: state.rejected,
     rejectionSummary: [...state.rejections.values()], rejectionOverflow: state.rejectionOverflow,
     connectionResetEventCount: state.connectionResetEvents, connectionResetSummary: [...state.connectionResets.values()],
-    ...(state.pathDiagnostics ? { rejectedPaths: [...state.rejectedPaths.values()], rejectedPathOverflow: state.rejectedPathOverflow } : {}) };
+    ...(state.pathDiagnostics ? { rejectedPaths: [...state.rejectedPaths.values()], rejectedPathOverflow: state.rejectedPathOverflow } : {}),
+    ...(contract.syntheticDiscovery ? { syntheticDiscovery: { ...state.syntheticDiscovery } } : {}) };
 }
 
 async function startLabProxy(contract, tlsOptions, env = process.env, transport = { http, tls }) {
   assertRunner(env);
   assert.ok(contracts.has(contract), 'Use a validated lab contract');
+  contract = bindSigned012EmptyDiscovery(contract, env);
   keys(tlsOptions, ['pfx', 'passphrase'], 'ephemeral TLS options');
   bounded(tlsOptions.pfx, 64 * 1024, 'TLS PFX');
   const context = transport.tls.createSecureContext({ ...tlsOptions, minVersion: 'TLSv1.2' });
@@ -405,7 +439,8 @@ async function main() {
 
 module.exports = { DESCRIPTOR, FEED_PATH, LIMITS, UNIFIED_OUTGOING_BASELINE, assertRunner, baselineFor, createContract,
   createUnifiedOutgoingContract, createIncoming016Contract, createDirectOutgoing017Contract, loadContract, readBounded, assertBaselineBytes, assertUnifiedOutgoingBaselineBytes,
-  connectHost, allowPathDiagnostics, newState, recordRejection, requestHandler, labReport, startLabProxy };
+  connectHost, allowPathDiagnostics, bindSigned012EmptyDiscovery, SIGNED012_PINS, SIGNED012_EMPTY_PATHS,
+  newState, recordRejection, requestHandler, labReport, startLabProxy };
 if (require.main === module) main().catch(() => {
   // Do not serialize TLS control input, parser errors, headers or candidate contents.
   console.error('Lab feed refused or failed; no native/public acceptance established.'); process.exitCode = 1;

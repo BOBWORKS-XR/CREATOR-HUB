@@ -96,13 +96,15 @@ test('receipt binds test-only lab, exact baseline and target, restart and cleanu
     releaseReady: false, userMachineUsed: false, originalExitCode: 0, originalPid: 10, restartedPid: 11 };
   const lifecycle = [{ kind: 'lab-lifecycle-result', scenario: 'public-stable', actualScope: 'unmodified-public-0.1.12-lab-only',
     lifecycleSucceeded: true, cleanupVerified: true, systemTlsVerified: true, labDiscovery: true, productAcceptance: false,
-    publicDiscovery: false, liveAiAcceptance: false, releaseReady: false, driverExitCode: 0, servedRouteCount: 5, rejectedRequestCount: 0 }];
+    publicDiscovery: false, liveAiAcceptance: false, releaseReady: false, driverExitCode: 0, servedRouteCount: 7, rejectedRequestCount: 0,
+    syntheticDiscovery: { mcp: 1, setup: 1 } }];
   receipt.checkReceipt(report, lifecycle, config, { pins: config.pins }, env.GITHUB_SHA);
   for (const change of [{ nativeAcceptance: true }, { releaseReady: true }, { testOnlyDescriptor: false }, { restartedPid: 10 },
     { from: { ...lab.BASELINE, exe: '0'.repeat(64) } }, { feed: { ...report.feed, pins: { ...pins(), descriptor: 'd'.repeat(64) } } }]) {
     assert.throws(() => receipt.checkReceipt({ ...report, ...change }, lifecycle, config, { pins: config.pins }, env.GITHUB_SHA));
   }
-  for (const change of [{ cleanupVerified: false }, { systemTlsVerified: false }, { rejectedRequestCount: 1 }, { servedRouteCount: 4 }]) {
+  for (const change of [{ cleanupVerified: false }, { systemTlsVerified: false }, { rejectedRequestCount: 1 }, { servedRouteCount: 5 },
+    { syntheticDiscovery: { mcp: 1, setup: 0 } }, { syntheticDiscovery: { mcp: 1, setup: 1, extra: 1 } }]) {
     assert.throws(() => receipt.checkReceipt(report, [{ ...lifecycle[0], ...change }], config, { pins: config.pins }, env.GITHUB_SHA));
   }
 });

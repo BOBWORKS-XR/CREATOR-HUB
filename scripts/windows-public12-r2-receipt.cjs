@@ -20,7 +20,9 @@ function checkReceipt(report, lifecycle, config, contract, source) {
   assert.equal(result[0].scenario, 'public-stable'); assert.equal(result[0].actualScope, 'unmodified-public-0.1.12-lab-only');
   for (const key of ['lifecycleSucceeded', 'cleanupVerified', 'systemTlsVerified', 'labDiscovery']) assert.equal(result[0][key], true, key);
   for (const key of ['productAcceptance', 'publicDiscovery', 'liveAiAcceptance', 'releaseReady']) assert.equal(result[0][key], false, key);
-  assert.equal(result[0].driverExitCode, 0); assert.equal(result[0].servedRouteCount, 5); assert.equal(result[0].rejectedRequestCount, 0);
+  assert.equal(result[0].driverExitCode, 0); assert.equal(result[0].servedRouteCount, 7); assert.equal(result[0].rejectedRequestCount, 0);
+  assert.deepEqual(Object.keys(result[0].syntheticDiscovery || {}).sort(), ['mcp', 'setup']);
+  for (const count of Object.values(result[0].syntheticDiscovery)) assert.ok(Number.isSafeInteger(count) && count > 0);
 }
 module.exports = { checkReceipt };
 if (require.main === module) {

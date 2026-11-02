@@ -296,7 +296,7 @@ async function main() {
     const report = proxy.report();
     console.log(JSON.stringify({ kind: 'lab-feed-stopped', servedRouteCount: report.requests.length, rejectedRequestCount: report.rejectedRequestCount,
       rejectionSummary: report.rejectionSummary, rejectionOverflow: report.rejectionOverflow,
-      rejectedPaths: report.rejectedPaths, rejectedPathOverflow: report.rejectedPathOverflow,
+      rejectedPaths: report.rejectedPaths, rejectedPathOverflow: report.rejectedPathOverflow, syntheticDiscovery: report.syntheticDiscovery,
       connectionResetEventCount: report.connectionResetEventCount, connectionResetSummary: report.connectionResetSummary }));
   } finally {
     input.fill(0); if (pfx) pfx.fill(0);
@@ -553,6 +553,7 @@ try {
     rejectionOverflow=$(if ($feedResult) { $feedResult.rejectionOverflow } else { $null });
     rejectedPaths=$(if ($feedResult -and $env:CREATOR_PUBLIC12_R2_PATH_DIAGNOSTIC -ceq '1') { @($feedResult.rejectedPaths) } else { @() });
     rejectedPathOverflow=$(if ($feedResult -and $env:CREATOR_PUBLIC12_R2_PATH_DIAGNOSTIC -ceq '1') { $feedResult.rejectedPathOverflow } else { $null });
+    syntheticDiscovery=$(if ($feedResult -and $env:CREATOR_PUBLIC12_R2_EMPTY_DISCOVERY -ceq '1') { $feedResult.syntheticDiscovery } else { $null });
     connectionResetEventCount=$(if ($feedResult) { $feedResult.connectionResetEventCount } else { $null });
     connectionResetSummary=$(if ($feedResult) { @($feedResult.connectionResetSummary) } else { @() })} | ConvertTo-Json -Depth 4 -Compress
 if ($failed -or -not $cleanupVerified) { exit 1 }

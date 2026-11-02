@@ -61,3 +61,13 @@ Headers, request bodies, arbitrary URLs and TLS
 material are never recorded. Overflow is counted. Every 404 remains a rejection
 and the zero-rejection receipt guard is unchanged. This instrumentation does not
 authorize a retry, new route, signing, publication or a release-readiness claim.
+
+## Synthetic Discovery
+
+The `signed012` job explicitly enables two test-only empty GitHub release-list
+responses for the exact MCP and Setup `/releases?per_page=10` requests from
+0.1.12. The proxy binds them to that hosted job, exact public12 baseline, R2
+installer/executable and the reviewed test descriptor, signature and manifest
+digests. Other modes retain their original five routes. The receipt requires
+all five original routes, both synthetic routes, and zero rejected requests.
+The empty lists do not establish the actual state of either public repository.

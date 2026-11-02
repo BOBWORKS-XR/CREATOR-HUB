@@ -34,12 +34,17 @@ function loadContract(config) {
   const contract = feed.loadContract(config);
   assert.deepEqual(contract.baseline, BASELINE); return contract;
 }
+function requireReviewedDiscovery(contract, env = process.env) {
+  assert.equal(env.CREATOR_PUBLIC12_R2_EMPTY_DISCOVERY, '1', 'Explicit signed012 synthetic discovery opt-in required');
+  const bound = feed.bindSigned012EmptyDiscovery(contract, env);
+  assert.equal(bound.syntheticDiscovery, true); return contract;
+}
 if (require.main === module) {
   try {
     assertHost();
     const [command, file] = process.argv.slice(2); assert.equal(command, 'check'); assert.ok(path.isAbsolute(file));
     const config = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(feed.readBounded(file, feed.LIMITS.metadata)));
-    const contract = loadContract(config);
+    const contract = requireReviewedDiscovery(loadContract(config));
     console.log(JSON.stringify({ kind: KIND, pins: contract.pins, baseline: BASELINE, testOnlyDescriptor: true,
       labDiscovery: false, nativeAcceptance: false, publicDiscovery: false, releaseReady: false }));
   } catch (error) { console.error(error.message); process.exitCode = 1; }
@@ -48,7 +53,7 @@ function selectLab(configPath, target, fixture, env = process.env) {
   assertHost(env); candidate.assertProxy(env); assert.equal(fixture, null);
   assert.ok(path.isAbsolute(configPath)); assert.equal(target.version, candidate.TARGET.version);
   assert.equal(target.installer, candidate.TARGET.installer); assert.equal(target.exe, candidate.TARGET.exe);
-  return loadContract(JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(feed.readBounded(configPath, feed.LIMITS.metadata))));
+  return requireReviewedDiscovery(loadContract(JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(feed.readBounded(configPath, feed.LIMITS.metadata)))), env);
 }
 function checkBaseline(contract, installer, executable) {
   assert.deepEqual(contract.baseline, BASELINE);
@@ -60,5 +65,5 @@ function discoveryScope(contract) {
     targetVersion: candidate.TARGET.version, pins: contract.pins, ...candidate.productProvenance(),
     labDiscovery: true, publicDiscovery: false, migrationAccepted: false, releaseReady: false };
 }
-module.exports = { KIND, BRANCH, WORKFLOW, BASELINE, TARGET: candidate.TARGET, assertHost, validatePins, loadContract, selectLab, checkBaseline,
+module.exports = { KIND, BRANCH, WORKFLOW, BASELINE, TARGET: candidate.TARGET, assertHost, validatePins, loadContract, requireReviewedDiscovery, selectLab, checkBaseline,
   discoveryScope, showPage: candidate.showPage, assertOwnedDebugging: candidate.assertOwnedDebugging };
