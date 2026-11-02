@@ -10,8 +10,8 @@ const block = workflow.match(/        run: \|\r?\n([\s\S]*?)(?=\r?\n      - uses
 assert.ok(block, 'Expected one inline data-only staging block');
 const script = block[1].split(/\r?\n/).map(line => line.replace(/^          /, '')).join('\n');
 const hasPwsh = spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-Command', '$PSVersionTable.PSVersion.Major'], { windowsHide: true, timeout: 15000 }).status === 0;
-const installer = { id: 699918079, name: 'Creator.Hub_0.1.16_x64-20261102-setup.exe', output: 'Creator.Hub_0.1.16_x64-setup.exe', size: 38205622,
-  state: 'uploaded', digest: 'sha256:3cf91b78f0782186b94f7a617a8ffa8cba8da170b971902bd69e69a1a67a7a1e' };
+const installer = { id: 701701405, name: 'Creator.Hub_0.1.16_x64-20261102-r2-setup.exe', output: 'Creator.Hub_0.1.16_x64-setup.exe', size: 38213208,
+  state: 'uploaded', digest: 'sha256:7326d054ac23b7ac560e2c3488933203a33f0033586b1c33988ce7f316e4c51a' };
 const metadata = [
   { id: 102, name: 'creator-hub-windows-x86_64-settings-v5.json', output: 'creator-hub-windows-x86_64.json', size: 512, state: 'uploaded', digest: `sha256:${'a'.repeat(64)}` },
   { id: 103, name: 'creator-hub-windows-x86_64-settings-v5.json.minisig', output: 'creator-hub-windows-x86_64.json.minisig', size: 297, state: 'uploaded', digest: `sha256:${'b'.repeat(64)}` },
@@ -76,10 +76,10 @@ test('staging has one private GET-only data job, no checkout, dependency/code ex
   assert.match(workflow, /github\.event_name == 'workflow_dispatch'/);
   assert.equal((workflow.match(/^        type: string$/gm) || []).length, 9);
   assert.doesNotMatch(workflow, /installer_asset_id|INSTALLER_ID|required: true/);
-  assert.ok(script.includes("id='699918079';bytes=38205622L;sha='3cf91b78f0782186b94f7a617a8ffa8cba8da170b971902bd69e69a1a67a7a1e'"));
+  assert.ok(script.includes("id='701701405';bytes=38213208L;sha='7326d054ac23b7ac560e2c3488933203a33f0033586b1c33988ce7f316e4c51a'"));
   assert.ok(script.includes("$row.id -cnotmatch '^[1-9][0-9]{0,19}$'"));
   assert.ok(script.indexOf("$row.id -cnotmatch") < script.indexOf('Invoke-RestMethod'));
-  assert.ok(script.includes("name='Creator.Hub_0.1.16_x64-setup.exe';sourceName='Creator.Hub_0.1.16_x64-20261102-setup.exe'"));
+  assert.ok(script.includes("name='Creator.Hub_0.1.16_x64-setup.exe';sourceName='Creator.Hub_0.1.16_x64-20261102-r2-setup.exe'"));
   for (const asset of metadata) assert.ok(script.includes(`name='${asset.output}';sourceName='${asset.name}'`));
   assert.ok(script.includes('$assets[0].name -cne $row.sourceName'));
   assert.match(workflow, /permissions:\s+contents: read/);
@@ -93,7 +93,7 @@ test('staging has one private GET-only data job, no checkout, dependency/code ex
   assert.doesNotMatch(script, /-Force|Set-Content|Add-Content|Remove-Item|Move-Item|Copy-Item/);
 });
 
-test('fresh stages only v5 under the canonical output name while preserving old v2, v3 and v4 transport assets', { skip: !hasPwsh }, () => {
+test('fresh stages only the pinned R2 candidate under the canonical name', { skip: !hasPwsh }, () => {
   const data = fixture();
   data.release.assets.push({ id: 679977699, name: installer.output, state: 'uploaded', size: 38214608,
     digest: 'sha256:390b63dee018c8b9aa0b0039d086c2f697df69ddd68d3ebf96359b4d40bae075' });

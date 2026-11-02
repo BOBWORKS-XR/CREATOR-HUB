@@ -56,7 +56,7 @@ jobs:
           MANIFEST_BYTES: ${{ inputs.manifest_bytes }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $rows = @(@{name='Creator.Hub_0.1.16_x64-setup.exe';sourceName='Creator.Hub_0.1.16_x64-20261102-setup.exe';id='699918079';bytes=38205622L;sha='3cf91b78f0782186b94f7a617a8ffa8cba8da170b971902bd69e69a1a67a7a1e'})
+          $rows = @(@{name='Creator.Hub_0.1.16_x64-setup.exe';sourceName='Creator.Hub_0.1.16_x64-20261102-r2-setup.exe';id='701701405';bytes=38213208L;sha='7326d054ac23b7ac560e2c3488933203a33f0033586b1c33988ce7f316e4c51a'})
           $metadata = @(
             @{name='creator-hub-windows-x86_64.json';sourceName='creator-hub-windows-x86_64-settings-v5.json';id=$env:DESCRIPTOR_ID;bytes=$env:DESCRIPTOR_BYTES;sha=$env:DESCRIPTOR_SHA256;limit=32768}
             @{name='creator-hub-windows-x86_64.json.minisig';sourceName='creator-hub-windows-x86_64-settings-v5.json.minisig';id=$env:MINISIG_ID;bytes=$env:MINISIG_BYTES;sha=$env:MINISIG_SHA256;limit=4096}

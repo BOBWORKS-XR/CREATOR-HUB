@@ -8,18 +8,19 @@ const KIND = 'public14-incoming-direct16';
 const BASELINE = Object.freeze({ version: '0.1.14',
   installer: '284820f92de487e8a0f1bb5b3b99cafe5e073f0402a9350a2ea6e76fa9543157',
   exe: 'cd5e3fd2829727d06444c0f3266b178798d1b55c63df651be12eb38ac4523a86' });
-const TARGET = Object.freeze({ version: '0.1.16', asset: 'Creator.Hub_0.1.16_x64-setup.exe', bytes: 38205622,
+const TARGET = Object.freeze({ version: '0.1.16', asset: 'Creator.Hub_0.1.16_x64-setup.exe', bytes: 38213208,
   productSource: 'source-receipt-sha256:a6eeac26841ad4dc7aa20e6480cc1ff185e0aa0458fa6611b70d681e812844e9',
-  installer: '3cf91b78f0782186b94f7a617a8ffa8cba8da170b971902bd69e69a1a67a7a1e',
-  exe: '66247535b5c3f051547b7669b2acf854f23361349722187ed1e479552d8be2bc' });
+  installer: '7326d054ac23b7ac560e2c3488933203a33f0033586b1c33988ce7f316e4c51a',
+  exe: 'fac846563720eb4dae665a814ea28d0556800ebaf75aba7e8ee0be7f1979a5cd' });
 // The source receipt identifies a HEAD export plus an overlay, not a built commit.
 // Digest: SHA256(JSON.stringify(before.sources)), no newline; no private settings.
 const BUILD_INPUT = Object.freeze({ builtFromDirtyWorktree: true, sourceSnapshotBuilt: false,
   buildSourceBase: 'cf6c2db2a4260e02206c91133878ff82bf3bb084', buildSourceFileCount: 1189,
-  buildInputDigest: '29d89245d9b911071f65ac5e42103d90c1ffff150bda8a8369118cc8a4ceab4a',
-  sourceSnapshotTestOnlyDifferences: Object.freeze([]), sourceUnchanged: false,
-  buildResultSha256: 'e8a8e2714dc83943ca5764c75e7ed6be261325b2dbdc87e752b07faccc801f1f',
-  sourceByteDrift: 'three Cargo.toml files changed CRLF to LF' });
+  buildInputDigest: 'bd07866cc0c80eb433ce963862b4c44e4d6712616e80b5ce06131e2306711288',
+  sourceSnapshotTestOnlyDifferences: Object.freeze([]), sourceUnchanged: true,
+  buildInputsSha256: 'ce08980312f1107870a20a5c850bc683f4aed6d51b30b0bc223f6a34ad48d575',
+  buildResultSha256: '78cf43f002c9a10c86987925b137932383481415d0d90c96ab1f2292ab9bbe2e',
+  sourcePreparation: 'three Cargo.toml files normalized CRLF to LF before R2 build' });
 const productProvenance = () => ({ productSource: TARGET.productSource, ...BUILD_INPUT });
 function freshSettingsBytes() {
   const settings = { channels: [], active_channel_id: null, auto_start: false, mcp_server_path: '', tool_groups: 'read',

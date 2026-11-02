@@ -226,14 +226,16 @@ test('fresh restart repeats exact-image and CDP ownership checks before semantic
 
 test('current finite target binds dirty build inputs separately from associated snapshot and rejects old16', () => {
   assert.equal(incoming.TARGET.productSource, 'source-receipt-sha256:a6eeac26841ad4dc7aa20e6480cc1ff185e0aa0458fa6611b70d681e812844e9');
-  assert.equal(incoming.TARGET.bytes, 38205622);
+  assert.equal(incoming.TARGET.bytes, 38213208);
   assert.equal(incoming.BUILD_INPUT.builtFromDirtyWorktree, true);
   assert.equal(incoming.BUILD_INPUT.sourceSnapshotBuilt, false);
   assert.equal(incoming.BUILD_INPUT.buildSourceBase, 'cf6c2db2a4260e02206c91133878ff82bf3bb084');
-  assert.equal(incoming.BUILD_INPUT.buildInputDigest, '29d89245d9b911071f65ac5e42103d90c1ffff150bda8a8369118cc8a4ceab4a');
+  assert.equal(incoming.BUILD_INPUT.buildInputDigest, 'bd07866cc0c80eb433ce963862b4c44e4d6712616e80b5ce06131e2306711288');
   assert.equal(incoming.BUILD_INPUT.buildSourceFileCount, 1189);
-  assert.equal(incoming.BUILD_INPUT.sourceUnchanged, false);
-  assert.throws(() => incoming.validatePins({ ...pins(), executable: 'c537bcaec1e57a2dc0477781aab0e18e71e0bab9d97946124fe8e2a3e455f676' }));
+  assert.equal(incoming.BUILD_INPUT.sourceUnchanged, true);
+  assert.throws(() => incoming.validatePins({ ...pins(), executable: '43dc478e1567266809bc68128317e8a1086d6aa5aae82042b07e3499347b3adf' }));
+  assert.throws(() => incoming.validatePins({ ...pins(), executable: '66247535b5c3f051547b7669b2acf854f23361349722187ed1e479552d8be2bc' }));
+  assert.throws(() => incoming.validatePins({ ...pins(), installer: '3cf91b78f0782186b94f7a617a8ffa8cba8da170b971902bd69e69a1a67a7a1e' }));
   assert.throws(() => incoming.validatePins({ ...pins(), installer: '898e57b1f3dd87b0f871965eb955d54cc88a573a3b879303805defa829d1b89a' }));
   assert.deepEqual(incoming.BUILD_INPUT.sourceSnapshotTestOnlyDifferences, []);
   assert.throws(() => incoming.validatePins({ ...pins(), installer: '35c9b066ecab363bf6151e00ab97b1da46ca07c6fa9c2e28453f8990d5b63a66',
@@ -289,7 +291,7 @@ test('reviewed source provenance cannot be replaced by harness HEAD or a claim t
     policyRestored: true, nativeGuideAccepted: true, repeatStartupAccepted: true, settingsPreserved: true,
     cancelAccepted: true, installedResourcesVerified: true, nativeDecisions: [{}, {}] };
   incoming.checkReceipt(report, 'migration');
-  for (const change of [{ productSource: report.testSource }, { sourceSnapshotBuilt: true }, { builtFromDirtyWorktree: false },
+  for (const change of [{ productSource: report.testSource }, { sourceSnapshotBuilt: true }, { builtFromDirtyWorktree: false }, { sourceUnchanged: false },
     { buildInputDigest: 'b'.repeat(64) }, { sourceSnapshotTestOnlyDifferences: [{ path: 'src-tauri/src/convergence_profiles_tests.rs' }] }]) assert.throws(() => incoming.checkReceipt({ ...report, ...change }, 'migration'));
 });
 
