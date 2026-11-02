@@ -9,6 +9,7 @@ const diag = require('./windows-mixed-public-diagnostic.cjs');
 const migration = require('./native-windows-016-migration.cjs');
 const handoff = require('./windows-migrated-outgoing-handoff.cjs');
 const candidate = require('./windows-migration-r2-candidate.cjs');
+const driver = require('./windows-mixed-public-driver.cjs');
 const sha = 'a'.repeat(40);
 const env = { GITHUB_ACTIONS: 'true', RUNNER_ENVIRONMENT: 'github-hosted', RUNNER_OS: 'Windows', RUNNER_ARCH: 'X64',
   GITHUB_REPOSITORY: 'BOBWORKS-XR/CREATOR-HUB', GITHUB_REPOSITORY_ID: '1364807512', GITHUB_EVENT_NAME: 'workflow_dispatch',
@@ -26,6 +27,36 @@ const config = { sourceCommit: 'e39d853f4207bbc8f250566064027c19d8eeb6e0', targe
     installer: '0a737147db5766e108ece53a6f6ffd5fad2d5d311058effacd4e07ae2d9bf219',
     executable: 'b98e7484bb7d3f2a9d3abb450446285eb24b42deeb31adf02a5694e1b16795a5',
     manifest: 'b80fba85744c023ed6d61a6442bd64d3031074d2d9d7ad9130d3c68e50ef3bf1' } };
+test('migrated successor activates the approved route only through unchanged guarded OpenCode review', async () => {
+  const calls = []; let checks = 0;
+  const migrated = { guard: { verify() { checks++; } } };
+  const page = { evaluate: async fn => fn() };
+  const previous = global.window;
+  global.window = { CreatorHubNative: { async invoke(command, args) {
+    calls.push([command, args]);
+    if (args.command === 'begin_ui_operation') return 7;
+    if (args.command === 'review_existing_client_connections') return { status: 'unchanged', count: 0 };
+  } } };
+  try {
+    await driver.activateMigratedRoute(page, migrated);
+    assert.equal(checks, 2);
+    assert.deepEqual(calls.map(([, args]) => [args.command, args.args]), [
+      ['begin_ui_operation', {}], ['review_existing_client_connections', { clients: ['opencode'] }], ['finish_ui_operation', { id: 7 }],
+    ]);
+    global.window.CreatorHubNative.invoke = async (command, args) => args.command === 'review_existing_client_connections'
+      ? { status: 'migrated', count: 1 } : 7;
+    await assert.rejects(driver.activateMigratedRoute(page, migrated));
+    assert.equal(checks, 4);
+    migrated.guard.verify = () => { throw Error('fixture changed'); };
+    await assert.rejects(driver.activateMigratedRoute(page, migrated), /fixture changed/);
+  } finally { global.window = previous; }
+  const source = fs.readFileSync(path.join(__dirname, 'windows-mixed-public-driver.cjs'), 'utf8');
+  assert.ok(source.indexOf('report.preReviewRoute = observeActive()') < source.indexOf('await activateMigratedRoute(page, migrated)'));
+  assert.ok(source.indexOf('await activateMigratedRoute(page, migrated)') < source.indexOf("report.afterRoute = active('0.1.17')"));
+  const fixture = migration.fixture(env, path.resolve('migration-output'));
+  assert.ok(fixture.untouched.some(item => item.path.endsWith(path.join('opencode', 'opencode.jsonc')) &&
+    item.bytes.toString().includes('"other":{"type":"remote"')));
+});
 test('diagnostic admission requires exact hosted context, actor, source and first attempt', () => {
   diag.admit(env, 'win32');
   for (const key of Object.keys(env)) assert.throws(() => diag.admit({ ...env, [key]: '' }, 'win32'));
@@ -179,13 +210,17 @@ test('phase receipt accepts only the diagnostic scope and rejects claims or fail
     baselines: [{ product: 'Creator Hub', version: '0.1.12', installerSha256: '0cd8a4493dd9a5b77fbc5fe160582a2b2698fea43aedd9118b2d5b3bd3c51a18',
       executableSha256: '34c6f05548f469ac23b4faee7aa8355d5cca083c444c4f7b0942426a9c76a7ac' }] };
   const bytes = Buffer.from(JSON.stringify(mr));
+  const beforeRoute = { schemaVersion: 1, descriptorSha256: config.runtime.baselineDescriptor, generation: 'a'.repeat(64) };
+  const afterRoute = { schemaVersion: 1, descriptorSha256: config.runtime.targetDescriptor, generation: 'b'.repeat(64) };
   const report = { kind: diag.KIND, passed: true, publicDiscovery: null, publicNetworkAllowed: true, publicDiscoveryProven: false, labDiscovery: true, migratedContinuation: true,
     automaticRestart: true, cancelPreserved: true, outgoingConnectionSurvived: true, newConnectionVerified: true,
     restorationVerified: true, policyRestored: true, fixtureSettingsChecksPassed: true,
     migratedFixtureFilesUnchangedAfterDriverCleanup: true, activeRouteUnchangedAfterCancel: true,
     nativeUpdateAccepted: false, liveAiAcceptance: false, acceptanceOnly: false, releaseReady: false, changedMcpGenerationProven: false,
     migrationNetworkObserved: false, webViewContinuityProven: false, migrationEraConnectionProven: false, combinedAcceptance: false,
-    initialCleanupUnverified: false, successorCleanupUnverified: false,
+    initialCleanupUnverified: false, successorCleanupUnverified: false, automaticRouteTransitionProven: false,
+    beforeRoute, preReviewRoute: beforeRoute, afterRoute, successorRouteAfterExplicitReview: afterRoute,
+    successorRouteObservation: 'after-explicit-client-review',
     migrationPhase: { publicNetworkAllowed: true, publicDiscovery: 'unproven', networkObservation: 'unobserved', isolationProven: false },
     outgoingPhase: { controlledFeed: true, publicDiscovery: false }, sourceCommit: config.sourceCommit, baseline: config.baseline, pins: config.pins,
     lastTool: 'mcp', restore: true, restoredLastTool: 'mcp', beforePeVersion: [0,1,16,0], afterPeVersion: [0,1,17,0],
@@ -200,11 +235,19 @@ test('phase receipt accepts only the diagnostic scope and rejects claims or fail
   const encoded = r => Buffer.from(JSON.stringify(r) + '\n');
   const result = diag.checkReceipt(report, bytes, encoded(life), config, env);
   assert.equal(result.diagnosticPassed, true); assert.equal(result.combinedAcceptance, false); assert.equal(result.releaseReady, false);
+  assert.deepEqual(result.preReviewRoute, beforeRoute); assert.deepEqual(result.successorRouteAfterExplicitReview, afterRoute);
+  assert.equal(result.successorRouteObservation, 'after-explicit-client-review'); assert.equal(result.automaticRouteTransitionProven, false);
+  assert.deepEqual(diag.checkReceipt({ ...report, preReviewRoute: afterRoute }, bytes, encoded(life), config, env).preReviewRoute, afterRoute);
   assert.throws(() => require('./windows-outgoing-017.cjs').checkMigratedReceipt(report, [life], config, 'mcp-restore', bytes, env));
   for (const change of [{ passed: false }, { nativeUpdateAccepted: true }, { migrationNetworkObserved: true }, { publicDiscovery: true }, { publicDiscovery: false }, { publicDiscoveryProven: true },
     { migrationEraConnectionProven: true }, { webViewContinuityProven: true }, { combinedAcceptance: true },
     { migratedFixtureFilesUnchangedAfterDriverCleanup: false }, { activeRouteUnchangedAfterCancel: false },
-    { initialCleanupUnverified: true }, { successorCleanupUnverified: true }])
+    { initialCleanupUnverified: true }, { successorCleanupUnverified: true }, { automaticRouteTransitionProven: true },
+    { preReviewRoute: null }, { preReviewRoute: { ...beforeRoute, schemaVersion: 2 } },
+    { preReviewRoute: { ...beforeRoute, descriptorSha256: '0'.repeat(64) } },
+    { preReviewRoute: { ...beforeRoute, generation: 'bad' } }, { preReviewRoute: { ...beforeRoute, generation: 'c'.repeat(64) } },
+    { successorRouteAfterExplicitReview: beforeRoute }, { afterRoute: beforeRoute },
+    { successorRouteObservation: 'automatic' }, { successorRouteObservation: undefined }])
     assert.throws(() => diag.checkReceipt({ ...report, ...change }, bytes, encoded(life), config, env));
   for (const change of [{ driverExitCode: 1 }, { driverExitCode: null }, { driverRegistered: false }, { driverGateOpened: false }, { publicDiscovery: true }, { publicDiscoveryProven: true }, { cleanupVerified: false }, { successorCleanupVerified: false }, { hubCleanupState: 'unknown' }, { hubCleanupUnknown: true }, { migrationHandoffBeforeTrust: false },
     { rejectedRequestCount: 1 }, { combinedAcceptance: true }])

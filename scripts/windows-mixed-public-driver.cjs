@@ -73,6 +73,18 @@ async function continueMcpGuide(page) {
     await guide.waitFor({ state: 'hidden' });
   }
 }
+async function activateMigratedRoute(page, migrated) {
+  migrated.guard.verify();
+  try {
+    const result = await page.evaluate(async () => {
+      const call = (command, args = {}) => window.CreatorHubNative.invoke('feature_call', { feature: 'mcp', command, args });
+      const id = await call('begin_ui_operation');
+      try { return await call('review_existing_client_connections', { clients: ['opencode'] }); }
+      finally { await call('finish_ui_operation', { id }); }
+    });
+    assert.deepEqual(result, { status: 'unchanged', count: 0 });
+  } finally { migrated.guard.verify(); }
+}
 async function main() {
   const diagnostic = require('./windows-mixed-public-diagnostic.cjs');
   diagnostic.admit();
@@ -126,7 +138,7 @@ async function main() {
     migrationReceipt: path.relative(ROOT, path.join(migrated.migrationOutput, 'migration-016-report.json')),
     migrationReportSha256: migrated.migrationReportSha256, migrationHarnessSource: process.env.GITHUB_SHA,
     migratedFixtureFilesUnchangedAfterDriverCleanup: false, activeRouteUnchangedAfterCancel: false,
-    changedMcpGenerationProven: false });
+    changedMcpGenerationProven: false, automaticRouteTransitionProven: false });
   const ps = (name, args = []) => execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
     '-File', path.join(ROOT, 'scripts', name), ...args], { encoding: 'utf8', timeout: 30000, windowsHide: true });
   const inventory = () => JSON.parse(ps('native-unified-outgoing-process.ps1').replace(/^\uFEFF/, ''));
@@ -184,12 +196,18 @@ async function main() {
     const result = await client.callTool({ name: 'get_mcp_reference', arguments: { source: 'creator-docs', query: 'PersistFileBridge', limit: 1 } });
     assert.notEqual(result.isError, true); assert.equal(JSON.parse(result.content[0].text).success, true);
   }
-  function active(version) {
+  function observeActive() {
     const value = JSON.parse(target.readBounded(route.active, 4096));
-    const expected = config.runtime[version === '0.1.16' ? 'baselineDescriptor' : 'targetDescriptor'];
-    assert.equal(value.descriptorSha256, expected); assert.match(value.generation, /^[a-f0-9]{64}$/);
-    const body = target.readBounded(path.join(path.dirname(route.active), 'descriptors', expected, 'runtime.json'), target.LIMITS.metadata);
-    assert.equal(target.hash(body), expected); assert.equal(JSON.parse(body).hubVersion, version);
+    assert.equal(value.schemaVersion, 1);
+    const versions = { [config.runtime.baselineDescriptor]: '0.1.16', [config.runtime.targetDescriptor]: '0.1.17' };
+    assert.ok(Object.hasOwn(versions, value.descriptorSha256)); assert.match(value.generation, /^[a-f0-9]{64}$/);
+    const body = target.readBounded(path.join(path.dirname(route.active), 'descriptors', value.descriptorSha256, 'runtime.json'), target.LIMITS.metadata);
+    assert.equal(target.hash(body), value.descriptorSha256); assert.equal(JSON.parse(body).hubVersion, versions[value.descriptorSha256]);
+    return value;
+  }
+  function active(version) {
+    const value = observeActive();
+    assert.equal(value.descriptorSha256, config.runtime[version === '0.1.16' ? 'baselineDescriptor' : 'targetDescriptor']);
     return value;
   }
   async function preserved() {
@@ -275,6 +293,7 @@ async function main() {
     // Deliberately no launch here: a replacement process must appear automatically.
     rootRecord = await retry(() => { const rows = inventory().filter(p => p.image.toLowerCase() === hub.toLowerCase() && p.pid !== child.pid); assert.equal(rows.length, 1); return rows[0]; }, 90);
     successorRecorded = true; report.afterRoot = rootRecord; await connect('0.1.17');
+    if (migrated) report.preReviewRoute = observeActive();
     clearInterval(watch); watch = null;
     if (restore) {
       assertTicket(observedTicket, lastTool, hub); await direct.checkRestored(page);
@@ -297,8 +316,10 @@ async function main() {
       }), feature);
       direct.assertService(feature, service);
     }
-    if (!migrated) await direct.prepareManagedRoute(page, { clientConfig, active: route.active, approve: () => { throw Error('Existing route must not require new consent'); } });
+    if (migrated) await activateMigratedRoute(page, migrated);
+    else await direct.prepareManagedRoute(page, { clientConfig, active: route.active, approve: () => { throw Error('Existing route must not require new consent'); } });
     report.afterRoute = active('0.1.17');
+    if (migrated) { report.successorRouteAfterExplicitReview = report.afterRoute; report.successorRouteObservation = 'after-explicit-client-review'; }
     const reconnect = new Client({ name: 'outgoing-direct-new-connection', version: '1' });
     try {
       const transport = new StdioClientTransport({ command: route.command, args: [], stderr: 'ignore' });
@@ -346,5 +367,5 @@ async function main() {
     console.log(JSON.stringify({ out, passed: report.passed, releaseReady: false }));
   }
 }
-module.exports = { assertProtocol, assertTicket, recoverSpawnedRoot, completeStartup, setUpdatePreferences, assertSavedPreferences, continueMcpGuide, main };
+module.exports = { assertProtocol, assertTicket, recoverSpawnedRoot, completeStartup, setUpdatePreferences, assertSavedPreferences, continueMcpGuide, activateMigratedRoute, main };
 if (require.main === module) main().catch(error => { console.error(String(error.message).slice(0, 1200)); process.exitCode = 1; });

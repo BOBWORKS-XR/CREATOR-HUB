@@ -108,12 +108,24 @@ function checkReceipt(report, migrationBytes, lifecycleBytes, config, env = proc
     'fixtureSettingsChecksPassed', 'migratedFixtureFilesUnchangedAfterDriverCleanup', 'activeRouteUnchangedAfterCancel']) assert.equal(report[key], true, key);
   for (const key of ['nativeUpdateAccepted', 'liveAiAcceptance', 'acceptanceOnly', 'releaseReady', 'changedMcpGenerationProven',
     'migrationNetworkObserved', 'publicDiscoveryProven', 'webViewContinuityProven', 'migrationEraConnectionProven', 'combinedAcceptance',
-    'initialCleanupUnverified', 'successorCleanupUnverified']) assert.equal(report[key], false, key);
+    'initialCleanupUnverified', 'successorCleanupUnverified', 'automaticRouteTransitionProven']) assert.equal(report[key], false, key);
   assert.deepEqual(report.migrationPhase, { publicNetworkAllowed: true, publicDiscovery: 'unproven', networkObservation: 'unobserved', isolationProven: false });
   assert.deepEqual(report.outgoingPhase, { controlledFeed: true, publicDiscovery: false });
   assert.equal(report.sourceCommit, config.sourceCommit); assert.deepEqual(report.baseline, config.baseline); assert.deepEqual(report.pins, config.pins);
   assert.equal(report.lastTool, 'mcp'); assert.equal(report.restore, true); assert.equal(report.restoredLastTool, 'mcp');
   assert.deepEqual(report.beforePeVersion, [0, 1, 16, 0]); assert.deepEqual(report.afterPeVersion, [0, 1, 17, 0]);
+  const route = (value, allowed) => {
+    assert.ok(value && typeof value === 'object' && !Array.isArray(value));
+    assert.equal(value.schemaVersion, 1); assert.ok(allowed.includes(value.descriptorSha256));
+    assert.match(value.generation, /^[a-f0-9]{64}$/);
+  };
+  route(report.beforeRoute, [config.runtime.baselineDescriptor]);
+  route(report.preReviewRoute, [config.runtime.baselineDescriptor, config.runtime.targetDescriptor]);
+  if (report.preReviewRoute.descriptorSha256 === config.runtime.baselineDescriptor)
+    assert.deepEqual(report.preReviewRoute, report.beforeRoute);
+  route(report.successorRouteAfterExplicitReview, [config.runtime.targetDescriptor]);
+  assert.deepEqual(report.afterRoute, report.successorRouteAfterExplicitReview);
+  assert.equal(report.successorRouteObservation, 'after-explicit-client-review');
   assert.equal(report.migratedFixtureFilesChecked, 23); assert.equal(report.migrationRunId, env.GITHUB_RUN_ID);
   assert.equal(report.migrationRunAttempt, env.GITHUB_RUN_ATTEMPT); assert.equal(report.migrationHarnessSource, env.GITHUB_SHA);
   assert.match(report.migrationReceipt, /^artifacts[\\/]native-suite-[0-9]+[\\/]migration-016-report\.json$/);
@@ -132,6 +144,8 @@ function checkReceipt(report, migrationBytes, lifecycleBytes, config, env = proc
   assert.equal(result.servedRouteCount, 5); assert.equal(result.rejectedRequestCount, 0);
   return { kind: KIND, diagnosticPassed: true, publicDiscovery: null, publicNetworkAllowed: true, publicDiscoveryProven: false, migrationNetworkObservation: 'unobserved',
     migrationNetworkObserved: false, isolationProven: false, webViewContinuityProven: false, migrationEraConnectionProven: false,
+    preReviewRoute: report.preReviewRoute, successorRouteAfterExplicitReview: report.successorRouteAfterExplicitReview,
+    successorRouteObservation: 'after-explicit-client-review', automaticRouteTransitionProven: false,
     combinedAcceptance: false, nativeAccepted: false, productionApproval: false, releaseReady: false };
 }
 function prepareOutgoing(env = process.env) {
