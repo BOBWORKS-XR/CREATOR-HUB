@@ -10,10 +10,12 @@
   let latestStatus = { integrated: false, features: [] };
   let generation = 0;
   let canLoad = true;
+  let mcpRouteUpdate = null;
   const changed = () => window.dispatchEvent(new Event('creator-feature-state'));
   const api = {
     invoke: (...args) => (native?.invoke || window.CreatorHubNative.invoke)(...args),
     changed,
+    mcpRouteUpdate: () => mcpRouteUpdate,
     retry(feature) { const page = pages.get(feature); if (canLoad && page && !page.busy()) { page.attempted = false; page.initialized = false; } return window.CreatorFeaturePages.show(feature); },
   };
   async function subscribe() {
@@ -42,13 +44,19 @@
   }
   function render() {
     host.hidden = !selected; host.inert = !selected;
+    for (const root of host.children) {
+      root.hidden = root.id !== `feature-${selected}`; root.inert = root.hidden;
+    }
     for (const [feature, page] of pages) {
-      page.root.hidden = selected !== feature; page.root.inert = selected !== feature;
       if (selected !== feature) page.hide?.();
     }
     help(selected);
   }
   window.CreatorFeaturePages = Object.freeze({
+    configureMcpRouteUpdate(value) {
+      if (mcpRouteUpdate || !value?.state?.subscribe || typeof value.recheck !== 'function' || typeof value.openMcp !== 'function') throw new Error('Root route status callbacks are unavailable.');
+      mcpRouteUpdate = value;
+    },
     configure(value) {
       if (pages.size || subscription) throw new Error('Configure feature API before opening a page.');
       if (typeof value?.invoke !== 'function' || typeof value.listen !== 'function') throw new Error('Feature invoke/listen API required.');
@@ -67,9 +75,20 @@
           if (!mounts.has(feature)) mounts.set(feature, (async () => {
             const root = document.createElement('section'); root.id = `feature-${feature}`; root.className = 'feature-page';
             host.append(root);
-            const module = await import(`./features/${feature}.js`);
-            if (currentGeneration !== generation) { root.remove(); return null; }
-            const mounted = module.mount(root, api); pages.set(feature, mounted); render(); return mounted;
+            try {
+              const module = await import(`./features/${feature}.js`);
+              if (currentGeneration !== generation) { root.remove(); return null; }
+              const mounted = module.mount(root, api); pages.set(feature, mounted); render(); return mounted;
+            } catch (reason) {
+              if (currentGeneration !== generation) { root.remove(); return null; }
+              const name = feature === 'setup' ? 'Project Setup' : 'Creator Works MCP';
+              const error = document.createElement('p'); error.className = 'feature-error'; error.setAttribute('role', 'alert');
+              error.textContent = `${name} could not open. Close and reopen Hub to try again. Other Hub pages remain available. ${String(reason).slice(0, 2000)}`;
+              root.replaceChildren(error); render();
+              // Failed module loads can remain cached for this document. Do not
+              // offer a same-document retry or reload across an active operation.
+              return null;
+            }
           })());
           page = await mounts.get(feature);
         }

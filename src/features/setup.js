@@ -53,6 +53,7 @@ export function mount(root, api) {
   let environment = null;
   let created = null;
   let inspection = null;
+  let inspectionRevision = 0;
   let completed = null;
   let hub = null;
   let operation = null;
@@ -101,7 +102,7 @@ export function mount(root, api) {
     controls();
   }
   function showHub(value) { hub = value; $('hub-result').textContent = value?.message || ''; controls(); }
-  function clearInspection() { inspection = null; completed = null; $('approval').checked = false; $('inspection-summary').replaceChildren(); $('findings').replaceChildren(); $('changes').replaceChildren(); $('existing-result').replaceChildren(); controls(); }
+  function clearInspection() { inspectionRevision++; inspection = null; completed = null; $('approval').checked = false; $('inspection-summary').replaceChildren(); $('findings').replaceChildren(); $('changes').replaceChildren(); $('existing-result').replaceChildren(); controls(); }
   function startActivity(kind, label, detail) {
     operation = kind; stage = 0;
     $('stage').textContent = label; $('detail').textContent = detail;
@@ -159,12 +160,17 @@ export function mount(root, api) {
   page.on($('approval'), 'change', controls);
   page.on($('inspect'), 'click', () => run(async () => {
     clearInspection();
-    const result = await page.call('inspect_project', { path: $('existing-path').value });
+    const path = $('existing-path').value;
+    const revision = inspectionRevision;
+    const result = await page.call('inspect_project', { path });
+    if (revision !== inspectionRevision || path !== $('existing-path').value) throw new Error('Project selection changed during inspection. Inspect the current folder again.');
     inspection = result; $('existing-path').value = result.projectPath;
     const blockers = result.findings.filter(finding => finding.status === 'blocked').length;
     $('inspection-summary').textContent = blockers
       ? `${blockers} ${blockers === 1 ? 'blocker needs' : 'blockers need'} review. No project files were changed. Resolve each finding, then inspect again. For manual review, open this project from Unity Hub using its existing Editor version.`
-      : 'Inspection complete. No project files were changed. Review the findings before approving a repair or validation.';
+      : result.canRepair && !result.canValidate
+        ? 'Inspection complete. No project files were changed. Review the proposed changes; repairs are required before validation is available.'
+        : 'Inspection complete. No project files were changed. Review the findings before approving a repair or validation.';
     const labels = { pass: ['Ready', 'feature-good'], blocked: ['Blocked', 'feature-warn'], repair: ['Repair available', 'feature-warn'], check: ['Needs Unity check', 'feature-note'] };
     $('findings').replaceChildren(...result.findings.map(finding => {
       const [label, style] = Object.hasOwn(labels, finding.status) ? labels[finding.status] : ['Review', 'feature-note'];
@@ -176,13 +182,17 @@ export function mount(root, api) {
     return run(async () => {
       if (!inspection || !$('approval').checked || !(repair ? inspection.canRepair : inspection.canValidate)) throw new Error('Inspect and approve the reviewed changes first.');
       const reviewed = inspection;
+      $('inspection-summary').textContent = 'Operation in progress. The findings below describe the pre-operation inspection.';
       startActivity('existing', repair ? 'Repairing project' : 'Validating project', 'Preparing the settings backup.');
       try {
         const result = await page.call('run_existing_project', { request: { projectPath: reviewed.projectPath, fingerprint: reviewed.fingerprint, repair, approved: true } });
         lines($('existing-result'), [result.message, result.backupPath ? `Backup: ${result.backupPath}` : null, result.reportPath ? `Report: ${result.reportPath}` : null]);
         if (!result.success) throw new Error(result.message || 'Validation needs attention. Review the report.');
         completed = result.projectPath;
-      } finally { inspection = null; $('approval').checked = false; operation = null; $('activity').hidden = true; }
+      } finally {
+        inspection = null; $('approval').checked = false; operation = null; $('activity').hidden = true;
+        $('inspection-summary').textContent = 'Inspect again before another repair or validation. The findings below describe the pre-operation inspection.';
+      }
     }, repair ? 'Backing up and repairing' : 'Backing up and validating');
   }
   page.on($('repair'), 'click', () => existing(true));

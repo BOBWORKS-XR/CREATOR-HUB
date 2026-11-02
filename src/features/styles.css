@@ -1,3 +1,13 @@
+.mcp-route-notice { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 12px; min-width: 0; margin: 12px 0 18px; padding: 12px 0 12px 12px; border-left: 2px solid #d9b054; color: inherit; font-size: 13px; line-height: 1.5; }
+.mcp-route-notice[hidden], .mcp-route-notice [hidden] { display: none !important; }
+.mcp-route-notice p { margin: 0 0 6px; overflow-wrap: anywhere; }
+.mcp-route-notice .mcp-route-title { color: #efcf86; }
+.mcp-route-notice .mcp-route-reason { color: #b8c1c7; font-size: 12px; }
+.mcp-route-notice details { margin: 8px 0 0; font-size: 12px; }
+.mcp-route-notice summary { cursor: pointer; padding: 0; }
+.mcp-route-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
+.mcp-route-actions button { min-height: 32px; max-width: 100%; white-space: normal; }
+@media (max-width: 700px) { .mcp-route-notice { grid-template-columns: minmax(0, 1fr); } }
 .feature-page { color: inherit; padding: 8px 0 24px; }
 .feature-page[hidden], .feature-page [hidden], #view-native-features[hidden] { display: none !important; }
 .feature-page *, .feature-dialog * { box-sizing: border-box; }

@@ -159,8 +159,32 @@ namespace CreatorWorks
             public bool restorationPerformed;
         }
 
+        private static string RequireCandidateBackupDirectory()
+        {
+            var status = new DirectoryInfo(StatusFolder);
+            var backups = new DirectoryInfo(Path.Combine(status.FullName, "backups"));
+            foreach (var directory in new[] { status, backups })
+                if (!directory.Exists || (directory.Attributes & FileAttributes.ReparsePoint) != 0)
+                    throw new InvalidOperationException("The operation backup folder is missing or linked. Backups retained.");
+            var requestPath = Path.Combine(status.FullName, "existing-request.json");
+            if (!File.Exists(requestPath) || (File.GetAttributes(requestPath) & FileAttributes.ReparsePoint) != 0)
+                throw new InvalidOperationException("The reviewed existing-project request is missing or linked. Backups retained.");
+            var request = JsonUtility.FromJson<ExistingRequest>(File.ReadAllText(requestPath));
+            if (request == null || string.IsNullOrWhiteSpace(request.backupPath) || !Path.IsPathRooted(request.backupPath))
+                throw new InvalidOperationException("The reviewed existing-project request requires an absolute backup path. Backups retained.");
+            var backup = new DirectoryInfo(Path.GetFullPath(request.backupPath));
+            var comparison = Path.DirectorySeparatorChar == '\\' ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+            // The outer operation approves and creates one direct child of this project's backups folder.
+            if (backup.Parent == null || !string.Equals(backup.Parent.FullName, backups.FullName, comparison))
+                throw new InvalidOperationException("The requested backup is outside this project's operation backups. Backups retained.");
+            if (!backup.Exists || (backup.Attributes & FileAttributes.ReparsePoint) != 0)
+                throw new InvalidOperationException("The requested operation backup is missing or linked. Backups retained.");
+            return backup.FullName;
+        }
+
         private static void WriteCandidateStampBeforeImage()
         {
+            var backupPath = RequireCandidateBackupDirectory();
             candidateStampBeforeValue = EditorUserSettings.GetConfigValue(CandidateStampKey);
             if (candidateStampBeforeValue != null && candidateStampBeforeValue.Length > 4096)
                 throw new InvalidOperationException("The candidate stamp before-image is outside its bound.");
@@ -170,7 +194,7 @@ namespace CreatorWorks
                 visualScriptingVersion = PackageVersion("com.unity.visualscripting"), restorationPerformed = false
             };
             var bytes = System.Text.Encoding.UTF8.GetBytes(JsonUtility.ToJson(evidence, true));
-            var path = Path.Combine(StatusFolder, "sdk4022-node-stamp-before.json");
+            var path = Path.Combine(backupPath, "sdk4022-node-stamp-before.json");
             using (var file = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None)) {
                 file.Write(bytes, 0, bytes.Length);
                 file.Flush(true);

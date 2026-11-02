@@ -361,6 +361,23 @@ pub(crate) struct ManagedRouteReview {
 }
 
 impl ManagedRouteReview {
+    #[cfg(all(target_os = "linux", feature = "integrated-features"))]
+    pub(crate) fn activate_update(
+        self,
+        authority: crate::mcp_update_handoff::Activation,
+    ) -> Result<creator_hub_mcp_router::Router, String> {
+        let descriptor = self.store.verify_descriptor(&self.bytes, &self.signature)?;
+        let target = crate::mcp_update_handoff::RouteTarget {
+            descriptor_sha256: {
+                use sha2::{Digest, Sha256};
+                format!("{:x}", Sha256::digest(&self.bytes))
+            },
+            generation: creator_hub_mcp_router::generation(&descriptor.module)?,
+        };
+        authority.authorize(self.previous.as_deref(), &target)?;
+        self.activate()
+    }
+
     #[cfg(feature = "integrated-features")]
     pub(crate) fn key(&self) -> String {
         use sha2::{Digest, Sha256};
@@ -411,6 +428,65 @@ impl ManagedRouteReview {
         consent.authorize_route(&self.key())?;
         self.activate()
     }
+}
+
+#[cfg(all(target_os = "linux", feature = "integrated-features"))]
+pub(crate) fn update_route_identity() -> Result<crate::mcp_update_handoff::RouteTarget, String> {
+    let manifest = manifest()?;
+    let routing = manifest.managed_routing.ok_or("This Root has no signed MCP routing identity.")?;
+    let entry = manifest.modules.get("mcp").ok_or("This Root has no bound MCP module.")?;
+    validate_module("mcp", entry)?;
+    Ok(crate::mcp_update_handoff::RouteTarget {
+        descriptor_sha256: routing.files.get("routing/runtime.json").ok_or("Missing signed runtime identity.")?.clone(),
+        generation: generation_id(entry)?,
+    })
+}
+
+#[cfg(all(target_os = "linux", feature = "integrated-features"))]
+pub(crate) fn inspect_update_route(handle: &tauri::AppHandle) -> Result<crate::mcp_update_handoff::RouteTarget, String> {
+    let manifest = manifest()?;
+    let routing = manifest.managed_routing.as_ref().ok_or("This Root has no signed MCP route.")?;
+    let entry = manifest.modules.get("mcp").ok_or("This Root has no bound MCP module.")?.clone();
+    let resources = handle.path().resource_dir().map_err(|_| "Cannot locate signed Hub resources.")?;
+    let source = Source::load(&resources, &manifest)?;
+    source.verify(&resources.join("modules"), "mcp", entry)?;
+    source.verify(&resources.join("modules"), "routing", Module {
+        executable: routing_names().0, version: env!("CARGO_PKG_VERSION").into(), files: routing.files.clone(),
+    })?;
+    let read = |name: &str, limit: usize| -> Result<Vec<u8>, String> {
+        match &source {
+            Source::Directory(root) => crate::manager::bounded_read(&root.join(name), limit as u64),
+            Source::Archive(snapshot) => {
+                let member = snapshot.0.get(name).ok_or("Missing signed routing metadata.")?;
+                if member.bytes.len() > limit { return Err("Signed routing metadata exceeds its bound.".into()); }
+                Ok(member.bytes.clone())
+            }
+        }
+    };
+    let bytes = read("routing/runtime.json", 32768)?;
+    let signature = read("routing/runtime.minisig", 4096)?;
+    let descriptor = creator_hub_mcp_router::Store::installed()?.verify_descriptor(&bytes, &signature)?;
+    let expected = update_route_identity()?;
+    use sha2::{Digest, Sha256};
+    if descriptor.hub_version != env!("CARGO_PKG_VERSION")
+        || format!("{:x}", Sha256::digest(&bytes)) != expected.descriptor_sha256
+        || creator_hub_mcp_router::generation(&descriptor.module)? != expected.generation
+    { return Err("The signed route differs from this Root's bound package/version.".into()); }
+    Ok(expected)
+}
+
+#[cfg(all(target_os = "linux", feature = "integrated-features"))]
+pub(crate) fn prepare_update_route(handle: &tauri::AppHandle, expected: &[u8]) -> Result<ManagedRouteReview, String> {
+    let store = creator_hub_mcp_router::Store::installed()?;
+    if store.snapshot()?.as_deref() != Some(expected) {
+        return Err("The approved old MCP route changed before update staging. Review the connection; nothing was activated.".into());
+    }
+    hosting_candidate(handle, AppId::Mcp)?.ok_or("This Root cannot stage its verified MCP payload.")?;
+    let review = convergence_route_review(handle)?.ok_or("This Root has no signed MCP route.")?;
+    if review.previous.as_deref() != Some(expected) {
+        return Err("The approved old MCP route changed during staging. Review the connection; nothing was activated.".into());
+    }
+    Ok(review)
 }
 
 pub(crate) fn convergence_route_review(

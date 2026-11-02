@@ -356,8 +356,8 @@ test('production update profiles expose exactly five DEB or eleven portable rout
 });
 
 test('actual017 DEB and installed ELF are mandatory at native/loader boundaries; synthetic bytes cannot pass', () => {
-  assert.deepEqual(lab.UPDATE_DEB, { size: 64296202, sha256: 'efc71fb740ab87e2d8a3d8519cbe8fff38edaa6ee95f358e50b2eccc0f5f80fe',
-    executableSha256: '147d7847a1437adbd33d161029307eb32bc1e406482d8f93247822eb805c47cd' });
+  assert.deepEqual(lab.UPDATE_DEB, { size: 64455526, sha256: 'f58801c95e6932266a897a7b139c6ad3cf4fdfb22ea518398f3a91ed3829ed54',
+    executableSha256: '1fae9d03ddd889068fdccb8416ad3644952027304c10038d0b6810f068e2a952' });
   assert.throws(() => lab.reviewedUpdateTarget(updateContract(updateInput('deb'))));
   assert.throws(() => lab.reviewedUpdateTarget({ ...updateContract(updateInput()) }));
   assert.ok(lab.loadUpdate016017.toString().includes('reviewedUpdateTarget(contract)'));
@@ -365,6 +365,7 @@ test('actual017 DEB and installed ELF are mandatory at native/loader boundaries;
 });
 
 test('portable16 baseline is externally pinned without c13 restriction while portable17 source is fixed75', () => {
+  assert.deepEqual(lab.UPDATE_SOURCE17, { commit: '75a99ff4a267064aaa3ac9e30039bc91dc791d89', tree: '5f62bf4bc1ba85eb293ca9a5a30330b06b6b4351' });
   const first = updateContract(updateInput('portable', '8')), second = updateContract(updateInput('portable', '9'));
   lab.reviewedUpdateTarget(first); lab.reviewedUpdateTarget(second);
   assert.notDeepEqual(first.pins, second.pins);
@@ -372,6 +373,10 @@ test('portable16 baseline is externally pinned without c13 restriction while por
     lab.BOOTSTRAP_FILES['creator-hub-linux-x86_64-0.1.16.appdir.tar.gz'].sha256);
   const changed = updateChange(updateInput(), 'portable17/creator-hub-linux-x86_64-0.1.17.portable-manifest.json', m => { m.sourceCommit = 'a'.repeat(40); });
   assert.throws(() => updateContract(changed));
+  const unqualifiedDcePortable = updateChange(updateInput(), 'portable17/creator-hub-linux-x86_64-0.1.17.portable-manifest.json', m => {
+    m.sourceCommit = 'dce183ec0a0f23210d83b064c04ecc8b6af999fe'; m.sourceTree = '6d881eade5b3178913012d3a6c6632bd41b0e849';
+  });
+  assert.throws(() => updateContract(unqualifiedDcePortable));
 });
 
 test('independent pins cannot hide changed version, source, route, schema, signature envelope or package bindings', () => {
@@ -409,6 +414,46 @@ test('exact five scenario dispatch guard refuses wrong modes, local execution an
     }
     await assert.rejects(lab.startUpdate016017Proxy(updateContract(updateInput(mode)), null, { GITHUB_ACTIONS: 'false' }));
   }
+});
+
+const migratedRunner = () => {
+  const branch = 'refs/heads/validation/native-linux-production-016';
+  return { ...updateRunner('deb'), GITHUB_REF: branch,
+    GITHUB_WORKFLOW_REF: `BOBWORKS-XR/CREATOR-HUB/.github/workflows/native-linux-production-016-migration.yml@${branch}`,
+    CREATOR_NATIVE_LINUX_PRODUCTION_016: '1', CREATOR_MIGRATION_016_EXECUTE: 'true', CREATOR_MIGRATION_016_SCENARIO: 'migration-approve',
+    CREATOR_MIGRATED_UPDATE_EXECUTE: 'true', UPDATE_SCENARIO: 'deb-approve',
+    UPDATE_PROFILE_SHA256: '808f83a6cdc14a2d49000a2c9cd340397a748e166dfdb29720fe4af07ff91e66' };
+};
+
+test('migrated DEB transport admits actual migration context only with explicit separate approval', () => {
+  const env = migratedRunner(), original = structuredClone(env);
+  lab.assertUpdateRunner('deb', env, 'linux', 'x64', 21314, 21314, true);
+  assert.deepEqual(env, original);
+  assert.throws(() => lab.assertUpdateRunner('deb', env, 'linux', 'x64', 21314, 21314));
+  assert.throws(() => lab.assertUpdateRunner('deb', updateRunner('deb'), 'linux', 'x64', 21314, 21314, true));
+  for (const name of ['CREATOR_NATIVE_LINUX_PRODUCTION_016', 'CREATOR_MIGRATED_UPDATE_EXECUTE', 'CREATOR_MIGRATION_016_EXECUTE',
+    'CREATOR_MIGRATION_016_SCENARIO', 'UPDATE_EXECUTE', 'UPDATE_PROFILE_SHA256', 'GITHUB_SHA', 'GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT']) {
+    assert.throws(() => lab.assertUpdateRunner('deb', { ...env, [name]: '' }, 'linux', 'x64', 21314, 21314, true), undefined, name);
+  }
+});
+
+test('migrated transport retains exact scenario, workflow, host and injection refusals', () => {
+  for (const [key, value] of [['GITHUB_REF', lab.UPDATE_BRANCH], ['GITHUB_WORKFLOW_REF', updateRunner('deb').GITHUB_WORKFLOW_REF],
+    ['GITHUB_EVENT_NAME', 'push'], ['UPDATE_SCENARIO', 'deb-auth-cancel'], ['CREATOR_MIGRATION_016_SCENARIO', 'migration-guide-cancel'],
+    ...['HTTPS_PROXY', 'LD_PRELOAD', 'NODE_OPTIONS', 'PYTHONPATH', 'APPIMAGE', 'SSL_CERT_FILE'].map(k => [k, ''])]) {
+    assert.throws(() => lab.assertUpdateRunner('deb', { ...migratedRunner(), [key]: value }, 'linux', 'x64', 21314, 21314, true), undefined, key);
+  }
+  for (const args of [['win32', 'x64', 21314, 21314], ['linux', 'arm64', 21314, 21314], ['linux', 'x64', 0, 0]]) {
+    assert.throws(() => lab.assertUpdateRunner('deb', migratedRunner(), ...args, true));
+  }
+  for (const flag of ['true', 1, null, {}]) assert.throws(() => lab.assertUpdateRunner('deb', migratedRunner(), 'linux', 'x64', 21314, 21314, flag));
+  assert.throws(() => lab.assertUpdateRunner('portable', migratedRunner(), 'linux', 'x64', 21314, 21314, true));
+});
+
+test('migrated transport refusal precedes access to TLS options or transport startup', async () => {
+  const untouched = new Proxy({}, { get() { throw new Error('TLS options must not be read'); } });
+  await assert.rejects(lab.startUpdate016017Proxy(updateContract(updateInput('deb')), untouched,
+    { ...migratedRunner(), CREATOR_MIGRATED_UPDATE_EXECUTE: 'false' }, true), error => !error.message.includes('TLS options must not be read'));
 });
 
 test('new loader reads only the exact fixed layout, bounded independent pins and complete input set', t => {

@@ -38,7 +38,7 @@ Run \`get_banter_sdk_info\` before adding SideQuest components, creating custom 
 - \`hybrid\`: prefer the Creator SDK contract for new content, preserve existing legacy content, and validate both before changing it.
 - \`none\` or \`unknown\`: do not guess a SideQuest namespace; restrict work to Unity built-ins or report the missing package state.
 
-For Creator SDK APIs and workflows, search \`get_mcp_reference\` with source \`creator-docs\`. The pinned AltVR documentation covers publishing, Play Mode, local multiplayer, persistence, recording, browsers and Visual Scripting. \`creator://docs-index\` lists the source pages and revision. Documentation is not installed-package or runtime verification; check new types against the selected SDK. Keep legacy Banter references separate.
+For Creator SDK APIs and workflows, search \`get_mcp_reference\` with source \`creator-docs\` for offline reference. For current or newly changed topics, call \`lookup_creator_docs\` with a specific query or page path. It checks the official AltVR source on demand, fetches at most three pages, labels offline fallback and does not send project contents or queries upstream. Reuse returned excerpts; do not check on every Unity operation. \`creator://docs-index\` lists bundled pages and revision. Documentation is not installed-package or runtime verification; check new types against the selected SDK. Keep legacy Banter references separate.
 
 Legacy aliases inside the Creator SDK are migration inputs, not proof that a hosted target supports those legacy types. Never perform blanket text replacement in scenes, prefabs, or graph assets. Any migration must use an explicit source-to-target mapping, duplicated assets, Unity serialization APIs, and post-import validation.
 

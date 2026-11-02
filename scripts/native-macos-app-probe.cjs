@@ -18,7 +18,8 @@ function admission(env, platform, arch) {
 }
 function options(args) {
   const termsInspect = args.at(-1) === '--terms-inspect';
-  if (termsInspect) args = args.slice(0, -1);
+  const termsSemantic = args.at(-1) === '--terms-semantic';
+  if (termsInspect || termsSemantic) args = args.slice(0, -1);
   let launchContext;
   if (args.at(-2) === '--launch-context') {
     launchContext = args.at(-1); args = args.slice(0, -2);
@@ -35,9 +36,10 @@ function options(args) {
     Object.assign(result, { expectedVersion: args[7], assemblyReceipt: args[9], assemblyReceiptSha256: args[11] });
   }
   if (launchContext) result.launchContext = launchContext;
-  if (termsInspect) {
+  if (termsInspect || termsSemantic) {
     requireThat(launchContext === 'direct-ordinary' && result.expectedVersion === '0.1.14', 'terms-inspection-requires-exact-ordinary14-context');
-    result.termsInspect = true;
+    if (termsInspect) result.termsInspect = true;
+    if (termsSemantic) result.termsSemantic = true;
   }
   return result;
 }
@@ -159,6 +161,61 @@ function validateTermsInspection(receipt, owner) {
     expected.delete(control.role);
   }
   requireThat(expected.size === 0, 'terms-control-capture-unverified');
+}
+function validateSemanticTerms(receipt, owner) {
+  requireThat(receipt?.command === 'terms-semantic' && receipt.contractRevision === 1 && receipt.complete === true
+    && receipt.diagnosticOnly === true && receipt.actionAttempted === true && receipt.permissionRequestsPerformed === false
+    && receipt.pointerMethodAdmitted === false && receipt.termsAccepted === false
+    && Object.keys(acceptance).every(key => receipt[key] === false)
+    && isDeepStrictEqual(receipt.process, owner.process) && isDeepStrictEqual(receipt.window, owner.window)
+    && receipt.package?.bundleShortVersion === '0.1.14' && receipt.package.bundleIdentifier === bundle
+    && receipt.package.bundleExecutable === 'creator-hub' && isDeepStrictEqual(receipt.package.infoPlist, owner.process.infoPlist)
+    && receipt.dialogAbsentVerified === true && receipt.rootNativeCFReferencePreserved === true
+    && receipt.rootReferenceScope === 'native-invocation' && receipt.elapsedMilliseconds >= 0 && receipt.elapsedMilliseconds <= 22000
+    && Array.isArray(receipt.actions) && receipt.actions.length === 2 && Array.isArray(receipt.attempts) && receipt.attempts.length <= 32,
+  'terms-semantic-transition-unverified');
+  const titles = ['I have read and agree to these terms, including the risk assumption and liability limitations above.', 'Accept and continue'];
+  for (const [index, role] of ['AXCheckBox', 'AXButton'].entries()) {
+    const action = receipt.actions[index];
+    requireThat(action?.role === role && action.action === 'AXPress' && action.axResult === 0
+      && typeof action.path === 'string' && Number.isFinite(action.startedUptime) && action.startedUptime > 0
+      && Number.isFinite(action.returnedUptime) && action.returnedUptime >= action.startedUptime
+      && (index === 0 || action.startedUptime >= receipt.actions[0].returnedUptime), 'terms-semantic-action-unverified');
+    for (const [phase, checked, enabled] of [['before', 0, false], ['afterCheckbox', 1, true]]) {
+      const rows = receipt[phase], row = Array.isArray(rows) && rows.find(r => r.role === role);
+      requireThat(rows?.length === 2 && rows.filter(r => r.role === role).length === 1 && row.title === titles[index]
+        && row.path === action.path && row.pid === owner.process.pid && row.windowID === owner.window.id
+        && row.parentPID === owner.process.pid && row.documentPID === owner.process.pid && row.containerPID === owner.process.pid
+        && row.actionMethod === 'held-element-semantic-AXPress' && row.parentCFMatches === true && row.windowCFMatches === true
+        && row.nativeReferencesStable === true && row.contained === true && row.actionsAXError === 0
+        && Array.isArray(row.actions) && row.actions.includes('AXPress') && row.fieldErrors?.length === 0
+        && (index === 0 ? row.enabled === true && row.checked === checked : row.enabled === enabled), 'terms-semantic-state-unverified');
+    }
+  }
+  const last = receipt.lastCapture;
+  requireThat(last?.complete === true && last.documentCount === 1 && last.candidateCount === 0 && last.containerCount === 0
+    && last.headingCount === 0 && isDeepStrictEqual(last.process, owner.process) && isDeepStrictEqual(last.window, owner.window)
+    && last.rootNativeCFReferencePreserved === true && last.rootReferenceScope === 'native-invocation', 'terms-semantic-disappearance-unverified');
+}
+function consentRecordPath(home) {
+  canonical(home);
+  const target = path.join(home, 'Library/Application Support/CreatorHub/consent/hub-usage-terms.json');
+  let current = home;
+  for (const component of path.relative(home, target).split(path.sep)) {
+    current = path.join(current, component);
+    let entry;
+    try { entry = fs.lstatSync(current); } catch (error) { if (error.code === 'ENOENT') break; throw error; }
+    requireThat(!entry.isSymbolicLink() && (current === target ? entry.isFile() && entry.nlink === 1 : entry.isDirectory())
+      && (typeof process.getuid !== 'function' || entry.uid === process.getuid()), 'terms-consent-path-unverified');
+  }
+  return target;
+}
+function readNativeConsent(home, started, ended) {
+  const file = consentRecordPath(home), saved = pin(file, 2048, true), value = JSON.parse(saved.bytes);
+  requireThat(Object.keys(value).sort().join(',') === 'acceptedAtMs,policyVersion,schemaVersion'
+    && value.schemaVersion === 1 && value.policyVersion === '2026-09-28-v1' && Number.isSafeInteger(value.acceptedAtMs)
+    && value.acceptedAtMs >= started && value.acceptedAtMs <= ended, 'terms-native-save-unverified');
+  return { path: file, image: saved.image, ...value, readOnlyVerification: true };
 }
 function privateProfile(output) {
   const home = path.join(output, 'private-home');
@@ -883,12 +940,20 @@ function surfaceSupportSource() {
   requireThat(at > 0 && surfaceSource.indexOf(marker, at + marker.length) === -1, 'sampler-support-boundary-unverified');
   return surfaceSource.slice(0, at) + '\n';
 }
+function termsSupportSource(source = fs.readFileSync(path.join(__dirname, 'native-macos-terms-inspect.swift'), 'utf8')) {
+  source = source.replace(/\r\n/g, '\n');
+  const marker = '\nvar termsAttempts =', at = source.indexOf(marker);
+  requireThat(at > 0 && source.indexOf(marker, at + marker.length) === -1, 'terms-support-boundary-unverified');
+  return source.slice(0, at) + '\n';
+}
 
 async function probe(args, env) {
   admission(env, process.platform, process.arch);
   const request = options(args), temporary = canonical(env.RUNNER_TEMP || '');
   if (request.launchContext) rootDiagnostics.launchControl(request.launchContext, env, request.expectedVersion);
   if (request.termsInspect) requireThat(process.arch === 'x64' && env.CREATOR_MACOS_TERMS_INSPECT === '1', 'explicit-intel-terms-inspection-required');
+  if (request.termsSemantic) requireThat(process.arch === 'x64' && env.CREATOR_MACOS_TERMS_INSPECT === '1'
+    && env.CREATOR_MACOS_TERMS_SEMANTIC === '1', 'explicit-intel-semantic-terms-required');
   canonical(request.app); requireThat(inside(temporary, request.app) && request.app.endsWith('.app'), 'root-app-outside-runner-temp');
   const executable = path.join(request.app, 'Contents/MacOS/creator-hub'), info = path.join(request.app, 'Contents/Info.plist');
   const executablePin = pin(executable), infoPin = pin(info, 65536);
@@ -979,6 +1044,19 @@ async function probe(args, env) {
       report.termsInspector = { path: binary, image: pin(binary).image, sourceSha256: source.image.sha256,
         supportSha256: crypto.createHash('sha256').update(support, 'utf8').digest('hex') };
     }
+    if (request.termsSemantic) {
+      const source = pin(path.join(__dirname, 'native-macos-terms-action.swift'), 65536, true);
+      const shared = pin(path.join(__dirname, 'native-macos-terms-inspect.swift'), 65536, true);
+      const support = surfaceSupportSource(), terms = termsSupportSource(shared.bytes.toString('utf8'));
+      fs.mkdirSync(path.join(output, 'terms-semantic'), { mode: 0o700 });
+      write('terms-semantic/main.swift', source.bytes); write('terms-semantic/support.swift', support); write('terms-semantic/terms.swift', terms);
+      const binary = path.join(output, 'terms-semantic/terms-action');
+      const result = await command('/usr/bin/swiftc', ['support.swift', 'terms.swift', 'main.swift'].map(f => path.join(output, 'terms-semantic', f)).concat(['-o', binary]), 'compile-terms-semantic', 120000);
+      requireThat(result.exitCode === 0, 'terms-semantic-compilation-failed');
+      report.termsSemanticHelper = { path: binary, image: pin(binary).image, sourceSha256: source.image.sha256,
+        inspectorSourceSha256: shared.image.sha256, termsSupportSha256: crypto.createHash('sha256').update(terms).digest('hex'),
+        supportSha256: crypto.createHash('sha256').update(support).digest('hex') };
+    }
     for (const [file, image, label] of [[helper, helperImage, 'availability-helper'], [sampler, samplerImage, 'availability-surface']]) {
       const result = await command(file, ['availability'], label, 15000, image);
       requireThat(result.exitCode === 0 && JSON.parse(result.text).accessibilityTrusted === true, 'existing-ax-trust-required-no-prompt');
@@ -989,6 +1067,10 @@ async function probe(args, env) {
     const suppliedTmpdir = rootEnv.TMPDIR;
     rootEnv.TMPDIR = fs.realpathSync(rootEnv.TMPDIR) + path.sep;
     canonical(rootEnv.HOME); canonical(rootEnv.TMPDIR.replace(/\/$/, ''));
+    if (request.termsSemantic) {
+      requireThat(rootEnv.HOME.startsWith('/Users/runner') && !fs.existsSync(consentRecordPath(rootEnv.HOME)), 'fresh-disposable-native-consent-required');
+      report.termsConsentBefore = { path: consentRecordPath(rootEnv.HOME), absent: true, inspectedAtMs: Date.now() };
+    }
     let launchStarted = Date.now();
     if (report.launchContext === 'launchservices-ordinary') {
       const launchSource = pin(path.join(__dirname, 'native-macos-launchservices.swift'), 65536, true);
@@ -1045,7 +1127,20 @@ async function probe(args, env) {
     ownerImage = pin(ownerPath, 8192).image;
     const captureOwnerFence = () => requireThat(!toolUncertain && !ownedExit && sameImage(pin(ownerPath, 8192).image, ownerImage),
       'capture-owner-or-tool-state-unverified');
-    if (request.termsInspect) {
+    if (request.termsSemantic) {
+      captureOwnerFence();
+      requireThat(!fs.existsSync(consentRecordPath(rootEnv.HOME)), 'terms-native-consent-created-before-action');
+      const helper = report.termsSemanticHelper, started = Date.now();
+      const result = await command(helper.path, [ownerPath, String(process.pid)], 'terms-semantic', 30000, helper.image);
+      const receipt = JSON.parse(result.text); report.termsSemantic = receipt; write('terms-semantic.json', receipt);
+      requireThat(result.exitCode === 0, 'terms-semantic-native-refused');
+      validateSemanticTerms(receipt, owner); captureOwnerFence();
+      const saved = readNativeConsent(rootEnv.HOME, started, Date.now());
+      report.termsAcceptance = { diagnosticOnly: true, ...acceptance, termsAccepted: true, nativeSave: saved, dialogAbsentVerified: true };
+      write('terms-native-save.json', report.termsAcceptance);
+      if (sourcePin) requireThat(sameImage(pin(request.assemblyReceipt, 16384).image, sourcePin.image), 'assembly-receipt-drift');
+      report.captureCompleted = true;
+    } else if (request.termsInspect) {
       captureOwnerFence();
       const inspector = report.termsInspector;
       const result = await command(inspector.path, [ownerPath, String(process.pid)], 'terms-inspect', 30000, inspector.image);
@@ -1169,4 +1264,4 @@ if (require.main === module) {
 module.exports = { admission, options, reserveOutput, pin, sameImage, validateOwner, privateProfile, acceptedExit, closeAssessment, probeCompletion,
   bitmapArguments, bitmapImage, windowBitmapDiagnostic, remoteReadPolicy, validateRootInspection, validateChildrenFailure, verifiedRootCloseDialog,
   assemblyIdentity, validatePackageIdentity, validateLinkFailure, validateChildObservations, rootSurfaceDiagnostic, acceptance, surfaceSource,
-  surfaceSupportSource, validateTermsInspection };
+  surfaceSupportSource, termsSupportSource, validateTermsInspection, validateSemanticTerms, consentRecordPath, readNativeConsent };

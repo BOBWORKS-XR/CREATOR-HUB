@@ -77,6 +77,9 @@ test('pinned preflight Python precedes pure tests while native brokers retain th
   assert.match(steps[pure].run, /^"\$PREFLIGHT_PYTHON" -I -c 'import sys, tomllib; assert sys.version_info\[:3\] == \(3, 11, 17\)'$/m);
   assert.match(steps[pure].run, /^"\$PREFLIGHT_PYTHON" -B scripts\/native-linux-production-016-stage\.test\.py$/m);
   assert.match(steps[pure].run, /^"\$PREFLIGHT_PYTHON" -B scripts\/native-linux-production-016-migration\.test\.py$/m);
+  assert.match(steps[pure].run, /^"\$PREFLIGHT_PYTHON" -I -S -B scripts\/native-linux-migrated-update\.test\.py$/m);
+  assert.match(steps[pure].run, /^node --test scripts\/linux-update-lab-feed\.test\.cjs$/m);
+  assert.doesNotMatch(source, /native-linux-migrated-update\.py (?:prepare|broker|session)|CREATOR_MIGRATED_UPDATE_EXECUTE/);
   for (const env of [workflow.env, workflow.jobs.migration.env, ...steps.map(step => step.env)]) {
     for (const key of Object.keys(env || {})) assert.doesNotMatch(key, /^(?:LD_|DYLD_|PYTHONPATH$|PYTHONHOME$)/);
   }

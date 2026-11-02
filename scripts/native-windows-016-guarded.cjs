@@ -2,7 +2,7 @@
 if (process.platform !== 'win32' || process.env.GITHUB_ACTIONS !== 'true'
   || process.env.RUNNER_ENVIRONMENT !== 'github-hosted' || process.env.RUNNER_OS !== 'Windows'
   || process.env.GITHUB_REPOSITORY !== 'BOBWORKS-XR/CREATOR-HUB'
-  || process.env.GITHUB_REF !== 'refs/heads/validation/windows-incoming-016'
+  || process.env.GITHUB_REF !== 'refs/heads/validation/windows-menu-merge-20261027'
   || process.env.CREATOR_WINDOWS_016_GUARDED !== '1') {
   throw Error('Guarded16 installation requires its explicit disposable GitHub-hosted Windows lane.');
 }
@@ -21,7 +21,7 @@ const out = path.resolve('artifacts', `native-016-guarded-${Date.now()}`);
 fs.mkdirSync(out, { recursive: false });
 const report = { passed: false, scope: 'exact-public14-to-direct16-guarded-nsis-only',
   installerScope: 'guarded-nsis-update-default-location-no-msi', from: candidate.BASELINE,
-  productSource: candidate.TARGET.productSource, testSource: process.env.GITHUB_SHA,
+  ...candidate.productProvenance(), testSource: process.env.GITHUB_SHA,
   guardedInstallerAccepted: false, migrationAccepted: false, signedUpdateAccepted: false,
   nativeGuiAccepted: false, releaseReady: false };
 function registrations() {

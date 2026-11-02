@@ -8,6 +8,11 @@ let termsHeading = "Terms of use and risk acknowledgement"
 let termsCheckbox = "I have read and agree to these terms, including the risk assumption and liability limitations above."
 let termsContinue = "Accept and continue"
 let termsFactNames = ["rootPID", "role", "title", "parentCF", "windowCF", "documentCF", "containerCF", "contained", "activationPoint", "hitPeerCF", "hitPeerPID", "pressSupported", "referencesStable", "stateTyped"]
+enum TermsContract { case pointer, semantic, semanticAbsent }
+let semanticFactNames = termsFactNames.filter { !["activationPoint", "hitPeerCF", "hitPeerPID"].contains($0) }
+func requireSemanticFacts(_ facts: [String: Bool]) throws {
+    for name in semanticFactNames { try check(facts[name] == true, "terms-semantic-" + name + "-unverified") }
+}
 func requireTermsFacts(_ facts: [String: Bool]) throws {
     for name in termsFactNames { try check(facts[name] == true, "terms-control-" + name + "-unverified") }
 }
@@ -40,6 +45,11 @@ func termsPointInside(_ point: CGPoint, _ bounds: [String: Double]) -> Bool {
 struct TermsCandidate {
     let item: AXUIElement, parent: AXUIElement, container: AXUIElement, document: AXUIElement
     let path: String, role: String, title: String
+}
+struct HeldTerms {
+    let candidates: [TermsCandidate]
+    let documents: [AXUIElement]
+    let verifyRoot: () throws -> Void
 }
 var termsRows = [[String: Any]](), termsReads = [[String: Any]](), termsResult = [String: Any]()
 var termsDeadline = Double(0)
@@ -76,7 +86,7 @@ func termsBounds(_ item: AXUIElement, _ phase: String, _ path: String) throws ->
     return ["x": values[0], "y": values[1], "width": values[2], "height": values[3]]
 }
 
-func captureTerms() throws {
+func captureTerms(_ contract: TermsContract = .pointer) throws -> HeldTerms {
     try admitted()
     let env = ProcessInfo.processInfo.environment, args = Array(CommandLine.arguments.dropFirst())
     try check(env["CREATOR_MACOS_TERMS_INSPECT"] == "1" && env["CREATOR_MACOS_LAUNCH_CONTROL"] == "1", "explicit-terms-inspection-required")
@@ -134,7 +144,7 @@ func captureTerms() throws {
         try check(current.count == 1 && CFEqual(current[0], window), "terms-root-cf-drift")
         try check(try termsBounds(window, "root-recheck", "root-window") == expected, "terms-root-bounds-drift")
     }
-    var seen = [AXUIElement](), candidates = [TermsCandidate](), groups = [AXUIElement](), headings = [AXUIElement]()
+    var seen = [AXUIElement](), candidates = [TermsCandidate](), groups = [AXUIElement](), headings = [AXUIElement](), documents = [AXUIElement]()
     func links(_ item: AXUIElement, _ parentElement: AXUIElement, _ path: String, _ phase: String) throws {
         let linkedParent = try termsRead(item, kAXParentAttribute, phase, path), linkedWindow = try termsRead(item, kAXWindowAttribute, phase, path)
         let parentEqual = termsLinkMatches(linkedParent, parentElement), windowEqual = termsLinkMatches(linkedWindow, window)
@@ -151,6 +161,8 @@ func captureTerms() throws {
             try heldRoot(); stamp = try remoteProcess(readPID); try links(item, parentElement, path, "remote-before")
         }
         let role = try termsText(item, kAXRoleAttribute, "traversal", path)
+        if contract != .pointer { try check(!["AXSheet", "AXDialog"].contains(role), "terms-semantic-unexpected-native-dialog") }
+        if role == "AXWebArea" { documents.append(item) }
         let nextDocument = role == "AXWebArea" ? item : document
         var nextContainer = container
         if ["AXGroup", "AXHeading", "AXCheckBox", "AXButton"].contains(role) {
@@ -175,6 +187,15 @@ func captureTerms() throws {
     try visit(window, 0, "root-window", nil, nil, nil)
     termsResult["candidateCount"] = candidates.count; termsResult["visitedNodeCount"] = seen.count
     termsResult["containerCount"] = groups.count; termsResult["headingCount"] = headings.count
+    termsResult["documentCount"] = documents.count
+    if contract == .semanticAbsent {
+        try check(groups.isEmpty && headings.isEmpty && candidates.isEmpty && documents.count == 1, "terms-semantic-dialog-not-absent")
+        try pidMatches(documents[0], pid)
+        try check(termsLinkMatches(termsRead(documents[0], kAXWindowAttribute, "after-semantic", "document"), window), "terms-context-window-unverified")
+        try heldRoot(); termsResult["rootNativeCFReferencePreserved"] = true
+        termsResult["rootReferenceScope"] = "native-invocation"; termsResult["complete"] = true
+        return HeldTerms(candidates: [], documents: documents, verifyRoot: heldRoot)
+    }
     try check(groups.count == 1 && headings.count == 1 && candidates.count == 2
         && candidates.filter { $0.role == "AXCheckBox" }.count == 1 && candidates.filter { $0.role == "AXButton" }.count == 1, "terms-controls-not-unique")
     try check(CFEqual(candidates[0].container, candidates[1].container) && CFEqual(candidates[0].document, candidates[1].document), "terms-document-or-container-mismatch")
@@ -217,13 +238,6 @@ func captureTerms() throws {
         // AXHidden describes the application, not arbitrary leaf controls. Do not
         // turn the observed noValue into a fabricated per-control false value.
         if role == "AXCheckBox" { field("checked") { try termsChecked(termsRead(candidate.item, kAXValueAttribute, "control", candidate.path)) } }
-        var activationPoint: CGPoint?
-        field("activationPoint") {
-            let point = try termsPoint(termsRead(candidate.item, NSAccessibility.Attribute.activationPoint.rawValue, "control", candidate.path))
-            activationPoint = point
-            return ["x": Double(point.x), "y": Double(point.y)]
-        }
-        row["fieldErrors"] = fieldErrors
         try termsLimit()
         var actions: CFArray?
         let actionStatus = AXUIElementCopyActionNames(candidate.item, &actions)
@@ -232,6 +246,14 @@ func captureTerms() throws {
         guard actionStatus == .success, let rawActions = actions, CFGetTypeID(rawActions) == CFArrayGetTypeID(),
             let names = rawActions as? [String], names.count <= 32, names.allSatisfy({ $0.utf8.count <= 128 }) else { throw Denied("terms-actions-unverified") }
         row["actions"] = names
+        if contract == .pointer {
+        var activationPoint: CGPoint?
+        field("activationPoint") {
+            let point = try termsPoint(termsRead(candidate.item, NSAccessibility.Attribute.activationPoint.rawValue, "control", candidate.path))
+            activationPoint = point
+            return ["x": Double(point.x), "y": Double(point.y)]
+        }
+        row["fieldErrors"] = fieldErrors
         let center = CGPoint(x: bounds["x"]! + bounds["width"]! / 2, y: bounds["y"]! + bounds["height"]! / 2)
         var centerPeer: AXUIElement?
         row["centerHitPeerAXError"] = AXUIElementCopyElementAtPosition(root, Float(center.x), Float(center.y), &centerPeer).rawValue
@@ -258,6 +280,11 @@ func captureTerms() throws {
                 row["hitPeerParentCFMatchesControlParent"] = termsLinkMatches(peerParent, candidate.parent)
             }
         }
+        row["activationPointVerified"] = activationVerified
+        } else {
+            row["actionMethod"] = "held-element-semantic-AXPress"
+            row["fieldErrors"] = fieldErrors
+        }
         let contained = bounds["x"]! >= expected["x"]! && bounds["y"]! >= expected["y"]!
             && bounds["x"]! + bounds["width"]! <= expected["x"]! + expected["width"]!
             && bounds["y"]! + bounds["height"]! <= expected["y"]! + expected["height"]!
@@ -268,10 +295,13 @@ func captureTerms() throws {
             childrenNode(candidate.parent, candidate.path + "/parent", 0, nil, pid, pid, id, "traversal-node"))
         let stable = termsLinkMatches(parentAgain, candidate.parent) && parentChildren.filter { CFEqual($0, candidate.item) }.count == 1
         row["nativeReferencesStable"] = stable; row["contained"] = contained
-        try requireTermsFacts(["rootPID": true, "role": role == candidate.role, "title": title == candidate.title,
+        let facts = ["rootPID": true, "role": role == candidate.role, "title": title == candidate.title,
             "parentCF": true, "windowCF": true, "documentCF": true, "containerCF": CFEqual(candidate.container, groups[0]),
-            "contained": contained, "activationPoint": activationVerified, "hitPeerCF": peerStatus == .success && peerEqual, "hitPeerPID": peerPIDStatus == .success && peerPID == pid,
-            "pressSupported": names.contains(kAXPressAction), "referencesStable": stable, "stateTyped": fieldErrors.isEmpty])
+            "contained": contained, "activationPoint": row["activationPointVerified"] as? Bool == true,
+            "hitPeerCF": row["hitPeerAXError"] as? Int32 == 0 && row["hitPeerCFMatches"] as? Bool == true,
+            "hitPeerPID": row["hitPeerPIDAXError"] as? Int32 == 0 && row["hitPeerPID"] as? pid_t == pid,
+            "pressSupported": names.contains(kAXPressAction), "referencesStable": stable, "stateTyped": fieldErrors.isEmpty]
+        if contract == .pointer { try requireTermsFacts(facts) } else { try requireSemanticFacts(facts) }
       } catch let failure as Denied {
         let metadataFailures = ["stateTyped", "activationPoint", "hitPeerCF", "hitPeerPID", "pressSupported", "contained"].map { "terms-control-" + $0 + "-unverified" }
         if !metadataFailures.contains(failure.reason) { throw failure }
@@ -282,6 +312,7 @@ func captureTerms() throws {
     try check(stateFailures.isEmpty, "terms-control-state-unverified")
     try heldRoot(); termsResult["rootNativeCFReferencePreserved"] = true
     termsResult["rootReferenceScope"] = "native-invocation"; termsResult["complete"] = true
+    return HeldTerms(candidates: candidates, documents: documents, verifyRoot: heldRoot)
 }
 func termsReadinessPending(_ reason: String, _ detail: [String: Any]?, _ result: [String: Any]) -> Bool {
     if reason == "ax-children-unbounded-or-unreadable" {
@@ -301,7 +332,7 @@ for attempt in 0..<32 {
     termsDeadline = min(termsReadinessDeadline, started + 4)
     termsRows = []; termsReads = []; termsResult = [:]
     var pending = false
-    do { try captureTerms() }
+    do { _ = try captureTerms() }
     catch {
         let reason = (error as? Denied)?.reason ?? "terms-native-inspection-unverified", detail = (error as? Denied)?.detail
         termsResult["complete"] = false; termsResult["error"] = reason

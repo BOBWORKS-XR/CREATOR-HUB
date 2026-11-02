@@ -22,8 +22,12 @@ const MAX_BYTES: u64 = 1_073_741_824;
 type Snapshot = BTreeMap<String, String>;
 
 fn gate(values: &BTreeMap<String, String>) -> Result<(), String> {
+    gate_for_target(values, TARGET)
+}
+
+fn gate_for_target(values: &BTreeMap<String, String>, target: &str) -> Result<(), String> {
     for (key, expected) in [
-        ("CREATOR_SETUP_SDK_COMPATIBILITY_AUDIT", TARGET),
+        ("CREATOR_SETUP_SDK_COMPATIBILITY_AUDIT", target),
         ("CREATOR_SETUP_SDK_COMPATIBILITY_GUARDS_REVIEWED", "yes"),
         ("CREATOR_SETUP_SDK_COMPATIBILITY_EDITORS_CLOSED", "yes"),
         ("CREATOR_SETUP_SDK_COMPATIBILITY_PREF_GUARD_REVIEWED", "yes"),
@@ -54,6 +58,9 @@ fn gate(values: &BTreeMap<String, String>) -> Result<(), String> {
     }
     Ok(())
 }
+
+#[path = "sdk_production_audit.rs"]
+mod production;
 
 fn validator() -> String {
     candidate_validation_script()
@@ -764,6 +771,7 @@ fn candidate_preserves_only_exact_nullable_project_stamp_before_mutation() {
     for required in [
         "sdk4022-node-stamp-before.json",
         "FileMode.CreateNew",
+        "FileAccess.Write, FileShare.None",
         "file.Flush(true);",
         "File.ReadAllBytes(path).SequenceEqual(bytes)",
         "apiValueWasNull = candidateStampBeforeValue == null",
@@ -784,6 +792,75 @@ fn candidate_preserves_only_exact_nullable_project_stamp_before_mutation() {
             .find("private static void ConfigureCandidateAfterLoader()")
             .unwrap()];
     assert!(loader.contains("candidateLoaderClock.Elapsed.TotalSeconds >= 30"));
+}
+
+#[test]
+fn candidate_stamp_receipt_uses_only_the_requested_operation_backup() {
+    let script = validator();
+    let receipt = &script[script
+        .find("private static void WriteCandidateStampBeforeImage()")
+        .unwrap()
+        ..script
+            .find("private static void RequireCandidatePair()")
+            .unwrap()];
+    assert!(receipt.contains("var backupPath = RequireCandidateBackupDirectory();"));
+    assert!(receipt.contains("Path.Combine(backupPath, \"sdk4022-node-stamp-before.json\")"));
+    assert!(
+        receipt.find("RequireCandidateBackupDirectory();").unwrap()
+            < receipt.find("EditorUserSettings.GetConfigValue").unwrap()
+    );
+    assert!(!script.contains("Path.Combine(StatusFolder, \"sdk4022-node-stamp-before.json\")"));
+    for forbidden in [
+        "Directory.CreateDirectory",
+        "File.Delete",
+        "FileMode.Create,",
+        "File.WriteAll",
+    ] {
+        assert!(!receipt.contains(forbidden), "{forbidden}");
+    }
+}
+
+#[test]
+fn candidate_stamp_backup_refuses_missing_or_unapproved_destinations() {
+    let script = validator();
+    let guard = &script[script
+        .find("private static string RequireCandidateBackupDirectory()")
+        .unwrap()
+        ..script
+            .find("private static void WriteCandidateStampBeforeImage()")
+            .unwrap()];
+    for required in [
+        "new DirectoryInfo(StatusFolder)",
+        "Path.Combine(status.FullName, \"backups\")",
+        "Path.Combine(status.FullName, \"existing-request.json\")",
+        "!File.Exists(requestPath)",
+        "File.GetAttributes(requestPath) & FileAttributes.ReparsePoint",
+        "JsonUtility.FromJson<ExistingRequest>(File.ReadAllText(requestPath))",
+        "request == null || string.IsNullOrWhiteSpace(request.backupPath)",
+        "!Path.IsPathRooted(request.backupPath)",
+        "new DirectoryInfo(Path.GetFullPath(request.backupPath))",
+        "backup.Parent == null || !string.Equals(backup.Parent.FullName, backups.FullName, comparison)",
+        "Path.DirectorySeparatorChar == '\\\\' ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal",
+        "new[] { status, backups }",
+        "!directory.Exists || (directory.Attributes & FileAttributes.ReparsePoint) != 0",
+        "!backup.Exists || (backup.Attributes & FileAttributes.ReparsePoint) != 0",
+        "return backup.FullName;",
+    ] {
+        assert!(guard.contains(required), "{required}");
+    }
+    assert_eq!(
+        guard.matches("throw new InvalidOperationException").count(),
+        5
+    );
+    for forbidden in [
+        "Directory.CreateDirectory",
+        "SetConfigValue",
+        "File.Write",
+        "catch",
+        "return StatusFolder",
+    ] {
+        assert!(!guard.contains(forbidden), "{forbidden}");
+    }
 }
 
 #[test]
@@ -813,6 +890,7 @@ fn newer_sdk_members_are_excluded_from_legacy_compilation() {
         "CandidateStampKey",
         "BackgroundWorker.Schedule",
         "ReadCandidateNodeDatabase",
+        "RequireCandidateBackupDirectory",
     ] {
         assert!(
             !compiled.contains(newer),

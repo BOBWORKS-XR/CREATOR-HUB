@@ -33,7 +33,7 @@ COHORT = "production-migration-016"
 BRANCH = "refs/heads/validation/native-linux-production-016"
 FEATURES = ["integrated-features", "experimental-flatpak-host", "linux-production-migration", "experimental-linux-portable-update"]
 PINS = (*S.PINS, "rawHub")
-PRIVATE = {"sourceCommit": S.PRIVATE_SOURCE, "runId": 39326776585, "runAttempt": 1}
+PRIVATE = {"sourceCommit": "085131ba6f3050a795fd513139a34975658ba321", "runId": 40538427509, "runAttempt": 1}
 PRIVATE_PATHS = ("modules/mcp", "modules/project-setup", "native/mcp-router", "native/host_parent_macos.rs",
                  "native/plugins_retirement.rs", "native/convergence-server-unix.rs", "src-tauri/src/module_archive.rs", "src-tauri/src/catalog-key.pub")
 FLAGS = dict.fromkeys(("nativeExecution", "nativeGuiAccepted", "migrationAccepted", "authenticationAccepted",

@@ -56,6 +56,8 @@ footer .text-button { font-size: 11px; }
 .convergence-dialog h2 { font-size: 18px; }
 #convergence-summary { margin-top: 8px; line-height: 1.55; color: var(--muted); }
 #convergence-details { margin: 16px 0; padding-left: 20px; line-height: 1.6; overflow-wrap: anywhere; }
+.convergence-dialog > ul { margin: 16px 0; padding-left: 20px; line-height: 1.55; }
+.convergence-dialog > ul li + li { margin-top: 8px; }
 #convergence-error { margin-top: 12px; color: var(--red); line-height: 1.5; }
 #convergence-recovery { margin-top: 14px; }
 #convergence-recovery label { display: block; margin-bottom: 6px; font-weight: 600; }
@@ -71,6 +73,7 @@ footer .text-button { font-size: 11px; }
 .context-help-content summary { cursor: pointer; font-weight: 600; }
 .context-help-content details p { margin-top: 8px; color: var(--muted); font-size: 12px; line-height: 1.6; }
 .context-help-content strong { color: #edf1f3; }
+.context-help-content [data-resource] { color: var(--cyan); max-width: 100%; text-align: left; }
 .hidden { display: none !important; }
 @media (max-width: 560px) {
   .app-header { flex-wrap: wrap; gap: 6px; padding-right: 16px; }

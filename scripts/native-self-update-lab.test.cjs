@@ -99,6 +99,27 @@ test('PowerShell syntax parses without executing helper or issuing certificates'
   assert.equal(result.status, 0, result.stdout + result.stderr);
 });
 
+test('outgoing17 mode refuses the real local host before files or trust', { skip: !hasPwsh }, () => {
+  const result = powershell(`function global:Get-Item { throw 'LOCAL_INSPECTION_SENTINEL' }; & '${helper.replaceAll("'", "''")}' -Outgoing017 -ContractPath 'Z:\\ABSENT.json'`);
+  assert.equal(result.status, 1); assert.equal(result.stdout, '');
+  assert.match(result.stderr, /disposable GitHub-hosted Windows runner required/);
+  assert.doesNotMatch(result.stderr, /LOCAL_INSPECTION_SENTINEL|ABSENT.json/);
+});
+
+test('outgoing17 adds only a scoped adapter and verifies baseline before certificate creation', () => {
+  assert.match(source, /\[switch\]\$Outgoing017/);
+  assert.match(source, /\$Outgoing017 -and \(\$Incoming016 -or \$Scenario -cne 'public-stable'\)/);
+  for (const file of ['target.cjs', 'driver.cjs']) assert.ok(source.includes(`../artifacts/menu-merge-20261027/outgoing/${file}`));
+  assert.match(source, /CREATOR_OUTGOING_CONFIG_SHA256/);
+  const pin = source.indexOf("throw 'Exact reviewed direct16 baseline installer required.'");
+  assert.ok(pin > source.indexOf("Set-LabPhase 'validator-result'"));
+  assert.ok(pin < source.indexOf("Set-LabPhase 'certificates'"));
+  assert.match(source, /\$validated.baselineVersion -cne '0\.1\.16'/);
+  assert.match(source, /\$validated.targetVersion -cne '0\.1\.17'/);
+  assert.match(bootstrap, /contract.actualScope\?\.kind === 'direct-outgoing-016-017'/);
+  assert.match(source, /\$reportedScenario = if \(\$Outgoing017\) \{ 'direct-outgoing-016-017' \} else \{ \$Scenario \}/);
+});
+
 test('literal actual-environment guard precedes settings, input reads, functions and watch dispatch', () => {
   const guardEnd = source.indexOf('$ErrorActionPreference');
   const guard = source.slice(0, guardEnd);

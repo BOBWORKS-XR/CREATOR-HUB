@@ -40,7 +40,7 @@ const hub = path.join(process.env.LOCALAPPDATA, 'Creator Hub', 'creator-hub.exe'
 assert.equal(fs.existsSync(hub), false, 'Expected a fresh runner without Hub installed');
 const out = path.resolve('artifacts', `native-suite-${Date.now()}`);
 fs.mkdirSync(out, { recursive: true });
-const report = { passed: false, from, to, checks: [], userMachineUsed: false, selfUpdateTested: false };
+const report = { passed: false, from, to, harnessSource: process.env.GITHUB_SHA, checks: [], userMachineUsed: false, selfUpdateTested: false };
 report.discoveryKind = lab ? 'controlled-lab-not-public-discovery' : 'public-github-discovery';
 report.labDiscovery = Boolean(lab);
 report.publicDiscovery = !lab;
@@ -113,6 +113,42 @@ async function showApp(app) {
   await page.locator('#suite-trigger').click();
   await page.locator(`#suite-menu [data-view="${app}"]`).click();
 }
+async function checkUpdatedDirectMenu() {
+  await page.getByRole('button', { name: 'Open menu', exact: true }).click();
+  const menu = page.getByRole('navigation', { name: 'Creator tools', exact: true });
+  await menu.waitFor({ state: 'visible' });
+  await page.waitForFunction(() => !document.querySelector('#suite-shell').getAnimations({ subtree: true })
+    .some(animation => animation.playState === 'running'));
+  for (const name of [/^Home\b/, /^MCP\b/, /^Setup \/ Repair\b/]) {
+    assert.equal(await menu.getByRole('button', { name }).isVisible(), true);
+  }
+  const layout = await menu.evaluate(element => {
+    const fits = node => node.scrollWidth <= node.clientWidth && node.scrollHeight <= node.clientHeight;
+    const within = (inner, outer) => inner.width > 0 && inner.height > 0
+      && inner.left >= outer.left - 1 && inner.right <= outer.right + 1
+      && inner.top >= outer.top - 1 && inner.bottom <= outer.bottom + 1;
+    return { fits: element.scrollWidth <= element.clientWidth, rows: [...element.querySelectorAll('.suite-item')].map(row => {
+      const title = row.querySelector('strong'), description = row.querySelector('small');
+      const status = row.querySelector('.suite-item-status');
+      const bounds = row.getBoundingClientRect(), titleBounds = title.getBoundingClientRect(), descriptionBounds = description.getBoundingClientRect();
+      const statusVisible = status && status.getClientRects().length > 0;
+      return { title: title.textContent.trim(), description: description.textContent.trim(),
+        icons: row.querySelectorAll('.icon,.suite-mark,img,svg,[role="img"]').length,
+        fits: fits(row) && fits(title) && fits(description) && within(titleBounds, bounds) && within(descriptionBounds, bounds)
+          && bounds.left >= element.getBoundingClientRect().left - 1 && bounds.right <= element.getBoundingClientRect().right + 1,
+        ordered: titleBounds.bottom <= descriptionBounds.top + 1
+          && (!statusVisible || descriptionBounds.bottom <= status.getBoundingClientRect().top + 1),
+        statusFits: !statusVisible || fits(status) && within(status.getBoundingClientRect(), bounds) };
+    }) };
+  });
+  assert.deepEqual(layout.rows.map(row => [row.title, row.description]), [
+    ['Home', 'Projects and updates'], ['MCP', 'AI bridge for Unity'],
+    ['Setup / Repair', 'Unity + Creator SDK project setup and repair'], ['Creator Converter', 'SideQuest / Coming soon'],
+  ]);
+  assert.ok(layout.fits && layout.rows.every(row => row.icons === 0 && row.fits && row.ordered && row.statusFits),
+    'Direct menu must be text-only, with contained non-overlapping text; wrapped titles and hidden status labels are allowed');
+  return layout;
+}
 function processes() {
   return JSON.parse(execFileSync('powershell.exe', ['-NoProfile', '-Command',
     "ConvertTo-Json -Compress -InputObject @(Get-CimInstance Win32_Process -Filter \"Name = 'creator-project-setup.exe' OR Name = 'creator-works-mcp-launcher.exe'\" | Select-Object ProcessId,ParentProcessId,ExecutablePath)"], { encoding: 'utf8', windowsHide: true }));
@@ -139,7 +175,7 @@ async function checkUpdatedBuiltIns() {
   assert.equal(inventory.apps.length, 2);
   assert.ok(inventory.apps.every(app => app.builtIn && app.trusted && !app.issue));
   if (directTarget) {
-    report.directServices = await direct.checkPages({ page, showApp, processes, requests: directRequests,
+    report.directServices = await direct.checkPages({ page, showApp: app => labTarget.showPage(page, app), processes, requests: directRequests,
       screenshot: app => page.screenshot({ path: path.join(out, `direct-${app}.png`), animations: 'disabled' }) });
     const locations = managedLocations(process.env.LOCALAPPDATA);
     report.directServices.mcp = await direct.prepareManagedRoute(page, { active: locations.active,
@@ -343,6 +379,11 @@ async function startUnrelatedRuntime() {
   if (directTarget) await direct.checkHome(page);
   else assert.equal(await page.locator('#view-hub').isVisible(), true, 'Restart opens Apps by default');
   await page.screenshot({ path: path.join(out, 'after-restart.png') });
+  if (directTarget) {
+    report.directMenu = await checkUpdatedDirectMenu();
+    await page.locator('#suite-shell').screenshot({ path: path.join(out, 'updated-app-menu.png') });
+    report.checks.push('Restarted installed build shows semantic Home/MCP/Setup / Repair navigation, requested descriptions and text-only rows without overflow or overlap; titles may wrap and built-in status labels may be hidden');
+  } else {
   await page.locator('#suite-trigger').click();
   await page.waitForFunction(() => document.querySelector('#suite-shell').getBoundingClientRect().width >= 303);
   const menuLayout = await page.evaluate(() => ['mcp', 'setup'].map(app => {
@@ -356,6 +397,7 @@ async function startUnrelatedRuntime() {
   assert.ok(menuLayout.every(row => row.titleFits && row.statusBelow && row.fits));
   await page.locator('#suite-shell').screenshot({ path: path.join(out, 'updated-app-menu.png') });
   report.checks.push('Restarted installed build shows the wider menu with single-line app names and status beneath each description');
+  }
   if (directTarget) {
     await direct.checkCleanDocument(page, directRequests);
     await page.keyboard.press('Escape');

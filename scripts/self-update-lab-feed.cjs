@@ -152,6 +152,22 @@ function createIncoming016Contract(input) {
     actualScope: { kind: incoming.KIND, labDiscovery: true, publicDiscovery: false, migrationAccepted: false, releaseReady: false } });
 }
 
+// Candidate hashes are independently reviewed inputs, never historical baseline overrides.
+function createDirectOutgoing017Contract(input) {
+  keys(input, ['targetVersion', 'baseline', 'descriptor', 'descriptorSignature', 'installer', 'manifest', 'pins'], 'direct outgoing input');
+  keys(input.baseline, ['version', 'installer', 'exe'], 'direct outgoing baseline');
+  assert.equal(input.baseline.version, '0.1.16', 'Genuine direct16 baseline required');
+  assert.equal(input.targetVersion, '0.1.17', 'Only acceptance-only direct17 target admitted');
+  for (const field of ['installer', 'exe']) assert.match(input.baseline[field], /^[a-f0-9]{64}$/);
+  assert.notEqual(input.baseline.installer, input.pins.installer, 'Same installer cannot be a higher-version target');
+  assert.notEqual(input.baseline.exe, input.pins.executable, 'Same executable cannot be a higher-version target');
+  return validatedContract(input, Object.freeze({ ...input.baseline }), {
+    descriptor: { assetName: 'Creator_Hub_0.1.17_x64-acceptance-only-setup.exe', minHubVersion: '0.1.16' },
+    actualScope: { kind: 'direct-outgoing-016-017', acceptanceOnly: true, labDiscovery: true,
+      publicDiscovery: false, liveAiAcceptance: false, productAcceptance: false, releaseReady: false },
+  });
+}
+
 function loadContract(config) {
   keys(config, ['schemaVersion', 'targetVersion', 'directory', 'pins'], 'lab config');
   assert.equal(config.schemaVersion, 1);
@@ -359,7 +375,7 @@ async function main() {
 }
 
 module.exports = { DESCRIPTOR, FEED_PATH, LIMITS, UNIFIED_OUTGOING_BASELINE, assertRunner, baselineFor, createContract,
-  createUnifiedOutgoingContract, createIncoming016Contract, loadContract, readBounded, assertBaselineBytes, assertUnifiedOutgoingBaselineBytes,
+  createUnifiedOutgoingContract, createIncoming016Contract, createDirectOutgoing017Contract, loadContract, readBounded, assertBaselineBytes, assertUnifiedOutgoingBaselineBytes,
   connectHost, newState, recordRejection, requestHandler, labReport, startLabProxy };
 if (require.main === module) main().catch(() => {
   // Do not serialize TLS control input, parser errors, headers or candidate contents.

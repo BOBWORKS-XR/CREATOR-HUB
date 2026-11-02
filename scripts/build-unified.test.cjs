@@ -6,6 +6,192 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { relativeFile, moduleFiles, verifyStage, stageFileMode } = require('./build-unified.cjs');
 
+test('Linux root cache is an explicit option, never an inherited Cargo target', () => {
+  const b = require('./build-unified.cjs');
+  assert.deepEqual(b.parseBuildOptions(['--linux-root-cache']), { linuxRootCache: true });
+  assert.throws(() => b.parseBuildOptions(['--linux-root-cache', '--linux-root-cache']), /Duplicate/);
+  assert.deepEqual(b.parseBuildOptions([]), {});
+});
+
+test('Linux root cache refuses unsupported build lanes before any tools or output writes', () => {
+  const b = require('./build-unified.cjs');
+  const options = { linuxRootCache: true, installer: true, managed: true, experimentalUnix: true,
+    experimentalWritable: true, signedUnixInput: path.resolve('/signed-input') };
+  const context = { platform: 'linux', arch: 'x86_64', env: {}, execute() { assert.fail('No tooling for refused cache options'); } };
+  for (const change of [{ linuxRootCache: 'true' }, { linuxRootCache: null }, { managed: false }, { experimentalUnix: false },
+    { experimentalWritable: false }, { signedUnixInput: null }, { prepareManagedUnix: true }, { linuxPrivateUpdateFixture: true }]) {
+    assert.throws(() => b.build('cache-options', { ...options, ...change }, context), /--linux-root-cache requires/);
+  }
+  for (const [platform, arch] of [['windows', 'x86_64'], ['macos', 'x86_64'], ['linux', 'aarch64']]) {
+    assert.throws(() => b.build('cache-options', options, { ...context, platform, arch }), /--linux-root-cache requires/);
+  }
+});
+
+function rootCacheFixture(t) {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'creator-root-cache-')));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const target = path.join(root, 'artifacts', 'linux-root-target');
+  const output = path.join(root, 'artifacts', 'unified', 'new-candidate');
+  const input = path.join(root, 'signed-input');
+  return { root, target, output, input, admit: () => require('./build-unified.cjs').linuxRootCacheTarget(root, output, input) };
+}
+
+test('Linux root cache admission is read-only on a miss or hit and never creates assembly output', t => {
+  const f = rootCacheFixture(t);
+  assert.equal(f.admit(), f.target);
+  assert.equal(fs.existsSync(path.join(f.root, 'artifacts')), false);
+  const file = path.join(f.target, 'x86_64-unknown-linux-gnu', 'release', 'deps', 'libfixture.rlib');
+  fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, 'preserved dependency');
+  const before = fs.statSync(file);
+  assert.equal(f.admit(), f.target); assert.equal(f.admit(), f.target);
+  assert.equal(fs.readFileSync(file, 'utf8'), 'preserved dependency');
+  assert.equal(fs.statSync(file).mtimeMs, before.mtimeMs);
+  assert.equal(fs.existsSync(f.output), false);
+});
+
+test('Linux root cache refuses overlap with handoff/output, even through a relative parent', t => {
+  const f = rootCacheFixture(t), admit = require('./build-unified.cjs').linuxRootCacheTarget;
+  for (const overlap of [f.target, path.dirname(f.target), path.join(f.target, 'child')]) {
+    assert.throws(() => admit(f.root, overlap, f.input), /separate from signed inputs/);
+    assert.throws(() => admit(f.root, f.output, overlap), /separate from signed inputs/);
+  }
+  assert.throws(() => admit('relative', f.output, f.input), /separate from signed inputs/);
+  assert.throws(() => admit(`${f.root}${path.sep}child${path.sep}..`, f.output, f.input), /separate from signed inputs/);
+  assert.equal(fs.existsSync(f.output), false);
+});
+
+for (const profile of ['release', 'x86_64-unknown-linux-gnu/release']) {
+  for (const name of ['bundle', 'creator-hub']) {
+    test(`Linux root cache keeps and refuses old ${profile}/${name}`, t => {
+      const f = rootCacheFixture(t), old = path.join(f.target, profile, name);
+      fs.mkdirSync(path.dirname(old), { recursive: true });
+      if (name === 'bundle') fs.mkdirSync(old);
+      else fs.writeFileSync(old, 'old root must not be reused');
+      assert.throws(f.admit, /previous Hub or bundle/);
+      assert.ok(fs.existsSync(old));
+      if (name === 'creator-hub') assert.equal(fs.readFileSync(old, 'utf8'), 'old root must not be reused');
+      assert.equal(fs.existsSync(f.output), false);
+    });
+  }
+}
+
+test('Linux root cache refuses redirected ancestors and nested directories without changing their targets', t => {
+  const f = rootCacheFixture(t), outside = path.join(f.root, 'protected');
+  fs.mkdirSync(outside); fs.writeFileSync(path.join(outside, 'marker'), 'keep');
+  fs.mkdirSync(path.dirname(f.target));
+  fs.symlinkSync(outside, f.target, process.platform === 'win32' ? 'junction' : 'dir');
+  assert.throws(f.admit, /ancestor is redirected/);
+  fs.unlinkSync(f.target);
+  fs.mkdirSync(f.target);
+  fs.symlinkSync(outside, path.join(f.target, 'deps'), process.platform === 'win32' ? 'junction' : 'dir');
+  assert.throws(f.admit, /redirected, linked or nonregular/);
+  assert.equal(fs.readFileSync(path.join(outside, 'marker'), 'utf8'), 'keep');
+  assert.equal(fs.existsSync(f.output), false);
+});
+
+test('Linux root cache refuses file ancestors and hardlinks instead of modifying foreign data', t => {
+  const f = rootCacheFixture(t);
+  fs.mkdirSync(path.dirname(f.target)); fs.writeFileSync(f.target, 'not a directory');
+  assert.throws(f.admit, /not a directory/);
+  assert.equal(fs.readFileSync(f.target, 'utf8'), 'not a directory');
+  fs.unlinkSync(f.target); fs.mkdirSync(f.target);
+  const original = path.join(f.root, 'keep'); fs.writeFileSync(original, 'preserved');
+  fs.linkSync(original, path.join(f.target, 'linked'));
+  assert.throws(f.admit, /redirected, linked or nonregular/);
+  assert.equal(fs.readFileSync(original, 'utf8'), 'preserved');
+});
+
+test('signed Linux root compilation reaches the cached target while assembly and package receipts stay fresh', t => {
+  const b = require('./build-unified.cjs'), archive = require('./module-archive.cjs');
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'creator-root-cache-')));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const write = (file, bytes = 'synthetic fixture, never executable') => {
+    fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, bytes); return file;
+  };
+  const target = path.join(root, 'artifacts', 'linux-root-target');
+  const dependency = write(path.join(target, 'x86_64-unknown-linux-gnu', 'release', 'deps', 'libfixture.rlib'));
+  const before = fs.readFileSync(dependency);
+  const options = { installer: true, managed: true, experimentalUnix: true, experimentalWritable: true,
+    signedUnixInput: path.join(root, 'signed-input'), linuxRootCache: true };
+  const env = { npm_execpath: write(path.join(root, 'fixture-npm.cjs')), GITHUB_SHA: 'a'.repeat(40),
+    CARGO_TARGET_DIR: path.join(root, 'never-use-inherited-target') };
+  write(path.join(root, 'src-tauri', 'tauri.conf.json'), JSON.stringify({ productName: 'Creator Hub' }));
+  let assembled = 0, compiled = 0, verified = 0;
+  t.mock.method(require('./assemble-unix-payload.cjs'), 'assemble', (input, output) => {
+    assert.equal(input, options.signedUnixInput);
+    assert.equal(fs.existsSync(output), false, 'the cache must not precreate the immutable assembly output');
+    const manifest = { schemaVersion: 1, platform: 'linux', arch: 'x86_64', modules: {}, managedRouting: { protocol: 1, files: {} } };
+    for (const id of ['mcp', 'setup']) {
+      const names = moduleFiles(id, 'linux'), files = {};
+      for (const name of names) files[name] = crypto.createHash('sha256').update(fs.readFileSync(write(path.join(output, 'modules', name)))).digest('hex');
+      manifest.modules[id] = { executable: names[0], version: '1.0.0', files };
+    }
+    for (const name of require('./managed-router-package.cjs').routeFiles('linux')) {
+      manifest.managedRouting.files[name] = crypto.createHash('sha256').update(fs.readFileSync(write(path.join(output, 'modules', name)))).digest('hex');
+    }
+    write(path.join(output, 'builtin-manifest.json'), JSON.stringify(manifest));
+    assembled++;
+    return { manifest, version: '0.1.14', source: { sourceCommit: 'b'.repeat(40) }, handoffSha256: 'c'.repeat(64) };
+  });
+  t.mock.method(archive, 'create', (_modules, _manifest, file) => { write(file); return { fixture: true }; });
+  t.mock.method(archive, 'verify', () => {});
+  t.mock.method(require('./unix-package-payload.cjs'), 'validatePackages', ({ output, bundleDirectory, rawHub }) => {
+    assert.equal(bundleDirectory, path.join(target, 'x86_64-unknown-linux-gnu', 'release', 'bundle'));
+    assert.equal(rawHub, path.join(output, 'creator-hub'));
+    assert.equal(fs.readFileSync(rawHub, 'utf8'), 'new root from explicit locked compilation');
+    verified++;
+  });
+  const execute = (command, args, settings) => {
+    if (command === 'cargo') {
+      assert.ok(settings.env.CARGO_TARGET_DIR.endsWith('archive-decoder-target'));
+      assert.notEqual(settings.env.CARGO_TARGET_DIR, target, 'only Root uses the new cache');
+      return;
+    }
+    assert.equal(command, process.execPath);
+    assert.equal(assembled, 1, 'signed admission/extraction still precedes Root compilation');
+    assert.equal(settings.env.CARGO_TARGET_DIR, target);
+    assert.deepEqual(args.slice(1, 6), ['build', '--target', 'x86_64-unknown-linux-gnu', '--bundles', 'appimage,deb,rpm']);
+    assert.deepEqual(args.slice(-2), ['--', '--locked']);
+    const output = path.join(root, 'artifacts', 'unified', 'cache-routing');
+    assert.equal(settings.env.CREATOR_BUILTIN_MANIFEST, path.join(output, 'builtin-manifest.json'));
+    assert.equal(fs.existsSync(path.join(target, 'x86_64-unknown-linux-gnu', 'release', 'bundle')), false);
+    write(path.join(target, 'x86_64-unknown-linux-gnu', 'release', 'creator-hub'), 'new root from explicit locked compilation');
+    write(path.join(target, 'x86_64-unknown-linux-gnu', 'release', 'bundle', 'new.deb'));
+    compiled++;
+  };
+  const output = b.build('cache-routing', options, { root, platform: 'linux', arch: 'x86_64', env, execute });
+  assert.equal(compiled, 1); assert.equal(verified, 1);
+  assert.deepEqual(fs.readFileSync(dependency), before, 'cached dependencies are preserved');
+  const receipt = JSON.parse(fs.readFileSync(path.join(output, 'signed-unix-assembly.json'), 'utf8'));
+  assert.equal(receipt.assemblyCommit, env.GITHUB_SHA);
+  assert.equal(receipt.handoffSha256, 'c'.repeat(64));
+  assert.equal(receipt.privateModulesRecompiled, false);
+  assert.equal(receipt.privateModulesResigned, false);
+  assert.equal(receipt.nativeGuiAccepted, false); assert.equal(receipt.releaseReady, false);
+  assert.equal(fs.existsSync(env.CARGO_TARGET_DIR), false);
+  assert.throws(() => b.build('keep-old-cache', options, { root, platform: 'linux', arch: 'x86_64', env, execute }), /previous Hub or bundle/);
+  assert.equal(assembled, 1, 'dirty cache refusal precedes expensive handoff tooling');
+  assert.equal(fs.existsSync(path.join(root, 'artifacts', 'unified', 'keep-old-cache')), false);
+});
+
+test('assembly workflow caches the opted-in Linux Root outside immutable output without changing existing caches', () => {
+  const { yaml } = require('../node_modules/playwright-core/lib/utilsBundle.js');
+  const document = yaml.parseDocument(fs.readFileSync(path.join(__dirname, '../.github/workflows/unix-managed-assembly.yml'), 'utf8'), { uniqueKeys: true });
+  assert.deepEqual(document.errors, []);
+  const workflow = document.toJS(), steps = workflow.jobs.assembly.steps;
+  const cache = steps.find(step => step.uses === 'Swatinem/rust-cache@v2');
+  assert.match(cache.with.workspaces, /native\/unix-transfer/);
+  assert.match(cache.with.workspaces, /src-tauri -> \.\.\/artifacts\/unix-verifier-target/);
+  assert.match(cache.with.workspaces, /runner\.os == 'Linux'.*src-tauri -> \.\.\/artifacts\/linux-root-target/);
+  assert.equal(cache.with['cache-on-failure'], true);
+  assert.equal(cache.with['cache-workspace-crates'], undefined);
+  const packageStep = steps.find(step => step.id === 'package');
+  assert.match(packageStep.run, /if \[\[ "\$RUNNER_OS" == Linux \]\]; then extra\+=\(--linux-root-cache\); fi/);
+  assert.doesNotMatch(cache.with.workspaces, /artifacts\/unified|hub-target/);
+  assert.equal(workflow.permissions.contents, 'read');
+  assert.equal(workflow.jobs.assembly.permissions, undefined);
+});
+
 test('signed assembly receipts use the admitted version and actual 016 Cargo features without changing frozen14 shape', () => {
   const { signedAssemblyReceipt, integrationArguments } = require('./build-unified.cjs');
   const result = { version: '0.1.16', source: { sourceCommit: 'a'.repeat(40) }, handoffSha256: 'b'.repeat(64) };

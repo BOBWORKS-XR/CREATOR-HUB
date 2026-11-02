@@ -83,10 +83,14 @@ impl Journal {
             .path
             .with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
         let result = (|| -> std::io::Result<()> {
-            let mut file = std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&temporary)?;
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let mut file = options.open(&temporary)?;
             file.write_all(&bytes)?;
             file.sync_all()?;
             // ReplaceFileW needs the replacement handle closed, even after a flush.
@@ -156,6 +160,59 @@ impl Journal {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    #[test]
+    fn replacing_a_private_journal_never_grants_group_or_world_access() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::process::CommandExt;
+        const CHILD: &str = "CREATOR_JOURNAL_UMASK_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+            child
+                .arg("--exact")
+                .arg("hosted_journal::tests::replacing_a_private_journal_never_grants_group_or_world_access")
+                .arg("--nocapture")
+                .env(CHILD, "1");
+            unsafe {
+                child.pre_exec(|| {
+                    libc::umask(0o022);
+                    Ok(())
+                });
+            }
+            let result = child.output().unwrap();
+            assert!(
+                result.status.success(),
+                "{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            assert!(String::from_utf8_lossy(&result.stdout).contains("running 1 test"));
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("creator-outcomes-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("hosted-operation-outcomes.json");
+        std::fs::write(&path, br#"{"revision":1,"records":[]}"#).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let mut journal = Journal::open(&dir).unwrap();
+        journal.begin(&"a".repeat(64), 1, "inspect").unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        journal.complete(&"a".repeat(64), 1, true).unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        journal.begin(&"a".repeat(64), 2, "inspect").unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir(dir).unwrap();
+    }
     #[test]
     fn unknown_is_not_replayed_or_reported_successful_and_records_are_bounded() {
         let dir = std::env::temp_dir().join(format!("creator-outcomes-{}", uuid::Uuid::new_v4()));

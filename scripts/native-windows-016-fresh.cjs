@@ -17,8 +17,9 @@ const out = path.resolve('artifacts', `native-suite-${Date.now()}`);
 fs.mkdirSync(out, { recursive: true });
 const policyState = path.join(out, 'webview-policy.json'), stop = path.join(out, 'stop-runtime');
 const report = { passed: false, freshInstallAccepted: false, migrationAccepted: false, signedUpdateAccepted: false,
+  formattingEquivalentSettingsAccepted: false, manualNormalRestartAccepted: false, signedAutomaticRestartAccepted: false, normalCloses: [],
   publicDiscovery: false, releaseReady: false, userMachineUsed: false, installerSha256: candidate.TARGET.installer,
-  executableSha256: candidate.TARGET.exe, harnessSource: process.env.GITHUB_SHA };
+  executableSha256: candidate.TARGET.exe, ...candidate.productProvenance(), harnessSource: process.env.GITHUB_SHA };
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function retry(action, seconds = 90) {
   let last;
@@ -34,7 +35,7 @@ function ps(script, args = []) {
 const policy = action => ps('scripts/native-webview-policy.ps1', ['-Action', action, '-StateFile', policyState]);
 const environment = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
   !/TOKEN|SECRET|PASSWORD|PRIVATE_KEY|SIGNING|CREDENTIAL|AUTHORIZATION|PROXY|^NODE_OPTIONS$|^NODE_TLS_|^NODE_EXTRA_CA_CERTS$|^SSL_CERT_|^CURL_CA_BUNDLE$|^REQUESTS_CA_BUNDLE$/i.test(key)));
-let child, runtime, browser, page, ownedPage = false, before, retained, retainedHash;
+let child, runtime, browser, page, ownedPage = false, before, retained, retainedHash, seededSettings;
 function native(action) { return ps('scripts/native-window.ps1', ['-TargetPid', String(child.pid), '-ExpectedExecutable', hub, '-Action', action]); }
 function processes() {
   return JSON.parse(execFileSync('powershell.exe', ['-NoProfile', '-Command',
@@ -43,16 +44,58 @@ function processes() {
 }
 function unchanged() {
   assert.deepEqual(direct.settingsSnapshot(process.env.APPDATA, process.env.LOCALAPPDATA), before);
+  for (const [file, bytes] of seededSettings) assert.deepEqual(fs.readFileSync(file), bytes, 'Original formatting must survive unchanged');
   assert.equal(candidate.hash(fs.readFileSync(retained)), retainedHash);
   assert.equal(runtime.exitCode, null, 'Unrelated Node must survive installer, navigation and normal close');
 }
+async function launchOwned() {
+  ownedPage = false;
+  assert.equal(candidate.hash(fs.readFileSync(hub)), candidate.TARGET.exe);
+  child = spawn(hub, [], { env: { ...environment, WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: '--remote-debugging-port=9238' }, windowsHide: true, stdio: 'ignore' });
+  // Wait for this new process tree to own CDP before attaching to its page.
+  await retry(() => {
+    assert.equal(child.exitCode, null);
+    const state = JSON.parse(ps('scripts/native-startup-diagnostics.ps1').replace(/^\uFEFF/, ''));
+    candidate.assertOwnedDebugging(state, child.pid, hub);
+  });
+  browser = await retry(() => chromium.connectOverCDP('http://127.0.0.1:9238'));
+  page = await retry(() => { const found = browser.contexts().flatMap(context => context.pages()).find(value => value.url().includes('tauri.localhost')); assert.ok(found); return found; });
+  page.setDefaultTimeout(30000);
+  const state = JSON.parse(ps('scripts/native-startup-diagnostics.ps1').replace(/^\uFEFF/, ''));
+  candidate.assertOwnedDebugging(state, child.pid, hub);
+  ownedPage = true;
+  const requests = direct.watchRequests(page), errors = [];
+  page.on('pageerror', error => errors.push(String(error)));
+  await page.waitForFunction(() => window.CreatorHubNative);
+  return { requests, errors };
+}
+async function inspectPages(observed, prefix = '') {
+  await direct.checkHome(page);
+  const services = await direct.checkPages({ page, requests: observed.requests, processes,
+    showApp: app => candidate.showPage(page, app),
+    screenshot: app => page.screenshot({ path: path.join(out, `${prefix}${app}.png`), animations: 'disabled' }) });
+  await candidate.showPage(page, 'hub'); await direct.checkHome(page);
+  unchanged(); assert.deepEqual(observed.errors, []);
+  assert.equal((await page.locator('.footer-version').innerText()).trim(), candidate.TARGET.version);
+  return services;
+}
+async function closeOwned() {
+  native('close'); await retry(() => assert.equal(child.exitCode, 0));
+  unchanged(); assert.deepEqual(processes(), []);
+  report.normalCloses.push({ pid: child.pid, exitCode: child.exitCode });
+  ownedPage = false;
+  await browser.close(); browser = null; page = null;
+}
 (async () => {
-  const settings = { channels: [], active_channel_id: null, auto_start: false, mcp_server_path: '', tool_groups: 'read',
-    enable_custom_scripts: false, allow_all_tests: false, automatic_update_checks: false, connection_guide_version: 1,
-    incoming16_unknown: { keep: 'exact bytes; no merge or reset' } };
+  const settings = candidate.freshSettingsBytes();
+  assert.notDeepEqual(settings.current, settings.legacy);
+  assert.deepEqual(JSON.parse(settings.current), JSON.parse(settings.legacy));
+  seededSettings = [
+    [path.join(process.env.APPDATA, 'creator-works-mcp/launcher-config.json'), settings.current],
+    [path.join(process.env.APPDATA, 'banter-mcp/launcher-config.json'), settings.legacy],
+  ];
   const seeds = [
-    [path.join(process.env.APPDATA, 'creator-works-mcp/launcher-config.json'), JSON.stringify(settings)],
-    [path.join(process.env.APPDATA, 'banter-mcp/launcher-config.json'), JSON.stringify(settings)],
+    ...seededSettings,
     [path.join(process.env.LOCALAPPDATA, 'CreatorProjectSetup/editor-roots.json'), '[]\n'],
   ];
   for (const [file] of seeds) assert.equal(fs.existsSync(file), false, 'Never overwrite pre-existing runner settings');
@@ -70,16 +113,7 @@ function unchanged() {
   assert.equal(candidate.hash(fs.readFileSync(hub)), candidate.TARGET.exe);
   unchanged();
   policy('Enable');
-  child = spawn(hub, [], { env: { ...environment, WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: '--remote-debugging-port=9238' }, windowsHide: true, stdio: 'ignore' });
-  browser = await retry(() => chromium.connectOverCDP('http://127.0.0.1:9238'));
-  page = await retry(() => { const found = browser.contexts().flatMap(context => context.pages()).find(value => value.url().includes('tauri.localhost')); assert.ok(found); return found; });
-  page.setDefaultTimeout(30000);
-  const requests = direct.watchRequests(page), errors = [];
-  page.on('pageerror', error => errors.push(String(error)));
-  const state = JSON.parse(ps('scripts/native-startup-diagnostics.ps1').replace(/^\uFEFF/, ''));
-  candidate.assertOwnedDebugging(state, child.pid, hub);
-  ownedPage = true;
-  await page.waitForFunction(() => window.CreatorHubNative);
+  const first = await launchOwned();
   await page.locator('#usage-terms-dialog').waitFor({ state: 'visible' });
   await page.locator('#usage-terms-checkbox').check(); await page.locator('#usage-terms-continue').click();
   await page.waitForFunction(() => !document.querySelector('#usage-terms-dialog').open);
@@ -90,14 +124,17 @@ function unchanged() {
   await page.locator('#convergence-later').click(); report.migrationDeferred = true;
   await page.locator('#convergence-dialog').waitFor({ state: 'hidden' });
   await page.waitForFunction(() => !document.querySelector('#check-updates').disabled, null, { timeout: 180000 });
-  await direct.checkHome(page);
-  report.services = await direct.checkPages({ page, requests, processes,
-    showApp: async app => { await page.locator('#suite-trigger').click(); await page.locator(`#suite-menu [data-view="${app}"]`).click(); },
-    screenshot: app => page.screenshot({ path: path.join(out, `${app}.png`), animations: 'disabled' }) });
-  unchanged(); assert.deepEqual(errors, []);
-  assert.equal((await page.locator('.footer-version').innerText()).trim(), candidate.TARGET.version);
-  native('close'); await retry(() => assert.equal(child.exitCode, 0));
-  unchanged(); assert.deepEqual(processes(), []);
+  report.services = await inspectPages(first);
+  await closeOwned();
+  const second = await launchOwned();
+  assert.notEqual(child.pid, report.normalCloses[0].pid, 'Manual reopen must create a new process');
+  await direct.checkProtocol(page);
+  await page.waitForFunction(() => !document.querySelector('#check-updates').disabled, null, { timeout: 180000 });
+  assert.equal(await page.locator('#usage-terms-dialog').isVisible(), false, 'Terms acceptance must persist');
+  assert.equal(await page.locator('#convergence-dialog').isVisible(), false, 'The deferred unchanged review must stay deferred');
+  report.reopenedServices = await inspectPages(second, 'reopened-');
+  await closeOwned();
+  report.formattingEquivalentSettingsAccepted = true; report.manualNormalRestartAccepted = true;
   report.freshInstallAccepted = true; report.settingsPreserved = true; report.pluginsRemoved = true;
   report.passed = true;
 })().catch(async error => {

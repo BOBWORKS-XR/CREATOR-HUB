@@ -10,6 +10,7 @@ import { writeVSGraph, WriteVSGraphResult } from "./write-vs-graph.js";
 import { generateVSGraph, GenerateVSGraphResult } from "./generate-vs-graph.js";
 import { queryProjectState, ProjectStateResult } from "./query-project.js";
 import { getMCPReference } from "./get-mcp-reference.js";
+import { lookupCreatorDocs } from "./lookup-creator-docs.js";
 import { projectFeedback } from "./project-feedback.js";
 import { boundedReadText, hasReadResponseBudget, readResponseBudget, READ_RESPONSE_BUDGET_SCHEMA } from "./read-response-budget.js";
 import {
@@ -68,9 +69,11 @@ interface Tool {
   annotations?: { readOnlyHint: boolean; destructiveHint: boolean; idempotentHint: boolean; openWorldHint: boolean };
   inputSchema: {
     type: "object";
+    additionalProperties?: boolean;
     properties: Record<string, unknown>;
     required?: string[];
     anyOf?: Array<{ required: string[] }>;
+    oneOf?: Array<{ required: string[] }>;
     allOf?: Array<{ anyOf: Array<{ required: string[]; properties?: Record<string, unknown> }> }>;
   };
 }
@@ -121,6 +124,24 @@ export function registerTools(selection: ToolGroupSelection = "all"): Tool[] {
         },
         required: ["source"],
         anyOf: [{ required: ["query"] }, { required: ["entryId"] }],
+      },
+    },
+    {
+      name: "lookup_creator_docs",
+      description: "Look up current AltVR Creator SDK docs on demand, without crawling the site. Rank the live page index and bundled text, then fetch at most 3 relevant pages. No project contents or query text leave MCP. Returns source revision, bounded excerpts and explicit offline fallback. Use for current SDK questions, not on every Unity operation; verify installed SDK compatibility separately.",
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+      inputSchema: {
+        type: "object", additionalProperties: false,
+        properties: {
+          query: { type: "string", minLength: 1, maxLength: 128, description: "Specific topic; mutually exclusive with path. This is not an exhaustive live full-text search." },
+          path: { type: "string", maxLength: 180, description: "Relative .md page from a result or creator://docs-index; not a URL" },
+          limit: { type: "integer", minimum: 1, maximum: 3, default: 3 },
+          startOffset: { type: "integer", minimum: 0, default: 0 },
+          revision: { type: "string", pattern: "^[a-f0-9]{40}$", description: "Required with contentHash for continuation" },
+          contentHash: { type: "string", pattern: "^[a-f0-9]{64}$" },
+          refresh: { type: "boolean", default: false, description: "Recheck source revision now instead of using the five-minute index cache" },
+        },
+        oneOf: [{ required: ["query"] }, { required: ["path"] }],
       },
     },
     // VS Graph Tools
@@ -1098,7 +1119,7 @@ Use after writing multiple files to force Unity to import them.`,
     {
       name: "wait_for_unity_compile",
       description: `Wait until Unity is no longer compiling or updating assets.
-Waits through stale heartbeat/domain reload up to timeoutMs; requires a fresh settled Editor and completed compilation. Returns compiler diagnostics. A timeout does not cancel pending commands; poll their original IDs instead of resubmitting.`,
+Idle state alone is not new-file proof. afterCommandId binds a refresh; sinceTimestamp requires a newer completed compile. Does not refresh or cancel. On timeout poll the original command ID; do not resubmit. Returns compiler errors.`,
       inputSchema: {
         type: "object",
         properties: {
@@ -1108,6 +1129,15 @@ Waits through stale heartbeat/domain reload up to timeoutMs; requires a fresh se
             maximum: 120000,
             default: 30000,
             description: "Maximum time to wait for Unity to settle",
+          },
+          afterCommandId: {
+            type: "string",
+            description: "Refresh UUID: require successful completion and a later Editor heartbeat in this project.",
+          },
+          sinceTimestamp: {
+            type: "integer",
+            minimum: 0,
+            description: "Unix ms (refreshRequestedAt): require a completed compile at/after this time. Asset-only refresh may not compile.",
           },
         },
       },
@@ -1424,7 +1454,7 @@ Requires BanterMCPBridge extension.`,
           },
           componentId: {
             type: "string",
-            description: "Preferred when duplicate component types exist: source component globalObjectId",
+            description: "Component globalObjectId; also supply owning objectId or objectPath. componentId alone is not an owner selector.",
           },
           propertyName: {
             type: "string",
@@ -1756,6 +1786,9 @@ export async function handleToolCall(
     case "get_mcp_reference":
       result = getMCPReference(args);
       break;
+    case "lookup_creator_docs":
+      result = await lookupCreatorDocs(args);
+      break;
     case "validate_vs_graph":
       result = validateVSGraph(args.graphJson as string, {
         sdkProfile: detectSidequestSDKProfile(config),
@@ -2046,7 +2079,8 @@ export async function handleToolCall(
     case "wait_for_unity_compile":
       result = await waitForUnityCompile(
         args.timeoutMs as number | undefined,
-        config
+        config,
+        { afterCommandId: args.afterCommandId as string | undefined, sinceTimestamp: args.sinceTimestamp as number | undefined }
       );
       break;
 
@@ -2240,7 +2274,7 @@ export async function handleToolCall(
       {
         type: "text",
         text: responseBudget !== undefined ? boundedReadText(name, result, responseBudget, config.mcpStatePath)
-          : typeof result === "string" ? result : JSON.stringify(result, null, ["query_project_state", "get_mcp_reference"].includes(name) ? undefined : 2),
+          : typeof result === "string" ? result : JSON.stringify(result, null, ["query_project_state", "get_mcp_reference", "lookup_creator_docs"].includes(name) ? undefined : 2),
       },
     ],
   };
@@ -2452,6 +2486,7 @@ async function refreshUnityAssets(
   assetPath: string | undefined,
   config: BanterMCPConfig
 ): Promise<unknown> {
+  const refreshRequestedAt = Date.now();
   const result = await sendUnityCommand({
     type: "refresh",
     path: assetPath || null,
@@ -2461,6 +2496,9 @@ async function refreshUnityAssets(
   return {
     ...commandResponse(result, "Unity asset refresh requested."),
     path: assetPath || "all assets",
+    refreshRequestedAt,
+    nextAction: { tool: "wait_for_unity_compile", arguments: { afterCommandId: result.commandId } },
+    compilationNote: "For C# changes, also pass sinceTimestamp=refreshRequestedAt to require a newer completed compilation. Refresh acknowledgement alone does not prove compilation finished.",
   };
 }
 
@@ -4004,6 +4042,9 @@ async function setObjectReference(
   targetComponent: string | undefined,
   config: BanterMCPConfig
 ): Promise<unknown> {
+  if (![objectId, objectPath].some(value => typeof value === "string" && value.trim().length > 0)) {
+    return { success: false, error: "set_object_reference requires the owning GameObject's objectId or objectPath; componentId alone is not an owner selector. No command was sent." };
+  }
   const command = {
     type: "set_object_reference",
     objectId: objectId || null,

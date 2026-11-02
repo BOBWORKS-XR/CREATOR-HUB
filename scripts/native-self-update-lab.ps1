@@ -1,6 +1,6 @@
 # VM-only transport lifecycle, not an update acceptance receipt. Requires pwsh 7.
 param([string]$ContractPath = '', [string]$BaselineInstallerPath = '', [int]$TimeoutSeconds = 300, [switch]$CleanupWatch,
-    [ValidateSet('public-stable','unified-outgoing-14-15')][string]$Scenario = 'public-stable', [switch]$Incoming016)
+    [ValidateSet('public-stable','unified-outgoing-14-15')][string]$Scenario = 'public-stable', [switch]$Incoming016, [switch]$Outgoing017)
 if ($env:GITHUB_ACTIONS -cne 'true' -or $env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or $env:RUNNER_OS -cne 'Windows') {
     [Console]::Error.WriteLine('Lab lifecycle refused: disposable GitHub-hosted Windows runner required.')
     exit 1
@@ -249,7 +249,9 @@ async function main() {
   const contract = lab.loadContract(config);
   if (process.argv[3] === 'validate') {
     console.log(JSON.stringify({ kind: 'lab-contract-validated', targetVersion: contract.targetVersion,
-      installerSha256: contract.pins.installer, executableSha256: contract.pins.executable }));
+      installerSha256: contract.pins.installer, executableSha256: contract.pins.executable,
+      ...(contract.actualScope?.kind === 'direct-outgoing-016-017' ? { baselineVersion: contract.baseline.version,
+        baselineInstallerSha256: contract.baseline.installer, baselineExecutableSha256: contract.baseline.exe } : {}) }));
     return;
   }
   if (process.argv[3] !== 'serve') throw Error('Mode refused');
@@ -336,16 +338,25 @@ $trustOwned = $false; $failed = $false; $cleanupVerified = $true; $systemTlsVeri
 $driverExitCode = $null; $feedResult = $null; $rootThumbprint = $null; $leafThumbprint = $null
 $phase = 'timeout'; $failureDetails = $null
 $script:processIdentityFailure = $null
-$actualScope = if ($Incoming016) { 'exact-public14-to-direct16-lab-only' }
+$actualScope = if ($Outgoing017) { 'exact-direct16-to-root-only17-acceptance-fixture-lab-only' }
+    elseif ($Incoming016) { 'exact-public14-to-direct16-lab-only' }
     elseif ($Scenario -ceq 'public-stable') { 'unmodified-public-0.1.12-lab-only' }
     else { 'accepted-unmodified-B05-0.1.14-to-outer-only-0.1.15-fixture-lab-only' }
+$reportedScenario = if ($Outgoing017) { 'direct-outgoing-016-017' } else { $Scenario }
 try {
     Set-LabPhase 'timeout'
+    if ($Outgoing017 -and ($Incoming016 -or $Scenario -cne 'public-stable')) { throw 'Outgoing17 cannot be combined with another scenario.' }
     if ($Incoming016 -and $Scenario -cne 'public-stable') { throw 'Incoming16 cannot be combined with a historical scenario.' }
     if ($TimeoutSeconds -lt 1 -or $TimeoutSeconds -gt 480) { throw 'Driver timeout must be 1..480 seconds.' }
     # The exact five-route proxy cannot bootstrap either baseline. Stage reviewed bytes beforehand.
     Set-LabPhase 'baseline'
-    if ($Incoming016) {
+    if ($Outgoing017) {
+        if (Test-Path Env:CREATOR_HOSTED_UPDATE_FIXTURE) { throw 'Outgoing baseline version masquerade refused.' }
+        if ($env:CREATOR_OUTGOING_CONFIG_SHA256 -cnotmatch '^[a-f0-9]{64}$') { throw 'Independently reviewed outgoing config hash required.' }
+        $BaselineInstallerPath = Resolve-LabFile $BaselineInstallerPath
+        $baselineItem = Get-Item -LiteralPath $BaselineInstallerPath
+        if ($baselineItem.Length -lt 1 -or $baselineItem.Length -gt 512MB) { throw 'Baseline installer size refused.' }
+    } elseif ($Incoming016) {
         if (Test-Path Env:CREATOR_HOSTED_UPDATE_FIXTURE) { throw 'Incoming16 baseline fixture refused.' }
         $BaselineInstallerPath = Resolve-UnifiedOutgoingLabBaseline $BaselineInstallerPath
     } elseif ($Scenario -ceq 'public-stable') {
@@ -357,7 +368,9 @@ try {
     Set-LabPhase 'contract'
     $ContractPath = Resolve-LabFile $ContractPath
     Set-LabPhase 'feed-path'
-    if ($Incoming016) {
+    if ($Outgoing017) {
+        $feedPath = Resolve-LabFile (Join-Path $PSScriptRoot '../artifacts/menu-merge-20261027/outgoing/target.cjs')
+    } elseif ($Incoming016) {
         $feedPath = Resolve-LabFile (Join-Path $PSScriptRoot 'windows-incoming-016.cjs')
     } elseif ($Scenario -ceq 'public-stable') {
         $feedPath = Resolve-LabFile (Join-Path $PSScriptRoot 'self-update-lab-feed.cjs')
@@ -365,7 +378,9 @@ try {
         $feedPath = Resolve-LabFile (Join-Path $PSScriptRoot 'native-unified-outgoing-target.cjs')
     }
     Set-LabPhase 'driver-path'
-    if ($Scenario -ceq 'public-stable') {
+    if ($Outgoing017) {
+        $driverPath = Resolve-LabFile (Join-Path $PSScriptRoot '../artifacts/menu-merge-20261027/outgoing/driver.cjs')
+    } elseif ($Scenario -ceq 'public-stable') {
         $driverPath = Resolve-LabFile (Join-Path $PSScriptRoot 'native-self-update-smoke.cjs')
     } else {
         $driverPath = Resolve-LabFile (Join-Path $PSScriptRoot 'native-unified-outgoing-smoke.cjs')
@@ -385,6 +400,14 @@ try {
     Set-LabPhase 'validator-result'
     $validated = Read-LabLine $validator.StandardOutput | ConvertFrom-Json
     if ($validated.kind -cne 'lab-contract-validated' -or -not $validator.WaitForExit(10000) -or $validator.ExitCode -ne 0) { throw 'Reviewed contract refused.' }
+    if ($Outgoing017) {
+        if ($validated.baselineVersion -cne '0.1.16' -or $validated.targetVersion -cne '0.1.17' -or
+            $validated.baselineInstallerSha256 -cnotmatch '^[a-f0-9]{64}$' -or
+            $validated.baselineExecutableSha256 -cnotmatch '^[a-f0-9]{64}$') { throw 'Outgoing version/baseline binding refused.' }
+        if ((Get-FileHash -LiteralPath $BaselineInstallerPath -Algorithm SHA256).Hash.ToLowerInvariant() -cne $validated.baselineInstallerSha256) {
+            throw 'Exact reviewed direct16 baseline installer required.'
+        }
+    }
 
     Set-LabPhase 'certificates'
     $caKey = [Security.Cryptography.RSACng]::new(2048)
@@ -455,7 +478,7 @@ try {
     Test-LabSystemTls $ready.proxyUrl 'github.com' $leafThumbprint
     Test-LabSystemTls $ready.proxyUrl 'api.github.com' $leafThumbprint
     $systemTlsVerified = $true
-    [ordered]@{kind='lab-lifecycle-ready'; scenario=$Scenario; actualScope=$actualScope; liveAiAcceptance=$false; productAcceptance=$false; releaseReady=$false;
+    [ordered]@{kind='lab-lifecycle-ready'; scenario=$reportedScenario; actualScope=$actualScope; liveAiAcceptance=$false; productAcceptance=$false; releaseReady=$false;
         labDiscovery=$true; publicDiscovery=$false; nativeAcceptanceTested=$false; systemTlsVerified=$true; trustScope='disposable-vm-local-machine';
         proxyUrl=$ready.proxyUrl; rootThumbprint=$publicRoot.Thumbprint; leafThumbprint=$leafThumbprint; proxy=$proxyRecord; cleanupWatcher=$watcherRecord} | ConvertTo-Json -Depth 4 -Compress
 
@@ -520,7 +543,7 @@ try {
     foreach ($resource in @($leaf, $unsignedLeaf, $ca, $leafKey, $caKey, $publicRoot, $rootStore, $driver, $proxy, $validator, $watcher)) { if ($resource) { $resource.Dispose() } }
 }
 [ordered]@{kind='lab-lifecycle-result'; lifecycleSucceeded=(-not $failed -and $cleanupVerified); cleanupVerified=$cleanupVerified;
-    scenario=$Scenario; actualScope=$actualScope; liveAiAcceptance=$false; productAcceptance=$false;
+    scenario=$reportedScenario; actualScope=$actualScope; liveAiAcceptance=$false; productAcceptance=$false;
     systemTlsVerified=$systemTlsVerified; trustScope='disposable-vm-local-machine'; labDiscovery=$true; publicDiscovery=$false; nativeAcceptanceTested=$false; releaseReady=$false;
     driverExitCode=$driverExitCode; failureDetails=$failureDetails; processIdentityFailure=$script:processIdentityFailure; rootThumbprint=$rootThumbprint; leafThumbprint=$leafThumbprint; driver=$driverRecord; proxy=$proxyRecord; cleanupWatcher=$watcherRecord;
     servedRouteCount=$(if ($feedResult) { $feedResult.servedRouteCount } else { $null });

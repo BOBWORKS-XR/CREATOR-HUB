@@ -76,7 +76,7 @@ const REVISIONS = Object.fromEntries(Object.entries(SOURCES).map(([key, source])
 
 export const REFERENCE_RESPONSE_MAX_BYTES = 16 * 1024;
 
-function excerptLength(text: string): number {
+export function excerptLength(text: string): number {
   let low = 0;
   let high = Math.min(text.length, 2048);
   while (low < high) {

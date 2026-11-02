@@ -43,6 +43,116 @@ pub fn initialize(handle: &tauri::AppHandle) {
     if let Ok(mut state) = handle.state::<SelfUpdate>().1.lock() {
         *state = Some(identity);
     }
+    #[cfg(all(target_os = "linux", feature = "integrated-features"))]
+    {
+        let pending = dirs::data_local_dir().map(|data| data.join("creator-hub-update-cache/deb/records/mcp-route-update.json"));
+        if pending.is_some_and(|path| fs::symlink_metadata(path).is_ok()) {
+            let operation = handle.state::<Manager>().begin();
+            let handle = handle.clone();
+            let _worker = tauri::async_runtime::spawn_blocking(move || {
+                let result = crate::mcp_update_handoff::after_operation(operation, || resume_mcp_handoff(&handle), || {
+                    let _ = handle.emit("mcp-route-update-complete", ());
+                });
+                if let Err(error) = result { eprintln!("{error}"); }
+            });
+        }
+    }
+}
+
+#[cfg(all(target_os = "linux", feature = "integrated-features"))]
+fn mcp_handoff_path() -> Result<PathBuf, String> {
+    Ok(manager::linux_update_cache_path(manager::LinuxUpdateCache::DebRecords)?.join("mcp-route-update.json"))
+}
+
+#[cfg(all(target_os = "linux", feature = "integrated-features"))]
+fn verify_mcp_update_release(bytes: &[u8], signature: &[u8]) -> Result<crate::mcp_update_handoff::VerifiedRelease, String> {
+    let release = catalog::verify_signed_target(APP_ID, bytes, signature, true, Target::native()?)?;
+    if release.package_type != "deb" || release.installer_protocol != 1 {
+        return Err("Only the approved native DEB lifecycle may hand off MCP routing.".into());
+    }
+    Ok(crate::mcp_update_handoff::VerifiedRelease { version: release.version, executable_sha256: release.executable_sha256 })
+}
+
+#[cfg(all(target_os = "linux", feature = "integrated-features"))]
+fn mcp_current(handle: &tauri::AppHandle) -> Result<crate::mcp_update_handoff::Current, String> {
+    let installed = installed_location(handle)?;
+    let executable_sha256 = manager::file_hash(&installed)?;
+    installed_location(handle)?;
+    Ok(crate::mcp_update_handoff::Current { version: env!("CARGO_PKG_VERSION").into(), executable_sha256, installed })
+}
+
+#[cfg(all(target_os = "linux", feature = "integrated-features"))]
+fn mcp_route_root() -> Result<PathBuf, String> {
+    Ok(dirs::data_local_dir().ok_or("MCP data directory unavailable.")?.join("creator-hub/mcp-route-v1")
+        .join(format!("linux-{}", std::env::consts::ARCH)))
+}
+
+#[cfg(all(target_os = "linux", feature = "integrated-features"))]
+fn prepare_mcp_handoff(handle: &tauri::AppHandle, release: &Release) -> Result<Option<crate::mcp_update_handoff::Prepared>, String> {
+    if Target::native()?.package != "deb" || !crate::builtin::enabled() { return Ok(None); }
+    let path = mcp_handoff_path()?;
+    let directory = path.parent().ok_or("Update records unavailable.")?;
+    let bytes = manager::bounded_read(&directory.join(format!("{}.json", release.version)), catalog::MAX_METADATA)?;
+    let signature = manager::bounded_read(&directory.join(format!("{}.minisig", release.version)), 4096)?;
+    if catalog::verify_signed_target(APP_ID, &bytes, &signature, true, Target::native()?)? != *release {
+        return Err("The retained signed catalog differs from the exact approved update.".into());
+    }
+    let store = creator_hub_mcp_router::Store::installed()?;
+    if store.snapshot()?.is_some() { store.router()?; }
+    crate::mcp_update_handoff::Prepared::capture(&path, &store, &mcp_current(handle)?, (bytes, signature), verify_mcp_update_release)
+        .map_err(|error| crate::mcp_update_handoff::review_message(&path, &error))
+}
+
+#[cfg(all(target_os = "linux", feature = "integrated-features"))]
+fn resume_mcp_handoff(handle: &tauri::AppHandle) -> Result<(), String> {
+    if Target::native()?.package != "deb" || !crate::builtin::enabled() { return Ok(()); }
+    let candidate = dirs::data_local_dir().ok_or("Update data directory unavailable.")?
+        .join("creator-hub-update-cache/deb/records/mcp-route-update.json");
+    match fs::symlink_metadata(&candidate) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(_) => return Err("Cannot inspect the retained MCP update handoff.".into()),
+        Ok(_) => {}
+    }
+    let path = mcp_handoff_path()?;
+    let result: Result<(), String> = (|| {
+        let store = creator_hub_mcp_router::Store::installed()?;
+        store.router()?;
+        crate::mcp_update_handoff::resume(&path, &mcp_route_root()?, &store, &mcp_current(handle)?, verify_mcp_update_release,
+            crate::builtin::update_route_identity, |expected| {
+                let review = crate::builtin::prepare_update_route(handle, expected)?;
+                Ok(|authority| {
+                    installed_location(handle)?;
+                    review.activate_update(authority).map(|_| ())
+                })
+            }).map(|_| ())
+    })();
+    result.map_err(|error| crate::mcp_update_handoff::review_message(&path, &error))
+}
+
+#[cfg(all(target_os = "linux", feature = "integrated-features"))]
+fn mcp_route_update_status(handle: &tauri::AppHandle) -> Option<crate::mcp_update_handoff::Readback> {
+    let readback: Result<Option<crate::mcp_update_handoff::Readback>, String> = (|| {
+        if Target::native()?.package != "deb" || !crate::builtin::enabled() { return Ok(None); }
+        let candidate = dirs::data_local_dir().ok_or("Update data directory unavailable.")?
+            .join("creator-hub-update-cache/deb/records/mcp-route-update.json");
+        let has_handoff = match fs::symlink_metadata(&candidate) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(_) => return Err("Cannot inspect the retained MCP outcome.".to_owned()),
+            Ok(_) => true,
+        };
+        let store = creator_hub_mcp_router::Store::installed()?;
+        if !has_handoff && store.snapshot()?.is_none() { return Ok(None); }
+        store.router()?;
+        let current = mcp_current(handle)?;
+        let target = crate::builtin::inspect_update_route(handle)?;
+        if has_handoff {
+            Ok(Some(crate::mcp_update_handoff::readback(&mcp_handoff_path()?, &mcp_route_root()?,
+                &store, &current, verify_mcp_update_release, &target)))
+        } else {
+            Ok(crate::mcp_update_handoff::legacy_readback(&store, &current, &target))
+        }
+    })();
+    match readback { Ok(value) => value, Err(error) => Some(crate::mcp_update_handoff::Readback::unavailable(&error)) }
 }
 
 #[derive(Serialize)]
@@ -53,6 +163,9 @@ pub struct State {
     pub(super) downloaded: bool,
     pub(super) install_blocked: Option<String>,
     pub(super) warning: Option<String>,
+    #[cfg(all(target_os = "linux", feature = "integrated-features"))]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) mcp_route_update: Option<crate::mcp_update_handoff::Readback>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) preview_supported: Option<bool>,
 }
@@ -327,6 +440,8 @@ fn check(handle: &tauri::AppHandle, online: bool, preview: bool) -> Result<State
                 .or_else(|| installed_location(handle).err())
         }),
         warning,
+        #[cfg(all(target_os = "linux", feature = "integrated-features"))]
+        mcp_route_update: mcp_route_update_status(handle),
         preview_supported: None,
     };
     *handle
@@ -517,6 +632,9 @@ pub async fn install_hub_update(
         let rechecked = installed_location(&handle)?;
         if rechecked != installed { return Err("The running Hub installation changed. Restart Hub before updating.".into()); }
         if handle.state::<Manager>().cancellation().load(Ordering::SeqCst) { return Err("Hub update cancelled.".into()); }
+        #[cfg(all(target_os = "linux", feature = "integrated-features"))]
+        let mcp_handoff = prepare_mcp_handoff(&handle, &release)
+            .map_err(|error| crate::mcp_update_handoff::manual_install_message(&installer, &release.version, &error))?;
         if !views.is_empty() {
             if restore_views {
                 handle.state::<crate::hosted_restore::Restore>().remember(views, &release.version)?;
@@ -532,13 +650,35 @@ pub async fn install_hub_update(
         #[cfg(target_os = "macos")]
         crate::mac_update::install(&bytes, &installed, &release.executable_sha256, || installed_location(&handle).map(|_| ()))?;
         #[cfg(target_os = "linux")]
-        if crate::linux_update::install(&bytes, release.byte_length, &release.sha256, Target::native()?.package)? == crate::linux_update::Outcome::Cancelled {
-            return Ok("Hub update cancelled at system authorization. Nothing was installed. Your settings and retained MCP connections were kept; closed app views can be reopened from Hub.".into());
+        {
+            let installed_outcome = crate::linux_update::install(&bytes, release.byte_length, &release.sha256, Target::native()?.package)?;
+            #[cfg(all(target_os = "linux", feature = "integrated-features"))]
+            {
+                let completion = crate::mcp_update_handoff::complete_deb_install(&installed_outcome, || {
+                    let restart = tauri::process::current_binary(&handle.env()).map_err(|_| "Cannot locate the replacement restart target.")?;
+                    crate::mcp_update_handoff::VerifiedRestartImage::native_deb(&installed, &restart, &release.executable_sha256)
+                }, || {
+                    if let Some(handoff) = mcp_handoff {
+                        handoff.publish(&installed_outcome, &creator_hub_mcp_router::Store::installed()?)?;
+                        Ok(crate::mcp_update_handoff::Publication::Published)
+                    } else {
+                        Ok(crate::mcp_update_handoff::Publication::NotRequired)
+                    }
+                });
+                completion.finish(&release.version, |notice| {
+                    let _ = handle.emit("app-progress", Progress { message: notice.into(), received: 0, total: 0, cancellable: false });
+                }, || handle.request_restart())
+            }
+            #[cfg(not(feature = "integrated-features"))]
+            if installed_outcome == crate::linux_update::Outcome::Cancelled {
+                return Ok("Hub update cancelled at system authorization. Nothing was installed. Your settings and retained MCP connections were kept; closed app views can be reopened from Hub.".into());
+            }
         }
         #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         update.install(bytes).map_err(|_| "Hub could not complete its update. Retry from the installed app; your settings and runtime generations were retained.")?;
-        #[cfg(unix)]
+        #[cfg(all(unix, not(all(target_os = "linux", feature = "integrated-features"))))]
         handle.request_restart();
+        #[cfg(not(all(target_os = "linux", feature = "integrated-features")))]
         Ok("Hub update started.".into())
     }).await.map_err(|_| "Hub update could not start.")?
 }
@@ -583,6 +723,8 @@ mod tests {
             downloaded: false,
             install_blocked: None,
             warning: None,
+            #[cfg(all(target_os = "linux", feature = "integrated-features"))]
+            mcp_route_update: None,
             preview_supported: None,
         };
         let original = serde_json::to_value(&state).unwrap();

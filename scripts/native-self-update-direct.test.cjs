@@ -5,6 +5,7 @@ const os = require('node:os');
 const path = require('node:path');
 const vm = require('node:vm');
 const { EventEmitter } = require('node:events');
+const { spawnSync } = require('node:child_process');
 const direct = require('./native-self-update-direct.cjs');
 
 const root = path.resolve(__dirname, '..');
@@ -97,6 +98,19 @@ test('direct mode is exactly 0.1.16 and source-bound, never inferred from a miss
     s => s.services.integrated = false, s => s.services.features.pop(), s => s.services.features.push('plugins')]) {
     const state = protocol(); mutate(state); assert.throws(() => direct.assertProtocol(state));
   }
+});
+
+test('incoming report binds the dispatched harness SHA independently of candidate product source', () => {
+  const declaration = smoke.match(/^const report = .*;$/m)?.[0];
+  assert.ok(declaration);
+  const harnessSource = '1234567890abcdef1234567890abcdef12345678';
+  const report = vm.runInNewContext(`${declaration}\nreport`, {
+    process: { env: { GITHUB_SHA: harnessSource } }, from: { version: '0.1.14' }, to: { version: '0.1.16' },
+  });
+  assert.equal(report.harnessSource, harnessSource);
+  assert.equal(report.passed, false);
+  assert.equal(report.selfUpdateTested, false);
+  assert.equal(Object.hasOwn(report, 'productSource'), false, 'Harness SHA must not be relabelled as compiled product source');
 });
 
 test('direct pages require real finite service calls, enabled/error-free controls and a retained navigation draft', async () => {
@@ -232,15 +246,18 @@ test('actual target function keeps SDK reconnect for 16 and never enters hosted 
   const check = vm.runInNewContext(`processes = () => [];\n(${smoke.slice(start, end)})`, {
     assert, path, process: { env: { LOCALAPPDATA: path.resolve('fixture-local'), USERPROFILE: path.resolve('fixture-home') } },
     directTarget: true, report, page: { evaluate: async () => ({ supported: true, apps: [{ builtIn: true, trusted: true }, { builtIn: true, trusted: true }] }) },
-    direct: { checkPages: async () => { events.push('direct-pages'); return {}; },
+    direct: { checkPages: async ({ page, showApp }) => {
+      events.push('direct-pages'); await showApp('setup'); await showApp('mcp'); return {};
+    },
       prepareManagedRoute: async () => { events.push('native-route'); return { ...mcp(), managedRouting: true }; },
       checkCleanDocument: async () => events.push('clean-document') },
     directRequests: [], processes: () => [], managedLocations: () => ({ active: 'fixture-active', command: 'fixture-router' }),
+    labTarget: { showPage: async (page, feature) => { assert.equal(typeof page.evaluate, 'function'); events.push(`semantic-${feature}`); } },
     showApp: forbidden, readyFrame: forbidden, native: forbidden, powershell: forbidden, frames: {}, ownedPid: 123,
     out: '.', retry: fn => fn(), require: name => { assert.equal(name, 'node:module'); return { createRequire: () => sdk }; },
   });
   await check();
-  assert.deepEqual(events, ['direct-pages', 'native-route', 'sdk-connect', 'sdk-close', 'sdk-connect', 'sdk-close', 'clean-document']);
+  assert.deepEqual(events, ['direct-pages', 'semantic-setup', 'semantic-mcp', 'native-route', 'sdk-connect', 'sdk-close', 'sdk-connect', 'sdk-close', 'clean-document']);
   assert.equal(report.directHubUpdateTested, true); assert.equal(report.managedRouteReconnectTested, true);
   assert.equal(report.directServices.mcp.managedRouting, true);
 });
@@ -284,3 +301,184 @@ test('historical hosted target function still requires both private approvals, f
   assert.equal(report.directHubUpdateTested, undefined);
   assert.equal(running.size, 0);
 });
+
+function directMenuFixture() {
+  const node = (text, left, top, width, height) => ({ textContent: text, scrollWidth: width, clientWidth: width,
+    scrollHeight: height, clientHeight: height, bounds: { left, top, right: left + width, bottom: top + height, width, height },
+    getBoundingClientRect() { return this.bounds; }, getClientRects() { return [this.bounds]; } });
+  const rows = [
+    ['Home', 'Projects and updates'], ['MCP', 'AI bridge for Unity'],
+    ['Setup / Repair', 'Unity + Creator SDK project setup and repair'], ['Creator Converter', 'SideQuest / Coming soon'],
+  ].map(([title, description], index) => {
+    const row = node('', 6, index * 140, 268, 132);
+    // Two-line titles and a hidden zero-geometry status reproduce the rejected current menu.
+    row.title = node(title, 20, row.bounds.top + 12, 240, 44);
+    row.description = node(description, 20, row.bounds.top + 60, 240, 36);
+    row.status = node('Ready', 0, 0, 0, 0); row.status.getClientRects = () => [];
+    row.icons = 0;
+    row.querySelector = selector => ({ strong: row.title, small: row.description, '.suite-item-status': row.status })[selector];
+    row.querySelectorAll = selector => { assert.equal(selector, '.icon,.suite-mark,img,svg,[role="img"]'); return new Array(row.icons); };
+    return row;
+  });
+  const element = node('', 0, 0, 280, 560), events = [];
+  element.querySelectorAll = selector => { assert.equal(selector, '.suite-item'); return rows; };
+  const menu = {
+    waitFor: async options => { assert.equal(options.state, 'visible'); events.push('visible'); },
+    getByRole: (role, options) => {
+      assert.equal(role, 'button'); assert.ok(['Home', 'MCP', 'Setup / Repair'].some(label => options.name.test(label)));
+      return { isVisible: async () => true };
+    },
+    evaluate: async fn => JSON.parse(JSON.stringify(await vm.runInNewContext(`(${fn.toString()})(element)`, { element }))),
+  };
+  const page = {
+    getByRole: (role, options) => {
+      assert.equal(options.exact, true);
+      if (role === 'button') {
+        assert.equal(options.name, 'Open menu'); return { click: async () => events.push('open') };
+      }
+      assert.equal(role, 'navigation'); assert.equal(options.name, 'Creator tools'); return menu;
+    },
+    waitForFunction: async fn => {
+      const evaluate = playState => vm.runInNewContext(`(${fn.toString()})()`, { document: { querySelector: selector => {
+        assert.equal(selector, '#suite-shell'); return { getAnimations: options => {
+          assert.equal(options.subtree, true); return [{ playState }];
+        } };
+      } } });
+      assert.equal(evaluate('running'), false); assert.equal(evaluate('finished'), true); events.push('transitions-finished');
+    },
+  };
+  const start = smoke.indexOf('async function checkUpdatedDirectMenu() {'), end = smoke.indexOf('\nfunction processes()', start);
+  assert.ok(start >= 0 && end > start);
+  const realmAssert = { ...assert, deepEqual: (actual, expected) =>
+    assert.deepEqual(JSON.parse(JSON.stringify(actual)), JSON.parse(JSON.stringify(expected))) };
+  return { rows, element, events, check: vm.runInNewContext(`(${smoke.slice(start, end)})`, { assert: realmAssert, page }) };
+}
+
+test('actual direct menu check accepts wrapped titles and hidden statuses through current semantic roles', async () => {
+  const fixture = directMenuFixture(), layout = await fixture.check();
+  assert.equal(layout.rows.length, 4);
+  assert.deepEqual(fixture.events, ['open', 'visible', 'transitions-finished']);
+  const row = fixture.rows[1];
+  row.status.bounds = { left: 20, top: 240, right: 260, bottom: 256, width: 240, height: 16 };
+  row.status.getClientRects = () => [row.status.bounds];
+  await fixture.check();
+});
+
+test('actual direct menu check rejects old labels, descriptions, icons, overflow and text overlap', async () => {
+  for (const mutate of [
+    f => f.rows[0].title.textContent = 'Creator Hub',
+    f => f.rows[1].description.textContent = 'Old MCP description',
+    f => f.rows[2].icons = 1,
+    f => f.element.scrollWidth++,
+    f => f.rows[1].scrollWidth++,
+    f => f.rows[2].title.scrollHeight++,
+    f => f.rows[2].description.bounds.right += 100,
+    f => f.rows[2].description.bounds.bottom += 100,
+    f => f.rows[2].title.bounds.bottom = f.rows[2].description.bounds.top + 10,
+    f => { f.rows[1].status.getClientRects = () => [f.rows[1].status.bounds]; },
+  ]) {
+    const fixture = directMenuFixture(); mutate(fixture); await assert.rejects(fixture.check());
+  }
+});
+
+test('baseline Apps navigation, direct Home admission and historical layout checks remain separate', () => {
+  const start = smoke.indexOf('async function showApps() {'), end = smoke.indexOf('\nasync function showApp(app)', start);
+  assert.equal(smoke.slice(start, end).replace(/\r/g, ''), `async function showApps() {
+  await page.locator('#suite-trigger').click();
+  await page.locator('#suite-menu [data-view="hub"]').click();
+  await page.locator('#hub-pages [data-view="hub"]').click();
+}`);
+  assert.match(smoke, /if \(directTarget && !fixture\) await direct\.checkHome\(page\)/);
+  assert.match(smoke, /if \(directTarget\) await direct\.checkHome\(page\);\s+else assert\.equal/);
+  const menuBlock = smoke.slice(smoke.indexOf("path.join(out, 'after-restart.png')"), smoke.indexOf('if (lab) await checkUpdatedBuiltIns()'));
+  assert.match(menuBlock, /if \(directTarget\) \{\s+report\.directMenu = await checkUpdatedDirectMenu\(\);/);
+  assert.match(menuBlock, /\} else \{\s+await page\.locator\('#suite-trigger'\)\.click\(\);/);
+  assert.match(menuBlock, /menuLayout\.every\(row => row\.titleFits && row\.statusBelow && row\.fits\)/);
+});
+
+test('native close admits only historical titles and the exact v3/17 titles while retaining ownership guards', { skip: process.platform !== 'win32' }, () => {
+  const source = fs.readFileSync(path.join(__dirname, 'native-window.ps1'), 'utf8');
+  const identity = source.slice(source.indexOf('$process = Get-Process'), source.indexOf('Add-Type -AssemblyName'));
+  const selection = source.slice(source.indexOf('$handles = [NativeTestWindows]::ForProcess'),
+    source.indexOf('    if (-not [NativeTestWindows]::PostMessage')) + '\n}';
+  assert.match(identity, /Get-Process -Id \$TargetPid -ErrorAction Stop/);
+  assert.match(identity, /GetFullPath\(\$process.Path\) -ine \[IO.Path\]::GetFullPath\(\$ExpectedExecutable\)/);
+  assert.match(source, /if\(owner == pid\) result.Add\(h\)/);
+  assert.match(selection, /Class\(\$_\) -eq 'Tauri Window'/);
+  assert.match(selection, /\$closeHandles.Count -ne 1/);
+  assert.match(source, /PostMessage\(\$closeHandles\[0\], 0x10, \[IntPtr\]::Zero, \[IntPtr\]::Zero\)/);
+  assert.doesNotMatch(selection, /-like|-match|StartsWith|Contains/);
+  const titles = ['Creator Hub - Development Preview', 'Creator Project Setup', 'Creator Works MCP',
+    'Creator Hub 0.1.16 - Settings Upgrade Test 2026-10-27', 'Creator Hub 0.1.17 - Settings Upgrade Test 2026-10-27'];
+  const row = (title, changes = {}) => ({ title, className: 'Tauri Window', pid: 123, ...changes });
+  const cases = titles.map(title => ({ rows: [row(title)], expected: true }));
+  for (const title of ['Unrelated app', 'Creator Hub', `${titles[3]} extra`, titles[3].replace('2026-10-27', '2026-10-28'),
+    titles[3].replace('0.1.16', '0.1.18')]) cases.push({ rows: [row(title)], expected: false });
+  cases.push({ rows: [row(titles[3], { className: '#32770' })], expected: false },
+    { rows: [row(titles[4], { className: 'Other Window' })], expected: false },
+    { rows: [row(titles[3], { pid: 124 })], expected: false },
+    { rows: [row(titles[3]), row(titles[4])], expected: false },
+    { rows: [], expected: false }, { rows: [row(titles[3])], wrongPath: true, expected: false },
+    { rows: [row(titles[3]), row(titles[4], { pid: 124 })], expected: true });
+  // Execute only the real identity/selection guards with an in-memory window
+  // inventory. No UIAutomation, native API imports, or WM_CLOSE can run here.
+  const script = `
+$ErrorActionPreference = 'Stop'
+Add-Type -TypeDefinition @'
+public static class NativeTestWindows {
+  public static string[] Titles, Classes;
+  public static int[] Owners;
+  public static int[] ForProcess(int owner) {
+    var result = new System.Collections.Generic.List<int>();
+    for (int i = 0; i < Owners.Length; i++) if (Owners[i] == owner) result.Add(i);
+    return result.ToArray();
+  }
+  public static string Class(int handle) { return Classes[handle]; }
+  public static string Text(int handle) { return Titles[handle]; }
+}
+'@
+function Get-Process { param($Id, $ErrorAction) if ($Id -ne 123) { throw 'Unexpected process' }; return @{ Path = $script:actualPath } }
+$cases = '${JSON.stringify(cases).replaceAll("'", "''")}' | ConvertFrom-Json
+$results = @()
+foreach ($case in $cases) {
+  [NativeTestWindows]::Titles = @($case.rows | ForEach-Object { $_.title })
+  [NativeTestWindows]::Classes = @($case.rows | ForEach-Object { $_.className })
+  [NativeTestWindows]::Owners = @($case.rows | ForEach-Object { $_.pid })
+  $TargetPid = 123; $ExpectedExecutable = 'C:\\fixture\\creator-hub.exe'; $Action = 'close'
+  $script:actualPath = if ($case.wrongPath) { 'C:\\foreign\\creator-hub.exe' } else { $ExpectedExecutable }
+  try {
+${identity}
+${selection}
+    $results += $true
+  } catch { $results += $false }
+}
+ConvertTo-Json -InputObject $results -Compress
+`;
+  const result = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script],
+    { encoding: 'utf8', windowsHide: true, timeout: 15000 });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout.trim()), cases.map(item => item.expected));
+});
+
+const localBuildReceipt = path.join(root, 'artifacts/menu-merge-20261027/settings-build-v5/build-receipt.json');
+test('local v5 build receipt title and outgoing version replacement satisfy the actual close title predicate',
+  { skip: process.platform !== 'win32' || !fs.existsSync(localBuildReceipt) }, () => {
+    const receipt = JSON.parse(fs.readFileSync(localBuildReceipt));
+    assert.equal(receipt.version, '0.1.16');
+    assert.equal(typeof receipt.title, 'string'); assert.ok(receipt.title.includes('0.1.16'));
+    const titles = [receipt.title, receipt.title.replaceAll('0.1.16', '0.1.17')];
+    const source = fs.readFileSync(path.join(__dirname, 'native-window.ps1'), 'utf8');
+    const close = source.slice(source.indexOf("if ($Action -eq 'close')"), source.indexOf("if ($Action -eq 'file')"));
+    const predicate = close.match(/\[NativeTestWindows\]::Text\(\$_\) (-in @\([^)]*\))/)?.[1];
+    assert.ok(predicate, 'Expected the finite native close title predicate');
+    // Supply real receipt titles to the unchanged membership expression only;
+    // no window inventory, native API, or synthetic successful match is used.
+    const script = `$ErrorActionPreference='Stop'
+$titles = '${JSON.stringify(titles).replaceAll("'", "''")}' | ConvertFrom-Json
+$accepted = @($titles | ForEach-Object { $_ ${predicate} })
+ConvertTo-Json -InputObject $accepted -Compress`;
+    const result = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script],
+      { encoding: 'utf8', windowsHide: true, timeout: 15000 });
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(JSON.parse(result.stdout.trim()), [true, true], `Built titles are not admitted: ${titles.join('; ')}`);
+  });

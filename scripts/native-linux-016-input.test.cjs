@@ -74,7 +74,7 @@ test('pre-apt source contract uses current UI and canonical SDK lock, not Window
   const html = read('src/index.html'), guide = read('src/convergence.js');
   for (const id of ['view-projects', 'projects-home-title', 'unified-home-updater', 'suite-menu', 'suite-trigger', 'convergence-move'])
     assert.ok(html.includes(`id="${id}"`), id);
-  assert.match(guide, /'Move complete' : 'Move to Hub'/);
+  assert.match(guide, /stage === 'complete' \? 'Move complete' : current\?\.recoveryHelp \? 'Migration needs review' : 'Move to Hub'/);
   assert.match(guide, /prepare\.hidden = connections\.hidden = retire\.hidden = true/);
   assert.match(read('src/projects.js'), /MCP bridge not installed/);
   assert.match(read('src/features/mcp.js'), /aria-pressed/);

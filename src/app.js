@@ -43,13 +43,15 @@
   const directFeatures = window.CreatorHubNative.integratedFeatures === true;
   const updateRecovery = window.CreatorHubNative.updateRecovery === true;
   let directReady = false;
+  const mcpRouteUpdate = window.CreatorMcpRouteUpdate.create();
+  let routeRead = null;
+  const routeService = { state: mcpRouteUpdate, recheck: recheckMcpRoute, openMcp: () => show('mcp') };
+  window.CreatorMcpRouteUpdate.mount(byId('hub-mcp-route-update'), routeService);
+  window.CreatorFeaturePages.configureMcpRouteUpdate(routeService);
   if (directFeatures) {
     current = 'projects';
     document.body.classList.add('integrated-home');
     byId('restore-hosted-views').closest('label').lastChild.textContent = ' Return to last tool after updating';
-    menu.querySelector('[data-view="hub"] small').textContent = 'Projects';
-    menu.setAttribute('aria-label', 'Creator tools');
-    trigger.title = 'Creator tools';
     const updater = document.querySelector('.hub-update');
     updater.querySelector('.page-heading').insertBefore(byId('check-updates'), byId('hub-update-button'));
     byId('update-settings').append(document.querySelector('#view-hub > .update-preferences'));
@@ -116,7 +118,8 @@
     menu.inert = true;
     menu.setAttribute('aria-hidden', 'true');
     trigger.setAttribute('aria-expanded', 'false');
-    trigger.setAttribute('aria-label', directFeatures ? 'Open Creator tools' : 'Open Creator apps');
+    trigger.setAttribute('aria-label', 'Open menu');
+    trigger.title = 'Open menu';
   }
   function show(view, preserveError = false) {
     if (!['hub', 'projects'].includes(view) && !Object.hasOwn(tools, view)) return;
@@ -137,7 +140,6 @@
     }
     if (view === 'projects') window.CreatorProjects.show();
     shell.querySelector('.suite-brand').innerHTML = '<span>CREATOR</span> <strong>HUB</strong>';
-    trigger.replaceChildren(menu.querySelector('[data-view="hub"] .suite-mark').cloneNode(true));
     for (const item of menu.querySelectorAll('[data-view]')) {
       const selected = item.dataset.view === (view === 'projects' ? 'hub' : view);
       item.classList.toggle('current', selected);
@@ -211,7 +213,8 @@
     menu.inert = false;
     menu.setAttribute('aria-hidden', 'false');
     trigger.setAttribute('aria-expanded', 'true');
-    trigger.setAttribute('aria-label', directFeatures ? 'Close Creator tools' : 'Close Creator apps');
+    trigger.setAttribute('aria-label', 'Close menu');
+    trigger.title = 'Close menu';
     menu.querySelector(`[data-view="${current === 'projects' ? 'hub' : current}"]`).focus({ preventScroll: true });
   });
   document.addEventListener('keydown', event => {
@@ -311,6 +314,7 @@
       status.classList.toggle('unverified', label.startsWith('Installed') && !state?.trusted);
       byId(`menu-status-${id}`).textContent = directFeatures ? label : inventory?.supported === false ? 'Not supported'
         : inventoryError ? 'Check failed' : !inventory && busy ? 'Checking' : appStatus(state);
+      byId(`menu-status-${id}`).hidden = directFeatures && !state?.issue;
       const menuDownload = byId(`menu-download-${id}`);
       const canDownload = Boolean(!directFeatures && inventory?.supported && !inventoryError && state && !state.builtIn
         && (!state.installed || state.updateAvailable) && !state.downloaded && !state.issue && !state.installBlocked);
@@ -485,6 +489,20 @@
     byId('progress-bytes').textContent = payload.total ? `${(payload.received / 1048576).toFixed(1)} / ${(payload.total / 1048576).toFixed(1)} MB` : '';
   }
 
+  async function recheckMcpRoute() {
+    if (routeRead) return routeRead;
+    mcpRouteUpdate.checking(true);
+    routeRead = (async () => {
+      try {
+        const result = await invoke('hub_update_status', { online: false, preview: byId('preview-channel').checked });
+        if (!result || typeof result.currentVersion !== 'string') throw Error('Hub route status is unavailable.');
+        hubUpdate = result; mcpRouteUpdate.observe(result.mcpRouteUpdate); renderState();
+      } catch (reason) { mcpRouteUpdate.failed(reason); }
+      finally { mcpRouteUpdate.checking(false); routeRead = null; }
+    })();
+    return routeRead;
+  }
+
   async function refresh(check = false) {
     if (busy) return;
     let succeeded = false;
@@ -505,9 +523,10 @@
       if (!result || typeof result.currentVersion !== 'string'
         || (result.previewSupported !== undefined && typeof result.previewSupported !== 'boolean')) throw 'Hub update response is unavailable.';
       hubUpdate = result;
+      mcpRouteUpdate.observe(result.mcpRouteUpdate);
       previewSupported = result.previewSupported !== false;
       hubChecked = true;
-    } catch (reason) { hubUpdate = { warning: String(reason) }; }
+    } catch (reason) { hubUpdate = { warning: String(reason) }; mcpRouteUpdate.failed(reason); }
     finally {
       if (updateRecovery) {
         try { acceptRecovery(await invoke('hub_update_recovery_status')); }
@@ -752,6 +771,9 @@
       await window.__TAURI__.event.listen('hub-launch-view', event => applyLaunch(event.payload));
       applyLaunch(await invoke('get_launch_request'));
     } catch (reason) { error.textContent = `Progress reporting unavailable: ${String(reason)}`; error.classList.remove('hidden'); }
+    // A completion hint is read-only; the Root worker must emit after releasing Manager.
+    try { await window.__TAURI__.event.listen('mcp-route-update-complete', () => { void recheckMcpRoute(); }); }
+    catch { /* Explicit route recheck remains available when this event is unsupported. */ }
     busy = true; renderState(); window.CreatorHosted.updating(true);
     await restoreHostedViews();
     window.CreatorHosted.updating(false); busy = false;

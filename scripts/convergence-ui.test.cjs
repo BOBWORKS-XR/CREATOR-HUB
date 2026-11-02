@@ -19,19 +19,21 @@ function fixture(handler = () => report(), capability = true, storage = new Map(
     dispatch(type) { const event = { prevented: false, preventDefault() { this.prevented = true; } };
       for (const listener of [...(this.listeners.get(type) || [])]) listener(event); return event; }
     replaceChildren(...children) { this.children = children; }
+    get childElementCount() { return this.children.length; }
     setAttribute(key, value) { this.attributes[key] = value; }
     showModal() { this.open = true; this.shown++; }
     close() { this.open = false; this.closed++; }
     focus() { document.activeElement = this; }
   }
-  const elements = Object.fromEntries(['dialog', 'title', 'summary', 'details', 'error', 'prepare', 'connections', 'retire', 'refresh', 'later', 'reopen'].map(id => [id, new Element()]));
+  const elements = Object.fromEntries(['dialog', 'title', 'summary', 'details', 'error', 'prepare', 'connections', 'retire', 'refresh', 'later', 'reopen',
+    'move', 'progress', 'explanation', 'import-explanation', 'backups', 'recovery', 'recovery-text', 'copy-recovery', 'copy-status'].map(id => [id, new Element()]));
   const main = new Element(), alreadyLocked = new Element(), focus = new Element(); alreadyLocked.inert = true;
   const calls = []; let lookups = 0;
   const document = { body: { children: [main, elements.dialog, alreadyLocked] }, activeElement: focus,
     querySelector(selector) { lookups++; return elements[selector.replace('#convergence-', '')] || null; },
     createElement(name) { assert.equal(name, 'li'); return new Element(); } };
   const native = { invoke(command, ...args) {
-    assert.ok(['convergence_status', 'refresh_convergence', 'prepare_convergence', 'migrate_convergence_connections', 'retire_convergence_apps'].includes(command), 'Only bounded native migration phases');
+    assert.ok(['convergence_status', 'refresh_convergence', 'prepare_convergence', 'migrate_convergence_connections', 'retire_convergence_apps', 'move_to_hub', 'inspect_convergence_outcome'].includes(command), 'Only bounded native migration phases');
     assert.deepEqual(args, [], 'No renderer paths, reports or client selections are native arguments');
     calls.push(command); return handler(command);
   } };
@@ -46,6 +48,82 @@ function fixture(handler = () => report(), capability = true, storage = new Map(
 
 test('loading the controller performs no reads, mutations or modal work', () => {
   const f = fixture(); assert.deepEqual(f.calls, []); assert.equal(f.lookups(), 0); assert.equal(f.elements.dialog.shown, 0);
+});
+
+test('settings-only conflict exposes backed-up import without client migration or retirement', async () => {
+  let value = report({ required: false, streamlined: true, legacyApps: [], settingsImportAvailable: true });
+  const f = fixture(command => {
+    if (command === 'prepare_convergence') value = { ...value, stage: 'backed-up', settingsImportAvailable: false, backups: ['original.bak'] };
+    return value;
+  });
+  const done = f.window.CreatorConvergence.run(); await tick();
+  assert.equal(f.elements.dialog.open, true);
+  assert.equal(f.elements.title.textContent, 'Import saved MCP projects');
+  assert.equal(f.elements.prepare.disabled, false);
+  assert.equal(f.elements.prepare.hidden, false);
+  assert.equal(f.elements.move.hidden, true);
+  assert.equal(f.elements.connections.hidden, true);
+  assert.equal(f.elements.retire.hidden, true);
+  f.click('prepare'); await tick();
+  assert.equal(f.elements.title.textContent, 'Saved MCP projects imported');
+  assert.equal(f.elements.prepare.hidden, true);
+  assert.equal(f.elements.later.textContent, 'Continue in Hub');
+  f.click('later'); await done;
+  assert.deepEqual(f.calls, ['convergence_status', 'prepare_convergence']);
+  assert.equal(f.elements.reopen.hidden, true);
+});
+
+test('settings-only deferral, cancellation and changed-state refusal never move clients', async () => {
+  for (const action of ['later', 'cancel', 'prepare']) {
+    const f = fixture(command => {
+      if (command === 'prepare_convergence') throw Error('Changed during review; originals retained.');
+      return report({ required: false, streamlined: true, legacyApps: [], settingsImportAvailable: true, reviewKey: 'f'.repeat(64) });
+    });
+    const done = f.window.CreatorConvergence.run(); await tick();
+    if (action === 'cancel') f.elements.dialog.dispatch('cancel'); else f.click(action);
+    await tick();
+    if (action === 'prepare') {
+      assert.equal(f.elements.error.hidden, false);
+      assert.equal(f.elements.dialog.open, true);
+      assert.equal(f.elements.prepare.disabled, false);
+      f.click('later');
+    }
+    await done;
+    assert.deepEqual(f.calls, action === 'prepare' ? ['convergence_status', 'prepare_convergence'] : ['convergence_status']);
+  }
+});
+
+test('uncertain settings import retains a review path after dismissal without granting a retry', async () => {
+  for (const required of [false, true]) {
+    let value = report({ required: false, streamlined: true, legacyApps: [], settingsImportAvailable: true });
+    const f = fixture(command => {
+      if (command === 'prepare_convergence') {
+        value = { ...value, required, settingsImportAvailable: false, moveAvailable: false,
+          recoveryHelp: 'Review the retained .creator-hub-product-settings transaction. No automatic retry.',
+          message: 'Settings import needs recovery review.' };
+        throw Error('Settings publication outcome needs review; originals retained.');
+      }
+      return value;
+    });
+    const done = f.window.CreatorConvergence.run(); await tick();
+    f.click('prepare'); await tick();
+    assert.equal(f.elements.error.hidden, false);
+    f.click('later'); await done;
+    f.click('reopen'); await tick();
+    assert.equal(f.elements.dialog.open, true);
+    assert.equal(f.elements.reopen.hidden, false);
+    assert.equal(f.elements.recovery.hidden, false);
+    assert.match(f.elements['recovery-text'].value, /\.creator-hub-product-settings/);
+    assert.equal(f.elements.move.hidden, true);
+    assert.equal(f.elements.prepare.hidden, true);
+    assert.equal(f.elements.connections.hidden, true);
+    assert.equal(f.elements.retire.hidden, true);
+    f.click('refresh'); await tick();
+    assert.equal(f.elements.move.hidden, true);
+    f.click('later'); await tick();
+    assert.equal(f.elements.dialog.open, false);
+    assert.deepEqual(f.calls, ['convergence_status', 'prepare_convergence', 'convergence_status', 'inspect_convergence_outcome']);
+  }
 });
 
 test('Continue for now persists only this native review and keeps a manual resume action', async () => {
@@ -287,4 +365,70 @@ test('failed refresh keeps previous native phase but does not advance it', async
   const done = f.window.CreatorConvergence.run(); await tick(); f.click('refresh'); await tick();
   assert.match(f.elements.error.textContent, /recovery/); assert.equal(f.elements.connections.hidden, false);
   assert.equal(f.elements.retire.hidden, true); f.click('later'); await done;
+});
+
+test('streamlined migration uses one action and does not call legacy mutation phases', async () => {
+  const f = fixture(command => command === 'convergence_status' ? report({ streamlined: true })
+    : { outcome: 'complete', phase: 'cleanup', message: 'Verified complete.',
+      report: report({ streamlined: true, stage: 'complete', required: false, legacyApps: [], backups: ['exact-original.bak'] }) });
+  const done = f.window.CreatorConvergence.run(); await tick();
+  assert.equal(f.elements.prepare.hidden, true);
+  assert.equal(f.elements.connections.hidden, true);
+  assert.equal(f.elements.retire.hidden, true);
+  assert.equal(f.elements.move.hidden, false);
+  f.click('move'); await tick();
+  assert.equal(f.elements.title.textContent, 'Move complete');
+  assert.equal(f.elements.move.hidden, true);
+  assert.equal(f.elements.later.textContent, 'Continue in Hub');
+  f.click('later'); await done;
+  assert.deepEqual(f.calls, ['convergence_status', 'move_to_hub']);
+});
+
+for (const [phase, stage] of [['backup', 'review'], ['connections', 'backed-up'], ['cleanup', 'connections-reviewed']]) {
+  test(`streamlined uncertain ${phase} keeps recovery, permits Not now and never replays on inspection or reopen`, async () => {
+    let current = report({ streamlined: true });
+    const f = fixture(command => {
+      if (command === 'move_to_hub') {
+        current = report({ streamlined: true, stage, moveAvailable: false, backups: ['exact-original.bak'],
+          recoveryHelp: `Review retained ${phase} record; do not replay the operation.` });
+        return { outcome: 'stopped', phase, message: `Uncertain ${phase}; settings retained.`, report: current };
+      }
+      return current;
+    });
+    let done = f.window.CreatorConvergence.run(); await tick();
+    f.click('move'); await tick();
+    assert.match(f.elements.error.textContent, /Uncertain/);
+    assert.equal(f.elements.move.hidden, true);
+    assert.equal(f.elements.recovery.hidden, false);
+    assert.equal(f.elements.later.textContent, 'Not now');
+    assert.equal(f.elements.later.disabled, false);
+    f.click('refresh'); await tick();
+    assert.equal(f.elements.move.hidden, true);
+    assert.equal(f.elements['recovery-text'].value, current.recoveryHelp);
+    f.click('later'); await done;
+    done = f.window.CreatorConvergence.run(true); await tick();
+    assert.equal(f.elements.move.hidden, true);
+    assert.equal(f.elements.recovery.hidden, false);
+    f.click('later'); await done;
+    assert.deepEqual(f.calls, ['convergence_status', 'move_to_hub', 'inspect_convergence_outcome', 'convergence_status']);
+  });
+}
+
+for (const stage of ['review', 'complete']) test(`rejected streamlined ${stage} inspection preserves retained recovery state`, async () => {
+  const retained = report({ streamlined: true, moveAvailable: false,
+    recoveryHelp: 'Keep the retained phase record; migration remains incomplete.', backups: ['exact-original.bak'] });
+  const rejected = report({ streamlined: false, stage, required: stage !== 'complete', legacyApps: [] });
+  const f = fixture(command => command === 'convergence_status' ? retained : rejected);
+  const done = f.window.CreatorConvergence.run(); await tick();
+  assert.equal(f.elements.move.hidden, true);
+  f.click('refresh'); await tick();
+  assert.match(f.elements.error.textContent, /Native migration support changed/);
+  assert.equal(f.elements.move.hidden, true, 'A rejected inspection must not restore mutation controls');
+  assert.equal(f.elements.title.textContent, 'Migration needs review', 'A rejected inspection must not imply completion');
+  assert.equal(f.elements.recovery.hidden, false);
+  assert.equal(f.elements['recovery-text'].value, retained.recoveryHelp);
+  assert.ok(f.elements.details.children.some(item => item.textContent === 'Backup: exact-original.bak'));
+  assert.equal(f.elements.later.disabled, false);
+  f.click('later'); await done;
+  assert.deepEqual(f.calls, ['convergence_status', 'inspect_convergence_outcome']);
 });
