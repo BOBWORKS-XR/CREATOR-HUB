@@ -173,6 +173,12 @@ module.exports = { KIND, BASELINE, TARGET, BUILD_INPUT, productProvenance, fresh
 if (require.main === module) {
   try {
     const [mode, directory, pinsText] = process.argv.slice(2);
+    if (mode === 'validate-pins') {
+      assert.equal(process.argv.length, 4);
+      validatePins(JSON.parse(directory));
+      console.log('Independent signed pins validated');
+      return;
+    }
     assert.ok(['inspect-installer', 'fresh', 'guarded', 'incoming', 'migration'].includes(mode)); assert.ok(path.isAbsolute(directory));
     installer(path.join(directory, TARGET.asset));
     if (mode === 'incoming') {

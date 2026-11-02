@@ -18,10 +18,10 @@ const metadata = [
   { id: 104, name: 'latest-settings-v5.json', output: 'latest.json', size: 745, state: 'uploaded', digest: `sha256:${'c'.repeat(64)}` },
 ];
 function fixture(signed = false) {
-  const env = { DESCRIPTOR_ID: '', DESCRIPTOR_BYTES: '', DESCRIPTOR_SHA256: '',
-    MINISIG_ID: '', MINISIG_BYTES: '', MINISIG_SHA256: '', MANIFEST_ID: '', MANIFEST_BYTES: '', MANIFEST_SHA256: '' };
+  const env = { DESCRIPTOR_NAME: '', DESCRIPTOR_ID: '', DESCRIPTOR_BYTES: '', DESCRIPTOR_SHA256: '',
+    MINISIG_NAME: '', MINISIG_ID: '', MINISIG_BYTES: '', MINISIG_SHA256: '', MANIFEST_NAME: '', MANIFEST_ID: '', MANIFEST_BYTES: '', MANIFEST_SHA256: '' };
   if (signed) for (const [index, prefix] of ['DESCRIPTOR', 'MINISIG', 'MANIFEST'].entries()) {
-    const asset = metadata[index]; env[`${prefix}_ID`] = String(asset.id); env[`${prefix}_BYTES`] = String(asset.size);
+    const asset = metadata[index]; env[`${prefix}_NAME`] = asset.name; env[`${prefix}_ID`] = String(asset.id); env[`${prefix}_BYTES`] = String(asset.size);
     env[`${prefix}_SHA256`] = asset.digest.slice(7);
   }
   return { env, release: { id: 424919952, draft: true, prerelease: true, tag_name: 'lab-windows-menu-merge-20261027', assets: structuredClone([installer, ...metadata]) },
@@ -74,13 +74,13 @@ test('staging has one private GET-only data job, no checkout, dependency/code ex
   assert.match(workflow, /workflow_dispatch:/);
   assert.match(workflow, /push:\s+branches: \[validation\/windows-menu-merge-20261027\]/);
   assert.match(workflow, /github\.event_name == 'workflow_dispatch'/);
-  assert.equal((workflow.match(/^        type: string$/gm) || []).length, 9);
+  assert.equal((workflow.match(/^        type: string$/gm) || []).length, 12);
   assert.doesNotMatch(workflow, /installer_asset_id|INSTALLER_ID|required: true/);
   assert.ok(script.includes("id='701701405';bytes=38213208L;sha='7326d054ac23b7ac560e2c3488933203a33f0033586b1c33988ce7f316e4c51a'"));
   assert.ok(script.includes("$row.id -cnotmatch '^[1-9][0-9]{0,19}$'"));
   assert.ok(script.indexOf("$row.id -cnotmatch") < script.indexOf('Invoke-RestMethod'));
   assert.ok(script.includes("name='Creator.Hub_0.1.16_x64-setup.exe';sourceName='Creator.Hub_0.1.16_x64-20261102-r2-setup.exe'"));
-  for (const asset of metadata) assert.ok(script.includes(`name='${asset.output}';sourceName='${asset.name}'`));
+  for (const [index, asset] of metadata.entries()) assert.ok(script.includes(`name='${asset.output}';sourceName=$env:${['DESCRIPTOR', 'MINISIG', 'MANIFEST'][index]}_NAME`));
   assert.ok(script.includes('$assets[0].name -cne $row.sourceName'));
   assert.match(workflow, /permissions:\s+contents: read/);
   assert.match(workflow, /stage:[\s\S]*permissions:\s+contents: write/);
@@ -106,16 +106,16 @@ test('fresh stages only the pinned R2 candidate under the canonical name', { ski
   assert.deepEqual(result.downloads, [installer.output]); assert.equal(result.created, 1); assert.equal(result.gets.length, 1);
 });
 
-test('candidate stager refuses signed metadata in the fresh and guarded lane', { skip: !hasPwsh }, () => {
+test('complete independently pinned metadata stages with the exact R2 installer', { skip: !hasPwsh }, () => {
   const data = fixture(true);
   data.release.assets.push(...metadata.map((asset, index) => ({ id: 200 + index, name: asset.output,
     state: 'uploaded', size: asset.size, digest: `sha256:${'d'.repeat(64)}` })));
   const result = run(data);
-  assert.equal(result.passed, false);
-  assert.deepEqual(result.downloads, []); assert.equal(result.created, 0);
+  assert.equal(result.passed, true, result.failure);
+  assert.deepEqual(result.downloads, [installer.output, ...metadata.map(asset => asset.output)]); assert.equal(result.created, 1);
 });
 
-test('canonical V3 or V4 metadata names cannot substitute for independently pinned V5 source names', { skip: !hasPwsh }, () => {
+test('asset metadata must match each independently supplied source name', { skip: !hasPwsh }, () => {
   for (const asset of metadata) {
     for (const oldName of [asset.output, asset.name.replace('settings-v5', 'settings-v4')]) {
       const data = fixture(true);
@@ -123,6 +123,15 @@ test('canonical V3 or V4 metadata names cannot substitute for independently pinn
       const result = run(data);
       assert.equal(result.passed, false); assert.deepEqual(result.downloads, []); assert.equal(result.created, 0);
     }
+  }
+});
+
+test('each signed asset independently refuses wrong identity, size, digest or upload state', { skip: !hasPwsh }, () => {
+  for (const asset of metadata) for (const change of [row => row.id++, row => row.size++,
+    row => row.digest = `sha256:${'f'.repeat(64)}`, row => row.state = 'new']) {
+    const data = fixture(true); change(data.release.assets.find(row => row.id === asset.id));
+    const result = run(data);
+    assert.equal(result.passed, false); assert.deepEqual(result.downloads, []); assert.equal(result.created, 0);
   }
 });
 
@@ -134,6 +143,14 @@ test('partial metadata, unsafe IDs, repeated IDs, invalid pins and size bounds r
     f => { Object.assign(f.env, fixture(true).env); f.env.MINISIG_BYTES = '4097'; },
     f => { Object.assign(f.env, fixture(true).env); f.env.MANIFEST_BYTES = '32769'; }]) {
     const data = fixture(); mutate(data); const result = run(data);
+    assert.equal(result.passed, false); assert.deepEqual(result.gets, []); assert.deepEqual(result.downloads, []); assert.equal(result.created, 0);
+  }
+});
+
+test('unsafe, duplicate or partially supplied source names refuse before any HTTP or writes', { skip: !hasPwsh }, () => {
+  for (const mutate of [f => f.env.DESCRIPTOR_NAME = '../escape', f => f.env.MINISIG_NAME = '',
+    f => f.env.MANIFEST_NAME = f.env.DESCRIPTOR_NAME, f => f.env.MANIFEST_NAME = installer.name]) {
+    const data = fixture(true); mutate(data); const result = run(data);
     assert.equal(result.passed, false); assert.deepEqual(result.gets, []); assert.deepEqual(result.downloads, []); assert.equal(result.created, 0);
   }
 });

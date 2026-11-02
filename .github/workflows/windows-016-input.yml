@@ -4,6 +4,15 @@ on:
     branches: [validation/windows-menu-merge-20261027]
   workflow_dispatch:
     inputs:
+      descriptor_asset_name:
+        type: string
+        required: false
+      minisig_asset_name:
+        type: string
+        required: false
+      manifest_asset_name:
+        type: string
+        required: false
       descriptor_asset_id:
         type: string
         required: false
@@ -45,6 +54,9 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
+          DESCRIPTOR_NAME: ${{ inputs.descriptor_asset_name }}
+          MINISIG_NAME: ${{ inputs.minisig_asset_name }}
+          MANIFEST_NAME: ${{ inputs.manifest_asset_name }}
           DESCRIPTOR_ID: ${{ inputs.descriptor_asset_id }}
           DESCRIPTOR_SHA256: ${{ inputs.descriptor_sha256 }}
           DESCRIPTOR_BYTES: ${{ inputs.descriptor_bytes }}
@@ -58,16 +70,15 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $rows = @(@{name='Creator.Hub_0.1.16_x64-setup.exe';sourceName='Creator.Hub_0.1.16_x64-20261102-r2-setup.exe';id='701701405';bytes=38213208L;sha='7326d054ac23b7ac560e2c3488933203a33f0033586b1c33988ce7f316e4c51a'})
           $metadata = @(
-            @{name='creator-hub-windows-x86_64.json';sourceName='creator-hub-windows-x86_64-settings-v5.json';id=$env:DESCRIPTOR_ID;bytes=$env:DESCRIPTOR_BYTES;sha=$env:DESCRIPTOR_SHA256;limit=32768}
-            @{name='creator-hub-windows-x86_64.json.minisig';sourceName='creator-hub-windows-x86_64-settings-v5.json.minisig';id=$env:MINISIG_ID;bytes=$env:MINISIG_BYTES;sha=$env:MINISIG_SHA256;limit=4096}
-            @{name='latest.json';sourceName='latest-settings-v5.json';id=$env:MANIFEST_ID;bytes=$env:MANIFEST_BYTES;sha=$env:MANIFEST_SHA256;limit=32768}
+            @{name='creator-hub-windows-x86_64.json';sourceName=$env:DESCRIPTOR_NAME;id=$env:DESCRIPTOR_ID;bytes=$env:DESCRIPTOR_BYTES;sha=$env:DESCRIPTOR_SHA256;limit=32768}
+            @{name='creator-hub-windows-x86_64.json.minisig';sourceName=$env:MINISIG_NAME;id=$env:MINISIG_ID;bytes=$env:MINISIG_BYTES;sha=$env:MINISIG_SHA256;limit=4096}
+            @{name='latest.json';sourceName=$env:MANIFEST_NAME;id=$env:MANIFEST_ID;bytes=$env:MANIFEST_BYTES;sha=$env:MANIFEST_SHA256;limit=32768}
           )
-          $supplied = @($metadata | ForEach-Object { $_.id; $_.bytes; $_.sha } | Where-Object { -not [string]::IsNullOrEmpty($_) })
-          if ($supplied.Count -ne 0) { throw 'This candidate staging lane admits only the installer for fresh and guarded tests.' }
-          if ($supplied.Count -ne 0 -and $supplied.Count -ne 9) { throw 'Signed metadata must be an all-or-none independently pinned set.' }
-          if ($supplied.Count -eq 9) {
+          $supplied = @($metadata | ForEach-Object { $_.sourceName; $_.id; $_.bytes; $_.sha } | Where-Object { -not [string]::IsNullOrEmpty($_) })
+          if ($supplied.Count -ne 0 -and $supplied.Count -ne 12) { throw 'Signed metadata must be an all-or-none independently pinned set.' }
+          if ($supplied.Count -eq 12) {
             foreach ($row in $metadata) {
-              if ($row.bytes -cnotmatch '^[1-9][0-9]{0,4}$' -or [long]$row.bytes -gt $row.limit -or $row.sha -cnotmatch '^[a-f0-9]{64}$') { throw 'Invalid independent metadata byte/hash pin.' }
+              if ($row.sourceName -cnotmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$' -or $row.sourceName.Contains('..') -or $row.bytes -cnotmatch '^[1-9][0-9]{0,4}$' -or [long]$row.bytes -gt $row.limit -or $row.sha -cnotmatch '^[a-f0-9]{64}$') { throw 'Invalid independent metadata name/byte/hash pin.' }
             }
             $rows += $metadata
           }
@@ -75,6 +86,7 @@ jobs:
             if ($row.id -cnotmatch '^[1-9][0-9]{0,19}$') { throw 'A positive fixed asset ID is required.' }
           }
           if (@($rows.id | Sort-Object -Unique).Count -ne $rows.Count) { throw 'Asset IDs must be distinct.' }
+          if (@($rows.sourceName | Sort-Object -Unique).Count -ne $rows.Count) { throw 'Asset names must be distinct.' }
           $directory = Join-Path $PWD 'windows-016-input'
           if (Test-Path -LiteralPath $directory) { throw 'Staging directory already exists; no clobber.' }
           $metadataHeaders = @{Authorization="Bearer $env:GH_TOKEN";Accept='application/vnd.github+json';'X-GitHub-Api-Version'='2026-03-10'}

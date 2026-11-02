@@ -6,8 +6,7 @@ const path = require('node:path');
 
 test('migration is manual, candidate-bound and runs its regressions before baseline or native work', () => {
   const workflow = fs.readFileSync(path.join(__dirname, '../.github/workflows/windows-incoming-016.yml'), 'utf8');
-  assert.match(workflow, /if: github\.repository == 'BOBWORKS-XR\/CREATOR-HUB' && github\.event_name == 'workflow_dispatch' && \(\(inputs\.mode == 'fresh' \|\| inputs\.mode == 'guarded'\) \|\| inputs\.mode == 'migration'\)/);
-  assert.doesNotMatch(workflow.split('runs-on:')[0], /inputs\.mode == 'incoming'/);
+  assert.match(workflow, /if: github\.repository == 'BOBWORKS-XR\/CREATOR-HUB' && github\.event_name == 'workflow_dispatch' && \(\(inputs\.mode == 'fresh' \|\| inputs\.mode == 'guarded'\) \|\| inputs\.mode == 'migration' \|\| inputs\.mode == 'incoming'\)/);
   assert.match(workflow, /runs-on: windows-latest/);
   assert.match(workflow, /Migration admission, fixture and workflow regressions before baseline staging\s+if: inputs\.mode == 'migration'\s+run: node --test --test-concurrency=1 scripts\/native-windows-016-migration\.test\.cjs scripts\/windows-migration-workflow\.test\.cjs/);
   const preflight = workflow.indexOf('Migration admission, fixture and workflow regressions');

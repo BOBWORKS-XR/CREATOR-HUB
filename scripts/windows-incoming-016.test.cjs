@@ -27,6 +27,18 @@ test('incoming16 is finite and does not repurpose public12 or private15', () => 
   assert.throws(() => incoming.assertBaselineBytes(Buffer.from('pretend14'), Buffer.from('pretend14')));
 });
 
+test('incoming preflight requires the complete independent pins and exact R2 installer and executable', () => {
+  const run = value => spawnSync(process.execPath, [path.join(__dirname, 'windows-incoming-016.cjs'), 'validate-pins', value],
+    { encoding: 'utf8', windowsHide: true, timeout: 15000 });
+  assert.equal(run(JSON.stringify(pins())).status, 0);
+  for (const value of ['', '{}', 'not-json', JSON.stringify({ ...pins(), descriptor: '' }),
+    JSON.stringify({ ...pins(), installer: 'd'.repeat(64) }), JSON.stringify({ ...pins(), executable: 'd'.repeat(64) }),
+    JSON.stringify({ ...pins(), extra: 'd'.repeat(64) })]) assert.notEqual(run(value).status, 0);
+  const workflow = fs.readFileSync(path.join(root, '.github/workflows/windows-incoming-016.yml'), 'utf8');
+  assert.match(workflow, /Require independent exact signed pins before artifact access\s+if: inputs\.mode == 'incoming'/);
+  assert.ok(workflow.indexOf('validate-pins $env:SIGNED_PINS') < workflow.indexOf('actions/download-artifact'));
+});
+
 test('local and foreign-proxy refusal precedes configuration, installer or credential inspection', () => {
   for (const env of [{}, { ...runner, GITHUB_ACTIONS: 'false' }, { ...runner, RUNNER_ENVIRONMENT: 'self-hosted' }]) {
     assert.throws(() => incoming.selectLab('missing', {}, null, env), /disposable/);

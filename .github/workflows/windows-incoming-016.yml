@@ -28,7 +28,7 @@ permissions:
   actions: read
 jobs:
   acceptance:
-    if: github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.event_name == 'workflow_dispatch' && ((inputs.mode == 'fresh' || inputs.mode == 'guarded') || inputs.mode == 'migration')
+    if: github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.event_name == 'workflow_dispatch' && ((inputs.mode == 'fresh' || inputs.mode == 'guarded') || inputs.mode == 'migration' || inputs.mode == 'incoming')
     runs-on: windows-latest
     timeout-minutes: 20
     steps:
@@ -38,6 +38,14 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: 24
+      - name: Require independent exact signed pins before artifact access
+        if: inputs.mode == 'incoming'
+        shell: pwsh
+        env:
+          SIGNED_PINS: ${{ inputs.signed_pins }}
+        run: |
+          node scripts/windows-incoming-016.cjs validate-pins $env:SIGNED_PINS
+          if ($LASTEXITCODE -ne 0) { throw 'Independent signed pins refused; no artifact or native action started.' }
       - name: Bind the immutable data artifact before extraction or native execution
         shell: pwsh
         env:
