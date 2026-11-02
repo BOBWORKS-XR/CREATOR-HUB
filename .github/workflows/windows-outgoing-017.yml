@@ -27,8 +27,12 @@ on:
         description: Separate public-migration then controlled-outgoing diagnostic, not acceptance
         type: boolean
         default: false
+      preflight_only_diagnostic:
+        description: Separate pinned MCP preflight-only environment comparison, no installer
+        type: boolean
+        default: false
       mixed_expected_source:
-        description: Independently reviewed exact workflow source commit for diagnostic
+        description: Independently reviewed exact workflow source commit for either diagnostic
         type: string
         required: false
       mixed_expected_actor_id:
@@ -40,7 +44,7 @@ permissions:
   actions: read
 jobs:
   acceptance:
-    if: github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/validation/windows-menu-merge-20261027' && !inputs.mixed_public_diagnostic
+    if: github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/validation/windows-menu-merge-20261027' && !inputs.mixed_public_diagnostic && !inputs.preflight_only_diagnostic
     runs-on: windows-latest
     timeout-minutes: 20
     strategy:
@@ -179,7 +183,7 @@ jobs:
             artifacts/native-suite-*/*.json
             artifacts/native-suite-*/*.png
   mixed-public-diagnostic:
-    if: github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/validation/windows-menu-merge-20261027' && inputs.mixed_public_diagnostic && !inputs.migrated
+    if: github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/validation/windows-menu-merge-20261027' && inputs.mixed_public_diagnostic && !inputs.migrated && !inputs.preflight_only_diagnostic
     runs-on: windows-latest
     timeout-minutes: 30
     env:
@@ -287,3 +291,32 @@ jobs:
             artifacts/incoming-016/input-binding.json
             artifacts/native-suite-*/*.json
             artifacts/native-suite-*/*.png
+  preflight-only-diagnostic:
+    if: github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/validation/windows-menu-merge-20261027' && inputs.preflight_only_diagnostic && !inputs.mixed_public_diagnostic && !inputs.migrated
+    runs-on: windows-latest
+    timeout-minutes: 5
+    env:
+      CREATOR_PREFLIGHT_ONLY: '1'
+      CREATOR_PREFLIGHT_SOURCE: ${{ inputs.mixed_expected_source }}
+      NODE_OPTIONS: ''
+      NODE_PATH: ''
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - name: Refuse unreviewed preflight source and runner
+        run: node -e "require('./scripts/windows-mcp-preflight-only-compare.cjs').admit()"
+      - name: Test preflight-only contract
+        run: node --test scripts/windows-mcp-preflight-only-compare.test.cjs
+      - name: Compare pinned read-only preflight environments
+        run: node scripts/windows-mcp-preflight-only-compare.cjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-mcp-preflight-only-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/preflight-only-comparison.json
+          if-no-files-found: warn
+          retention-days: 7
