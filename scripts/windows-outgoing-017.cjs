@@ -17,6 +17,24 @@ const DESCRIPTOR = 'creator-hub-windows-x86_64.json';
 const LIMITS = Object.freeze({ [BASELINE]: 64 * 1024 * 1024, [TARGET]: 64 * 1024 * 1024,
   [DESCRIPTOR]: 32768, [`${DESCRIPTOR}.minisig`]: 4096, 'latest.json': 32768, [TEMPLATE]: 32768 });
 const CASES = Object.freeze({ 'mcp-restore': ['mcp', 'true'], 'setup-restore': ['setup', 'true'], 'setup-no-restore': ['setup', 'false'] });
+const R2 = Object.freeze({
+  sourceCommit: 'e39d853f4207bbc8f250566064027c19d8eeb6e0',
+  receiptSha256: '92ef27dce02b55f1ce324e6a60e4835708fadee95dea1f439314a0e065dd1c02',
+  baseline: Object.freeze({ version: '0.1.16', installer: '7326d054ac23b7ac560e2c3488933203a33f0033586b1c33988ce7f316e4c51a',
+    exe: 'fac846563720eb4dae665a814ea28d0556800ebaf75aba7e8ee0be7f1979a5cd' }),
+  pins: Object.freeze({ descriptor: '50bbcc0dfe5a4d22900a65b046145a9f05b185a4f86333c37f6b4277aebe1b6f',
+    descriptorSignature: '57df8ee478f8e159a983d2e598b4bbedef15f7eb375a68b4221c12854fcbb733',
+    installer: '0a737147db5766e108ece53a6f6ffd5fad2d5d311058effacd4e07ae2d9bf219',
+    executable: 'b98e7484bb7d3f2a9d3abb450446285eb24b42deeb31adf02a5694e1b16795a5',
+    manifest: 'b80fba85744c023ed6d61a6442bd64d3031074d2d9d7ad9130d3c68e50ef3bf1' }),
+  runtime: Object.freeze({ baselineDescriptor: '2bd6e4f9c80a051b9b4dd4c57a253a30d325136c6cd2605e81c603dad65fcb3d',
+    targetDescriptor: '1e53158ae6bffe842c7256c1b40a44d59c2d0a6d3f03b5506b1e5f17584d6fda' })
+});
+function assertR2(config, receiptSha256) {
+  assert.equal(config.sourceCommit, R2.sourceCommit); assert.equal(config.targetVersion, '0.1.17');
+  assert.deepEqual(config.baseline, R2.baseline); assert.deepEqual(config.pins, R2.pins); assert.deepEqual(config.runtime, R2.runtime);
+  if (receiptSha256 !== undefined) assert.equal(receiptSha256, R2.receiptSha256);
+}
 const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 const digest = value => { assert.match(value, /^[a-f0-9]{64}$/); assert.notEqual(value, '0'.repeat(64)); };
 function keys(value, names) {
@@ -136,6 +154,7 @@ function main(args, env = process.env) {
   assert.deepEqual(fs.readdirSync(directory).sort(), Object.keys(LIMITS).sort(), 'Only the six flat reviewed data files are admitted');
   const files = Object.fromEntries(Object.entries(LIMITS).map(([name, max]) => [name, read(path.join(directory, name), max)]));
   const admitted = admit(review, files, directory);
+  assertR2(admitted.config, admitted.receiptSha256);
   const configPath = path.join(control, 'runner-config.json');
   if (mode === 'prepare') {
     write('runner-config.json', admitted.config); write('admission.json', { ...binding, ...admitted });
@@ -154,7 +173,7 @@ function main(args, env = process.env) {
     lifecycleSha256: hash(lifecycleBytes), nativeAccepted: true, acceptanceOnly: true, releaseReady: false };
   write('acceptance-binding.json', result); return result;
 }
-module.exports = { BRANCH, WORKFLOW, ARTIFACT, KIND, DIRECTORY, TEMPLATE, BASELINE, TARGET, DESCRIPTOR, LIMITS, CASES,
+module.exports = { BRANCH, WORKFLOW, ARTIFACT, KIND, DIRECTORY, TEMPLATE, BASELINE, TARGET, DESCRIPTOR, LIMITS, CASES, R2, assertR2,
   hash, assertHost, reviewBytes, inputs, bindArtifact, admit, checkReceipt, main };
 if (require.main === module) {
   try { console.log(JSON.stringify(main(process.argv.slice(2)))); }

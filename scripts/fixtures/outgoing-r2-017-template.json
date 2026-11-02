@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "receiptSha256": "92ef27dce02b55f1ce324e6a60e4835708fadee95dea1f439314a0e065dd1c02",
+  "config": {
+    "schemaVersion": 1,
+    "kind": "direct-outgoing-016-017",
+    "sourceCommit": "e39d853f4207bbc8f250566064027c19d8eeb6e0",
+    "baseline": {
+      "version": "0.1.16",
+      "installer": "7326d054ac23b7ac560e2c3488933203a33f0033586b1c33988ce7f316e4c51a",
+      "exe": "fac846563720eb4dae665a814ea28d0556800ebaf75aba7e8ee0be7f1979a5cd"
+    },
+    "targetVersion": "0.1.17",
+    "directory": "@ARTIFACT_DIRECTORY@",
+    "pins": {
+      "descriptor": "50bbcc0dfe5a4d22900a65b046145a9f05b185a4f86333c37f6b4277aebe1b6f",
+      "descriptorSignature": "57df8ee478f8e159a983d2e598b4bbedef15f7eb375a68b4221c12854fcbb733",
+      "installer": "0a737147db5766e108ece53a6f6ffd5fad2d5d311058effacd4e07ae2d9bf219",
+      "executable": "b98e7484bb7d3f2a9d3abb450446285eb24b42deeb31adf02a5694e1b16795a5",
+      "manifest": "b80fba85744c023ed6d61a6442bd64d3031074d2d9d7ad9130d3c68e50ef3bf1"
+    },
+    "runtime": {
+      "baselineDescriptor": "2bd6e4f9c80a051b9b4dd4c57a253a30d325136c6cd2605e81c603dad65fcb3d",
+      "targetDescriptor": "1e53158ae6bffe842c7256c1b40a44d59c2d0a6d3f03b5506b1e5f17584d6fda"
+    }
+  }
+}

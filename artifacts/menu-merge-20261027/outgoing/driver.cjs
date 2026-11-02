@@ -65,6 +65,7 @@ async function continueMcpGuide(page) {
 async function main() {
   target.assertAdmission(); // Must precede config/profile reads, installers, policy and native probes.
   const config = target.readConfig(process.env.CREATOR_SELF_UPDATE_LAB_CONFIG);
+  require('../../../scripts/windows-outgoing-017.cjs').assertR2(config);
   target.loadContract(config);
   assert.equal(process.env.CREATOR_SELF_UPDATE_TARGET_VERSION, config.targetVersion);
   assert.equal(process.env.CREATOR_SELF_UPDATE_INSTALLER_SHA256, config.pins.installer);

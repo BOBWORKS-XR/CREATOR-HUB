@@ -14,18 +14,19 @@ assert.ok(pinBlock.test(script));
 const powershell = process.platform === 'win32' ? 'powershell.exe' : 'pwsh';
 function fixture() {
   const rows = Object.entries(outgoing.LIMITS).map(([name, limit], index) => ({ name,
-    sourceName: index === 0 ? 'Creator.Hub_0.1.16_x64-settings-v5-setup.exe' : `test-outgoing17-${name}`,
-    id: String(index === 0 ? 680325441 : 101 + index), bytes: index === 0 ? 38216528 : 123,
-    sha: index === 0 ? '898e57b1f3dd87b0f871965eb955d54cc88a573a3b879303805defa829d1b89a' : String(index).repeat(64), limit }));
+    sourceName: index === 0 ? 'Creator.Hub_0.1.16_x64-20261102-r2-setup.exe' : `test-outgoing17-${name}`,
+    id: String(index === 0 ? 701701405 : 101 + index), bytes: index === 0 ? 38213208 : 123,
+    sha: index === 0 ? '7326d054ac23b7ac560e2c3488933203a33f0033586b1c33988ce7f316e4c51a' : String(index).repeat(64), limit }));
   return { rows, receipt: 'a'.repeat(64), review: 'b'.repeat(64), inputReview: 'b'.repeat(64),
     release: { id: 424919952, draft: true, prerelease: true, tag_name: 'lab-windows-menu-merge-20261027',
       assets: rows.map(row => ({ id: Number(row.id), name: row.sourceName, size: row.bytes, digest: `sha256:${row.sha}`, state: 'uploaded' })) },
     directoryExists: false, fileExists: false, badSize: false, badHash: false };
 }
-function run(data, original = false) {
+function run(data, original = false, unresolved = false) {
   // Only the reviewed-constant block is parameterized. Every HTTP/filesystem
   // cmdlet is mocked; the real stager, installer and trust helpers are never run.
-  const code = original ? script : script.replace(pinBlock, '$receiptSha256=$fixture.receipt\n$reviewSha256=$fixture.review\n$rows=@($fixture.rows)');
+  const code = original ? (unresolved ? script.replace("id='701941257'", "id='PENDING'") : script)
+    : script.replace(pinBlock, '$receiptSha256=$fixture.receipt\n$reviewSha256=$fixture.review\n$rows=@($fixture.rows)');
   const harness = `
 $ErrorActionPreference='Stop'
 $fixture='${JSON.stringify(data).replaceAll("'", "''")}' | ConvertFrom-Json
@@ -86,7 +87,7 @@ test('output is exactly the six admission filenames, never an incoming artifact 
   const files = [...workflow.matchAll(/^            windows-outgoing-017-input\/([^\r\n]+)$/gm)].map(m => m[1]);
   assert.deepEqual(files.sort(), Object.keys(outgoing.LIMITS).sort());
   assert.match(workflow, /compression-level: 0/); assert.match(workflow, /if-no-files-found: error/);
-  assert.ok(script.includes("id='680325441';bytes=38216528L;sha='898e57b1f3dd87b0f871965eb955d54cc88a573a3b879303805defa829d1b89a'"));
+  assert.ok(script.includes("id='701701405';bytes=38213208L;sha='7326d054ac23b7ac560e2c3488933203a33f0033586b1c33988ce7f316e4c51a'"));
   assert.ok(script.indexOf('Exact private asset metadata differs') < script.indexOf('New-Item -ItemType Directory'));
 });
 test('mismatched independent review refuses checked-in pins before HTTP or writes', () => {
@@ -101,19 +102,44 @@ test('actual checked-in PowerShell pins match the immutable reviewed file and ap
   assert.equal(result.status, 0, result.stdout + result.stderr);
   const pins = JSON.parse(result.stdout.trim());
   const bytes = fs.readFileSync(path.join(__dirname, 'windows-outgoing-017-review.json'));
-  assert.equal(pins.review, 'a1d91e39e42f3fdbdbb072323971994db43f559e122cabd893586178ed0fc56f');
+  assert.equal(pins.review, '1ec982be724555fe0bf8556dd8fa4a997cd7e1772ea87e91e7992d1d8209cdc7');
   const review = outgoing.reviewBytes(bytes, pins.review);
   assert.equal(pins.receipt, review.receiptSha256);
   assert.deepEqual(pins.rows.map(row => [row.name, row.sourceName, row.id]), [
-    [outgoing.BASELINE, 'Creator.Hub_0.1.16_x64-settings-v5-setup.exe', '680325441'],
-    [outgoing.TARGET, 'Creator_Hub_0.1.17_x64-settings-v5-acceptance-only-setup.exe', '680911010'],
-    [outgoing.DESCRIPTOR, 'outgoing-017-settings-v5-creator-hub-windows-x86_64.json', '680911028'],
-    [`${outgoing.DESCRIPTOR}.minisig`, 'outgoing-017-settings-v5-creator-hub-windows-x86_64.json.minisig', '680911014'],
-    ['latest.json', 'outgoing-017-settings-v5-latest.json', '680911024'],
-    [outgoing.TEMPLATE, 'outgoing-017-settings-v5-template.json', '680911019'],
+    [outgoing.BASELINE, 'Creator.Hub_0.1.16_x64-20261102-r2-setup.exe', '701701405'],
+    [outgoing.TARGET, 'Creator_Hub_0.1.17_x64-r2-acceptance-only-setup.exe', '701941257'],
+    [outgoing.DESCRIPTOR, 'outgoing-017-r2-creator-hub-windows-x86_64.json', '701941264'],
+    [`${outgoing.DESCRIPTOR}.minisig`, 'outgoing-017-r2-creator-hub-windows-x86_64.json.minisig', '701941260'],
+    ['latest.json', 'outgoing-017-r2-latest.json', '701941269'],
+    [outgoing.TEMPLATE, 'outgoing-017-r2-template.json', '701941268'],
   ]);
   assert.deepEqual(Object.fromEntries(pins.rows.map(row => [row.name, { bytes: row.bytes, sha256: row.sha }])), review.files);
   assert.deepEqual(Object.fromEntries(pins.rows.map(row => [row.name, row.limit])), outgoing.LIMITS);
+});
+test('unresolved R2 asset IDs refuse before HTTP even with the exact review hash', () => {
+  const f = fixture(); f.inputReview = outgoing.hash(fs.readFileSync(path.join(__dirname, 'windows-outgoing-017-review.json')));
+  const result = run(f, true, true);
+  assert.equal(result.passed, false); assert.match(result.failure, /asset ID/);
+  assert.deepEqual(result.gets, []); assert.deepEqual(result.downloads, []); assert.equal(result.created, 0);
+});
+test('actual R2 pins require all six exact draft asset metadata records', () => {
+  const f = fixture(), reviewBytes = fs.readFileSync(path.join(__dirname, 'windows-outgoing-017-review.json'));
+  const review = JSON.parse(reviewBytes);
+  const identities = [
+    ['Creator.Hub_0.1.16_x64-20261102-r2-setup.exe', '701701405'],
+    ['Creator_Hub_0.1.17_x64-r2-acceptance-only-setup.exe', '701941257'],
+    ['outgoing-017-r2-creator-hub-windows-x86_64.json', '701941264'],
+    ['outgoing-017-r2-creator-hub-windows-x86_64.json.minisig', '701941260'],
+    ['outgoing-017-r2-latest.json', '701941269'], ['outgoing-017-r2-template.json', '701941268']
+  ];
+  f.rows = Object.entries(outgoing.LIMITS).map(([name, limit], index) => ({ name, limit,
+    sourceName: identities[index][0], id: identities[index][1], bytes: review.files[name].bytes, sha: review.files[name].sha256 }));
+  f.release.assets = f.rows.map(row => ({ id: Number(row.id), name: row.sourceName, size: row.bytes, digest: `sha256:${row.sha}`, state: 'uploaded' }));
+  f.inputReview = outgoing.hash(reviewBytes);
+  const result = run(f, true); assert.equal(result.passed, true, result.failure);
+  assert.equal(result.gets.length, 1); assert.deepEqual(result.downloads, f.rows.map(row => row.name));
+  f.release.assets[1].digest = `sha256:${'f'.repeat(64)}`;
+  const refused = run(f, true); assert.equal(refused.passed, false); assert.equal(refused.gets.length, 1); assert.deepEqual(refused.downloads, []);
 });
 test('six exact reviewed files stage while unrelated incoming and historical assets remain ignored', () => {
   const f = fixture(); f.release.assets.push({ id: 679977699, name: outgoing.BASELINE, state: 'uploaded', size: 38214608,

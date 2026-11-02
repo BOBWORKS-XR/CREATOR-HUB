@@ -41,6 +41,21 @@ function refreshTemplate(f) {
   f.review.configCanonicalSha256 = hash(bytes(f.template.config));
 }
 const runnerDirectory = path.resolve('artifacts/outgoing-017-data');
+test('R2 fixture source, baseline, successor and runtime pins refuse substitutions', () => {
+  const template = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures/outgoing-r2-017-template.json')));
+  const review = JSON.parse(fs.readFileSync(path.join(__dirname, 'windows-outgoing-017-review.json')));
+  outgoing.assertR2(template.config, template.receiptSha256);
+  assert.equal(hash(bytes(template.config)), review.configCanonicalSha256);
+  assert.equal(hash(fs.readFileSync(path.join(__dirname, 'fixtures/outgoing-r2-017-template.json'))), review.files[outgoing.TEMPLATE].sha256);
+  for (const mutate of [c => c.sourceCommit = 'a'.repeat(40), c => c.baseline.installer = 'a'.repeat(64),
+    c => c.baseline.exe = 'a'.repeat(64), c => c.pins.installer = 'a'.repeat(64), c => c.pins.executable = 'a'.repeat(64),
+    c => c.pins.descriptor = 'a'.repeat(64), c => c.pins.descriptorSignature = 'a'.repeat(64),
+    c => c.pins.manifest = 'a'.repeat(64), c => c.runtime.baselineDescriptor = 'a'.repeat(64),
+    c => c.runtime.targetDescriptor = 'a'.repeat(64)]) {
+    const changed = structuredClone(template.config); mutate(changed); assert.throws(() => outgoing.assertR2(changed, template.receiptSha256));
+  }
+  assert.throws(() => outgoing.assertR2(template.config, 'a'.repeat(64)));
+});
 test('unpopulated committed review fails closed; populated reviews need an independent exact-byte digest', () => {
   assert.throws(() => outgoing.reviewBytes(Buffer.from('null\n'), 'a'.repeat(64)), /not populated/);
   const f = fixture();
@@ -52,8 +67,10 @@ test('unpopulated committed review fails closed; populated reviews need an indep
 });
 test('the byte-pinned outgoing review stays LF on Windows checkout', () => {
   const attributes = fs.readFileSync(path.join(__dirname, '.gitattributes'), 'utf8');
-  assert.equal(attributes.trim(), 'windows-outgoing-017-review.json text eol=lf');
+  assert.ok(attributes.split(/\r?\n/).includes('windows-outgoing-017-review.json text eol=lf'));
+  assert.ok(attributes.split(/\r?\n/).includes('fixtures/outgoing-r2-017-template.json text eol=lf'));
   assert.equal(fs.readFileSync(path.join(__dirname, 'windows-outgoing-017-review.json')).includes(13), false);
+  assert.equal(fs.readFileSync(path.join(__dirname, 'fixtures/outgoing-r2-017-template.json')).includes(13), false);
 });
 test('review cannot omit any of the five payload pins or the template/receipt/config bindings', () => {
   for (const name of Object.keys(outgoing.LIMITS)) {

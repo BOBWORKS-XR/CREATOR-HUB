@@ -1,4 +1,4 @@
-name: Windows direct16 to root-only17 restore acceptance (not release)
+name: Windows R2 direct16 to root-only17 restore acceptance (not release)
 on:
   push:
     branches: [validation/windows-menu-merge-20261027]
@@ -102,7 +102,7 @@ jobs:
           if ($errors.Count) { throw 'Native lifecycle parse failed.' }
           node --check artifacts/menu-merge-20261027/outgoing/driver.cjs
           if ($LASTEXITCODE -ne 0) { throw 'Outgoing driver parse failed.' }
-      - name: Genuine direct16 signed update and automatic restart into root-only17
+      - name: Genuine R2 direct16 signed update and automatic restart into root-only17
         shell: pwsh
         run: |
           ./scripts/native-self-update-lab.ps1 -Outgoing017 -ContractPath (Join-Path $PWD artifacts/outgoing-017-control/runner-config.json) -BaselineInstallerPath (Join-Path $PWD artifacts/outgoing-017-data/Creator.Hub_0.1.16_x64-setup.exe) -TimeoutSeconds 480 | Tee-Object -FilePath artifacts/outgoing-017-control/lifecycle.jsonl
