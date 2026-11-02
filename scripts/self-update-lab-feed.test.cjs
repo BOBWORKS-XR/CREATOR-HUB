@@ -280,6 +280,48 @@ test('credentials and request bodies refused; reports retain only allowlisted ho
   assert.equal(report.rejectedRequestCount, 6);
 });
 
+test('signed012-only 404 path diagnostics remain bounded and never record private paths, queries or headers', () => {
+  const contract = lab.createContract(input()), route = contract.routes[0], state = lab.newState(true);
+  const safePath = '/repos/BOBWORKS-XR/CREATOR-WORKS-UNITY-MCP/releases';
+  for (let i = 0; i < 2; i++) assert.equal(request(contract, route, { url: `${safePath}?per_page=10` }, state).res.status, 404);
+  assert.equal(request(contract, route, { url: `${safePath}?token=SECRET_QUERY` }, state).res.status, 404);
+  assert.equal(request(contract, route, { url: '/private/SECRET_PATH?token=SECRET_QUERY' }, state).res.status, 404);
+  assert.equal(request(contract, route, { url: safePath, headers: { host: route.host, authorization: 'SECRET_HEADER' } }, state).res.status, 400);
+  const report = lab.labReport(contract, state);
+  assert.equal(report.rejectedRequestCount, 5);
+  assert.deepEqual(report.rejectedPaths, [
+    { host: 'api.github.com', path: safePath, queryPresent: true, count: 3 },
+    { host: 'api.github.com', path: '[redacted]', queryPresent: true, count: 1 },
+  ]);
+  assert.doesNotMatch(JSON.stringify(report), /SECRET_QUERY|SECRET_PATH|SECRET_HEADER/);
+  assert.equal(lab.labReport(contract, lab.newState()).rejectedPaths, undefined);
+  const bounded = lab.newState(true);
+  for (const name of ['CREATOR-HUB', 'CREATOR-WORKS-UNITY-MCP', 'CREATOR-PROJECT-SETUP']) {
+    for (const suffix of ['/releases', '/releases/latest']) for (const query of ['', '?per_page=10']) {
+      const res = request(contract, route, { url: `/repos/BOBWORKS-XR/${name}${suffix}${query}` }, bounded).res;
+      if (res.status === 200) continue;
+      assert.equal(res.status, 404);
+    }
+  }
+  const limited = lab.labReport(contract, bounded);
+  assert.equal(limited.rejectedPaths.length, 8); assert.ok(limited.rejectedPathOverflow > 0);
+  assert.equal(limited.rejectedRequestCount, limited.rejectedPaths.reduce((n, row) => n + row.count, 0) + limited.rejectedPathOverflow);
+});
+
+test('path diagnostics require the exact signed012 runner and R2 contract', () => {
+  const env = { CREATOR_PUBLIC12_R2_PATH_DIAGNOSTIC: '1', CREATOR_PUBLIC12_R2_LAB: '1', GITHUB_ACTIONS: 'true',
+    RUNNER_ENVIRONMENT: 'github-hosted', RUNNER_OS: 'Windows', RUNNER_ARCH: 'X64', GITHUB_REPOSITORY: 'BOBWORKS-XR/CREATOR-HUB',
+    GITHUB_REPOSITORY_ID: '1364807512', GITHUB_EVENT_NAME: 'workflow_dispatch', GITHUB_REF: 'refs/heads/validation/windows-menu-merge-20261027',
+    GITHUB_WORKFLOW_REF: 'BOBWORKS-XR/CREATOR-HUB/.github/workflows/windows-incoming-016.yml@refs/heads/validation/windows-menu-merge-20261027' };
+  const contract = { targetVersion: '0.1.16', baseline: { version: '0.1.12' }, pins: {
+    installer: '7326d054ac23b7ac560e2c3488933203a33f0033586b1c33988ce7f316e4c51a',
+    executable: 'fac846563720eb4dae665a814ea28d0556800ebaf75aba7e8ee0be7f1979a5cd' } };
+  assert.equal(lab.allowPathDiagnostics(env, contract), true);
+  for (const key of Object.keys(env)) assert.equal(lab.allowPathDiagnostics({ ...env, [key]: 'foreign' }, contract), false, key);
+  assert.equal(lab.allowPathDiagnostics(env, { ...contract, targetVersion: '0.1.17' }), false);
+  assert.equal(lab.allowPathDiagnostics(env, { ...contract, pins: { ...contract.pins, installer: 'a'.repeat(64) } }), false);
+});
+
 test('request and byte budgets refuse further data', () => {
   const contract = lab.createContract(input()), route = contract.routes[0];
   const state = lab.newState(); state.requests = lab.LIMITS.requests;

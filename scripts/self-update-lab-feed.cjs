@@ -206,8 +206,34 @@ function singleHost(request) {
     index % 2 === 0 && value.toLowerCase() === 'host').length === 1;
 }
 
-function newState() { return { requests: 0, bytes: 0, rejected: 0, served: new Map(), rejections: new Map(), rejectionOverflow: 0,
+function allowPathDiagnostics(env, contract) {
+  return env.CREATOR_PUBLIC12_R2_PATH_DIAGNOSTIC === '1' && env.CREATOR_PUBLIC12_R2_LAB === '1'
+    && env.GITHUB_ACTIONS === 'true' && env.RUNNER_ENVIRONMENT === 'github-hosted' && env.RUNNER_OS === 'Windows' && env.RUNNER_ARCH === 'X64'
+    && env.GITHUB_REPOSITORY === 'BOBWORKS-XR/CREATOR-HUB' && env.GITHUB_REPOSITORY_ID === '1364807512' && env.GITHUB_EVENT_NAME === 'workflow_dispatch'
+    && env.GITHUB_REF === 'refs/heads/validation/windows-menu-merge-20261027'
+    && env.GITHUB_WORKFLOW_REF === 'BOBWORKS-XR/CREATOR-HUB/.github/workflows/windows-incoming-016.yml@refs/heads/validation/windows-menu-merge-20261027'
+    && contract.targetVersion === '0.1.16' && contract.baseline.version === '0.1.12'
+    && contract.pins.installer === '7326d054ac23b7ac560e2c3488933203a33f0033586b1c33988ce7f316e4c51a'
+    && contract.pins.executable === 'fac846563720eb4dae665a814ea28d0556800ebaf75aba7e8ee0be7f1979a5cd';
+}
+function newState(pathDiagnostics = false) { return { requests: 0, bytes: 0, rejected: 0, served: new Map(), rejections: new Map(), rejectionOverflow: 0,
+  pathDiagnostics, rejectedPaths: new Map(), rejectedPathOverflow: 0,
   connectionResetEvents: 0, connectionResets: new Map() }; }
+
+function recordRejectedPath(state, tunnelHost, url) {
+  if (!state.pathDiagnostics) return;
+  const host = ['api.github.com', 'github.com'].includes(tunnelHost) ? tunnelHost : '[redacted]';
+  const raw = typeof url === 'string' ? url : '';
+  const q = raw.indexOf('?'), pathname = q < 0 ? raw : raw.slice(0, q);
+  const publicApi = /^\/repos\/BOBWORKS-XR\/(?:CREATOR-HUB|CREATOR-WORKS-UNITY-MCP|CREATOR-PROJECT-SETUP)\/releases(?:\/latest)?$/;
+  const publicAsset = /^\/BOBWORKS-XR\/CREATOR-HUB\/releases\/download\/v0\.1\.16\/(?:creator-hub-windows-x86_64\.json(?:\.minisig)?|latest\.json|Creator\.Hub_0\.1\.16_x64-setup\.exe)$/;
+  const safe = pathname.length <= 192 && ((host === 'api.github.com' && publicApi.test(pathname)) || (host === 'github.com' && publicAsset.test(pathname)));
+  const row = { host, path: safe ? pathname : '[redacted]', queryPresent: q >= 0 };
+  const key = JSON.stringify(row);
+  if (state.rejectedPaths.has(key)) state.rejectedPaths.get(key).count++;
+  else if (state.rejectedPaths.size < 8) state.rejectedPaths.set(key, { ...row, count: 1 });
+  else state.rejectedPathOverflow++;
+}
 
 function recordTransportError(state, kind, error) {
   if (error?.code !== 'ECONNRESET') { recordRejection(state, kind, error?.code); return; }
@@ -253,6 +279,7 @@ function requestHandler(contract, state) {
   return (req, res) => {
     const result = resolveRequest(contract, req.socket.labHost, req, state);
     if (result.status !== 200) {
+      if (result.status === 404) recordRejectedPath(state, req.socket.labHost, req.url);
       recordRejection(state, `http-${result.status}`); res.writeHead(result.status, { Connection: 'close', 'Content-Length': '0' }); res.end(); return;
     }
     const route = result.route;
@@ -274,7 +301,8 @@ function labReport(contract, state) {
     baseline: contract.baseline, targetVersion: contract.targetVersion,
     requests: [...state.served.values()], rejectedRequestCount: state.rejected,
     rejectionSummary: [...state.rejections.values()], rejectionOverflow: state.rejectionOverflow,
-    connectionResetEventCount: state.connectionResetEvents, connectionResetSummary: [...state.connectionResets.values()] };
+    connectionResetEventCount: state.connectionResetEvents, connectionResetSummary: [...state.connectionResets.values()],
+    ...(state.pathDiagnostics ? { rejectedPaths: [...state.rejectedPaths.values()], rejectedPathOverflow: state.rejectedPathOverflow } : {}) };
 }
 
 async function startLabProxy(contract, tlsOptions, env = process.env, transport = { http, tls }) {
@@ -283,7 +311,8 @@ async function startLabProxy(contract, tlsOptions, env = process.env, transport 
   keys(tlsOptions, ['pfx', 'passphrase'], 'ephemeral TLS options');
   bounded(tlsOptions.pfx, 64 * 1024, 'TLS PFX');
   const context = transport.tls.createSecureContext({ ...tlsOptions, minVersion: 'TLSv1.2' });
-  const state = newState(), sockets = new Set();
+  const pathDiagnostics = allowPathDiagnostics(env, contract);
+  const state = newState(pathDiagnostics), sockets = new Set();
   const options = { maxHeaderSize: LIMITS.headers, headersTimeout: 10000, requestTimeout: 30000 };
   const inner = transport.http.createServer(options, requestHandler(contract, state));
   const outer = transport.http.createServer(options, (_req, res) => {
@@ -376,7 +405,7 @@ async function main() {
 
 module.exports = { DESCRIPTOR, FEED_PATH, LIMITS, UNIFIED_OUTGOING_BASELINE, assertRunner, baselineFor, createContract,
   createUnifiedOutgoingContract, createIncoming016Contract, createDirectOutgoing017Contract, loadContract, readBounded, assertBaselineBytes, assertUnifiedOutgoingBaselineBytes,
-  connectHost, newState, recordRejection, requestHandler, labReport, startLabProxy };
+  connectHost, allowPathDiagnostics, newState, recordRejection, requestHandler, labReport, startLabProxy };
 if (require.main === module) main().catch(() => {
   // Do not serialize TLS control input, parser errors, headers or candidate contents.
   console.error('Lab feed refused or failed; no native/public acceptance established.'); process.exitCode = 1;

@@ -48,3 +48,16 @@ must verify public12 installer and executable, exercise actual UI discovery,
 cancel, exact R2 update, automatic restart and direct MCP/Setup operations,
 and preserve settings. The checked receipt and TLS/proxy cleanup evidence are
 lab-only. A passing lab is not public discovery, migration, or release approval.
+
+## Bounded 404 Diagnostic
+
+Run 41450880554 had a passing native driver and cleanup but its independent
+receipt refused two `http-404` rejections. The retained evidence does not
+include their paths. A later separately authorized diagnostic run can record
+up to eight aggregated 404 host/path categories for this exact signed012 R2
+runner only. The diagnostic emits only fixed public GitHub release paths; all
+other paths are redacted, and only query presence is recorded, never its values.
+Headers, request bodies, arbitrary URLs and TLS
+material are never recorded. Overflow is counted. Every 404 remains a rejection
+and the zero-rejection receipt guard is unchanged. This instrumentation does not
+authorize a retry, new route, signing, publication or a release-readiness claim.

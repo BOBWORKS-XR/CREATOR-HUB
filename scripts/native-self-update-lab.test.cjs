@@ -560,6 +560,21 @@ test('adapter sends readiness, closes on owner EOF, and emits only public counts
   } finally { a.dispose(); }
 });
 
+test('bounded 404 paths survive the adapter and lifecycle without changing rejection counts', async () => {
+  const a = adapter();
+  try {
+    a.mockProxy.report = () => ({ requests: [], rejectedRequestCount: 2,
+      rejectedPaths: [{ host: 'api.github.com', path: '/repos/BOBWORKS-XR/CREATOR-PROJECT-SETUP/releases', queryPresent: true, count: 2 }],
+      rejectedPathOverflow: 0 });
+    a.stdin.emit('data', frame(tlsFixture)); await turn(); a.stdin.emit('end'); await a.completion;
+    assert.equal(a.output[1].rejectedRequestCount, 2);
+    assert.deepEqual(a.output[1].rejectedPaths, [{ host: 'api.github.com', path: '/repos/BOBWORKS-XR/CREATOR-PROJECT-SETUP/releases', queryPresent: true, count: 2 }]);
+    assert.equal(a.output[1].rejectedPathOverflow, 0);
+    assert.match(source, /rejectedPaths=\$\(if \(\$feedResult -and \$env:CREATOR_PUBLIC12_R2_PATH_DIAGNOSTIC -ceq '1'\)/);
+    assert.doesNotMatch(JSON.stringify(a.output), /NEVER-LOG-SECRET|NOT A CERTIFICATE/);
+  } finally { a.dispose(); }
+});
+
 test('adapter failure is sanitized and erases supplied PFX, including start failure', async () => {
   const a = adapter({ failStart: true });
   try {
