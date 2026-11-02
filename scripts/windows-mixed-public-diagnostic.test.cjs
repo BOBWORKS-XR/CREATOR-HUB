@@ -57,6 +57,50 @@ test('migrated successor activates the approved route only through unchanged gua
   assert.ok(fixture.untouched.some(item => item.path.endsWith(path.join('opencode', 'opencode.jsonc')) &&
     item.bytes.toString().includes('"other":{"type":"remote"')));
 });
+test('pre-review SDK probe checks route, owned processes and fixture on success and failure', async () => {
+  const route = { schemaVersion: 1, descriptorSha256: 'a'.repeat(64), generation: 'b'.repeat(64) };
+  const router = { pid: 3, parentPid: 9, startTicks: '3', image: 'C:\\router.exe', kernelIdentityVerified: true };
+  const node = { pid: 4, parentPid: 3, startTicks: '4', image: 'C:\\generation\\node.exe', kernelIdentityVerified: true };
+  let closed = 0, checked = 0, calls = 0, stopped = 0;
+  const opts = { client: { async connect() { calls++; }, async close() { closed++; } }, transport: { pid: 3 },
+    roundTrip: async () => { calls++; }, inventory: () => [router, node], waitForStopped: async records => { assert.deepEqual(records, [router, node]); stopped++; }, sameProcess: () => { calls++; },
+    rootRecord: { pid: 1 }, existingProcesses: [{ pid: 2 }], routeCommand: router.image, nodePath: node.image,
+    observeActive: () => route, expectedRoute: route, guard: { verify() { checked++; } }, cleanup: { state: 'not-started' }, driverPid: 9 };
+  assert.deepEqual(await driver.probePreReviewRoute(opts), { records: [router, node], transportPid: 3 });
+  assert.equal(closed, 1); assert.equal(checked, 2); assert.equal(calls, 6);
+  assert.equal(stopped, 1);
+  assert.equal(opts.cleanup.state, 'verified');
+  await assert.rejects(driver.probePreReviewRoute({ ...opts, roundTrip: async () => { throw Error('tool failed'); } }), /tool failed/);
+  assert.equal(closed, 2); assert.equal(checked, 4);
+  await assert.rejects(driver.probePreReviewRoute({ ...opts, nodePath: 'C:\\other\\node.exe' }));
+  assert.equal(opts.cleanup.state, 'unknown');
+  assert.equal(closed, 3); assert.equal(checked, 6);
+  let observed = 0;
+  await assert.rejects(driver.probePreReviewRoute({ ...opts, observeActive: () => ++observed === 1 ? route : { ...route, generation: 'c'.repeat(64) } }));
+  assert.equal(closed, 4); assert.equal(checked, 8);
+  await assert.rejects(driver.probePreReviewRoute({ ...opts, client: { async connect() { throw Error('connect failed'); }, async close() { closed++; } } }), /connect failed/);
+  assert.equal(opts.cleanup.state, 'unknown');
+  assert.equal(closed, 5); assert.equal(checked, 10);
+  let guardChecks = 0;
+  await assert.rejects(driver.probePreReviewRoute({ ...opts, guard: { verify() { if (++guardChecks === 2) throw Error('fixture drift'); } } }), /fixture drift/);
+  assert.equal(closed, 6);
+  await assert.rejects(driver.probePreReviewRoute({ ...opts, waitForStopped: async () => { throw Error('process still running'); } }), /process still running/);
+  assert.equal(closed, 7);
+  assert.equal(opts.cleanup.state, 'unknown');
+  await assert.rejects(driver.probePreReviewRoute({ ...opts, driverPid: 99 }));
+  assert.equal(opts.cleanup.state, 'unknown');
+  await assert.rejects(driver.probePreReviewRoute({ ...opts, inventory: () => { throw Error('capture failed'); } }), /capture failed/);
+  assert.equal(opts.cleanup.state, 'unknown');
+  await assert.rejects(driver.probePreReviewRoute({ ...opts, transport: { pid: 999 } }));
+  assert.equal(opts.cleanup.state, 'unknown');
+  await assert.rejects(driver.probePreReviewRoute({ ...opts, client: { async connect() {}, async close() { throw Error('close failed'); } } }), /close failed/);
+  assert.equal(opts.cleanup.state, 'unknown');
+  const source = fs.readFileSync(path.join(__dirname, 'windows-mixed-public-driver.cjs'), 'utf8');
+  assert.ok(source.indexOf('await probePreReviewRoute({') < source.indexOf('await activateMigratedRoute(page, migrated)'));
+  const lifecycle = fs.readFileSync(path.join(__dirname, 'native-mixed-public-diagnostic.ps1'), 'utf8');
+  assert.match(lifecycle, /\$driverReport\.preReviewProbeCleanup\.state -cne 'verified'/);
+  assert.match(lifecycle, /if \(\$driverExitCode -ne 0\) \{ throw 'Driver did not succeed\.' \}/);
+});
 test('diagnostic admission requires exact hosted context, actor, source and first attempt', () => {
   diag.admit(env, 'win32');
   for (const key of Object.keys(env)) assert.throws(() => diag.admit({ ...env, [key]: '' }, 'win32'));
@@ -214,11 +258,16 @@ test('phase receipt accepts only the diagnostic scope and rejects claims or fail
   const afterRoute = { schemaVersion: 1, descriptorSha256: config.runtime.targetDescriptor, generation: 'b'.repeat(64) };
   const report = { kind: diag.KIND, passed: true, publicDiscovery: null, publicNetworkAllowed: true, publicDiscoveryProven: false, labDiscovery: true, migratedContinuation: true,
     automaticRestart: true, cancelPreserved: true, outgoingConnectionSurvived: true, newConnectionVerified: true,
-    restorationVerified: true, policyRestored: true, fixtureSettingsChecksPassed: true,
-    migratedFixtureFilesUnchangedAfterDriverCleanup: true, activeRouteUnchangedAfterCancel: true,
+    restorationVerified: true, policyRestored: true, boundedFixtureCheckpointsMatched: true,
+    migratedFixtureFilesMatchedAtCheckpointsAndAfterDriverCleanup: true, activeRouteUnchangedAfterCancel: true,
     nativeUpdateAccepted: false, liveAiAcceptance: false, acceptanceOnly: false, releaseReady: false, changedMcpGenerationProven: false,
     migrationNetworkObserved: false, webViewContinuityProven: false, migrationEraConnectionProven: false, combinedAcceptance: false,
     initialCleanupUnverified: false, successorCleanupUnverified: false, automaticRouteTransitionProven: false,
+    preReviewNewConnectionVerified: true, preReviewRouteMatchedAtProbeCheckpoints: true,
+    preReviewProbeCleanup: { state: 'verified' }, preReviewTransportPid: 3,
+    fixtureObservation: '23-exact-files-at-checkpoints-through-driver-cleanup', continuousFixtureIntegrityProven: false, serverPayloadDigestProven: false,
+    preReviewReconnectedProcesses: [{ pid: 3, parentPid: 9, startTicks: '3', image: path.win32.join(env.LOCALAPPDATA, 'creator-hub/mcp-route-v1/windows-x86_64/router-v1/creator-hub-mcp-router.exe'), kernelIdentityVerified: true },
+      { pid: 4, parentPid: 3, startTicks: '4', image: path.win32.join(env.LOCALAPPDATA, 'creator-hub/runtime-generations/windows-x86_64', beforeRoute.generation, 'mcp/server/runtime/node.exe'), kernelIdentityVerified: true }],
     beforeRoute, preReviewRoute: beforeRoute, afterRoute, successorRouteAfterExplicitReview: afterRoute,
     successorRouteObservation: 'after-explicit-client-review',
     migrationPhase: { publicNetworkAllowed: true, publicDiscovery: 'unproven', networkObservation: 'unobserved', isolationProven: false },
@@ -231,25 +280,34 @@ test('phase receipt accepts only the diagnostic scope and rejects claims or fail
     outgoingControlledFeed: true, migrationHandoffBeforeTrust: true, successorCleanupVerified: true, driverRegistered: true, driverGateOpened: true, hubCleanupState: 'verified', hubCleanupUnknown: false, isolationProven: false, liveAiAcceptance: false,
     productAcceptance: false, nativeAcceptanceTested: false, releaseReady: false, migrationNetworkObserved: false,
     webViewContinuityProven: false, migrationEraConnectionProven: false, combinedAcceptance: false,
-    migrationNetworkObservation: 'unobserved', driverExitCode: 0, servedRouteCount: 5, rejectedRequestCount: 0 };
+    migrationNetworkObservation: 'unobserved', driver: { pid: 9 }, driverExitCode: 0, servedRouteCount: 5, rejectedRequestCount: 0 };
   const encoded = r => Buffer.from(JSON.stringify(r) + '\n');
   const result = diag.checkReceipt(report, bytes, encoded(life), config, env);
   assert.equal(result.diagnosticPassed, true); assert.equal(result.combinedAcceptance, false); assert.equal(result.releaseReady, false);
   assert.deepEqual(result.preReviewRoute, beforeRoute); assert.deepEqual(result.successorRouteAfterExplicitReview, afterRoute);
   assert.equal(result.successorRouteObservation, 'after-explicit-client-review'); assert.equal(result.automaticRouteTransitionProven, false);
-  assert.deepEqual(diag.checkReceipt({ ...report, preReviewRoute: afterRoute }, bytes, encoded(life), config, env).preReviewRoute, afterRoute);
+  const targetNode = path.win32.join(env.LOCALAPPDATA, 'creator-hub/runtime-generations/windows-x86_64', afterRoute.generation, 'mcp/server/runtime/node.exe');
+  assert.deepEqual(diag.checkReceipt({ ...report, preReviewRoute: afterRoute, preReviewReconnectedProcesses: [report.preReviewReconnectedProcesses[0], { ...report.preReviewReconnectedProcesses[1], image: targetNode }] }, bytes, encoded(life), config, env).preReviewRoute, afterRoute);
   assert.throws(() => require('./windows-outgoing-017.cjs').checkMigratedReceipt(report, [life], config, 'mcp-restore', bytes, env));
   for (const change of [{ passed: false }, { nativeUpdateAccepted: true }, { migrationNetworkObserved: true }, { publicDiscovery: true }, { publicDiscovery: false }, { publicDiscoveryProven: true },
     { migrationEraConnectionProven: true }, { webViewContinuityProven: true }, { combinedAcceptance: true },
-    { migratedFixtureFilesUnchangedAfterDriverCleanup: false }, { activeRouteUnchangedAfterCancel: false },
+    { migratedFixtureFilesMatchedAtCheckpointsAndAfterDriverCleanup: false }, { activeRouteUnchangedAfterCancel: false },
     { initialCleanupUnverified: true }, { successorCleanupUnverified: true }, { automaticRouteTransitionProven: true },
+    { preReviewNewConnectionVerified: false }, { preReviewRouteMatchedAtProbeCheckpoints: false },
+    { preReviewProbeCleanup: { state: 'unknown' } }, { preReviewTransportPid: 10 },
+    { continuousFixtureIntegrityProven: true }, { serverPayloadDigestProven: true }, { fixtureObservation: 'entire-profile' },
+    { preReviewReconnectedProcesses: [] }, { preReviewReconnectedProcesses: undefined },
+    { preReviewReconnectedProcesses: [report.preReviewReconnectedProcesses[0], { ...report.preReviewReconnectedProcesses[1], parentPid: 999 }] },
+    { preReviewReconnectedProcesses: [{ ...report.preReviewReconnectedProcesses[0], parentPid: 999 }, report.preReviewReconnectedProcesses[1]] },
+    { preReviewReconnectedProcesses: [{ ...report.preReviewReconnectedProcesses[0], image: 'C:\\foreign.exe' }, report.preReviewReconnectedProcesses[1]] },
+    { preReviewReconnectedProcesses: [report.preReviewReconnectedProcesses[0], { ...report.preReviewReconnectedProcesses[1], image: 'C:\\foreign-node.exe' }] },
     { preReviewRoute: null }, { preReviewRoute: { ...beforeRoute, schemaVersion: 2 } },
     { preReviewRoute: { ...beforeRoute, descriptorSha256: '0'.repeat(64) } },
     { preReviewRoute: { ...beforeRoute, generation: 'bad' } }, { preReviewRoute: { ...beforeRoute, generation: 'c'.repeat(64) } },
     { successorRouteAfterExplicitReview: beforeRoute }, { afterRoute: beforeRoute },
     { successorRouteObservation: 'automatic' }, { successorRouteObservation: undefined }])
     assert.throws(() => diag.checkReceipt({ ...report, ...change }, bytes, encoded(life), config, env));
-  for (const change of [{ driverExitCode: 1 }, { driverExitCode: null }, { driverRegistered: false }, { driverGateOpened: false }, { publicDiscovery: true }, { publicDiscoveryProven: true }, { cleanupVerified: false }, { successorCleanupVerified: false }, { hubCleanupState: 'unknown' }, { hubCleanupUnknown: true }, { migrationHandoffBeforeTrust: false },
+  for (const change of [{ driverExitCode: 1 }, { driverExitCode: null }, { driver: { pid: 999 } }, { driverRegistered: false }, { driverGateOpened: false }, { publicDiscovery: true }, { publicDiscoveryProven: true }, { cleanupVerified: false }, { successorCleanupVerified: false }, { hubCleanupState: 'unknown' }, { hubCleanupUnknown: true }, { migrationHandoffBeforeTrust: false },
     { rejectedRequestCount: 1 }, { combinedAcceptance: true }])
     assert.throws(() => diag.checkReceipt(report, bytes, encoded({ ...life, ...change }), config, env));
 });

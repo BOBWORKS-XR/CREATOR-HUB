@@ -105,10 +105,14 @@ function checkReceipt(report, migrationBytes, lifecycleBytes, config, env = proc
   assert.equal(report.publicDiscovery, null);
   for (const key of ['publicNetworkAllowed', 'labDiscovery', 'migratedContinuation', 'automaticRestart', 'cancelPreserved',
     'outgoingConnectionSurvived', 'newConnectionVerified', 'restorationVerified', 'policyRestored',
-    'fixtureSettingsChecksPassed', 'migratedFixtureFilesUnchangedAfterDriverCleanup', 'activeRouteUnchangedAfterCancel']) assert.equal(report[key], true, key);
+    'boundedFixtureCheckpointsMatched', 'migratedFixtureFilesMatchedAtCheckpointsAndAfterDriverCleanup', 'activeRouteUnchangedAfterCancel',
+    'preReviewNewConnectionVerified', 'preReviewRouteMatchedAtProbeCheckpoints']) assert.equal(report[key], true, key);
   for (const key of ['nativeUpdateAccepted', 'liveAiAcceptance', 'acceptanceOnly', 'releaseReady', 'changedMcpGenerationProven',
     'migrationNetworkObserved', 'publicDiscoveryProven', 'webViewContinuityProven', 'migrationEraConnectionProven', 'combinedAcceptance',
-    'initialCleanupUnverified', 'successorCleanupUnverified', 'automaticRouteTransitionProven']) assert.equal(report[key], false, key);
+    'initialCleanupUnverified', 'successorCleanupUnverified', 'automaticRouteTransitionProven',
+    'continuousFixtureIntegrityProven', 'serverPayloadDigestProven']) assert.equal(report[key], false, key);
+  assert.equal(report.fixtureObservation, '23-exact-files-at-checkpoints-through-driver-cleanup');
+  assert.deepEqual(report.preReviewProbeCleanup, { state: 'verified' });
   assert.deepEqual(report.migrationPhase, { publicNetworkAllowed: true, publicDiscovery: 'unproven', networkObservation: 'unobserved', isolationProven: false });
   assert.deepEqual(report.outgoingPhase, { controlledFeed: true, publicDiscovery: false });
   assert.equal(report.sourceCommit, config.sourceCommit); assert.deepEqual(report.baseline, config.baseline); assert.deepEqual(report.pins, config.pins);
@@ -126,6 +130,19 @@ function checkReceipt(report, migrationBytes, lifecycleBytes, config, env = proc
   route(report.successorRouteAfterExplicitReview, [config.runtime.targetDescriptor]);
   assert.deepEqual(report.afterRoute, report.successorRouteAfterExplicitReview);
   assert.equal(report.successorRouteObservation, 'after-explicit-client-review');
+  assert.ok(Array.isArray(report.preReviewReconnectedProcesses));
+  assert.equal(report.preReviewReconnectedProcesses.length, 2);
+  const [preRouter, preNode] = report.preReviewReconnectedProcesses;
+  for (const process of [preRouter, preNode]) {
+    assert.equal(process.kernelIdentityVerified, true); assert.ok(Number.isSafeInteger(process.pid) && process.pid > 0);
+    assert.match(process.startTicks, /^[0-9]+$/); assert.ok(path.win32.isAbsolute(process.image));
+  }
+  assert.equal(preNode.parentPid, preRouter.pid); assert.notEqual(preNode.pid, preRouter.pid);
+  assert.equal(report.preReviewTransportPid, preRouter.pid);
+  const expectedRouter = path.win32.join(env.LOCALAPPDATA, 'creator-hub', 'mcp-route-v1', 'windows-x86_64', 'router-v1', 'creator-hub-mcp-router.exe');
+  const expectedNode = path.win32.join(env.LOCALAPPDATA, 'creator-hub', 'runtime-generations', 'windows-x86_64', report.preReviewRoute.generation, 'mcp', 'server', 'runtime', 'node.exe');
+  assert.equal(path.win32.normalize(preRouter.image).toLowerCase(), expectedRouter.toLowerCase());
+  assert.equal(path.win32.normalize(preNode.image).toLowerCase(), expectedNode.toLowerCase());
   assert.equal(report.migratedFixtureFilesChecked, 23); assert.equal(report.migrationRunId, env.GITHUB_RUN_ID);
   assert.equal(report.migrationRunAttempt, env.GITHUB_RUN_ATTEMPT); assert.equal(report.migrationHarnessSource, env.GITHUB_SHA);
   assert.match(report.migrationReceipt, /^artifacts[\\/]native-suite-[0-9]+[\\/]migration-016-report\.json$/);
@@ -135,6 +152,8 @@ function checkReceipt(report, migrationBytes, lifecycleBytes, config, env = proc
   const rows = lifecycleBytes.toString('utf8').split(/\r?\n/).filter(Boolean).map(JSON.parse).filter(row => row.kind === 'lab-lifecycle-result');
   assert.equal(rows.length, 1); const result = rows[0];
   assert.equal(result.scenario, KIND); assert.equal(result.actualScope, KIND);
+  assert.ok(result.driver && Number.isSafeInteger(result.driver.pid) && result.driver.pid > 0);
+  assert.equal(preRouter.parentPid, result.driver.pid);
   assert.equal(result.publicDiscovery, null);
   for (const key of ['lifecycleSucceeded', 'cleanupVerified', 'systemTlsVerified', 'labDiscovery', 'publicNetworkAllowed', 'outgoingControlledFeed', 'migrationHandoffBeforeTrust', 'successorCleanupVerified', 'driverRegistered', 'driverGateOpened']) assert.equal(result[key], true, key);
   for (const key of ['isolationProven', 'liveAiAcceptance', 'productAcceptance', 'nativeAcceptanceTested', 'releaseReady',
@@ -145,6 +164,9 @@ function checkReceipt(report, migrationBytes, lifecycleBytes, config, env = proc
   return { kind: KIND, diagnosticPassed: true, publicDiscovery: null, publicNetworkAllowed: true, publicDiscoveryProven: false, migrationNetworkObservation: 'unobserved',
     migrationNetworkObserved: false, isolationProven: false, webViewContinuityProven: false, migrationEraConnectionProven: false,
     preReviewRoute: report.preReviewRoute, successorRouteAfterExplicitReview: report.successorRouteAfterExplicitReview,
+    preReviewNewConnectionVerified: true, preReviewRouteMatchedAtProbeCheckpoints: true,
+    preReviewProbeCleanup: { state: 'verified' }, serverPayloadDigestProven: false,
+    fixtureObservation: '23-exact-files-at-checkpoints-through-driver-cleanup', continuousFixtureIntegrityProven: false,
     successorRouteObservation: 'after-explicit-client-review', automaticRouteTransitionProven: false,
     combinedAcceptance: false, nativeAccepted: false, productionApproval: false, releaseReady: false };
 }

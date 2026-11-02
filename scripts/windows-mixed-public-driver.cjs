@@ -85,6 +85,41 @@ async function activateMigratedRoute(page, migrated) {
     assert.deepEqual(result, { status: 'unchanged', count: 0 });
   } finally { migrated.guard.verify(); }
 }
+async function probePreReviewRoute({ client, transport, roundTrip, inventory, waitForStopped, sameProcess, rootRecord, existingProcesses, routeCommand, nodePath, observeActive, expectedRoute, guard, cleanup, driverPid = process.pid }) {
+  guard.verify();
+  try {
+    sameProcess(rootRecord);
+    for (const process of existingProcesses) sameProcess(process);
+    assert.deepEqual(observeActive(), expectedRoute);
+    let records;
+    try {
+      cleanup.state = 'unknown';
+      await client.connect(transport);
+      const transportPid = transport.pid;
+      assert.ok(Number.isSafeInteger(transportPid) && transportPid > 0);
+      const rows = inventory(), router = rows.find(process => process.pid === transportPid);
+      assert.ok(router && router.kernelIdentityVerified);
+      assert.equal(router.parentPid, driverPid);
+      assert.notEqual(router.pid, existingProcesses[0].pid);
+      assert.equal(path.win32.normalize(router.image).toLowerCase(), path.win32.normalize(routeCommand).toLowerCase());
+      const nodes = rows.filter(process => process.parentPid === router.pid && /node\.exe$/i.test(process.image));
+      assert.equal(nodes.length, 1); assert.equal(nodes[0].kernelIdentityVerified, true);
+      assert.equal(path.win32.normalize(nodes[0].image).toLowerCase(), path.win32.normalize(nodePath).toLowerCase());
+      records = [router, nodes[0]];
+      await roundTrip(client);
+      return { records, transportPid };
+    } finally {
+      let closed = false;
+      try { await client.close(); closed = true; }
+      finally { if (records) { await waitForStopped(records); if (closed) cleanup.state = 'verified'; } }
+    }
+  } finally {
+    guard.verify();
+    sameProcess(rootRecord);
+    for (const process of existingProcesses) sameProcess(process);
+    assert.deepEqual(observeActive(), expectedRoute);
+  }
+}
 async function main() {
   const diagnostic = require('./windows-mixed-public-diagnostic.cjs');
   diagnostic.admit();
@@ -137,7 +172,9 @@ async function main() {
     migrationRunAttempt: migrated.runAttempt, migratedFixtureFilesChecked: migrated.guard.fileCount,
     migrationReceipt: path.relative(ROOT, path.join(migrated.migrationOutput, 'migration-016-report.json')),
     migrationReportSha256: migrated.migrationReportSha256, migrationHarnessSource: process.env.GITHUB_SHA,
-    migratedFixtureFilesUnchangedAfterDriverCleanup: false, activeRouteUnchangedAfterCancel: false,
+    migratedFixtureFilesMatchedAtCheckpointsAndAfterDriverCleanup: false, activeRouteUnchangedAfterCancel: false,
+    fixtureObservation: '23-exact-files-at-checkpoints-through-driver-cleanup', continuousFixtureIntegrityProven: false,
+    serverPayloadDigestProven: false, preReviewProbeCleanup: { state: 'not-started' },
     changedMcpGenerationProven: false, automaticRouteTransitionProven: false });
   const ps = (name, args = []) => execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
     '-File', path.join(ROOT, 'scripts', name), ...args], { encoding: 'utf8', timeout: 30000, windowsHide: true });
@@ -316,7 +353,25 @@ async function main() {
       }), feature);
       direct.assertService(feature, service);
     }
-    if (migrated) await activateMigratedRoute(page, migrated);
+    if (migrated) {
+      const probe = await probePreReviewRoute({
+        client: new Client({ name: 'outgoing-pre-review-connection', version: '1' }),
+        transport: new StdioClientTransport({ command: route.command, args: [], stderr: 'ignore' }),
+        roundTrip, inventory, sameProcess, rootRecord, existingProcesses: sdkRecords,
+        waitForStopped: records => retry(() => {
+          const rows = inventory();
+          for (const process of records) assert.equal(rows.some(row => row.pid === process.pid && row.startTicks === process.startTicks), false);
+        }),
+        routeCommand: route.command,
+        nodePath: path.join(local, 'creator-hub/runtime-generations/windows-x86_64', report.preReviewRoute.generation, 'mcp/server/runtime/node.exe'),
+        observeActive, expectedRoute: report.preReviewRoute, guard: migrated.guard, cleanup: report.preReviewProbeCleanup,
+      });
+      report.preReviewReconnectedProcesses = probe.records;
+      report.preReviewTransportPid = probe.transportPid;
+      report.preReviewNewConnectionVerified = true;
+      report.preReviewRouteMatchedAtProbeCheckpoints = true;
+      await activateMigratedRoute(page, migrated);
+    }
     else await direct.prepareManagedRoute(page, { clientConfig, active: route.active, approve: () => { throw Error('Existing route must not require new consent'); } });
     report.afterRoute = active('0.1.17');
     if (migrated) { report.successorRouteAfterExplicitReview = report.afterRoute; report.successorRouteObservation = 'after-explicit-client-review'; }
@@ -337,7 +392,7 @@ async function main() {
     assert.deepEqual(report.pageErrors || [], []);
     Object.assign(report, { passed: true, nativeUpdateAccepted: false, automaticRestart: true,
       outgoingConnectionSurvived: true, newConnectionVerified: true, restorationVerified: true, observedTicket });
-    if (migrated) report.fixtureSettingsChecksPassed = true;
+    if (migrated) report.boundedFixtureCheckpointsMatched = true;
     else report.settingsPreserved = true;
   } catch (error) {
     report.error = String(error.stack || error).slice(0, 16000); process.exitCode = 1;
@@ -360,12 +415,12 @@ async function main() {
       fs.writeFileSync(stopFile, 'exit', { flag: 'wx' });
       try { await retry(() => assert.equal(sentinel.exitCode, 0)); } catch { report.passed = false; report.sentinelCleanupFailed = true; }
     }
-    if (migrated) { try { migrated.guard.verify(); report.migratedFixtureFilesUnchangedAfterDriverCleanup = true; }
+    if (migrated) { try { migrated.guard.verify(); report.migratedFixtureFilesMatchedAtCheckpointsAndAfterDriverCleanup = true; }
       catch (error) { report.passed = false; report.preservationError = String(error); } }
     if (!report.passed) process.exitCode = 1;
     fs.writeFileSync(path.join(out, 'mixed-public-diagnostic-report.json'), JSON.stringify(report, null, 2), { flag: 'wx' });
     console.log(JSON.stringify({ out, passed: report.passed, releaseReady: false }));
   }
 }
-module.exports = { assertProtocol, assertTicket, recoverSpawnedRoot, completeStartup, setUpdatePreferences, assertSavedPreferences, continueMcpGuide, activateMigratedRoute, main };
+module.exports = { assertProtocol, assertTicket, recoverSpawnedRoot, completeStartup, setUpdatePreferences, assertSavedPreferences, continueMcpGuide, activateMigratedRoute, probePreReviewRoute, main };
 if (require.main === module) main().catch(error => { console.error(String(error.message).slice(0, 1200)); process.exitCode = 1; });
