@@ -117,14 +117,18 @@ function admit(review, files, directory) {
   return { config: materialized, configSha256: hash(JSON.stringify(materialized)), receiptSha256: review.receiptSha256,
     configCanonicalSha256: review.configCanonicalSha256 };
 }
-function checkReceipt(report, lifecycle, config, caseName) {
+function checkReceiptCore(report, lifecycle, config, caseName) {
   assert.ok(Object.hasOwn(CASES, caseName)); const [lastTool, restore] = CASES[caseName];
   assert.equal(report.kind, KIND); assert.equal(report.sourceCommit, config.sourceCommit);
   assert.deepEqual(report.baseline, config.baseline); assert.deepEqual(report.pins, config.pins);
   assert.equal(report.lastTool, lastTool); assert.equal(report.restore, restore === 'true');
   assert.equal(report.restoredLastTool, restore === 'true' ? lastTool : null);
-  for (const key of ['passed', 'nativeUpdateAccepted', 'automaticRestart', 'cancelPreserved', 'settingsPreserved',
+  for (const key of ['passed', 'nativeUpdateAccepted', 'automaticRestart', 'cancelPreserved',
     'existingConnectionSurvived', 'newConnectionVerified', 'restorationVerified', 'policyRestored', 'labDiscovery', 'acceptanceOnly']) assert.equal(report[key], true, key);
+  if (report.migratedContinuation === true) {
+    assert.equal(report.fixtureSettingsChecksPassed, true);
+    assert.equal(Object.hasOwn(report, 'settingsPreserved'), false);
+  } else assert.equal(report.settingsPreserved, true);
   for (const key of ['publicDiscovery', 'liveAiAcceptance', 'releaseReady']) assert.equal(report[key], false, key);
   assert.deepEqual(report.beforePeVersion, [0, 1, 16, 0]); assert.deepEqual(report.afterPeVersion, [0, 1, 17, 0]);
   const results = lifecycle.filter(row => row.kind === 'lab-lifecycle-result'); assert.equal(results.length, 1);
@@ -133,6 +137,25 @@ function checkReceipt(report, lifecycle, config, caseName) {
   for (const key of ['lifecycleSucceeded', 'cleanupVerified', 'systemTlsVerified', 'labDiscovery']) assert.equal(result[key], true, key);
   for (const key of ['publicDiscovery', 'liveAiAcceptance', 'productAcceptance', 'releaseReady']) assert.equal(result[key], false, key);
   assert.equal(result.driverExitCode, 0); assert.equal(result.servedRouteCount, 5); assert.equal(result.rejectedRequestCount, 0);
+}
+function checkReceipt(report, lifecycle, config, caseName) {
+  assert.notEqual(report.migratedContinuation, true, 'Migrated continuation requires its dedicated receipt check');
+  return checkReceiptCore(report, lifecycle, config, caseName);
+}
+function checkMigratedReceipt(report, lifecycle, config, caseName, migrationBytes, env = process.env) {
+  checkReceiptCore(report, lifecycle, config, caseName);
+  const handoff = require('./windows-migrated-outgoing-handoff.cjs');
+  handoff.checkOutgoingBaseline(config);
+  assert.equal(report.migratedContinuation, true); assert.equal(report.changedMcpGenerationProven, false);
+  assert.equal(report.migratedFixtureFilesUnchangedAfterDriverCleanup, true); assert.equal(report.migratedFixtureFilesChecked, 23);
+  assert.equal(report.activeRouteUnchangedAfterCancel, true);
+  assert.match(env.GITHUB_RUN_ID || '', /^[1-9][0-9]*$/); assert.match(env.GITHUB_RUN_ATTEMPT || '', /^[1-9][0-9]*$/);
+  assert.match(env.GITHUB_SHA || '', /^[a-f0-9]{40}$/);
+  assert.equal(report.migrationRunId, env.GITHUB_RUN_ID); assert.equal(report.migrationRunAttempt, env.GITHUB_RUN_ATTEMPT);
+  assert.equal(report.migrationHarnessSource, env.GITHUB_SHA);
+  assert.match(report.migrationReceipt, /^artifacts[\\/]native-suite-[0-9]+[\\/]migration-016-report\.json$/);
+  assert.ok(Buffer.isBuffer(migrationBytes)); assert.equal(hash(migrationBytes), report.migrationReportSha256);
+  handoff.checkReport(json(migrationBytes), env.GITHUB_SHA);
 }
 function read(file, max = 32768) {
   const bytes = readBounded(path.resolve(file), max); assert.equal(fs.lstatSync(file).nlink, 1); return bytes;
@@ -148,8 +171,8 @@ function main(args, env = process.env) {
   const binding = bindArtifact(json(read(path.join(control, 'stager-run.json'), 2 * 1024 * 1024)),
     json(read(path.join(control, 'artifact.json'), 2 * 1024 * 1024)), env, review);
   if (mode === 'bind') { assert.equal(args.length, 1); write('input-binding.json', binding); return binding; }
-  assert.ok(['prepare', 'contract', 'receipt'].includes(mode));
-  assert.equal(args.length, mode === 'receipt' ? 4 : 2);
+  assert.ok(['prepare', 'contract', 'receipt', 'migrated-receipt'].includes(mode));
+  assert.equal(args.length, mode === 'receipt' ? 4 : mode === 'migrated-receipt' ? 5 : 2);
   const directory = path.resolve(args[1]);
   assert.deepEqual(fs.readdirSync(directory).sort(), Object.keys(LIMITS).sort(), 'Only the six flat reviewed data files are admitted');
   const files = Object.fromEntries(Object.entries(LIMITS).map(([name, max]) => [name, read(path.join(directory, name), max)]));
@@ -168,13 +191,17 @@ function main(args, env = process.env) {
   const reportBytes = read(args[2], 256 * 1024), lifecycleBytes = read(args[3], 1024 * 1024);
   const report = json(reportBytes);
   const lifecycle = lifecycleBytes.toString('utf8').split(/\r?\n/).filter(line => line.trim()).map(line => JSON.parse(line));
-  checkReceipt(report, lifecycle, admitted.config, env.CREATOR_OUTGOING_CASE);
+  if (mode === 'migrated-receipt') {
+    assert.match(report.migrationReceipt, /^artifacts[\\/]native-suite-[0-9]+[\\/]migration-016-report\.json$/);
+    assert.equal(path.resolve(args[4]).toLowerCase(), path.resolve(ROOT, report.migrationReceipt).toLowerCase());
+    checkMigratedReceipt(report, lifecycle, admitted.config, env.CREATOR_OUTGOING_CASE, read(args[4], 256 * 1024), env);
+  } else checkReceipt(report, lifecycle, admitted.config, env.CREATOR_OUTGOING_CASE);
   const result = { ...binding, configSha256: admitted.configSha256, reportSha256: hash(reportBytes),
     lifecycleSha256: hash(lifecycleBytes), nativeAccepted: true, acceptanceOnly: true, releaseReady: false };
   write('acceptance-binding.json', result); return result;
 }
 module.exports = { BRANCH, WORKFLOW, ARTIFACT, KIND, DIRECTORY, TEMPLATE, BASELINE, TARGET, DESCRIPTOR, LIMITS, CASES, R2, assertR2,
-  hash, assertHost, reviewBytes, inputs, bindArtifact, admit, checkReceipt, main };
+  hash, assertHost, reviewBytes, inputs, bindArtifact, admit, checkReceipt, checkMigratedReceipt, main };
 if (require.main === module) {
   try { console.log(JSON.stringify(main(process.argv.slice(2)))); }
   catch (error) { console.error(String(error.message).slice(0, 1600)); process.exitCode = 1; }

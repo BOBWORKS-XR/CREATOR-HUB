@@ -19,27 +19,34 @@ on:
         description: Exact SHA256 of the reviewed scripts/windows-outgoing-017-review.json bytes
         type: string
         required: true
+      migrated:
+        description: Same-run migrated fixture continuation, restore enabled only
+        type: boolean
+        default: false
+      mixed_public_diagnostic:
+        description: Separate public-migration then controlled-outgoing diagnostic, not acceptance
+        type: boolean
+        default: false
+      mixed_expected_source:
+        description: Independently reviewed exact workflow source commit for diagnostic
+        type: string
+        required: false
+      mixed_expected_actor_id:
+        description: Independently reviewed numeric initiating actor ID for diagnostic
+        type: string
+        required: false
 permissions:
   contents: read
   actions: read
 jobs:
   acceptance:
-    if: github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/validation/windows-menu-merge-20261027'
+    if: github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/validation/windows-menu-merge-20261027' && !inputs.mixed_public_diagnostic
     runs-on: windows-latest
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - case: mcp-restore
-            last_tool: mcp
-            restore: 'true'
-          - case: setup-restore
-            last_tool: setup
-            restore: 'true'
-          - case: setup-no-restore
-            last_tool: setup
-            restore: 'false'
+        include: ${{ fromJSON(inputs.migrated && '[{"case":"mcp-restore","last_tool":"mcp","restore":"true"}]' || '[{"case":"mcp-restore","last_tool":"mcp","restore":"true"},{"case":"setup-restore","last_tool":"setup","restore":"true"},{"case":"setup-no-restore","last_tool":"setup","restore":"false"}]') }}
     env:
       CREATOR_OUTGOING_CASE: ${{ matrix.case }}
       CREATOR_OUTGOING_LAST_TOOL: ${{ matrix.last_tool }}
@@ -82,6 +89,38 @@ jobs:
           run-id: ${{ inputs.artifact_run }}
           path: artifacts/outgoing-017-data
           merge-multiple: true
+      - name: Bind exact R2 migration artifact
+        if: inputs.migrated
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $artifact = gh api repos/BOBWORKS-XR/CREATOR-HUB/actions/artifacts/13141988162 | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $artifact.id -ne 13141988162 -or $artifact.name -cne 'windows-016-acceptance-input' -or $artifact.expired -ne $false -or $artifact.size_in_bytes -lt 1 -or $artifact.size_in_bytes -gt 64MB -or $artifact.digest -cne 'sha256:fabe440d1108114a0ca810a1115a29e19c08e7a77f30aa370d46a3cb2481a53e' -or $artifact.workflow_run.id -ne 41446190810) { throw 'R2 migration artifact differs.' }
+          $run = gh api repos/BOBWORKS-XR/CREATOR-HUB/actions/runs/41446190810 | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $run.status -cne 'completed' -or $run.conclusion -cne 'success' -or $run.repository.full_name -cne 'BOBWORKS-XR/CREATOR-HUB' -or $run.head_repository.full_name -cne 'BOBWORKS-XR/CREATOR-HUB' -or $run.head_sha -cne 'bd980ed2b02ba5d00bce25d156d67f6a2f45253d' -or $artifact.workflow_run.head_sha -cne $run.head_sha) { throw 'R2 migration stager differs.' }
+          New-Item -ItemType Directory -Path artifacts/incoming-016 | Out-Null
+          @{artifactId=$artifact.id;runId=$run.id;artifactSource=$run.head_sha;archiveSha256='fabe440d1108114a0ca810a1115a29e19c08e7a77f30aa370d46a3cb2481a53e';harnessSource=$env:GITHUB_SHA} | ConvertTo-Json | Set-Content artifacts/incoming-016/input-binding.json -Encoding utf8NoBOM
+      - uses: actions/download-artifact@v4
+        if: inputs.migrated
+        with:
+          artifact-ids: 13141988162
+          github-token: ${{ github.token }}
+          run-id: 41446190810
+          path: artifacts/incoming-016/candidate
+          merge-multiple: true
+      - name: Stage exact migration baselines
+        if: inputs.migrated
+        shell: pwsh
+        run: |
+          $directory = New-Item -ItemType Directory -Path artifacts/incoming-016/baselines
+          node -e "const {baselines}=require('./scripts/native-installed-baseline.cjs');process.stdout.write(JSON.stringify(baselines))" | Set-Content artifacts/incoming-016/baselines.json -Encoding utf8NoBOM
+          if ($LASTEXITCODE -ne 0) { throw 'Baseline contract unavailable.' }
+          foreach ($baseline in (Get-Content artifacts/incoming-016/baselines.json -Raw | ConvertFrom-Json)) {
+            $target = Join-Path $directory.FullName $baseline.asset
+            Invoke-WebRequest -Uri "https://github.com/BOBWORKS-XR/$($baseline.repo)/releases/download/v$($baseline.version)/$($baseline.asset)" -OutFile $target -TimeoutSec 180
+            if ((Get-FileHash -LiteralPath $target).Hash.ToLowerInvariant() -cne $baseline.sha256) { throw 'Migration baseline differs.' }
+          }
       - name: Pin both installers, three metadata files and the path-free config before dependencies or trust
         shell: pwsh
         run: |
@@ -91,7 +130,10 @@ jobs:
       - run: npm ci
       - run: npm --prefix modules/mcp ci
       - name: Focused pure and host-refusal tests, no installer or trust operations
-        run: node --test scripts/windows-outgoing-017.test.cjs scripts/self-update-lab-feed.test.cjs
+        run: node --test scripts/windows-outgoing-017.test.cjs scripts/self-update-lab-feed.test.cjs scripts/windows-migrated-outgoing-handoff.test.cjs
+      - name: Require migration network isolation before native trust
+        if: inputs.migrated
+        run: node -e "require('./scripts/windows-migrated-outgoing-handoff.cjs').requireMigrationNetworkIsolation()"
       - name: Validate the unchanged signed contract and parse the lifecycle before trust
         shell: pwsh
         run: |
@@ -104,12 +146,25 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Outgoing driver parse failed.' }
       - name: Genuine R2 direct16 signed update and automatic restart into root-only17
         shell: pwsh
+        env:
+          MIGRATED_MODE: ${{ inputs.migrated }}
         run: |
+          if ($env:MIGRATED_MODE -ceq 'true') {
+            $env:CREATOR_MIGRATED_CONTINUATION = '1'
+            $env:CREATOR_MIGRATED_CANDIDATE = Join-Path $PWD artifacts/incoming-016/candidate
+            $env:CREATOR_MIGRATED_BASELINES = Join-Path $PWD artifacts/incoming-016/baselines
+          }
           ./scripts/native-self-update-lab.ps1 -Outgoing017 -ContractPath (Join-Path $PWD artifacts/outgoing-017-control/runner-config.json) -BaselineInstallerPath (Join-Path $PWD artifacts/outgoing-017-data/Creator.Hub_0.1.16_x64-setup.exe) -TimeoutSeconds 480 | Tee-Object -FilePath artifacts/outgoing-017-control/lifecycle.jsonl
           if ($LASTEXITCODE -ne 0) { throw 'Outgoing17 native lifecycle failed.' }
           $reports = @(Get-ChildItem -LiteralPath artifacts -Directory -Filter 'native-suite-*' | ForEach-Object { Get-ChildItem -LiteralPath $_.FullName -File -Filter outgoing-report.json })
           if ($reports.Count -ne 1) { throw 'Expected one isolated outgoing acceptance receipt.' }
-          node scripts/windows-outgoing-017.cjs receipt (Join-Path $PWD artifacts/outgoing-017-data) $reports[0].FullName (Join-Path $PWD artifacts/outgoing-017-control/lifecycle.jsonl)
+          if ($env:MIGRATED_MODE -ceq 'true') {
+            $migrations = @(Get-ChildItem -LiteralPath artifacts -Directory -Filter 'native-suite-*' | ForEach-Object { Get-ChildItem -LiteralPath $_.FullName -File -Filter migration-016-report.json })
+            if ($migrations.Count -ne 1) { throw 'Expected one same-run migration receipt.' }
+            node scripts/windows-outgoing-017.cjs migrated-receipt (Join-Path $PWD artifacts/outgoing-017-data) $reports[0].FullName (Join-Path $PWD artifacts/outgoing-017-control/lifecycle.jsonl) $migrations[0].FullName
+          } else {
+            node scripts/windows-outgoing-017.cjs receipt (Join-Path $PWD artifacts/outgoing-017-data) $reports[0].FullName (Join-Path $PWD artifacts/outgoing-017-control/lifecycle.jsonl)
+          }
           if ($LASTEXITCODE -ne 0) { throw 'Outgoing native/cleanup receipt refused.' }
       - uses: actions/upload-artifact@v4
         if: always()
@@ -120,5 +175,115 @@ jobs:
           path: |
             artifacts/outgoing-017-control/*.json
             artifacts/outgoing-017-control/lifecycle.jsonl
+            artifacts/incoming-016/input-binding.json
+            artifacts/native-suite-*/*.json
+            artifacts/native-suite-*/*.png
+  mixed-public-diagnostic:
+    if: github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/validation/windows-menu-merge-20261027' && inputs.mixed_public_diagnostic && !inputs.migrated
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      CREATOR_MIXED_PUBLIC_DIAGNOSTIC: '1'
+      CREATOR_MIXED_EXPECTED_SOURCE: ${{ inputs.mixed_expected_source }}
+      CREATOR_MIXED_EXPECTED_ACTOR_ID: ${{ inputs.mixed_expected_actor_id }}
+      CREATOR_OUTGOING_CASE: mcp-restore
+      CREATOR_OUTGOING_LAST_TOOL: mcp
+      CREATOR_OUTGOING_RESTORE: 'true'
+      CREATOR_OUTGOING_REVIEW_SHA256: 1ec982be724555fe0bf8556dd8fa4a997cd7e1772ea87e91e7992d1d8209cdc7
+      INPUT_RUN: '41458124135'
+      INPUT_ARTIFACT: '13147427412'
+      INPUT_SHA256: 6861cb447f1416a9e2a6a7ab14796cb601896dce934a62fee3dec998006ab73c
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - name: Refuse unreviewed runner, actor and source before any download
+        shell: pwsh
+        run: |
+          node -e "require('./scripts/windows-mixed-public-diagnostic.cjs').admit()"
+          if ($LASTEXITCODE -ne 0) { throw 'Diagnostic runner admission refused.' }
+      - name: Bind exact outgoing and migration stager metadata
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          New-Item -ItemType Directory -Path artifacts/outgoing-017-control,artifacts/incoming-016,artifacts/mixed-public-control | Out-Null
+          gh api repos/BOBWORKS-XR/CREATOR-HUB/actions/runs/41458124135 | Set-Content artifacts/outgoing-017-control/stager-run.json -Encoding utf8NoBOM
+          if ($LASTEXITCODE -ne 0) { throw 'Outgoing stager unavailable.' }
+          gh api repos/BOBWORKS-XR/CREATOR-HUB/actions/artifacts/13147427412 | Set-Content artifacts/outgoing-017-control/artifact.json -Encoding utf8NoBOM
+          if ($LASTEXITCODE -ne 0) { throw 'Outgoing artifact unavailable.' }
+          $artifact = gh api repos/BOBWORKS-XR/CREATOR-HUB/actions/artifacts/13141988162 | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $artifact.id -ne 13141988162 -or $artifact.name -cne 'windows-016-acceptance-input' -or $artifact.expired -ne $false -or $artifact.size_in_bytes -lt 1 -or $artifact.size_in_bytes -gt 64MB -or $artifact.digest -cne 'sha256:fabe440d1108114a0ca810a1115a29e19c08e7a77f30aa370d46a3cb2481a53e' -or $artifact.workflow_run.id -ne 41446190810 -or $artifact.workflow_run.repository_id -ne 1364807512 -or $artifact.workflow_run.head_repository_id -ne 1364807512 -or $artifact.workflow_run.head_sha -cne 'bd980ed2b02ba5d00bce25d156d67f6a2f45253d') { throw 'Migration artifact differs.' }
+          $run = gh api repos/BOBWORKS-XR/CREATOR-HUB/actions/runs/41446190810 | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $run.id -ne 41446190810 -or $run.run_attempt -ne 1 -or $run.event -cne 'workflow_dispatch' -or $run.status -cne 'completed' -or $run.conclusion -cne 'success' -or $run.head_branch -cne 'validation/windows-menu-merge-20261027' -or $run.path -cne '.github/workflows/windows-016-input.yml' -or $run.repository.id -ne 1364807512 -or $run.head_repository.id -ne 1364807512 -or $run.head_sha -cne 'bd980ed2b02ba5d00bce25d156d67f6a2f45253d') { throw 'Migration stager differs.' }
+          @{artifactId=$artifact.id;runId=$run.id;artifactSource=$run.head_sha;archiveSha256='fabe440d1108114a0ca810a1115a29e19c08e7a77f30aa370d46a3cb2481a53e';harnessSource=$env:GITHUB_SHA} | ConvertTo-Json | Set-Content artifacts/incoming-016/input-binding.json -Encoding utf8NoBOM
+      - uses: actions/download-artifact@v4
+        with:
+          artifact-ids: 13147427412
+          github-token: ${{ github.token }}
+          run-id: 41458124135
+          path: artifacts/outgoing-017-data
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          artifact-ids: 13141988162
+          github-token: ${{ github.token }}
+          run-id: 41446190810
+          path: artifacts/incoming-016/candidate
+          merge-multiple: true
+      - name: Stage pinned public legacy baselines
+        shell: pwsh
+        run: |
+          $directory = New-Item -ItemType Directory -Path artifacts/incoming-016/baselines
+          node -e "const {baselines}=require('./scripts/native-installed-baseline.cjs');process.stdout.write(JSON.stringify(baselines))" | Set-Content artifacts/incoming-016/baselines.json -Encoding utf8NoBOM
+          if ($LASTEXITCODE -ne 0) { throw 'Baseline contract unavailable.' }
+          foreach ($baseline in (Get-Content artifacts/incoming-016/baselines.json -Raw | ConvertFrom-Json)) {
+            $target = Join-Path $directory.FullName $baseline.asset
+            Invoke-WebRequest -Uri "https://github.com/BOBWORKS-XR/$($baseline.repo)/releases/download/v$($baseline.version)/$($baseline.asset)" -OutFile $target -TimeoutSec 180
+            if ((Get-FileHash -LiteralPath $target).Hash.ToLowerInvariant() -cne $baseline.sha256) { throw 'Migration baseline differs.' }
+          }
+      - run: npm ci
+      - run: npm --prefix modules/mcp ci
+      - name: Test diagnostic and unchanged isolation refusal
+        run: node --test scripts/windows-mixed-public-diagnostic.test.cjs scripts/windows-migrated-outgoing-handoff.test.cjs
+      - name: Pin exact outgoing R2 and successor data
+        shell: pwsh
+        run: |
+          $admission = node scripts/windows-mixed-public-diagnostic.cjs --prepare | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $admission.configSha256 -cnotmatch '^[a-f0-9]{64}$') { throw 'Diagnostic outgoing admission refused.' }
+          "CREATOR_OUTGOING_CONFIG_SHA256=$($admission.configSha256)" | Add-Content -LiteralPath $env:GITHUB_ENV -Encoding utf8
+      - name: Public unobserved migration before lab trust
+        shell: pwsh
+        run: |
+          $env:CREATOR_MIGRATED_CONTINUATION = '1'
+          $env:CREATOR_MIGRATED_CANDIDATE = Join-Path $PWD artifacts/incoming-016/candidate
+          $env:CREATOR_MIGRATED_BASELINES = Join-Path $PWD artifacts/incoming-016/baselines
+          node scripts/windows-mixed-public-diagnostic.cjs --migration
+          if ($LASTEXITCODE -ne 0) { throw 'Public migration diagnostic refused.' }
+      - name: Controlled outgoing diagnostic on the same runner profile
+        shell: pwsh
+        run: |
+          $env:CREATOR_MIGRATED_CONTINUATION = '1'
+          $env:CREATOR_MIGRATED_CANDIDATE = Join-Path $PWD artifacts/incoming-016/candidate
+          $env:CREATOR_MIGRATED_BASELINES = Join-Path $PWD artifacts/incoming-016/baselines
+          ./scripts/native-mixed-public-diagnostic.ps1 -Outgoing017 -ContractPath (Join-Path $PWD artifacts/outgoing-017-control/runner-config.json) -BaselineInstallerPath (Join-Path $PWD artifacts/outgoing-017-data/Creator.Hub_0.1.16_x64-setup.exe) -TimeoutSeconds 480 | Tee-Object -FilePath artifacts/mixed-public-control/lifecycle.jsonl
+          if ($LASTEXITCODE -ne 0) { throw 'Controlled outgoing diagnostic or cleanup failed; no receipt.' }
+          $reports = @(Get-ChildItem -LiteralPath artifacts -Directory -Filter 'native-suite-*' | ForEach-Object { Get-ChildItem -LiteralPath $_.FullName -File -Filter mixed-public-diagnostic-report.json })
+          if ($reports.Count -ne 1) { throw 'Expected one diagnostic report.' }
+          node scripts/windows-mixed-public-diagnostic.cjs --receipt $reports[0].FullName
+          if ($LASTEXITCODE -ne 0) { throw 'Diagnostic receipt refused.' }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-mixed-public-diagnostic-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            artifacts/mixed-public-control/*.json
+            artifacts/mixed-public-control/*.jsonl
+            artifacts/incoming-016/input-binding.json
             artifacts/native-suite-*/*.json
             artifacts/native-suite-*/*.png

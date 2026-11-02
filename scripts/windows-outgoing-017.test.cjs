@@ -176,16 +176,53 @@ test('each restore case independently needs native signed restart and complete T
     assert.throws(() => outgoing.checkReceipt({ ...f.report, afterPeVersion: [0, 1, 16, 0] }, f.lifecycle, f.config, caseName));
   }
 });
+test('migrated receipt requires the same-run report, R2 baseline and latched preservation', () => {
+  const f = receipts('mcp-restore');
+  const handoff = require('./windows-migrated-outgoing-handoff.cjs');
+  const migration = require('./native-windows-016-migration.cjs');
+  const target = require('./windows-migration-r2-candidate.cjs').TARGET;
+  const sha = 'a'.repeat(40), env = { GITHUB_RUN_ID: '123', GITHUB_RUN_ATTEMPT: '1', GITHUB_SHA: sha };
+  const migrationReport = { ...migration.reportTemplate(sha), passed: true, nativeGuideAccepted: true,
+    repeatStartupAccepted: true, settingsPreserved: true, cancelAccepted: true, installedResourcesVerified: true,
+    policyRestored: true, nativeDecisions: [{}, {}], inputBinding: { ...handoff.input, harnessSource: sha },
+    baselines: [{ product: 'Creator Hub', version: '0.1.12',
+      installerSha256: '0cd8a4493dd9a5b77fbc5fe160582a2b2698fea43aedd9118b2d5b3bd3c51a18',
+      executableSha256: '34c6f05548f469ac23b4faee7aa8355d5cca083c444c4f7b0942426a9c76a7ac' }] };
+  const bytes = Buffer.from(JSON.stringify(migrationReport));
+  const config = { ...f.config, baseline: { version: target.version, installer: target.installer, exe: target.exe },
+    runtime: { ...f.config.runtime, baselineDescriptor: migration.RESOURCE_PINS['routing/runtime.json'] } };
+  const report = { ...f.report, baseline: config.baseline, migratedContinuation: true, changedMcpGenerationProven: false,
+    fixtureSettingsChecksPassed: true,
+    migratedFixtureFilesUnchangedAfterDriverCleanup: true, migratedFixtureFilesChecked: 23, activeRouteUnchangedAfterCancel: true, migrationRunId: '123', migrationRunAttempt: '1',
+    migrationHarnessSource: sha, migrationReceipt: 'artifacts/native-suite-123/migration-016-report.json', migrationReportSha256: outgoing.hash(bytes) };
+  delete report.settingsPreserved;
+  outgoing.checkMigratedReceipt(report, f.lifecycle, config, 'mcp-restore', bytes, env);
+  assert.throws(() => outgoing.checkReceipt(report, f.lifecycle, config, 'mcp-restore'), /dedicated/);
+  for (const change of [{ migratedFixtureFilesUnchangedAfterDriverCleanup: false }, { migratedFixtureFilesChecked: 22 }, { activeRouteUnchangedAfterCancel: false }, { fixtureSettingsChecksPassed: false }, { settingsPreserved: true },
+    { changedMcpGenerationProven: true }, { migrationRunId: '124' }, { migrationRunAttempt: '2' },
+    { migrationHarnessSource: 'b'.repeat(40) }, { migrationReceipt: '../migration-016-report.json' },
+    { migrationReportSha256: '0'.repeat(64) }]) {
+    assert.throws(() => outgoing.checkMigratedReceipt({ ...report, ...change }, f.lifecycle, config, 'mcp-restore', bytes, env));
+  }
+  assert.throws(() => outgoing.checkMigratedReceipt(report, f.lifecycle, config, 'mcp-restore', Buffer.from('{}'), env));
+});
 test('workflow execution is manual branch-only, read-only and creates three independent Windows matrix jobs', () => {
   assert.match(workflow, /^  workflow_dispatch:/m);
   assert.doesNotMatch(workflow, /\b(?:pull_request|schedule|workflow_run|workflow_call):/);
   assert.match(workflow, /github\.ref == 'refs\/heads\/validation\/windows-menu-merge-20261027'/);
   assert.match(workflow, /permissions:\s+contents: read\s+actions: read/);
   assert.doesNotMatch(workflow, /contents: write|actions: write|secrets\.|cargo |gh release|workflow run|trustlocal|SkipCertificateCheck|NODE_TLS_REJECT_UNAUTHORIZED/);
-  assert.equal((workflow.match(/runs-on: windows-latest/g) || []).length, 1);
+  assert.equal((workflow.match(/runs-on: windows-latest/g) || []).length, 2);
   assert.match(workflow, /fail-fast: false/);
-  assert.deepEqual([...workflow.matchAll(/- case: ([^\r\n]+)\r?\n\s+last_tool: ([^\r\n]+)\r?\n\s+restore: '([^']+)'/g)]
-    .map(match => [match[1], [match[2], match[3]]]), Object.entries(outgoing.CASES));
+  const matrix = workflow.match(/fromJSON\(inputs\.migrated && '([^']+)' \|\| '([^']+)'\)/);
+  assert.ok(matrix);
+  const cases = rows => JSON.parse(rows).map(row => [row.case, [row.last_tool, row.restore]]);
+  assert.deepEqual(cases(matrix[1]), [['mcp-restore', outgoing.CASES['mcp-restore']]]);
+  assert.deepEqual(cases(matrix[2]), Object.entries(outgoing.CASES));
+  assert.ok(workflow.indexOf('requireMigrationNetworkIsolation()') < workflow.indexOf('native-self-update-lab.ps1 -Outgoing017'));
+  for (const fragment of ['13141988162', '41446190810', 'bd980ed2b02ba5d00bce25d156d67f6a2f45253d',
+    'fabe440d1108114a0ca810a1115a29e19c08e7a77f30aa370d46a3cb2481a53e', 'CREATOR_MIGRATED_CONTINUATION',
+    'CREATOR_MIGRATED_CANDIDATE', 'CREATOR_MIGRATED_BASELINES', 'migrated-receipt']) assert.ok(workflow.includes(fragment));
   assert.equal((workflow.match(/native-self-update-lab\.ps1 -Outgoing017/g) || []).length, 1);
   assert.doesNotMatch(workflow, /-Incoming016|native-unified-outgoing-smoke|\.exe\s+\/S|\.exe\s+-/);
   assert.match(workflow, /persist-credentials: false/);
@@ -197,9 +234,9 @@ test('registration push is validation-branch-only and every job skips unless exp
   assert.deepEqual([...events.matchAll(/^  ([a-z_]+):/gm)].map(match => match[1]), ['push', 'workflow_dispatch']);
   const jobs = workflow.match(/^jobs:\r?\n([\s\S]*)/m)[1];
   const gate = "github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/validation/windows-menu-merge-20261027'";
-  assert.deepEqual([...jobs.matchAll(/^  ([a-zA-Z0-9_-]+):/gm)].map(match => match[1]), ['acceptance']);
+  assert.deepEqual([...jobs.matchAll(/^  ([a-zA-Z0-9_-]+):/gm)].map(match => match[1]), ['acceptance', 'mixed-public-diagnostic']);
   assert.deepEqual([...jobs.matchAll(/^  ([a-zA-Z0-9_-]+):\r?\n    if: ([^\r\n]+)/gm)]
-    .map(match => [match[1], match[2]]), [['acceptance', gate]]);
+    .map(match => [match[1], match[2]]), [['acceptance', `${gate} && !inputs.mixed_public_diagnostic`], ['mixed-public-diagnostic', `${gate} && inputs.mixed_public_diagnostic && !inputs.migrated`]]);
   const f = fixture();
   assert.throws(() => outgoing.assertHost({ ...f.env, GITHUB_EVENT_NAME: 'push' }, 'win32'));
   assert.throws(() => outgoing.assertHost({ ...f.env, GITHUB_REF: 'refs/heads/main' }, 'win32'));
@@ -386,8 +423,8 @@ test('cold and cached updates both cancel and prove preservation before native a
   assert.match(rust, /fn download\([\s\S]*?if cached\(release\) \{\s*return Ok\(path\);/);
   assert.ok(fs.readFileSync(path.join(__dirname, '../src/app.js'), 'utf8')
     .includes("byId('hub-update-button').addEventListener('click', () => hubAction('install_hub_update'))"));
-  for (const downloaded of [false, true]) {
-    const events = [], report = {};
+  for (const [downloaded, migratedMode, routeChanged] of [[false, false, false], [true, false, false], [false, true, false], [true, true, false], [false, true, true]]) {
+    const events = [], report = { beforeRoute: { generation: 'original' } };
     let clicks = 0;
     const page = {
       evaluate: async () => ({ currentVersion: '0.1.16', availableVersion: '0.1.17', installBlocked: null, downloaded }),
@@ -401,6 +438,7 @@ test('cold and cached updates both cancel and prove preservation before native a
       },
     };
     const context = { assert, page, report, retry: async read => read(),
+      migrated: migratedMode ? { guard: { verify: () => events.push('guard-verify') } } : null,
       button: action => {
         assert.equal(action, clicks === 1 ? 'Not now' : 'Update Hub');
         if (action === 'Update Hub') assert.equal(report.cancelPreserved, true);
@@ -409,11 +447,15 @@ test('cold and cached updates both cancel and prove preservation before native a
       sameProcess: () => { events.push('same-process'); }, rootRecord: {},
       hashFile: () => 'baseline-hash', hub: 'test.exe', config: { baseline: { exe: 'baseline-hash' } },
       preserved: async () => { assert.equal(clicks, 1); events.push('preserved'); },
+      active: version => { assert.equal(version, '0.1.16'); events.push('active-route'); return routeChanged ? { generation: 'changed' } : report.beforeRoute; },
       draft: 'unchanged-draft', ticket: 'test-ticket', fs: { existsSync: () => false },
       setInterval: () => { assert.equal(report.cancelPreserved, true); events.push('watch-ticket'); return 1; },
     };
-    await require('node:vm').runInNewContext(`(async () => { let watch, observedTicket; ${sequence} })()`, context);
-    assert.deepEqual(events, ['click-update', 'Not now', 'same-process', 'preserved', 'watch-ticket', 'click-update', 'Update Hub']);
+    const execution = require('node:vm').runInNewContext(`(async () => { let watch, observedTicket; ${sequence} })()`, context);
+    if (routeChanged) { await assert.rejects(execution); assert.equal(clicks, 1); continue; }
+    await execution;
+    assert.deepEqual(events, [...(migratedMode ? ['guard-verify'] : []), 'click-update', 'Not now', 'same-process', 'preserved', ...(migratedMode ? ['active-route'] : []),
+      'watch-ticket', ...(migratedMode ? ['guard-verify'] : []), 'click-update', 'Update Hub']);
     assert.equal(report.cancelPreserved, true);
   }
 });
@@ -421,7 +463,7 @@ test('cold and cached updates both cancel and prove preservation before native a
 test('all inline PowerShell blocks parse without executing their contents', () => {
   const blocks = [...workflow.matchAll(/        run: \|\r?\n((?:          [^\r\n]*\r?\n)+)/g)]
     .map(match => match[1].split(/\r?\n/).map(line => line.slice(10)).join('\n'));
-  assert.equal(blocks.length, 5);
+  assert.equal(blocks.length, 13);
   const command = '$texts=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($env:OUTGOING_PARSE_INPUT))|ConvertFrom-Json;foreach($text in $texts){$t=$null;$e=$null;[void][Management.Automation.Language.Parser]::ParseInput($text,[ref]$t,[ref]$e);if($e.Count){$e|ForEach-Object{$_.Message};exit 1}}';
   const result = spawnSync(process.platform === 'win32' ? 'powershell.exe' : 'pwsh', ['-NoProfile', '-NonInteractive', '-Command', command],
     { env: { ...process.env, OUTGOING_PARSE_INPUT: bytes(blocks).toString('base64') }, encoding: 'utf8', windowsHide: true, timeout: 15000 });
