@@ -42,8 +42,8 @@ test('local and foreign-proxy refusal precedes configuration, installer or crede
   assert.doesNotMatch(result.stderr, /ENOENT|MUST-NOT-INSPECT/);
 });
 
-const candidatePath = [path.join(root, 'artifacts/menu-merge-20261027/settings-build-v5', incoming.TARGET.asset),
-  path.join(root, 'artifacts/incoming-016/candidate', incoming.TARGET.asset)].find(file => fs.existsSync(file));
+const candidatePath = [process.env.CREATOR_TEST_CANDIDATE_PATH, path.join(root, 'artifacts/menu-merge-20261027/settings-build-v5', incoming.TARGET.asset),
+  path.join(root, 'artifacts/incoming-016/candidate', incoming.TARGET.asset)].find(file => file && fs.existsSync(file));
 test('actual pinned NSIS binds the new public14 five-route contract, not source-only or synthetic installer bytes', { skip: !candidatePath }, () => {
   incoming.installer(candidatePath);
   const installer = fs.readFileSync(candidatePath);
@@ -131,11 +131,12 @@ test('new native lane is explicit/manual, read-only, data-bound and tests before
   assert.deepEqual(testCommand?.split(/\s+/), ['node', '--test', '--test-concurrency=1',
     'scripts/windows-incoming-016.test.cjs', 'scripts/native-self-update-direct.test.cjs',
     'scripts/self-update-lab-feed.test.cjs', 'scripts/native-self-update-lab.test.cjs',
-    'scripts/native-unified-outgoing-target.test.cjs', 'scripts/native-windows-016-migration.test.cjs'],
+    'scripts/native-unified-outgoing-target.test.cjs'],
   'Serialize PowerShell-heavy test files without dropping any pre-native regression');
   assert.match(workflow, /workflow_dispatch:/); assert.match(workflow, /options: \[fresh, guarded, incoming, migration\]/);
   assert.match(workflow, /push:\s+branches: \[validation\/windows-menu-merge-20261027\]/);
   assert.match(workflow, /acceptance:\s+if: github\.repository == 'BOBWORKS-XR\/CREATOR-HUB' && github\.event_name == 'workflow_dispatch'/);
+  assert.ok(workflow.includes("(inputs.mode == 'fresh' || inputs.mode == 'guarded')"));
   assert.doesNotMatch(workflow, /contents: write|pull_request:|macos|cargo |build:unified|signer sign|gh release|TAURI_SIGNING|rejectUnauthorized|ignore-certificate/);
   for (const expected of ['artifact.digest', 'archive_sha256', 'artifact.workflow_run.id', 'same-repository run',
     'persist-credentials: false', 'servedRouteCount -ne 5', 'rejectedRequestCount -ne 0', 'cleanupVerified -ne $true',
@@ -224,13 +225,16 @@ test('fresh restart repeats exact-image and CDP ownership checks before semantic
 });
 
 test('current finite target binds dirty build inputs separately from associated snapshot and rejects old16', () => {
-  assert.equal(incoming.TARGET.productSource, '958233ffd5c52ea6c4168ecd2419f5c3fdfadb7a');
-  assert.equal(incoming.TARGET.bytes, 38216528);
+  assert.equal(incoming.TARGET.productSource, 'source-receipt-sha256:a6eeac26841ad4dc7aa20e6480cc1ff185e0aa0458fa6611b70d681e812844e9');
+  assert.equal(incoming.TARGET.bytes, 38205622);
   assert.equal(incoming.BUILD_INPUT.builtFromDirtyWorktree, true);
   assert.equal(incoming.BUILD_INPUT.sourceSnapshotBuilt, false);
   assert.equal(incoming.BUILD_INPUT.buildSourceBase, 'cf6c2db2a4260e02206c91133878ff82bf3bb084');
-  assert.equal(incoming.BUILD_INPUT.buildInputDigest, '52a0ac264c54769360e05d7be6149712771af3f1a366649ae3b7f04b2d19f1b5');
-  assert.equal(incoming.BUILD_INPUT.buildSourceFileCount, 781);
+  assert.equal(incoming.BUILD_INPUT.buildInputDigest, '29d89245d9b911071f65ac5e42103d90c1ffff150bda8a8369118cc8a4ceab4a');
+  assert.equal(incoming.BUILD_INPUT.buildSourceFileCount, 1189);
+  assert.equal(incoming.BUILD_INPUT.sourceUnchanged, false);
+  assert.throws(() => incoming.validatePins({ ...pins(), executable: 'c537bcaec1e57a2dc0477781aab0e18e71e0bab9d97946124fe8e2a3e455f676' }));
+  assert.throws(() => incoming.validatePins({ ...pins(), installer: '898e57b1f3dd87b0f871965eb955d54cc88a573a3b879303805defa829d1b89a' }));
   assert.deepEqual(incoming.BUILD_INPUT.sourceSnapshotTestOnlyDifferences, []);
   assert.throws(() => incoming.validatePins({ ...pins(), installer: '35c9b066ecab363bf6151e00ab97b1da46ca07c6fa9c2e28453f8990d5b63a66',
     executable: 'd6b851e9f2d4ed1db0f881d9d867b1c0554263833d779ab38b8aedea79c1c461' }));

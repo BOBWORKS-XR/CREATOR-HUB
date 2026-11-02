@@ -10,8 +10,8 @@ const block = workflow.match(/        run: \|\r?\n([\s\S]*?)(?=\r?\n      - uses
 assert.ok(block, 'Expected one inline data-only staging block');
 const script = block[1].split(/\r?\n/).map(line => line.replace(/^          /, '')).join('\n');
 const hasPwsh = spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-Command', '$PSVersionTable.PSVersion.Major'], { windowsHide: true, timeout: 15000 }).status === 0;
-const installer = { id: 680325441, name: 'Creator.Hub_0.1.16_x64-settings-v5-setup.exe', output: 'Creator.Hub_0.1.16_x64-setup.exe', size: 38216528,
-  state: 'uploaded', digest: 'sha256:898e57b1f3dd87b0f871965eb955d54cc88a573a3b879303805defa829d1b89a' };
+const installer = { id: 699918079, name: 'Creator.Hub_0.1.16_x64-20261102-setup.exe', output: 'Creator.Hub_0.1.16_x64-setup.exe', size: 38205622,
+  state: 'uploaded', digest: 'sha256:3cf91b78f0782186b94f7a617a8ffa8cba8da170b971902bd69e69a1a67a7a1e' };
 const metadata = [
   { id: 102, name: 'creator-hub-windows-x86_64-settings-v5.json', output: 'creator-hub-windows-x86_64.json', size: 512, state: 'uploaded', digest: `sha256:${'a'.repeat(64)}` },
   { id: 103, name: 'creator-hub-windows-x86_64-settings-v5.json.minisig', output: 'creator-hub-windows-x86_64.json.minisig', size: 297, state: 'uploaded', digest: `sha256:${'b'.repeat(64)}` },
@@ -76,8 +76,10 @@ test('staging has one private GET-only data job, no checkout, dependency/code ex
   assert.match(workflow, /github\.event_name == 'workflow_dispatch'/);
   assert.equal((workflow.match(/^        type: string$/gm) || []).length, 9);
   assert.doesNotMatch(workflow, /installer_asset_id|INSTALLER_ID|required: true/);
-  assert.ok(script.includes("id='680325441';bytes=38216528L;sha='898e57b1f3dd87b0f871965eb955d54cc88a573a3b879303805defa829d1b89a'"));
-  assert.ok(script.includes("name='Creator.Hub_0.1.16_x64-setup.exe';sourceName='Creator.Hub_0.1.16_x64-settings-v5-setup.exe'"));
+  assert.ok(script.includes("id='699918079';bytes=38205622L;sha='3cf91b78f0782186b94f7a617a8ffa8cba8da170b971902bd69e69a1a67a7a1e'"));
+  assert.ok(script.includes("$row.id -cnotmatch '^[1-9][0-9]{0,19}$'"));
+  assert.ok(script.indexOf("$row.id -cnotmatch") < script.indexOf('Invoke-RestMethod'));
+  assert.ok(script.includes("name='Creator.Hub_0.1.16_x64-setup.exe';sourceName='Creator.Hub_0.1.16_x64-20261102-setup.exe'"));
   for (const asset of metadata) assert.ok(script.includes(`name='${asset.output}';sourceName='${asset.name}'`));
   assert.ok(script.includes('$assets[0].name -cne $row.sourceName'));
   assert.match(workflow, /permissions:\s+contents: read/);
@@ -104,13 +106,13 @@ test('fresh stages only v5 under the canonical output name while preserving old 
   assert.deepEqual(result.downloads, [installer.output]); assert.equal(result.created, 1); assert.equal(result.gets.length, 1);
 });
 
-test('incoming stages only the fixed optional three files with independent hash and size pins', { skip: !hasPwsh }, () => {
+test('candidate stager refuses signed metadata in the fresh and guarded lane', { skip: !hasPwsh }, () => {
   const data = fixture(true);
   data.release.assets.push(...metadata.map((asset, index) => ({ id: 200 + index, name: asset.output,
     state: 'uploaded', size: asset.size, digest: `sha256:${'d'.repeat(64)}` })));
   const result = run(data);
-  assert.equal(result.passed, true, result.failure);
-  assert.deepEqual(result.downloads, [installer.output, ...metadata.map(asset => asset.output)]);
+  assert.equal(result.passed, false);
+  assert.deepEqual(result.downloads, []); assert.equal(result.created, 0);
 });
 
 test('canonical V3 or V4 metadata names cannot substitute for independently pinned V5 source names', { skip: !hasPwsh }, () => {
