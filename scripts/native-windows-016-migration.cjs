@@ -11,6 +11,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const os = require('node:os');
 const { spawn, execFileSync } = require('node:child_process');
 const { createRequire } = require('node:module');
 
@@ -21,6 +22,30 @@ const CONTEXT = Object.freeze({ GITHUB_ACTIONS: 'true', RUNNER_ENVIRONMENT: 'git
   GITHUB_REF: 'refs/heads/validation/windows-menu-merge-20261027', CREATOR_WINDOWS_016_MIGRATION: '1' });
 const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+const BASELINE_OUTPUT_MESSAGES = new Set([
+  'NSIS Error', 'Error launching installer', 'Error writing temporary file',
+  'Installer integrity check has failed', 'Error opening file for writing',
+]);
+function redactBaselineOutput(output) {
+  if (!Buffer.isBuffer(output) && typeof output !== 'string') return { available: false, lines: [], truncated: false };
+  const bytes = Buffer.isBuffer(output) ? output : Buffer.from(output.slice(0, 4097));
+  const prefix = bytes.subarray(0, 4096).toString('utf8');
+  const lines = prefix.split(/\r\n|\r|\n/).filter(Boolean);
+  return { available: true, lines: lines.slice(0, 32).map(line => BASELINE_OUTPUT_MESSAGES.has(line) ? line : '[redacted]'),
+    truncated: bytes.length > 4096 || lines.length > 32 };
+}
+function baselineFailure(error, baseline) {
+  const code = error && error.code;
+  const signal = error && error.signal;
+  return { asset: baseline.asset, status: Number.isSafeInteger(error?.status) ? error.status : null,
+    signal: typeof signal === 'string' && Object.hasOwn(os.constants.signals, signal) ? signal : signal == null ? null : 'other',
+    code: Number.isSafeInteger(code) ? code : typeof code === 'string' && (Object.hasOwn(os.constants.errno, code) || code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') ? code : code == null ? null : 'other',
+    stdout: redactBaselineOutput(error?.stdout), stderr: redactBaselineOutput(error?.stderr) };
+}
+function installBaseline(file, baseline, environment, report, run = execFileSync) {
+  try { return run(file, ['/S', '/NS'], { env: environment, windowsHide: true, timeout: 180000, stdio: 'pipe' }); }
+  catch (error) { report.baselineInstallerFailure = baselineFailure(error, baseline); throw error; }
+}
 
 // Independently frozen from the R2 installer payload. The signed runtime
 // descriptor binds all nine MCP files; these pins also bind Setup and routing.
@@ -486,7 +511,7 @@ async function main(args = process.argv.slice(2)) {
     for (const helper of ['native-window.ps1', 'native-webview-policy.ps1', 'native-startup-diagnostics.ps1']) regular(path.resolve('scripts', helper));
     report.baselines = [];
     for (const baseline of baselines) {
-      execFileSync(path.join(input.baselines, baseline.asset), ['/S', '/NS'], { env: environment, windowsHide: true, timeout: 180000, stdio: 'pipe' });
+      installBaseline(path.join(input.baselines, baseline.asset), baseline, environment, report);
       report.baselines.push({ product: baseline.product, version: baseline.version, installerSha256: baseline.sha256,
         executableSha256: hash(regular(path.join(process.env.LOCALAPPDATA, baseline.product, baseline.binary), 200 * 1024 * 1024)) });
     }
@@ -615,7 +640,7 @@ async function main(args = process.argv.slice(2)) {
     report.nativeGuideAccepted = true; report.repeatStartupAccepted = true; report.settingsPreserved = true;
     report.passed = true;
   } catch (error) {
-    report.error = String(error.stack || error); process.exitCode = 1;
+    report.error = report.baselineInstallerFailure ? 'Baseline installer failed; see redacted baselineInstallerFailure.' : String(error.stack || error); process.exitCode = 1;
     if (page) {
       report.guide = await page.locator('#convergence-dialog').innerText().catch(() => null);
       report.openDialogs = await page.evaluate(() => [...document.querySelectorAll('dialog[open]')]
@@ -642,7 +667,7 @@ async function main(args = process.argv.slice(2)) {
   return report;
 }
 
-module.exports = { TARGET, CONTEXT, admission, parseArgs, inside, hash, backupFile, fixture, verifyMerged, verifyClient,
+module.exports = { TARGET, CONTEXT, admission, parseArgs, inside, hash, backupFile, fixture, verifyMerged, verifyClient, redactBaselineOutput, baselineFailure, installBaseline,
   installerPath, validateProvenance, RESOURCE_PINS, MCP_FILES, INPUT_FILES, resourcePlan, moduleGeneration, verifyActiveReceipt,
   inspectInstalledResources, inspectActiveRoute, assertDialog, connectionReview, assertConnectionDialog, dialogCommand, DIALOG_ACTION, REGISTRATIONS, PROCESSES, reportTemplate, main };
 if (require.main === module) main().catch(error => { console.error(String(error.stack || error)); process.exitCode = 1; });

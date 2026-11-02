@@ -27,6 +27,42 @@ const config = { sourceCommit: 'e39d853f4207bbc8f250566064027c19d8eeb6e0', targe
     installer: '0a737147db5766e108ece53a6f6ffd5fad2d5d311058effacd4e07ae2d9bf219',
     executable: 'b98e7484bb7d3f2a9d3abb450446285eb24b42deeb31adf02a5694e1b16795a5',
     manifest: 'b80fba85744c023ed6d61a6442bd64d3031074d2d9d7ad9130d3c68e50ef3bf1' } };
+test('baseline installer failure preserves outcome and admits only bounded fixed diagnostic messages', () => {
+  const baseline = { asset: 'Creator.Works.MCP_2.7.7_x64-setup.exe' }, report = {}, options = { fixture: true };
+  const original = Object.assign(new Error('secret in exception stack'), { status: 2, signal: null, code: 2,
+    stdout: Buffer.from('NSIS Error\nC:\\Users\\private\\token-value\n'), stderr: Buffer.from('Error launching installer\nsecret-value\n') });
+  let calls = 0;
+  assert.throws(() => migration.installBaseline('C:\\fixture\\setup.exe', baseline, options, report, (file, args, opts) => {
+    calls++; assert.equal(file, 'C:\\fixture\\setup.exe'); assert.deepEqual(args, ['/S', '/NS']);
+    assert.deepEqual(opts, { env: options, windowsHide: true, timeout: 180000, stdio: 'pipe' }); throw original;
+  }), error => error === original);
+  assert.equal(calls, 1); assert.equal(report.baselineInstallerFailure.status, 2);
+  assert.equal(report.baselineInstallerFailure.code, 2); assert.equal(report.baselineInstallerFailure.signal, null);
+  assert.deepEqual(report.baselineInstallerFailure.stdout.lines, ['NSIS Error', '[redacted]']);
+  assert.deepEqual(report.baselineInstallerFailure.stderr.lines, ['Error launching installer', '[redacted]']);
+  assert.doesNotMatch(JSON.stringify(report), /secret|private|token-value/);
+  const source = fs.readFileSync(path.join(__dirname, 'native-windows-016-migration.cjs'), 'utf8');
+  assert.match(source, /report\.baselineInstallerFailure \? 'Baseline installer failed; see redacted baselineInstallerFailure\.'/);
+  const success = {}; assert.equal(migration.installBaseline('fixture', baseline, options, success, () => 'ok'), 'ok');
+  assert.deepEqual(success, {});
+});
+test('baseline diagnostics cover timeout, spawn error, signal, absent and excessive output without disclosure', () => {
+  const baseline = { asset: 'fixture.exe' };
+  for (const sample of [
+    { error: { status: null, code: 'ETIMEDOUT', signal: 'SIGTERM' }, code: 'ETIMEDOUT', signal: 'SIGTERM' },
+    { error: { status: null, code: 'ENOENT', signal: null }, code: 'ENOENT', signal: null },
+    { error: { status: null, code: 'secret-code', signal: 'secret-signal' }, code: 'other', signal: 'other' },
+  ]) {
+    const result = migration.baselineFailure(sample.error, baseline);
+    assert.equal(result.status, null); assert.equal(result.code, sample.code); assert.equal(result.signal, sample.signal);
+    assert.equal(result.stdout.available, false); assert.equal(result.stderr.available, false);
+    assert.doesNotMatch(JSON.stringify(result), /secret/);
+  }
+  const large = migration.redactBaselineOutput(Buffer.from(('private-output\n').repeat(1000)));
+  assert.equal(large.truncated, true); assert.equal(large.lines.length, 32);
+  assert.ok(large.lines.every(line => line === '[redacted]')); assert.doesNotMatch(JSON.stringify(large), /private-output/);
+  assert.deepEqual(migration.redactBaselineOutput(Buffer.alloc(0)), { available: true, lines: [], truncated: false });
+});
 test('migrated successor activates the approved route only through unchanged guarded OpenCode review', async () => {
   const calls = []; let checks = 0;
   const migrated = { guard: { verify() { checks++; } } };

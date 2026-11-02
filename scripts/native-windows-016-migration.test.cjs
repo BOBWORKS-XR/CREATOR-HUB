@@ -384,7 +384,8 @@ test('installed EXE and server checks respect their actual bounded artifact size
 
 test('runtime harness dependencies and helper files are checked before baseline installation', () => {
   const source = fs.readFileSync(path.join(__dirname, 'native-windows-016-migration.cjs'), 'utf8');
-  const installer = source.indexOf('execFileSync(path.join(input.baselines, baseline.asset)');
+  const installer = source.indexOf('installBaseline(path.join(input.baselines, baseline.asset)');
+  assert.ok(installer > 0, 'The baseline installer call must remain present');
   for (const marker of ["require('@playwright/test').chromium", "sdk('@modelcontextprotocol/sdk/client/stdio.js')",
     "print('tomllib-ready')", "regular(path.resolve('scripts', helper))"]) {
     const check = source.indexOf(marker); assert.ok(check > 0 && check < installer, marker);
