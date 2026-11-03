@@ -80,12 +80,34 @@ function assertService(feature, value) {
   }
 }
 
-async function checkPages({ page, showApp, processes, requests, screenshot }) {
+async function checkPages({ page, showApp, processes, requests, screenshot, expectedMcpConflict = false, verifyFixture }) {
+  assert.equal(typeof expectedMcpConflict, 'boolean');
+  if (expectedMcpConflict) assert.equal(typeof verifyFixture, 'function');
   await checkProtocol(page);
   const services = {};
   for (const feature of ['setup', 'mcp']) {
     await showApp(feature);
     const prefix = `#feature-${feature}`;
+    if (feature === 'mcp' && expectedMcpConflict) {
+      await page.waitForFunction(selector => {
+        const root = document.querySelector(selector);
+        return root && !root.hidden && root.getAttribute('aria-busy') === 'false'
+          && root.querySelector('[data-field="status"]')?.textContent === 'Review saved settings';
+      }, prefix, { timeout: 90000 });
+      assert.equal(await page.locator(prefix).isVisible(), true);
+      assert.equal(await page.locator(`${prefix} [data-field="controls"]`).isEnabled(), false);
+      assert.equal(await page.locator(`${prefix} [data-field="error"]`).isVisible(), false);
+      assert.equal(await page.locator(`${prefix} [data-field="product-panel"]`).isVisible(), true);
+      assert.equal(await page.locator(`${prefix} [data-field="product-status"]`).textContent(),
+        'Current and older MCP settings differ. Both originals are kept. Review before loading this form.');
+      assert.equal(await page.locator(`${prefix} [data-field="product-review"]`).isEnabled(), true);
+      assert.deepEqual(processes(), [], 'Direct navigation must not launch either private module GUI');
+      await checkCleanDocument(page, requests);
+      verifyFixture();
+      services.mcp = { state: 'saved-settings-conflict-locked', serviceCallTested: false, reviewApproved: false };
+      await screenshot(feature);
+      continue;
+    }
     await page.waitForFunction(selector => {
       const root = document.querySelector(selector);
       return root && !root.hidden && root.getAttribute('aria-busy') === 'false'

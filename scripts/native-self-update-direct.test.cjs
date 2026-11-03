@@ -27,6 +27,8 @@ class Page extends EventEmitter {
     super(); this.current = 'projects'; this.frameCount = 1; this.pageCount = 1; this.embedded = 0; this.plugins = 0; this.text = 'Creator tools';
     this.resources = []; this.calls = []; this.actions = []; this.values = new Map(); this.guide = true;
     this.state = protocol(); this.mcp = mcp(); this.setup = setup(); this.ready = true; this.enabled = true; this.errorVisible = false;
+    this.conflict = false; this.conflictLocked = true; this.conflictPanel = true; this.conflictReviewEnabled = true;
+    this.conflictText = 'Current and older MCP settings differ. Both originals are kept. Review before loading this form.';
     this.restored = 'Your Hub page has been restored.'; this.pending = []; this.review = { status: 'unchanged', count: 0 };
   }
   async invoke(command, args) {
@@ -53,7 +55,7 @@ class Page extends EventEmitter {
         if (['#suite-menu', '#context-help-dialog'].includes(selector)) return { textContent: this.text };
         assert.match(selector, /^#feature-(setup|mcp)$/);
         return { hidden: selector !== `#feature-${this.current}`, getAttribute: () => 'false',
-          querySelector: () => ({ textContent: this.ready ? 'Ready' : 'Needs attention' }) };
+          querySelector: () => ({ textContent: this.current === 'mcp' && this.conflict ? 'Review saved settings' : this.ready ? 'Ready' : 'Needs attention' }) };
       },
     };
     const value = await vm.runInNewContext(`(${fn.toString()})(argument)`, { argument: arg, document,
@@ -70,8 +72,11 @@ class Page extends EventEmitter {
   context() { return { pages: () => new Array(this.pageCount) }; }
   locator(selector) {
     return {
-      isEnabled: async () => this.enabled,
+      isEnabled: async () => selector.includes('[data-field="product-review"]') ? this.conflictReviewEnabled
+        : selector.includes('#feature-mcp [data-field="controls"]') && this.conflict ? !this.conflictLocked : this.enabled,
+      textContent: async () => this.conflictText,
       isVisible: async () => {
+        if (selector.includes('[data-field="product-panel"]')) return this.conflictPanel;
         if (selector.includes('[data-field="error"]')) return this.errorVisible;
         if (selector.includes('[data-field="guide-dialog"]')) return this.guide;
         if (selector === '#view-native-features') return ['mcp', 'setup'].includes(this.current);
@@ -137,6 +142,32 @@ test('direct readiness cannot hide a private GUI, frame, service error, disabled
   const page = new Page();
   await assert.rejects(direct.checkPages({ page, requests: [], processes: () => [{ ProcessId: 24, ParentProcessId: 12 }],
     showApp: async feature => { page.current = feature; }, screenshot: async () => {} }), /private module GUI/);
+});
+
+test('pre-migration diagnostic accepts only locked fixture conflict without review or MCP service call', async () => {
+  const opts = page => ({ page, requests: [], processes: () => [], expectedMcpConflict: true,
+    verifyFixture: () => { page.fixtureChecks = (page.fixtureChecks || 0) + 1; },
+    showApp: async feature => { page.current = feature; }, screenshot: async () => {} });
+  const page = new Page(); page.conflict = true;
+  const services = await direct.checkPages(opts(page));
+  assert.deepEqual(services.mcp, { state: 'saved-settings-conflict-locked', serviceCallTested: false, reviewApproved: false });
+  assert.equal(page.fixtureChecks, 1);
+  assert.equal(page.calls.filter(call => call.args?.feature === 'mcp').length, 0);
+  assert.ok(!page.actions.some(action => action.includes('product-review')));
+  for (const mutate of [p => { p.conflict = false; }, p => { p.conflictLocked = false; },
+    p => { p.conflictPanel = false; }, p => { p.conflictText = 'Other'; }, p => { p.conflictReviewEnabled = false; },
+    p => { p.errorVisible = true; }]) {
+    const altered = new Page(); altered.conflict = true; mutate(altered);
+    await assert.rejects(direct.checkPages(opts(altered)));
+  }
+  const missing = new Page(); missing.conflict = true;
+  await assert.rejects(direct.checkPages({ ...opts(missing), verifyFixture: undefined }));
+  const drift = new Page(); drift.conflict = true;
+  await assert.rejects(direct.checkPages({ ...opts(drift), verifyFixture: () => { throw Error('fixture changed'); } }), /fixture changed/);
+  const spawned = new Page(); spawned.conflict = true;
+  await assert.rejects(direct.checkPages({ ...opts(spawned), processes: () => spawned.current === 'mcp' ? [{}] : [] }), /private module GUI/);
+  const ordinary = new Page(); ordinary.conflict = true;
+  await assert.rejects(direct.checkPages({ ...opts(ordinary), expectedMcpConflict: false }));
 });
 
 test('Plugins and catalogue checks cover historical startup resources as well as requests after attachment', async () => {
@@ -269,11 +300,11 @@ test('preinstalled diagnostic checks services without reviewing or changing seed
     assert, path, process: { env: {} }, directTarget: true, incomingPreinstalled: true, report,
     page: { evaluate: async () => ({ supported: true, apps: [{ builtIn: true, trusted: true }, { builtIn: true, trusted: true }] }) },
     preinstalledFixture: { fixtureRoot: 'synthetic', recorded: {}, owned: { checkFixtureBytes: () => events.push('fixture') } },
-    direct: { checkPages: async () => { events.push('pages'); return {}; }, prepareManagedRoute: forbidden },
+    direct: { checkPages: async options => { assert.equal(options.expectedMcpConflict, true); options.verifyFixture(); events.push('pages'); return {}; }, prepareManagedRoute: forbidden },
     labTarget: { showPage() {} }, processes() {}, directRequests: [], out: '.', managedLocations: forbidden, require: forbidden,
   });
   await check();
-  assert.deepEqual(events, ['fixture', 'pages', 'fixture']);
+  assert.deepEqual(events, ['fixture', 'fixture', 'pages', 'fixture']);
   assert.equal(report.managedRouteReconnectTested, false); assert.equal(report.directHubUpdateTested, true);
 });
 

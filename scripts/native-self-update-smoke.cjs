@@ -223,11 +223,12 @@ async function checkUpdatedBuiltIns() {
   if (directTarget) {
     if (incomingPreinstalled) preinstalledFixture.owned.checkFixtureBytes({ env: process.env, out: preinstalledFixture.fixtureRoot, recorded: preinstalledFixture.recorded });
     report.directServices = await direct.checkPages({ page, showApp: app => labTarget.showPage(page, app), processes, requests: directRequests,
+      expectedMcpConflict: incomingPreinstalled, verifyFixture: incomingPreinstalled ? () => preinstalledFixture.owned.checkFixtureBytes({ env: process.env, out: preinstalledFixture.fixtureRoot, recorded: preinstalledFixture.recorded }) : undefined,
       screenshot: app => page.screenshot({ path: path.join(out, `direct-${app}.png`), animations: 'disabled' }) });
     if (incomingPreinstalled) {
       preinstalledFixture.owned.checkFixtureBytes({ env: process.env, out: preinstalledFixture.fixtureRoot, recorded: preinstalledFixture.recorded });
       report.managedRouteReconnectTested = false; report.directHubUpdateTested = true;
-      report.checks.push('Direct services checked without reviewing or modifying the seeded client routes; routing remains for migration.');
+      report.checks.push('Setup service checked; MCP saved-settings conflict remained locked without review or service call; seeded fixture rechecked.');
       return;
     }
     const locations = managedLocations(process.env.LOCALAPPDATA);
