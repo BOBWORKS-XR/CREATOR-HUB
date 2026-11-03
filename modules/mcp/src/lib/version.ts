@@ -1,1 +1,1 @@
-export const MCP_VERSION = "2.7.7";
+export const MCP_VERSION = "2.7.8-fixture.18";
