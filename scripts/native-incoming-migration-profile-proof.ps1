@@ -32,6 +32,7 @@ try {
     $stage = 'PROFILE_OWNER_READ'
     $owner = (Get-Acl -LiteralPath $profile).GetOwner([Security.Principal.SecurityIdentifier]).Value
     $stage = 'PROFILE_OWNER_MISMATCH'
+    $ownerCategory = if ($owner -ceq $sid) { 'TOKEN' } elseif ($owner -ceq 'S-1-5-32-544') { 'ADMINISTRATORS' } elseif ($owner -ceq 'S-1-5-18') { 'SYSTEM' } else { 'OTHER' }
     if ($owner -cne $sid) { throw 'Profile owner differs from token.' }
     $stage = 'ROOTS'
     $roots = @($profile, [IO.Path]::GetFullPath($env:GITHUB_WORKSPACE), [IO.Path]::GetFullPath($env:RUNNER_TEMP))
@@ -69,4 +70,9 @@ try {
     [ordered]@{kind='incoming-migration-profile-proof'; sid=$sid; ownerSid=$owner; profile=$profile;
         appData=[IO.Path]::GetFullPath($env:APPDATA); localAppData=[IO.Path]::GetFullPath($env:LOCALAPPDATA);
         pathsChecked=@($request.paths).Count; handleBound=$false; compromisedRunnerResistance=$false} | ConvertTo-Json -Compress
-} catch { [Console]::Error.WriteLine('PROFILE_PROOF_REFUSED:' + $stage); exit 1 }
+} catch {
+    if ($stage -ceq 'PROFILE_OWNER_MISMATCH' -and $ownerCategory -cin @('ADMINISTRATORS', 'SYSTEM', 'OTHER')) {
+        [Console]::Error.WriteLine('PROFILE_PROOF_REFUSED:' + $stage + ':' + $ownerCategory)
+    } else { [Console]::Error.WriteLine('PROFILE_PROOF_REFUSED:' + $stage) }
+    exit 1
+}

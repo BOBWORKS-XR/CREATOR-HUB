@@ -58,6 +58,29 @@ test('refusals expose only bounded stage codes, never raw child output or errors
   assert.match(ps, /Error\.WriteLine\('PROFILE_PROOF_REFUSED:' \+ \$stage\)/);
   assert.doesNotMatch(ps, /WriteLine\(\$_|WriteLine\(\$Error/);
 });
+test('owner category is bounded and never changes the owner mismatch refusal', () => {
+  for (const category of ['ADMINISTRATORS', 'SYSTEM', 'OTHER']) {
+    const line = `PROFILE_PROOF_REFUSED:PROFILE_OWNER_MISMATCH:${category}\r\n`;
+    assert.equal(diagnostic.proofFailure(line), 'PROOF_PROFILE_OWNER_MISMATCH');
+    assert.equal(diagnostic.proofOwnerCategory(line), category);
+  }
+  for (const line of ['PROFILE_PROOF_REFUSED:PROFILE_OWNER_MISMATCH:TOKEN',
+    'PROFILE_PROOF_REFUSED:PROFILE_OWNER_MISMATCH:S-1-5-18',
+    'PROFILE_PROOF_REFUSED:PROFILE_OWNER_MISMATCH:SYSTEM\nC:\\private',
+    'PROFILE_PROOF_REFUSED:PROFILE_OWNER_READ:SYSTEM']) {
+    assert.equal(diagnostic.proofFailure(line), 'PROOF_CHILD');
+    assert.equal(diagnostic.proofOwnerCategory(line), undefined);
+  }
+  let error;
+  try { diagnostic.at('PROOF_PROFILE_OWNER_MISMATCH', () => { throw Error('private'); }); } catch (caught) { error = caught; }
+  error.ownerCategory = 'SYSTEM';
+  assert.equal(diagnostic.publicFailure(error), 'PROOF_PROFILE_OWNER_MISMATCH');
+  assert.equal(diagnostic.publicOwnerCategory(error), 'SYSTEM');
+  error.ownerCategory = 'S-1-5-18'; assert.equal(diagnostic.publicOwnerCategory(error), undefined);
+  const ps = fs.readFileSync(path.join(__dirname, 'native-incoming-migration-profile-proof.ps1'), 'utf8');
+  assert.match(ps, /if \(\$owner -cne \$sid\) \{ throw 'Profile owner differs from token\.' \}/);
+  assert.match(ps, /\$ownerCategory -cin @\('ADMINISTRATORS', 'SYSTEM', 'OTHER'\)/);
+});
 test('workflow isolates opt-in from native acceptance and proof does not write fixtures', () => {
   const workflow = fs.readFileSync(path.join(__dirname, '../.github/workflows/windows-incoming-016.yml'), 'utf8');
   const acceptance = workflow.split('  acceptance:')[1].split('  signed012:')[0];

@@ -8,18 +8,27 @@ const PROOF_STAGES = Object.freeze(['ADMISSION', 'REQUEST', 'TOKEN', 'PROFILE_RE
 const CODES = new Set(['LAUNCHER_ADMISSION', 'SOURCE_CHECK', 'PROOF_CHILD', 'PROOF_CONTRACT',
   ...PROOF_STAGES.map(stage => `PROOF_${stage}`)]);
 class Refusal extends Error {
-  constructor(code) { super('Diagnostic refused'); this.code = code; }
+  constructor(code, ownerCategory) { super('Diagnostic refused'); this.code = code; this.ownerCategory = ownerCategory; }
 }
 function at(code, callback) {
   try { return callback(); } catch { throw new Refusal(code); }
 }
 function proofFailure(stderr) {
   if (typeof stderr !== 'string') return 'PROOF_CHILD';
+  if (/^PROFILE_PROOF_REFUSED:PROFILE_OWNER_MISMATCH:(?:ADMINISTRATORS|SYSTEM|OTHER)\r?\n?$/.test(stderr)) return 'PROOF_PROFILE_OWNER_MISMATCH';
   const match = /^PROFILE_PROOF_REFUSED:([A-Z_]+)\r?\n?$/.exec(stderr);
   return match && PROOF_STAGES.includes(match[1]) ? `PROOF_${match[1]}` : 'PROOF_CHILD';
 }
+function proofOwnerCategory(stderr) {
+  if (typeof stderr !== 'string') return undefined;
+  return /^PROFILE_PROOF_REFUSED:PROFILE_OWNER_MISMATCH:(ADMINISTRATORS|SYSTEM|OTHER)\r?\n?$/.exec(stderr)?.[1];
+}
 function publicFailure(error) {
   return error instanceof Refusal && CODES.has(error.code) ? error.code : 'PROOF_CHILD';
+}
+function publicOwnerCategory(error) {
+  return error instanceof Refusal && error.code === 'PROOF_PROFILE_OWNER_MISMATCH' &&
+    ['ADMINISTRATORS', 'SYSTEM', 'OTHER'].includes(error.ownerCategory) ? error.ownerCategory : undefined;
 }
 
 function admit(env, platform) {
@@ -68,14 +77,18 @@ function run(env = process.env) {
   const shell = path.join(env.ProgramFiles, 'PowerShell', '7', 'pwsh.exe');
   const child = at('PROOF_CHILD', () => spawnSync(shell, ['-NoProfile', '-NonInteractive', '-File', path.join(__dirname, 'native-incoming-migration-profile-proof.ps1')],
     { input: JSON.stringify({ paths }), encoding: 'utf8', env: childEnv, timeout: 30000, maxBuffer: 16384, windowsHide: true }));
-  if (child.status !== 0) throw new Refusal(proofFailure(child.stderr));
+  if (child.status !== 0) throw new Refusal(proofFailure(child.stderr), proofOwnerCategory(child.stderr));
   at('PROOF_CONTRACT', () => checkProof(JSON.parse(child.stdout), env, paths.length));
   return { kind: 'read-only-hosted-profile-diagnostic', source: env.GITHUB_SHA, runId: env.GITHUB_RUN_ID,
-    sourceHeadMatched: true, profileChecksPassed: true, fixtureWrites: false, identityAttestation: false,
+    sourceHeadMatched: true, profileChecksPassed: true, ownerCategory: 'TOKEN', fixtureWrites: false, identityAttestation: false,
     handleBound: false, compromisedRunnerResistance: false, snapshotAuthorized: false, releaseReady: false };
 }
 if (require.main === module) {
   try { process.stdout.write(`${JSON.stringify(run())}\n`); }
-  catch (error) { process.stderr.write(`Read-only hosted profile diagnostic refused: ${publicFailure(error)}\n`); process.exitCode = 1; }
+  catch (error) {
+    const category = publicOwnerCategory(error);
+    process.stderr.write(`Read-only hosted profile diagnostic refused: ${publicFailure(error)}${category ? `; ownerCategory=${category}` : ''}\n`);
+    process.exitCode = 1;
+  }
 }
-module.exports = { admit, checkProof, gitEnvironment, run, at, proofFailure, publicFailure, PROOF_STAGES };
+module.exports = { admit, checkProof, gitEnvironment, run, at, proofFailure, proofOwnerCategory, publicFailure, publicOwnerCategory, PROOF_STAGES };
