@@ -5,7 +5,7 @@ const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 const legacy = require('./windows-artifact-candidate.cjs');
 const pinned = require('./fixtures/windows-r5-raw-binding.json');
-const SOURCE = Object.freeze({ commit: '086892de8e65f1c36711da1661224a4d0ff18946', tree: 'dd721ab81c45b9a5bcb5b4c75059d280994b353a' });
+const SOURCE = Object.freeze({ commit: 'ec7f1d218c187caac30d0170aaaca2dfcdf83766', tree: '11efac78fc7509e8da08de3af7262bfc6369ce5c' });
 const VERSION = '0.1.17', ASSET = 'Creator.Hub_0.1.17_x64-setup.exe';
 const WORKFLOW = '.github/workflows/windows-r5-raw-installer.yml';
 const MODULE_FILES = ['mcp/creator-works-mcp-launcher.exe', 'mcp/server/creator-works-mcp.mjs', 'mcp/server/runtime/node.exe',
@@ -15,7 +15,7 @@ const MODULE_FILES = ['mcp/creator-works-mcp-launcher.exe', 'mcp/server/creator-
   'routing/runtime.json', 'routing/runtime.minisig'];
 const digest = value => { assert.match(value ?? '', /^[a-f0-9]{64}$/); assert.notEqual(value, '0'.repeat(64)); };
 function validatePins(value) {
-  assert.equal(value.enabled, true, 'R5 binary pins are not populated; no download or native action allowed');
+  assert.equal(value.enabled, true, 'R6 binary pins are not populated; no download or native action allowed');
   assert.equal(value.schemaVersion, 1); assert.equal(value.version, VERSION); assert.equal(value.outgoingFixtureVersion, '0.1.18');
   assert.deepEqual(value.source, SOURCE);
   for (const key of ['installer', 'executable', 'manifest']) {
@@ -59,7 +59,7 @@ function createAdapter(value) {
     assert.deepEqual(source, { commit: SOURCE.commit, manifestSha256: value.buildInputsSha256 });
     assert.deepEqual(legacy.inventory(directory), [ASSET]);
     assert.deepEqual(legacy.record(path.join(directory, ASSET)), value.installer);
-    return { source, producer: { kind: 'local-r5-build', sourceTree: SOURCE.tree, buildResultSha256: value.buildResultSha256,
+    return { source, producer: { kind: 'local-r6-build', sourceTree: SOURCE.tree, buildResultSha256: value.buildResultSha256,
       privateAsset: binding }, files: { [ASSET]: value.installer, 'creator-hub.exe': value.executable } };
   }
   function extractExpected(installer, output, execute = execFileSync, inspect = legacy) {
@@ -83,7 +83,7 @@ if (require.main === module) {
   try {
     assertRunner(); const adapter = createAdapter(pinned);
     const [mode, ...args] = process.argv.slice(2);
-    if (mode === 'preflight') { assert.equal(args.length, 0); console.log('Exact R5 pins populated; installer-only input admitted'); }
+    if (mode === 'preflight') { assert.equal(args.length, 0); console.log('Exact R6 pins populated; installer-only input admitted'); }
     else {
       assert.ok(['fresh', 'guarded'].includes(mode)); assert.equal(args.length, 3);
       const env = { ...process.env, SOURCE_COMMIT: SOURCE.commit, SOURCE_MANIFEST_SHA256: pinned.buildInputsSha256 };

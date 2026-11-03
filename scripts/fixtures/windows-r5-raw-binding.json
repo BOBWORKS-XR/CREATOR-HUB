@@ -4,12 +4,23 @@
   "version": "0.1.17",
   "outgoingFixtureVersion": "0.1.18",
   "source": {
-    "commit": "086892de8e65f1c36711da1661224a4d0ff18946",
-    "tree": "dd721ab81c45b9a5bcb5b4c75059d280994b353a"
+    "commit": "ec7f1d218c187caac30d0170aaaca2dfcdf83766",
+    "tree": "11efac78fc7509e8da08de3af7262bfc6369ce5c"
   },
-  "installer": {"bytes": null, "sha256": null},
-  "executable": {"bytes": null, "sha256": null},
-  "manifest": {"bytes": null, "sha256": null, "sha256Canonical": null, "document": null},
+  "installer": {
+    "bytes": null,
+    "sha256": null
+  },
+  "executable": {
+    "bytes": null,
+    "sha256": null
+  },
+  "manifest": {
+    "bytes": null,
+    "sha256": null,
+    "sha256Canonical": null,
+    "document": null
+  },
   "buildResultSha256": null,
   "buildInputsSha256": null
 }
