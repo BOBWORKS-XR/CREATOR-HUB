@@ -134,3 +134,15 @@ test('manual qualification reruns use the package version, not a branch masquera
   assert.match(workflow, /GITHUB_REF_TYPE -ceq 'tag' -and \$env:GITHUB_REF_NAME -cne "v\$version"/);
   assert.doesNotMatch(workflow, /GITHUB_REF_NAME\.Substring\(1\)/);
 });
+test('current no-rebuild workflow uses target metadata and separately binds the association commit', () => {
+  const workflow = fs.readFileSync(path.join(__dirname, '..', '.github', 'workflows', 'release.yml'), 'utf8');
+  assert.match(workflow, /scripts\/windows-016-release-qualification\.test\.cjs/);
+  assert.match(workflow, /windows-release-target\.cjs/);
+  assert.match(workflow, /if \(\$version -ceq \$targetVersion\)/);
+  assert.match(workflow, /\$receipt = "packaging\/windows\/\$version-qualification\.json"/);
+  assert.match(workflow, /Get-Content -LiteralPath "\$receipt\.sha256"/);
+  assert.match(workflow, /--sha256 "\$digest" --association "\$env:GITHUB_SHA" --verify-draft/);
+  assert.match(workflow, /elseif \(\$version -ceq '0\.1\.14'\)/);
+  assert.match(workflow, /This version has no reviewed Windows qualification route/);
+  assert.doesNotMatch(workflow, /build:unified|cargo build|tauri-action|--clobber|macos-|ubuntu-/);
+});
