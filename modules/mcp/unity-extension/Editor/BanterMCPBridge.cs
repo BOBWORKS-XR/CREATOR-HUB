@@ -3248,6 +3248,10 @@ namespace BantworksMCP
 
         private static void SetComponentProperty(SetComponentPropertyCommand cmd)
         {
+            if (EditorApplication.isPlayingOrWillChangePlaymode)
+                throw new InvalidOperationException(
+                    "Stop Play Mode before setting component properties.");
+
             var obj = ResolveGameObject(cmd?.objectId, cmd?.objectPath);
             var component = ResolveComponent(obj, cmd.componentId, cmd.componentType);
 
