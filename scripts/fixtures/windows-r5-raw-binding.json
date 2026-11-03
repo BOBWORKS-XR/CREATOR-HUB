@@ -4,16 +4,123 @@
   "version": "0.1.18",
   "outgoingFixtureVersion": "0.1.19",
   "source": {
-    "commit": "032bb101823fcfff1c5b85f863bb7381db8285e4",
-    "tree": "6a1441ea078a1a35f1580ad91b83dd546dc2e536"
+    "commit": "930a2886b6872a08a4a25be4738a5a01a4e911d2",
+    "tree": "a1af9bf6c56b221352f8b3feb1fd65259200e9dc"
+  },
+  "rootOnlyAssembly": {
+    "kind": "windows-018-root-only-postbuild-verification",
+    "sourceCommit": "930a2886b6872a08a4a25be4738a5a01a4e911d2",
+    "sourceTree": "a1af9bf6c56b221352f8b3feb1fd65259200e9dc",
+    "reusedSourceCommit": "032bb101823fcfff1c5b85f863bb7381db8285e4",
+    "reusedSourceTree": "6a1441ea078a1a35f1580ad91b83dd546dc2e536",
+    "rawSourceUnchanged": false,
+    "rawSourceChanges": [
+      "modules/mcp/launcher/src-tauri/gen/schemas/acl-manifests.json",
+      "modules/mcp/launcher/src-tauri/gen/schemas/desktop-schema.json",
+      "modules/mcp/launcher/src-tauri/gen/schemas/windows-schema.json"
+    ],
+    "generatedSchemaChanges": [
+      "modules/mcp/launcher/src-tauri/gen/schemas/acl-manifests.json",
+      "modules/mcp/launcher/src-tauri/gen/schemas/desktop-schema.json",
+      "modules/mcp/launcher/src-tauri/gen/schemas/windows-schema.json"
+    ],
+    "compilerInputsUnchanged": true,
+    "frozenSourceUnchanged": true,
+    "reusedR7InputsUnchanged": true,
+    "sourceReceipt": {
+      "path": "C:\\Users\\bobman\\creator-hub-platform-review\\artifacts\\windows-release-20261103-r3\\source-receipt-r8.json",
+      "sha256": "417546ff9eb33c0dea923cb02b2b6657490316d0b403676d03f79a0f81424f1d"
+    },
+    "inputInventorySha256": "913339fad522155b95449cd868a1fffc16a67e3a0a872ec57d1901906bd3aee9",
+    "afterInventorySha256": "c6e817565a5b463a6741eb59ef98564186a2052f0b7b44650fc70574d8b88ab6",
+    "originalBuildResult": {
+      "path": "C:\\Users\\bobman\\creator-hub-windows-016-publication-review-20261102\\local-final18-preparation\\root-only-builds\\r8-01\\result.json",
+      "sha256": "f46805c6cdd4d34b0dd7ca84ae66b05839e38da59d2c94e01a7eced022f92fda",
+      "status": 1,
+      "receipt": {
+        "schemaVersion": 1,
+        "kind": "windows-018-root-only-assembly",
+        "status": 1,
+        "sourceCommit": "930a2886b6872a08a4a25be4738a5a01a4e911d2",
+        "sourceTree": "a1af9bf6c56b221352f8b3feb1fd65259200e9dc",
+        "reusedSourceCommit": "032bb101823fcfff1c5b85f863bb7381db8285e4",
+        "reusedSourceTree": "6a1441ea078a1a35f1580ad91b83dd546dc2e536",
+        "sourceReceipt": {
+          "path": "C:\\Users\\bobman\\creator-hub-platform-review\\artifacts\\windows-release-20261103-r3\\source-receipt-r8.json",
+          "sha256": "417546ff9eb33c0dea923cb02b2b6657490316d0b403676d03f79a0f81424f1d"
+        },
+        "rootOnlyDelta": [
+          "src-tauri/src/convergence.rs"
+        ],
+        "rootFileSha256": "44be445026ed3ee342aa09d6df837066f66ae45be80b15a83e7249c83d968d90",
+        "wrapperSha256": "617e8efe65b4a2cc7d4bb512d794e7ba2d117dd4a03930a07a1b90db644f8430",
+        "planSha256": "0cfd27373665f50788ec50fef379da2a72005a17bed8c19a9b814eb7527b8978",
+        "version": "0.1.18",
+        "managedSignaturesRegenerated": false,
+        "outerSignaturesGenerated": false,
+        "nativeGuiAccepted": false,
+        "migrationAccepted": false,
+        "signedUpdateAccepted": false,
+        "published": false,
+        "releaseReady": false,
+        "inputInventorySha256": "913339fad522155b95449cd868a1fffc16a67e3a0a872ec57d1901906bd3aee9",
+        "phase": "root-tauri-nsis",
+        "error": "Nonregular or oversized input",
+        "afterInventorySha256": "c6e817565a5b463a6741eb59ef98564186a2052f0b7b44650fc70574d8b88ab6",
+        "rawSourceChanges": [
+          "modules/mcp/launcher/src-tauri/gen/schemas/acl-manifests.json",
+          "modules/mcp/launcher/src-tauri/gen/schemas/desktop-schema.json",
+          "modules/mcp/launcher/src-tauri/gen/schemas/windows-schema.json"
+        ],
+        "rawSourceUnchanged": false,
+        "generatedSchemaChanges": [
+          "modules/mcp/launcher/src-tauri/gen/schemas/acl-manifests.json",
+          "modules/mcp/launcher/src-tauri/gen/schemas/desktop-schema.json",
+          "modules/mcp/launcher/src-tauri/gen/schemas/windows-schema.json"
+        ],
+        "compilerInputsUnchanged": true,
+        "frozenSourceUnchanged": true,
+        "reusedR7InputsUnchanged": true,
+        "logSha256": "841e3d7b8cf026cc75c7290ee9aa0da590060b305afa264cb1e6c89440daa41b"
+      }
+    },
+    "exception": "Only retained Cargo Root output aliases; no source or payload-link exception",
+    "aliases": [
+      {
+        "path": "C:\\Users\\bobman\\creator-hub-platform-review\\artifacts\\windows-release-20261102\\targets\\hub\\release\\creator-hub.exe",
+        "canonical": "C:\\Users\\bobman\\creator-hub-platform-review\\artifacts\\windows-release-20261102\\targets\\hub\\release\\creator-hub.exe",
+        "regular": true,
+        "symlink": false,
+        "ino": 844424939439124,
+        "dev": 2251308992,
+        "size": 19371008,
+        "nlink": 2,
+        "mtimeMs": 1793740290226.4414,
+        "sha256": "e3d6da75ebc6c56f84121804d8319d10d0e0dc84d4392171a7f3b1808ed88ef4"
+      },
+      {
+        "path": "C:\\Users\\bobman\\creator-hub-platform-review\\artifacts\\windows-release-20261102\\targets\\hub\\release\\deps\\creator_hub.exe",
+        "canonical": "C:\\Users\\bobman\\creator-hub-platform-review\\artifacts\\windows-release-20261102\\targets\\hub\\release\\deps\\creator_hub.exe",
+        "regular": true,
+        "symlink": false,
+        "ino": 844424939439124,
+        "dev": 2251308992,
+        "size": 19371008,
+        "nlink": 2,
+        "mtimeMs": 1793740290226.4414,
+        "sha256": "e3d6da75ebc6c56f84121804d8319d10d0e0dc84d4392171a7f3b1808ed88ef4"
+      }
+    ],
+    "verifierSha256": "7e53d402007ca407b5a1a8cdfa4f441e904b409c1dd0ba299686380642afa0f2",
+    "finalizerSha256": "d96e391ff52209fc5936bdc4635a0de9e406785867b0363e0dbb6b0f2aa35533"
   },
   "installer": {
-    "bytes": 38242944,
-    "sha256": "f2d6cfea9f116819de193dd1ff0162f5620e00230a59e8282a3a346b19bc140a"
+    "bytes": 38235117,
+    "sha256": "c09e3f73ca3e7fab74db2c204a17f6277d5b7817c650f090bd77af00a6f0f3f9"
   },
   "executable": {
-    "bytes": 19361280,
-    "sha256": "43dd8e2b17396520e2b2fca3b25b1569a76a01cec0bcf5ecef385fec499ba62d"
+    "bytes": 19371008,
+    "sha256": "ae1d15ff3919ee9947e21d8542bcab50abf044e1bf047ce2c87abac4ccebfdc9"
   },
   "manifest": {
     "bytes": 2053,
@@ -59,6 +166,6 @@
       }
     }
   },
-  "buildResultSha256": "c1c7e949f6de018029624265d4cff1c79805a65003ebce690560b78139764744",
-  "buildInputsSha256": "ae3083efb07ea982a5ab7ca6aaa43a0d4168cf838c405291fef7e66396721c39"
+  "buildResultSha256": "c83dec8051be90c7b1017b0cc2746e43f94a5ea5c8c9e326d99248fb5187dacb",
+  "buildInputsSha256": "913339fad522155b95449cd868a1fffc16a67e3a0a872ec57d1901906bd3aee9"
 }

@@ -1,4 +1,4 @@
-name: R7 017 raw fresh and guarded installer (no release signatures)
+name: R8 017 raw fresh and guarded installer (no release signatures)
 on:
   push:
     branches: [validation/windows-menu-merge-20261027]
@@ -69,7 +69,7 @@ jobs:
           node-version: 24
       - name: Refuse missing R5 pins before network or native actions
         run: node scripts/windows-r5-raw.cjs preflight
-      - name: GET only the exact private R7 installer
+      - name: GET only the exact private R8 installer
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -82,7 +82,7 @@ jobs:
           foreach ($id in @($env:RELEASE_ID, $env:ASSET_ID)) { if ($id -cnotmatch '^[1-9][0-9]{0,15}$') { throw 'Fixed positive ID required.' } }
           foreach ($name in @($env:RELEASE_TAG, $env:ASSET_NAME)) { if ($name -cnotmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$' -or $name.Contains('..')) { throw 'Exact safe name required.' } }
           $pins = Get-Content -LiteralPath scripts/fixtures/windows-r5-raw-binding.json -Raw | ConvertFrom-Json
-          if ($pins.enabled -ne $true -or $pins.version -cne '0.1.18') { throw 'R7 pins unavailable.' }
+          if ($pins.enabled -ne $true -or $pins.version -cne '0.1.18') { throw 'R8 pins unavailable.' }
           $headers = @{Authorization="Bearer $env:GH_TOKEN";Accept='application/vnd.github+json';'X-GitHub-Api-Version'='2026-03-10'}
           $release = Invoke-RestMethod -Method Get -Uri "https://api.github.com/repos/BOBWORKS-XR/CREATOR-HUB/releases/$env:RELEASE_ID" -Headers $headers -TimeoutSec 30
           if ($release.id.ToString() -cne $env:RELEASE_ID -or $release.tag_name -cne $env:RELEASE_TAG -or $release.draft -ne $true -or $release.prerelease -ne $true) { throw 'Private draft identity differs.' }

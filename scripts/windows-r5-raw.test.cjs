@@ -24,10 +24,10 @@ const runner = () => ({ GITHUB_ACTIONS: 'true', RUNNER_ENVIRONMENT: 'github-host
   GITHUB_REF: 'refs/heads/validation/windows-menu-merge-20261027',
   GITHUB_WORKFLOW_REF: `BOBWORKS-XR/CREATOR-HUB/${r5.WORKFLOW}@refs/heads/validation/windows-menu-merge-20261027`,
   CREATOR_WINDOWS_R5_RAW_INSTALL: '1', CREATOR_WINDOWS_ARTIFACT_INSTALL: '1', GITHUB_SHA: 'a'.repeat(40), EXPECTED_HARNESS_COMMIT: 'a'.repeat(40) });
-test('unpopulated R7 pins refuse; no R4 binary fallback exists', () => {
+test('unpopulated R8 pins refuse; no R4 binary fallback exists', () => {
   assert.throws(() => r5.validatePins({ ...r5.pinned, enabled: false }), /not populated/);
   assert.throws(() => r5.createAdapter({ ...r5.pinned, enabled: false }), /not populated/);
-  assert.equal(r5.pinned.source.commit, '032bb101823fcfff1c5b85f863bb7381db8285e4');
+  assert.equal(r5.pinned.source.commit, '930a2886b6872a08a4a25be4738a5a01a4e911d2');
   assert.equal(r5.pinned.version, '0.1.18'); assert.equal(r5.pinned.outgoingFixtureVersion, '0.1.19');
   if (!r5.pinned.enabled) assert.equal(r5.pinned.installer.sha256, null);
   else r5.validatePins(r5.pinned);
