@@ -987,7 +987,9 @@ fn refresh_reviewed_server_paths(
     server: &std::path::Path,
     response: &Value,
 ) -> Result<(), String> {
-    if response["changed"].as_bool().is_none() || response["server"].as_str() != server.to_str() {
+    if response["changed"].as_bool().is_none()
+        || response["server"].as_str().map(PathBuf::from) != Some(server.to_path_buf())
+    {
         return Err(
             "The reviewed server transition could not be verified; old apps were kept.".into(),
         );
@@ -1022,8 +1024,11 @@ fn refresh_reviewed_server_paths(
         let object = before
             .as_object_mut()
             .ok_or("Cannot verify retained MCP settings.")?;
-        object.insert("mcp_server_path".into(), json!(server));
-        if response["changed"] != true || before != after {
+        object.insert("mcp_server_path".into(), after["mcp_server_path"].clone());
+        if response["changed"] != true
+            || after["mcp_server_path"].as_str().map(PathBuf::from) != Some(server.to_path_buf())
+            || before != after
+        {
             return Err("Other MCP settings changed during server migration; originals and old apps were kept.".into());
         }
         updates.push((index, fresh));
@@ -4065,6 +4070,115 @@ mod tests {
         fs::remove_file(&legacy).unwrap();
         plan.stores[1] = stores::Snapshot::inspect(stores::Store::McpLegacy, &roots).unwrap();
         assert!(!reviewed_snapshots_at(&review, &plan.stores).unwrap());
+    }
+
+    #[cfg(windows)]
+    fn mixed_server_fixture() -> (tempfile::TempDir, stores::Roots, Plan, PathBuf, PathBuf) {
+        let (temp, base, mut plan) = fixture_plan();
+        let legacy = stores::Store::McpLegacy.path(&base).unwrap();
+        fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        fs::write(&legacy, plan.stores[0].bytes().unwrap()).unwrap();
+        plan.stores[1] = stores::Snapshot::inspect(stores::Store::McpLegacy, &base).unwrap();
+        let parent = base.local_data.join("runtime-generations").join("windows-x86_64").join("reviewed-generation");
+        let canonical = parent.join("mcp").join("server").join("creator-works-mcp.mjs");
+        let mixed = parent.join("mcp/server/creator-works-mcp.mjs");
+        assert_ne!(canonical.to_str(), mixed.to_str());
+        assert_eq!(canonical, mixed);
+        (temp, base, plan, canonical, mixed)
+    }
+
+    #[cfg(windows)]
+    fn write_reviewed_servers(base: &stores::Roots, plan: &Plan, server: &std::path::Path, change_preference: bool) {
+        for snapshot in &plan.stores[..2] {
+            let mut value: Value = serde_json::from_slice(snapshot.bytes().unwrap()).unwrap();
+            value["mcp_server_path"] = json!(server);
+            if change_preference { value["auto_start"] = json!(true); }
+            fs::write(snapshot.store().path(base).unwrap(), serde_json::to_vec(&value).unwrap()).unwrap();
+        }
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn mixed_separator_receipt_is_the_same_reviewed_windows_path() {
+        let (_temp, base, mut plan, canonical, mixed) = mixed_server_fixture();
+        write_reviewed_servers(&base, &plan, &canonical, false);
+        refresh_reviewed_server_paths(&mut plan, &base, &canonical, &json!({"changed":true,"server":mixed})).unwrap();
+        for snapshot in &plan.stores[..2] { snapshot.recheck().unwrap(); }
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn mixed_separator_saved_fields_preserve_all_other_values_exactly() {
+        let (_temp, base, mut plan, canonical, mixed) = mixed_server_fixture();
+        let mut expected: Value = serde_json::from_slice(plan.stores[0].bytes().unwrap()).unwrap();
+        expected["mcp_server_path"] = json!(mixed);
+        write_reviewed_servers(&base, &plan, &mixed, false);
+        refresh_reviewed_server_paths(&mut plan, &base, &canonical, &json!({"changed":true,"server":canonical})).unwrap();
+        for snapshot in &plan.stores[..2] {
+            snapshot.recheck().unwrap();
+            let value: Value = serde_json::from_slice(snapshot.bytes().unwrap()).unwrap();
+            assert_eq!(value, expected);
+        }
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn mixed_separator_receipt_and_saved_fields_are_read_only_validation() {
+        let (_temp, base, mut plan, canonical, mixed) = mixed_server_fixture();
+        write_reviewed_servers(&base, &plan, &mixed, false);
+        let files: Vec<_> = plan.stores[..2].iter().map(|snapshot| snapshot.store().path(&base).unwrap()).collect();
+        let before: Vec<_> = files.iter().map(|file| fs::read(file).unwrap()).collect();
+        refresh_reviewed_server_paths(&mut plan, &base, &canonical, &json!({"changed":true,"server":mixed})).unwrap();
+        assert_eq!(before, files.iter().map(|file| fs::read(file).unwrap()).collect::<Vec<_>>());
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn wrong_receipt_path_never_renews_snapshots() {
+        let (_temp, base, mut plan, canonical, mixed) = mixed_server_fixture();
+        write_reviewed_servers(&base, &plan, &mixed, false);
+        let before = plan.stores[0].bytes().unwrap().to_vec();
+        assert!(refresh_reviewed_server_paths(&mut plan, &base, &canonical, &json!({"changed":true,"server":canonical.with_file_name("other.mjs")})).is_err());
+        assert_eq!(plan.stores[0].bytes().unwrap(), before);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn wrong_saved_path_or_preference_never_renews_snapshots() {
+        for preference in [false, true] {
+            let (_temp, base, mut plan, canonical, mixed) = mixed_server_fixture();
+            let saved = if preference { mixed } else { canonical.with_file_name("other.mjs") };
+            write_reviewed_servers(&base, &plan, &saved, preference);
+            let before: Vec<_> = plan.stores[..2].iter().map(|snapshot| snapshot.bytes().unwrap().to_vec()).collect();
+            assert!(refresh_reviewed_server_paths(&mut plan, &base, &canonical, &json!({"changed":true,"server":canonical})).is_err());
+            assert_eq!(before, plan.stores[..2].iter().map(|snapshot| snapshot.bytes().unwrap().to_vec()).collect::<Vec<_>>());
+        }
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn false_or_missing_changed_never_accepts_changed_stores() {
+        for changed in [json!(false), Value::Null, json!("true")] {
+            let (_temp, base, mut plan, canonical, mixed) = mixed_server_fixture();
+            write_reviewed_servers(&base, &plan, &mixed, false);
+            let before = plan.stores[0].bytes().unwrap().to_vec();
+            assert!(refresh_reviewed_server_paths(&mut plan, &base, &canonical, &json!({"changed":changed,"server":canonical})).is_err());
+            assert_eq!(plan.stores[0].bytes().unwrap(), before);
+        }
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn later_store_error_cannot_partially_renew_first_snapshot() {
+        let (_temp, base, mut plan, canonical, mixed) = mixed_server_fixture();
+        write_reviewed_servers(&base, &plan, &mixed, false);
+        let legacy = stores::Store::McpLegacy.path(&base).unwrap();
+        let mut value: Value = serde_json::from_slice(&fs::read(&legacy).unwrap()).unwrap();
+        value["futureOption"] = json!({"nested":[false,8]});
+        fs::write(legacy, serde_json::to_vec(&value).unwrap()).unwrap();
+        let before = plan.stores[0].bytes().unwrap().to_vec();
+        assert!(refresh_reviewed_server_paths(&mut plan, &base, &canonical, &json!({"changed":true,"server":canonical})).is_err());
+        assert_eq!(plan.stores[0].bytes().unwrap(), before);
     }
 
     #[test]
