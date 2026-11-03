@@ -25,6 +25,23 @@ function assertTicket(ticket, lastTool, hub) {
   assert.equal(view.app, lastTool); assert.equal(view.direct, true); assert.equal(view.bundled, true);
   assert.equal(path.win32.normalize(view.path).toLowerCase(), path.win32.normalize(hub).toLowerCase());
 }
+async function observeAutomaticSuccessor({ hub, previousPid, expectedSha256, inventory, hashFile,
+  peVersion, onObserved, verifyResources, wait = retry }) {
+  const ready = await wait(() => {
+    const rows = inventory().filter(item => item.image.toLowerCase() === hub.toLowerCase() && item.pid !== previousPid);
+    assert.equal(rows.length, 1, 'Exactly one automatic replacement Root required');
+    const record = rows[0];
+    assert.equal(record.kernelIdentityVerified, true, 'Replacement Root identity unavailable');
+    assert.equal(hashFile(hub), expectedSha256, 'Replacement Root image differs');
+    const version = peVersion(19);
+    assert.deepEqual(version, [0, 1, 19, 0], 'Replacement Root PE version differs');
+    assert.deepEqual(inventory().filter(item => item.pid === record.pid), [record], 'Replacement Root identity changed');
+    return { record, version };
+  }, 90);
+  onObserved(ready.record, ready.version);
+  verifyResources();
+  return ready;
+}
 async function completeStartup(page, version, report) {
   assert.ok(['0.1.18', '0.1.19'].includes(version));
   const terms = page.locator('#usage-terms-dialog'), guide = page.locator('#convergence-dialog');
@@ -257,12 +274,16 @@ async function main() {
     await page.locator('#hub-update-button').click(); await retry(() => button('Update Hub'));
     await retry(() => assert.equal(child.exitCode, 0), 180);
     await browser.close().catch(() => {}); browser = null; page = null;
-    await retry(() => assert.equal(hashFile(hub), config.pins.executable), 180);
-    report.afterPeVersion = peVersion(19);
-    target.assertInstalledResources(path.dirname(hub), '0.1.19');
-    // Deliberately no launch here: a replacement process must appear automatically.
-    rootRecord = await retry(() => { const rows = inventory().filter(p => p.image.toLowerCase() === hub.toLowerCase() && p.pid !== child.pid); assert.equal(rows.length, 1); return rows[0]; }, 90);
-    report.afterRoot = rootRecord; await connect('0.1.19');
+    // NSIS copies the main EXE before resources; observe its automatic replacement first.
+    await observeAutomaticSuccessor({ hub, previousPid: child.pid, expectedSha256: config.pins.executable,
+      inventory, hashFile, peVersion,
+      onObserved: (record, version) => { rootRecord = record; report.afterRoot = record; report.afterPeVersion = version; },
+      verifyResources: () => {
+        report.resourceProbe = { phase: 'after-automatic-root', attempts: 1, passed: false };
+        target.assertInstalledResources(path.dirname(hub), '0.1.19');
+        report.resourceProbe.passed = true;
+      } });
+    await connect('0.1.19');
     clearInterval(watch); watch = null;
     if (restore) {
       assertTicket(observedTicket, lastTool, hub); await direct.checkRestored(page);
@@ -316,6 +337,7 @@ async function main() {
     if (migrated) report.fixtureSettingsChecksPassed = true;
     else report.settingsPreserved = true;
   } catch (error) {
+    if (error.resourceDiagnostic) report.resourceFailure = error.resourceDiagnostic;
     report.error = String(error.stack || error).slice(0, 16000); process.exitCode = 1;
     try { if (page) await page.screenshot({ path: path.join(out, 'failure.png') }); } catch {}
   } finally {
@@ -336,5 +358,5 @@ async function main() {
     console.log(JSON.stringify({ out, passed: report.passed, releaseReady: false }));
   }
 }
-module.exports = { assertProtocol, assertTicket, completeStartup, setUpdatePreferences, assertSavedPreferences, continueMcpGuide, main };
+module.exports = { assertProtocol, assertTicket, observeAutomaticSuccessor, completeStartup, setUpdatePreferences, assertSavedPreferences, continueMcpGuide, main };
 if (require.main === module) main().catch(error => { console.error(String(error.message).slice(0, 1200)); process.exitCode = 1; });

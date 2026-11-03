@@ -96,15 +96,25 @@ function loadContract(config, env = process.env) {
     descriptor: read(feed.DESCRIPTOR, binding.target.descriptor), descriptorSignature: read(`${feed.DESCRIPTOR}.minisig`, binding.target.descriptorSignature),
     installer: read(ASSET, binding.target.installer), manifest: read('latest.json', binding.target.latest) });
 }
-function readHash(file, expected) {
-  const stat = fs.lstatSync(file); assert.ok(stat.isFile() && !stat.isSymbolicLink());
-  assert.equal(hash(feed.readBounded(file, 512 * 1024 * 1024)), expected, path.basename(file));
+function readHash(file, expected, relativePath = path.basename(file)) {
+  let stat, bytes;
+  try {
+    stat = fs.lstatSync(file); assert.ok(stat.isFile() && !stat.isSymbolicLink());
+    bytes = feed.readBounded(file, 512 * 1024 * 1024);
+    assert.equal(hash(bytes), expected, relativePath);
+  } catch (error) {
+    error.resourceDiagnostic = { relativePath, absolutePath: file, expectedSha256: expected,
+      lstat: stat ? { isFile: stat.isFile(), isDirectory: stat.isDirectory(), isSymbolicLink: stat.isSymbolicLink(), size: stat.size, mtimeMs: stat.mtimeMs } : null,
+      actualSha256: bytes ? hash(bytes) : null, hashAvailable: Boolean(bytes), code: error.code || null };
+    error.message = `${relativePath}: ${error.message}`;
+    throw error;
+  }
 }
 function itemFor(version) { assert.ok(['0.1.18', '0.1.19'].includes(version)); return version === '0.1.18' ? binding.baseline : binding.target; }
 function assertInstalledResources(directory, version) {
-  const item = itemFor(version); readHash(path.join(directory, 'creator-hub.exe'), item.executable.sha256);
+  const item = itemFor(version); readHash(path.join(directory, 'creator-hub.exe'), item.executable.sha256, 'creator-hub.exe');
   const files = { ...item.manifest.modules.mcp.files, ...item.manifest.modules.setup.files, ...item.manifest.managedRouting.files };
-  for (const [name, sha] of Object.entries(files)) readHash(path.join(directory, 'modules', name), sha);
+  for (const [name, sha] of Object.entries(files)) readHash(path.join(directory, 'modules', name), sha, `modules/${name}`);
 }
 function payloadRoot(local, version) { return path.join(local, 'creator-hub/runtime-generations/windows-x86_64', itemFor(version).generation); }
 function assertGenerationProcess(image, local, version) {
@@ -124,4 +134,4 @@ function assertActiveResources(local, version, value, current = true) {
 }
 module.exports = { KIND, ASSET, BASELINE_ASSET, CASES, binding, hash, generation, validateBinding, assertHost, assertAdmission,
   configFor, assertBound, readConfig, loadContract, assertInstalledResources, assertGenerationProcess, assertActiveResources,
-  readBounded: feed.readBounded, LIMITS: feed.LIMITS, assertRunner: assertHost, startLabProxy: feed.startLabProxy };
+  readHash, readBounded: feed.readBounded, LIMITS: feed.LIMITS, assertRunner: assertHost, startLabProxy: feed.startLabProxy };

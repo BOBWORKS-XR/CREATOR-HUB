@@ -143,3 +143,76 @@ test('receipt refuses held-session replacement, old generation, no restart and f
     assert.throws(() => input.checkReceipt(value.report, [value.lifecycle], value.config, env()));
   }
 });
+
+function copyFixture() {
+  const root = path.join(__dirname, '../artifacts/readiness-fixtures'); fs.mkdirSync(root, { recursive: true });
+  const directory = fs.mkdtempSync(path.join(root, 'case-'));
+  const hub = path.join(directory, 'creator-hub.exe'), bytes = Buffer.from('synthetic-root-19');
+  fs.writeFileSync(hub, bytes, { flag: 'wx' });
+  const resources = Array.from({ length: 15 }, (_, index) => {
+    const data = Buffer.from(`complete-resource-${index}`), file = path.join(directory, `resource-${index}.bin`);
+    fs.writeFileSync(file, index === 0 ? Buffer.alloc(0) : data, { flag: 'wx' });
+    return { file, data, sha256: target.hash(data), name: `modules/resource-${index}.bin` };
+  });
+  const record = { pid: 20, parentPid: 18, startTicks: '20', image: hub, kernelIdentityVerified: true };
+  return { directory, hub, bytes, resources, record };
+}
+test('partial-copy fixture reproduces early read refusal but waits for automatic Root before one strict 15-file probe', async () => {
+  const f = copyFixture(); let visible = false, probes = 0, resourceReads = 0, observed = false;
+  assert.equal(target.hash(fs.readFileSync(f.hub)), target.hash(f.bytes));
+  assert.throws(() => target.readHash(f.resources[0].file, f.resources[0].sha256, f.resources[0].name), error =>
+    error.resourceDiagnostic.relativePath === f.resources[0].name && error.resourceDiagnostic.lstat.size === 0);
+  await driver.observeAutomaticSuccessor({ hub: f.hub, previousPid: 10, expectedSha256: target.hash(f.bytes),
+    inventory: () => visible ? [f.record] : [], hashFile: file => target.hash(fs.readFileSync(file)), peVersion: () => [0, 1, 19, 0],
+    onObserved: record => { assert.deepEqual(record, f.record); observed = true; },
+    verifyResources: () => { assert.equal(observed, true); probes++; for (const item of f.resources) { resourceReads++; target.readHash(item.file, item.sha256, item.name); } },
+    wait: async (read, seconds) => {
+      assert.equal(seconds, 90); assert.throws(read, /automatic replacement Root/); assert.equal(probes, 0);
+      fs.writeFileSync(f.resources[0].file, f.resources[0].data); visible = true; return read();
+    } });
+  assert.equal(probes, 1); assert.equal(resourceReads, 15);
+});
+test('corrupt payload after Root readiness is refused once with named size and actual-hash evidence', async () => {
+  const f = copyFixture(), item = f.resources[0], corrupt = Buffer.from('corrupt-after-ready');
+  fs.writeFileSync(item.file, corrupt); let probes = 0, observed = false;
+  await assert.rejects(driver.observeAutomaticSuccessor({ hub: f.hub, previousPid: 10, expectedSha256: target.hash(f.bytes),
+    inventory: () => [f.record], hashFile: file => target.hash(fs.readFileSync(file)), peVersion: () => [0, 1, 19, 0],
+    onObserved: () => { observed = true; }, verifyResources: () => { probes++; target.readHash(item.file, item.sha256, item.name); },
+    wait: async read => read() }), error => {
+    assert.equal(observed, true); assert.equal(error.resourceDiagnostic.relativePath, item.name);
+    assert.equal(error.resourceDiagnostic.lstat.size, corrupt.length);
+    assert.equal(error.resourceDiagnostic.actualSha256, target.hash(corrupt));
+    assert.equal(error.resourceDiagnostic.expectedSha256, item.sha256); return true;
+  });
+  assert.equal(probes, 1);
+});
+test('wrong replacement identity, image or PE version cannot reach payload verification', async () => {
+  for (const mode of ['same-pid', 'kernel', 'hash', 'version']) {
+    const f = copyFixture(); let probes = 0, observed = 0;
+    const record = { ...f.record, ...(mode === 'same-pid' ? { pid: 10 } : {}), ...(mode === 'kernel' ? { kernelIdentityVerified: false } : {}) };
+    await assert.rejects(driver.observeAutomaticSuccessor({ hub: f.hub, previousPid: 10, expectedSha256: target.hash(f.bytes),
+      inventory: () => [record], hashFile: () => mode === 'hash' ? '0'.repeat(64) : target.hash(f.bytes),
+      peVersion: () => [0, 1, mode === 'version' ? 18 : 19, 0], onObserved: () => { observed++; }, verifyResources: () => { probes++; },
+      wait: async (read, seconds) => { assert.equal(seconds, 90); return read(); } }));
+    assert.equal(probes, 0); assert.equal(observed, 0);
+  }
+});
+test('resource diagnostics preserve empty-file and nonregular-file refusal without contents', () => {
+  const f = copyFixture(), item = f.resources[0];
+  assert.throws(() => target.readHash(item.file, item.sha256, item.name), error => {
+    assert.equal(error.resourceDiagnostic.lstat.size, 0); assert.equal(error.resourceDiagnostic.actualSha256, null);
+    assert.equal(error.resourceDiagnostic.hashAvailable, false); return true;
+  });
+  assert.throws(() => target.readHash(f.directory, item.sha256, 'modules/not-a-file'), error =>
+    error.resourceDiagnostic.relativePath === 'modules/not-a-file' && error.resourceDiagnostic.lstat.isDirectory);
+  const source = fs.readFileSync(path.join(__dirname, 'windows-outgoing-018-target.cjs'), 'utf8');
+  assert.ok(source.includes('!stat.isSymbolicLink()')); assert.ok(source.includes('512 * 1024 * 1024'));
+});
+test('actual driver captures new Root before the strict probe and preserves diagnostic evidence', () => {
+  const source = fs.readFileSync(path.join(__dirname, 'windows-outgoing-018-driver.cjs'), 'utf8');
+  assert.equal((source.match(/spawn\(hub,/g) || []).length, 1);
+  assert.ok(source.includes('await observeAutomaticSuccessor({ hub,'));
+  assert.ok(source.includes("phase: 'after-automatic-root', attempts: 1"));
+  assert.ok(source.includes('report.resourceFailure = error.resourceDiagnostic'));
+  assert.ok(source.indexOf('onObserved(ready.record, ready.version)') < source.indexOf('verifyResources();'));
+});
