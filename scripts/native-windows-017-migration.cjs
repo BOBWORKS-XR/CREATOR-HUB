@@ -21,6 +21,8 @@ const CONTEXT = Object.freeze({ GITHUB_ACTIONS: 'true', RUNNER_ENVIRONMENT: 'git
   GITHUB_EVENT_NAME: 'workflow_dispatch', GITHUB_WORKFLOW_REF: 'BOBWORKS-XR/CREATOR-HUB/.github/workflows/windows-017-production.yml@refs/heads/validation/windows-menu-merge-20261027',
   GITHUB_REF: 'refs/heads/validation/windows-menu-merge-20261027', CREATOR_WINDOWS_017_MIGRATION: '1' });
 const INCOMING_PARENT_MODE = Symbol('incoming-signed-migration-diagnostic');
+const setupOwned = require('./windows-setup-owned-case.cjs');
+const unverifiedServer = require('./windows-unverified-server-case.cjs');
 const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 const BASELINE_OUTPUT_MESSAGES = new Set([
@@ -74,13 +76,14 @@ async function installMigrationTarget({ installer, environment, hub, hubHash, un
 // Independently frozen from the R2 installer payload. The signed runtime
 // descriptor binds all nine MCP files; these pins also bind Setup and routing.
 const RESOURCE_PINS = Object.freeze({
-  "setup/creator-project-setup.exe": "99c9598340401c8cbf3892524280c26c303fe2fd479bfb6b2ca2445c73e96bd3",
-  "routing/creator-hub-mcp-router.exe": "28dab129c215bc7835bef1441e01db7be46d976639c356e84998f6bfde6615a3",
-  "routing/router.json": "0673956592c25d1e021af0bb6eb68909d185a6c145bd0490fdc6a0d58628ae97",
-  "routing/router.minisig": "90f31c89c45ca694f554f23909cb30660679c97e88bdff368e303278147e1071",
-  "routing/runtime.json": "dc46a104a2c880ac9d304d98aac1a7b9510dfa202e495295ed63e037079611f6",
-  "routing/runtime.minisig": "b5e9e0e69668bb483e1b1ff6cd02a2a53881e91b50f0334fa2e56dafcf637c63"
+  "setup/creator-project-setup.exe": "f87e4bd643159840b9920faab8da1700f31f4aa986a4138e2fb92827ee96935d",
+  "routing/creator-hub-mcp-router.exe": "1634add175777541b36fd91301535090a3833e6418e00f89252a9a1944afa4dd",
+  "routing/router.json": "52097de8ca97ab3134a0cb663a458d15c78bf8949809d36c306424a502abe5f0",
+  "routing/router.minisig": "3130b037ced20e8fdd0aff2164523c2010e268c15da2211be23357218b75cbc8",
+  "routing/runtime.json": "c2c36c431df7b027a396035e981c29e762e26f7368edd40e36292c21a8d714a1",
+  "routing/runtime.minisig": "cfadbd03638f06a291a2ee2acb9daedeadae12018cf6278eb1e3f6feb8378346"
 });
+
 const MCP_FILES = Object.freeze(['mcp/creator-works-mcp-launcher.exe', 'mcp/server/creator-works-mcp.mjs',
   'mcp/server/runtime/node.exe', 'mcp/server/runtime/LICENSE', 'mcp/server/runtime/VERSION',
   'mcp/server/unity-extension/Editor/BanterMCPBridge.cs', 'mcp/server/unity-extension/Editor/CreatorWorksMCPLogo.png',
@@ -238,7 +241,7 @@ function fixture(env, out, paths = path) {
     { path: paths.join(env.USERPROFILE, '.gemini', 'config', 'mcp_config.json'), bytes: Buffer.from(JSON.stringify({ mcpServers: { other }, futureRoot: ['keep'] }) + '\n') },
     { path: paths.join(env.APPDATA, 'opencode', 'opencode.jsonc'), bytes: Buffer.from('// Keep comment and third-party entry\n{"mcp":{"other":{"type":"remote","url":"https://example.invalid/mcp"}},"futureRoot":false}\n') },
   ];
-  return { projectA, projectB, oldRoot, oldServer, oldNode, current, legacy, missingChannel, stores, clients, untouched, entry };
+  return setupOwned.fixtureCase(env, { projectA, projectB, oldRoot, oldServer, oldNode, current, legacy, missingChannel, stores, clients, untouched, entry });
 }
 
 function seedMigrationFixture({ f, stores, fsOps = fs, checkLinks = rejectLinks, read = regular, digest = hash, image = projectImage }) {
@@ -271,6 +274,7 @@ function verifyMerged(f, currentBytes, legacyBytes, server) {
 }
 
 function verifyClient(f, item, document, router) {
+  if (item.setupOwned) return setupOwned.verifyClient(item, document, router);
   const actual = item.id === 'codex' ? document.mcp_servers['creator-works'] : document.mcpServers['creator-works'];
   assert.deepEqual(actual, { ...item.entry, command: router, args: [],
     env: { ...item.entry.env, CREATOR_WORKS_CONFIG_OWNER: 'creator-hub-v1' } },
@@ -300,7 +304,7 @@ function assertDialog(windows, pid, approve) {
 
 function connectionReview(f, router) {
   return 'These existing connections could not be publisher-verified:\n\n'
-    + ['Codex', 'Claude Code', 'Claude Desktop'].map(name => `${name}\nCommand: ${f.oldNode}\nServer: ${f.oldServer}\nProject kept: ${f.projectA}`).join('\n\n')
+    + (f.normalSetup ? ['Claude Code', 'Claude Desktop'] : ['Codex', 'Claude Code', 'Claude Desktop']).map(name => `${name}\nCommand: ${f.oldNode}\nServer: ${f.oldServer}\nProject kept: ${f.projectA}`).join('\n\n')
     + `\n\nMove them to the verified Hub router at ${router}? Names and ownership markers are not proof. Continue only for your Creator Works connections. Exact backups, client options and other servers are kept. Cancel stops migration before changing any of these clients.`;
 }
 
@@ -356,12 +360,13 @@ if(-not [Migration016Dialog]::PostMessage($h,0x466,[IntPtr]$buttonId,[IntPtr]::Z
 function dialogCommand(pid, executable, selected) {
   assert.ok(Number.isSafeInteger(pid) && pid > 0); assert.ok(Number.isSafeInteger(selected.handle) && selected.handle > 0);
   const guide = selected.title === 'Move to Hub' && ((selected.id === 1000 && selected.name === 'Move to Hub') || (selected.id === 1001 && selected.name === 'Not now'));
+  const server = selected.title === 'Keep MCP settings working in Hub' && selected.id === 1000 && selected.name === 'Use Hub runtime';
   const connection = selected.title === 'Review unverified MCP connections' && selected.id === 1000 && selected.name === 'Move reviewed connections';
-  assert.ok(guide || connection, 'Only fixed guide/connection decisions are admitted');
-  if (connection) assert.ok(typeof selected.content === 'string' && selected.content.length > 0 && selected.content.length <= 8192);
+  assert.ok(guide || connection || server, 'Only fixed guide/connection/server decisions are admitted');
+  if (connection || server) assert.ok(typeof selected.content === 'string' && selected.content.length > 0 && selected.content.length <= 8192);
   assert.ok(path.win32.isAbsolute(executable) && !/[\0\r\n]/.test(executable));
   const quote = text => `'${text.replaceAll("'", "''")}'`;
-  return `$targetPid=${pid};$expectedExecutable=${quote(executable)};$dialogHandle=${selected.handle};$buttonId=${selected.id};$buttonName=${quote(selected.name)};$expectedTitle=${quote(selected.title)};$expectedContent=${quote(connection ? selected.content : '')};\n${DIALOG_ACTION}`;
+  return `$targetPid=${pid};$expectedExecutable=${quote(executable)};$dialogHandle=${selected.handle};$buttonId=${selected.id};$buttonName=${quote(selected.name)};$expectedTitle=${quote(selected.title)};$expectedContent=${quote(connection || server ? selected.content : '')};\n${DIALOG_ACTION}`;
 }
 
 function reportTemplate(testSource) {
@@ -440,7 +445,7 @@ function verifyGuidePage(live, hub) {
 }
 
 async function runGuideRestart({ fixture: seededFixture, projectBefore, connect }, context) {
-  const { live, f, retry, readStatus, nativeDecision, unchanged, retained, report, connectionDecision, verifyBackups,
+  const { live, f, retry, readStatus, nativeDecision, unchanged, retained, report, connectionDecision, serverDecision, verifyBackups,
     read, manifest, oldClient, registrations, baselines, projectImage, out, hub, termsAlreadyAccepted = false } = context;
   assert.ok(f && Array.isArray(f.stores) && Array.isArray(f.clients) && Array.isArray(f.untouched), 'A seeded migration fixture is required');
   assert.equal(seededFixture, f, 'Guide must consume the same synthetic fixture object');
@@ -473,11 +478,14 @@ async function runGuideRestart({ fixture: seededFixture, projectBefore, connect 
   const cancelled = await readStatus(); assert.equal(cancelled.stage, 'review'); assert.deepEqual(cancelled.backups, []);
   for (const item of [...f.stores, ...f.clients]) assert.equal(effects.fs.existsSync(backupFile(item.path, item.bytes)), false);
   report.cancelAccepted = true;
+  if (f.normalSetup) report.normalSetupOwnedCodex = { fixtureOnly: true, copiedUserData: false,
+    command: f.clients[0].entry.command, args: [], beforeNativeMoveSha256: hash(read(f.clients[0].path)),
+    guiNativeMoveRequired: true, migrationAccepted: false };
   // Observation is deliberately not advertised as atomic before-write proof.
   const observed = new Map(); let observationError;
   const sample = () => {
     try {
-      for (const item of [...f.stores.slice(0, 2), ...f.clients]) {
+      for (const item of [...f.stores.slice(0, 2), ...f.clients.filter(item => !item.setupOwned)]) {
         if (observed.has(item.path)) continue;
         let bytes;
         try { bytes = read(item.path); }
@@ -495,10 +503,11 @@ async function runGuideRestart({ fixture: seededFixture, projectBefore, connect 
   live.observer = setInterval(sample, 20);
   await live.page.locator('#convergence-move').click(); await nativeDecision(true);
   await connectionDecision();
+  if (f.unverifiedSavedServer) await serverDecision();
   await live.page.locator('#convergence-title').filter({ hasText: /^Move complete$/ }).waitFor({ timeout: 180000 });
   sample(); clearInterval(live.observer); live.observer = null;
   if (observationError) throw observationError;
-  assert.equal(observed.size, 5); report.backupsPresentAtFirstObservedChange = [...observed.values()];
+  assert.equal(observed.size, f.normalSetup ? 4 : 5); report.backupsPresentAtFirstObservedChange = [...observed.values()];
   const completed = await readStatus(); assert.equal(completed.stage, 'complete'); assert.equal(completed.required, false);
   assert.deepEqual(completed.legacyApps, []); verifyBackups([...f.stores, ...f.clients]); retained();
   const current = read(f.stores[0].path), earlier = read(f.stores[1].path);
@@ -507,6 +516,11 @@ async function runGuideRestart({ fixture: seededFixture, projectBefore, connect 
   const active = effects.inspectActiveRoute(effects.localAppData, manifest);
   assert.equal(effects.fs.realpathSync(server), effects.fs.realpathSync(path.join(active.payload, 'mcp/server/creator-works-mcp.mjs')));
   report.activeRoute = active;
+  if (f.unverifiedSavedServer) {
+    assert.equal(report.serverRuntimeDecision?.length, 1, 'Separate native Use Hub runtime approval required');
+    assert.equal(server, report.serverRuntimeDecision[0].expectedServer, 'The re-resolved mixed-slash server must be persisted');
+    report.unverifiedSavedServerTransition = { before: f.unverifiedSavedServer, after: server, nativeApproved: true };
+  }
   effects.verifyMerged(f, current, earlier, server);
   const { managedLocations, verifyMigratedTarget } = effects.managedTarget();
   const route = managedLocations(effects.localAppData), migrated = [];
@@ -549,6 +563,12 @@ async function runGuideRestart({ fixture: seededFixture, projectBefore, connect 
   await close();
   assert.equal(report.nativeDecisions.length, 2, 'One native cancellation and one native approval; no additional decisions');
   report.checks.push('Normal close/relaunch is idempotent: no repeated guide/terms, no settings reset, old live transport and all managed routes reconnect');
+  if (f.normalSetup) {
+    const retained = hash(read(f.clients[0].path));
+    assert.equal(retained, report.normalSetupOwnedCodex.beforeNativeMoveSha256);
+    report.normalSetupOwnedCodex.afterRestartSha256 = retained;
+    report.normalSetupOwnedCodex.migrationAccepted = true;
+  }
   report.nativeGuideAccepted = true; report.repeatStartupAccepted = true; report.settingsPreserved = true;
   report.passed = true;
 }
@@ -705,7 +725,7 @@ async function main(args = process.argv.slice(2), mode) {
     for (const item of retainedRuntime) assert.equal(hash(regular(item.file, 200 * 1024 * 1024)), item.sha256);
   };
   const verifyBackups = items => {
-    for (const item of items) assert.deepEqual(read(backupFile(item.path, item.bytes)), item.bytes, 'Exact original backup required');
+    for (const item of items) if (item.setupOwned) assert.deepEqual(read(item.path), item.bytes, 'Already-owned Setup entry must be an exact no-op'); else assert.deepEqual(read(backupFile(item.path, item.bytes)), item.bytes, 'Exact original backup required');
   };
   const readStatus = () => page.evaluate(() => window.CreatorHubNative.invoke('convergence_status'));
   const nativeDecision = async approve => {
@@ -739,6 +759,19 @@ async function main(args = process.argv.slice(2), mode) {
     assert.equal(hubHash(), TARGET.exe);
     report.connectionExceptionDecisions = [{ ...selected, pid: child.pid, executableSha256: hubHash() }];
     // One explicit approval of captured known fixture paths, not generic modal dismissal.
+    ps(dialogCommand(child.pid, hub, selected));
+  };
+  const serverDecision = async () => {
+    assert.ok(f.unverifiedSavedServer); assert.equal(fs.existsSync(f.unverifiedSavedServer), false, 'Never create or execute the unverified fixture server');
+    assert.equal(report.connectionExceptionDecisions?.length, 1, 'Client review must complete separately first');
+    const active = inspectActiveRoute(process.env.LOCALAPPDATA, manifest);
+    const expectedServer = active.payload + path.sep + 'mcp/server/creator-works-mcp.mjs';
+    assert.ok(expectedServer.includes('\\') && expectedServer.includes('mcp/server/'));
+    const selected = await retry(() => unverifiedServer.assertServerDialog(JSON.parse(native('snapshot')), child.pid, expectedServer));
+    const imported = { ...f.current, channels: [...f.current.channels, f.missingChannel] };
+    for (const item of f.stores.slice(0, 2)) assert.deepEqual(JSON.parse(read(item.path)), imported, 'No saved server replacement before separate approval');
+    verifyBackups(f.stores); retained(); assert.equal(hubHash(), TARGET.exe);
+    report.serverRuntimeDecision = [{ ...selected, expectedServer, pid: child.pid, executableSha256: hubHash() }];
     ps(dialogCommand(child.pid, hub, selected));
   };
   const launch = async () => {
@@ -818,7 +851,7 @@ async function main(args = process.argv.slice(2), mode) {
         { encoding: 'utf8', timeout: 20000, windowsHide: true, maxBuffer: 256 * 1024 }).replace(/^\uFEFF/, '')) }),
       get observer() { return observer; }, set observer(value) { observer = value; } };
     await runMigrationPhases(setupInstall, setup => runGuideRestart(setup, { live, f, retry, readStatus, nativeDecision,
-      unchanged, retained, report, connectionDecision, verifyBackups, read, manifest, oldClient, registrations, baselines, projectImage, out, hub,
+      unchanged, retained, report, connectionDecision, serverDecision, verifyBackups, read, manifest, oldClient, registrations, baselines, projectImage, out, hub,
       termsAlreadyAccepted: mode === INCOMING_PARENT_MODE }));
   } catch (error) {
     report.error = report.baselineInstallerFailure ? 'Baseline installer failed; see redacted baselineInstallerFailure.' : String(error.stack || error); process.exitCode = 1;

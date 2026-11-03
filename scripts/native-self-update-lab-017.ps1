@@ -428,7 +428,7 @@ try {
     $validated = Read-LabLine $validator.StandardOutput | ConvertFrom-Json
     if ($validated.kind -cne 'lab-contract-validated' -or -not $validator.WaitForExit(10000) -or $validator.ExitCode -ne 0) { throw 'Reviewed contract refused.' }
     if ($Outgoing017) {
-        if ($validated.baselineVersion -cne '0.1.16' -or $validated.targetVersion -cne '0.1.17' -or
+        if ($validated.baselineVersion -cne '0.1.16' -or $validated.targetVersion -cne '0.1.18' -or
             $validated.baselineInstallerSha256 -cnotmatch '^[a-f0-9]{64}$' -or
             $validated.baselineExecutableSha256 -cnotmatch '^[a-f0-9]{64}$') { throw 'Outgoing version/baseline binding refused.' }
         if ((Get-FileHash -LiteralPath $BaselineInstallerPath -Algorithm SHA256).Hash.ToLowerInvariant() -cne $validated.baselineInstallerSha256) {

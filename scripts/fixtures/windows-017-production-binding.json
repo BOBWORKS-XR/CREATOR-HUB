@@ -1,49 +1,49 @@
 {
   "schemaVersion": 1,
   "enabled": true,
-  "version": "0.1.17",
+  "version": "0.1.18",
   "minHubVersion": "0.1.12",
   "source": {
-    "commit": "ec7f1d218c187caac30d0170aaaca2dfcdf83766",
-    "tree": "11efac78fc7509e8da08de3af7262bfc6369ce5c"
+    "commit": "930a2886b6872a08a4a25be4738a5a01a4e911d2",
+    "tree": "a1af9bf6c56b221352f8b3feb1fd65259200e9dc"
   },
   "descriptor": {
     "bytes": 505,
-    "sha256": "9661ad162d87bfb7436e7e9eb767bea87763677a9b642de909323dd97b6aeb59"
+    "sha256": "34ce337b78887dba0d60e9d93e4d3f24569f8c6009637bca352d4074f38062df"
   },
   "descriptorSignature": {
     "bytes": 316,
-    "sha256": "c080d757d129116cc311986aea11d633af2fcd31c10db198a7afb783c9646c3a"
+    "sha256": "77d4a61d81064985998e9eb6db7a532c3867860fcef4264090e379ac1b974674"
   },
   "manifest": {
     "bytes": 676,
-    "sha256": "babf517e8e6a8e89f93cbcc3620b6fe02bd659d9b403dd01edadd5fb24b5afd1"
+    "sha256": "b2af75e3ea28002ff9b116cafc9ddf6b0bd31018c83fe2330cd85753ddc1313d"
   },
   "privateRelease": {
-    "id": 433152381,
-    "tag": "v0.1.17",
-    "sourceCommit": "ec7f1d218c187caac30d0170aaaca2dfcdf83766"
+    "id": 433204480,
+    "tag": "v0.1.18",
+    "sourceCommit": "930a2886b6872a08a4a25be4738a5a01a4e911d2"
   },
   "assets": {
-    "Creator.Hub_0.1.17_x64-setup.exe": {
-      "id": 706895046,
-      "size": 38246135,
-      "sha256": "4b8f3f34ed0d3ca06ba92230b37f8f8b4f75da772cb285a4129d9b3068dd4f9e"
+    "Creator.Hub_0.1.18_x64-setup.exe": {
+      "id": 707135294,
+      "size": 38235117,
+      "sha256": "c09e3f73ca3e7fab74db2c204a17f6277d5b7817c650f090bd77af00a6f0f3f9"
     },
     "creator-hub-windows-x86_64.json": {
-      "id": 706895054,
+      "id": 707135295,
       "size": 505,
-      "sha256": "9661ad162d87bfb7436e7e9eb767bea87763677a9b642de909323dd97b6aeb59"
+      "sha256": "34ce337b78887dba0d60e9d93e4d3f24569f8c6009637bca352d4074f38062df"
     },
     "creator-hub-windows-x86_64.json.minisig": {
-      "id": 706895060,
+      "id": 707135296,
       "size": 316,
-      "sha256": "c080d757d129116cc311986aea11d633af2fcd31c10db198a7afb783c9646c3a"
+      "sha256": "77d4a61d81064985998e9eb6db7a532c3867860fcef4264090e379ac1b974674"
     },
     "latest.json": {
-      "id": 706895055,
+      "id": 707135300,
       "size": 676,
-      "sha256": "babf517e8e6a8e89f93cbcc3620b6fe02bd659d9b403dd01edadd5fb24b5afd1"
+      "sha256": "b2af75e3ea28002ff9b116cafc9ddf6b0bd31018c83fe2330cd85753ddc1313d"
     }
   }
 }

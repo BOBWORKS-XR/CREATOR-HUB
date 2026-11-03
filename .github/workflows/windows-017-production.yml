@@ -1,4 +1,4 @@
-name: Windows R6 production17 incoming and same-profile migration (private only)
+name: Windows R8 production17 incoming and same-profile migration (private only)
 on:
   push:
     branches: [validation/windows-menu-merge-20261027]
@@ -16,6 +16,11 @@ on:
         description: Recheck failed signed incoming and combined cases; retain completed fresh-native receipt.
         type: boolean
         default: false
+      migration_scope:
+        description: Select the custom-server gate first or the remaining standard lanes.
+        type: choice
+        options: [all, custom-server, standard, incoming-only]
+        default: all
 permissions:
   contents: read
 jobs:
@@ -31,10 +36,13 @@ jobs:
         with:
           node-version: 24
       - run: npm ci --ignore-scripts
-      - run: node --test scripts/windows-017-production.test.cjs scripts/windows-017-updater.test.cjs scripts/windows-017-owned-close.test.cjs scripts/windows-017-migration-phase.test.cjs
+      - name: Parse actual PowerShell and exercise named arguments in this pwsh process
+        shell: pwsh
+        run: ./scripts/preflight-powershell.ps1
+      - run: node --test scripts/windows-017-production.test.cjs scripts/windows-017-updater.test.cjs scripts/windows-017-owned-close.test.cjs scripts/windows-017-migration-phase.test.cjs scripts/windows-setup-owned-case.test.cjs scripts/windows-unverified-server-case.test.cjs
   incoming:
     needs: preflight
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' && inputs.migration_scope != 'custom-server'
     runs-on: windows-latest
     timeout-minutes: 20
     permissions:
@@ -56,13 +64,13 @@ jobs:
           persist-credentials: false
       - uses: actions/checkout@v6
         with:
-          ref: ec7f1d218c187caac30d0170aaaca2dfcdf83766
+          ref: 930a2886b6872a08a4a25be4738a5a01a4e911d2
           path: product
           persist-credentials: false
       - name: Bind exact MCP client source tree
         shell: pwsh
         run: |
-          if ((git -C product rev-parse HEAD) -cne 'ec7f1d218c187caac30d0170aaaca2dfcdf83766' -or (git -C product rev-parse 'HEAD^{tree}') -cne '11efac78fc7509e8da08de3af7262bfc6369ce5c') { throw 'Wrong product source.' }
+          if ((git -C product rev-parse HEAD) -cne '930a2886b6872a08a4a25be4738a5a01a4e911d2' -or (git -C product rev-parse 'HEAD^{tree}') -cne 'a1af9bf6c56b221352f8b3feb1fd65259200e9dc') { throw 'Wrong product source.' }
       - uses: actions/setup-node@v6
         with:
           node-version: 24
@@ -91,7 +99,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Production incoming lifecycle failed.' }
       - name: Fresh native pages, equivalent settings and normal restart
         if: matrix.case == 'fresh'
-        run: node scripts/native-windows-017-fresh.cjs "${{ github.workspace }}/artifacts/incoming-017/candidate/Creator.Hub_0.1.17_x64-setup.exe"
+        run: node scripts/native-windows-017-fresh.cjs "${{ github.workspace }}/artifacts/incoming-017/candidate/Creator.Hub_0.1.18_x64-setup.exe"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -106,12 +114,17 @@ jobs:
             !artifacts/native-suite-*/startup.json
   incoming-migration:
     needs: preflight
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' && inputs.migration_scope != 'incoming-only'
     runs-on: windows-latest
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        migration_case: ${{ fromJSON(inputs.migration_scope == 'custom-server' && '["setup-owned-codex-unverified-server"]' || inputs.migration_scope == 'standard' && '["legacy","setup-owned-codex"]' || '["legacy","setup-owned-codex","setup-owned-codex-unverified-server"]') }}
     permissions:
       contents: write # Private draft GET access only; no write operations.
     env:
+      WINDOWS_MIGRATION_CASE: ${{ matrix.migration_case }}
       EXPECTED_HARNESS_COMMIT: ${{ inputs.expected_harness_commit }}
       CREATOR_WINDOWS_017_PRODUCTION: '1'
       CREATOR_PRODUCTION_017_BASELINE: '0.1.12'
@@ -125,7 +138,7 @@ jobs:
           persist-credentials: false
       - uses: actions/checkout@v6
         with:
-          ref: ec7f1d218c187caac30d0170aaaca2dfcdf83766
+          ref: 930a2886b6872a08a4a25be4738a5a01a4e911d2
           path: product
           persist-credentials: false
       - uses: actions/setup-node@v6
@@ -134,7 +147,7 @@ jobs:
       - name: Bind exact MCP client source tree
         shell: pwsh
         run: |
-          if ((git -C product rev-parse HEAD) -cne 'ec7f1d218c187caac30d0170aaaca2dfcdf83766' -or (git -C product rev-parse 'HEAD^{tree}') -cne '11efac78fc7509e8da08de3af7262bfc6369ce5c') { throw 'Wrong product source.' }
+          if ((git -C product rev-parse HEAD) -cne '930a2886b6872a08a4a25be4738a5a01a4e911d2' -or (git -C product rev-parse 'HEAD^{tree}') -cne 'a1af9bf6c56b221352f8b3feb1fd65259200e9dc') { throw 'Wrong product source.' }
       - run: npm ci --ignore-scripts
       - run: npm --prefix product/modules/mcp ci --ignore-scripts
       - name: Acquire identical four signed production files
@@ -165,7 +178,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: windows-017-production-migration-${{ github.run_id }}-${{ github.run_attempt }}
+          name: windows-017-production-migration-${{ matrix.migration_case }}-${{ github.run_id }}-${{ github.run_attempt }}
           retention-days: 14
           if-no-files-found: warn
           path: |

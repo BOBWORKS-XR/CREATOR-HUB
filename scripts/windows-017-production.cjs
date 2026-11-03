@@ -7,8 +7,8 @@ const shared = require('./windows-incoming-016.cjs');
 const raw = require('./fixtures/windows-r5-raw-binding.json');
 const binding = require('./fixtures/windows-017-production-binding.json');
 const feed = () => require('./self-update-lab-feed-017.cjs');
-const SOURCE = Object.freeze({ commit: 'ec7f1d218c187caac30d0170aaaca2dfcdf83766', tree: '11efac78fc7509e8da08de3af7262bfc6369ce5c' });
-const TARGET = Object.freeze({ version: '0.1.17', asset: 'Creator.Hub_0.1.17_x64-setup.exe',
+const SOURCE = Object.freeze({ commit: '930a2886b6872a08a4a25be4738a5a01a4e911d2', tree: 'a1af9bf6c56b221352f8b3feb1fd65259200e9dc' });
+const TARGET = Object.freeze({ version: '0.1.18', asset: 'Creator.Hub_0.1.18_x64-setup.exe',
   bytes: raw.installer.bytes, installer: raw.installer.sha256, exe: raw.executable.sha256, productSource: SOURCE.commit });
 const PINS = Object.freeze({ descriptor: binding.descriptor?.sha256, descriptorSignature: binding.descriptorSignature?.sha256,
   manifest: binding.manifest?.sha256, installer: TARGET.installer, executable: TARGET.exe });
@@ -73,7 +73,9 @@ function checkBaseline(contract, installer, executable) {
   assert.equal(hash(readBounded(executable, 512 * 1024 * 1024)), BASELINE.exe);
 }
 function productProvenance() { return { productSource: SOURCE.commit, productTree: SOURCE.tree,
-  sourceUnchanged: true, buildInputsSha256: raw.buildInputsSha256, buildResultSha256: raw.buildResultSha256 }; }
+  compilerInputsUnchanged: raw.rootOnlyAssembly?.compilerInputsUnchanged,
+  rawSourceUnchanged: raw.rootOnlyAssembly?.rawSourceUnchanged,
+  rootOnlyAssembly: raw.rootOnlyAssembly, buildInputsSha256: raw.buildInputsSha256, buildResultSha256: raw.buildResultSha256 }; }
 function discoveryScope(contract) {
   validatePins(contract.pins); assert.deepEqual(contract.baseline, BASELINE);
   return { kind: KIND, previousStable: BASELINE.version, baselineRole: 'explicit-pinned-public-version',

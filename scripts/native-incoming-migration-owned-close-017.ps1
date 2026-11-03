@@ -23,8 +23,8 @@ try {
     }
     $expected = [IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'Creator Hub/creator-hub.exe'))
     if ([IO.Path]::GetFullPath($ExpectedExecutable) -ine $expected) { throw 'Unexpected executable.' }
-    if ((Get-FileHash -LiteralPath $expected -Algorithm SHA256).Hash.ToLowerInvariant() -cne 'ab73d243fc6ba7ec956bf59b12679f736ecbefa7131bac678347e5a7b1618337') {
-        throw 'R6 executable differs.'
+    if ((Get-FileHash -LiteralPath $expected -Algorithm SHA256).Hash.ToLowerInvariant() -cne 'ae1d15ff3919ee9947e21d8542bcab50abf044e1bf047ce2c87abac4ccebfdc9') {
+        throw 'R8 executable differs.'
     }
     Add-Type -TypeDefinition @'
 using System;

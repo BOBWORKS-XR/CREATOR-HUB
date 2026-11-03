@@ -3,7 +3,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 
-const VERSION = '0.1.17';
+const VERSION = '0.1.18';
 const removedResource = /Creator-Community|community[._-](?:catalogue|catalog|projects)|community\.(?:js|css)(?:[?#]|$)|creator-plugins\.png(?:[?#]|$)/i;
 
 function directTarget(target, source) {
@@ -12,9 +12,9 @@ function directTarget(target, source) {
 }
 
 function assertProtocol(state) {
-  assert.equal(state.version, VERSION, 'Direct smoke requires the exact native 0.1.17 build');
+  assert.equal(state.version, VERSION, 'Direct smoke requires the exact native 0.1.18 build');
   assert.equal(state.protocol, 1, 'Native direct-feature protocol is required');
-  assert.equal(state.integrated, true, 'A hosted 0.1.17 build cannot satisfy direct acceptance');
+  assert.equal(state.integrated, true, 'A hosted 0.1.18 build cannot satisfy direct acceptance');
   assert.deepEqual(state.services, { integrated: true, features: ['setup', 'mcp'] });
 }
 

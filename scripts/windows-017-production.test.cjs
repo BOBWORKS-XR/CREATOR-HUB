@@ -12,11 +12,11 @@ function runner() { return { GITHUB_ACTIONS: 'true', RUNNER_ENVIRONMENT: 'github
   GITHUB_WORKFLOW_REF: 'BOBWORKS-XR/CREATOR-HUB/.github/workflows/windows-017-production.yml@refs/heads/validation/windows-menu-merge-20261027',
   CREATOR_WINDOWS_017_PRODUCTION: '1', CREATOR_PRODUCTION_017_BASELINE: '0.1.12', GITHUB_JOB: 'incoming',
   GITHUB_SHA: 'a'.repeat(40), EXPECTED_HARNESS_COMMIT: 'a'.repeat(40) }; }
-test('exact R6 17 bytes and one production metadata set are frozen', () => {
-  c.validateBinding(); assert.equal(c.SOURCE.commit, 'ec7f1d218c187caac30d0170aaaca2dfcdf83766');
-  assert.equal(c.TARGET.version, '0.1.17'); assert.equal(b.minHubVersion, '0.1.12');
-  assert.equal(c.TARGET.installer, '4b8f3f34ed0d3ca06ba92230b37f8f8b4f75da772cb285a4129d9b3068dd4f9e');
-  assert.equal(c.PINS.descriptor, '9661ad162d87bfb7436e7e9eb767bea87763677a9b642de909323dd97b6aeb59');
+test('exact R8 17 bytes and one production metadata set are frozen', () => {
+  c.validateBinding(); assert.equal(c.SOURCE.commit, '930a2886b6872a08a4a25be4738a5a01a4e911d2');
+  assert.equal(c.TARGET.version, '0.1.18'); assert.equal(b.minHubVersion, '0.1.12');
+  assert.equal(c.TARGET.installer, 'c09e3f73ca3e7fab74db2c204a17f6277d5b7817c650f090bd77af00a6f0f3f9');
+  assert.equal(c.PINS.descriptor, '34ce337b78887dba0d60e9d93e4d3f24569f8c6009637bca352d4074f38062df');
   for (const key of Object.keys(c.PINS)) assert.throws(() => c.validatePins({ ...c.PINS, [key]: 'b'.repeat(64) }));
 });
 test('runner gate refuses every wrong identity before candidate operations', () => {
@@ -26,7 +26,7 @@ test('runner gate refuses every wrong identity before candidate operations', () 
   assert.throws(() => c.assertHost({ ...runner(), CREATOR_HOSTED_UPDATE_FIXTURE: 'x' }, 'win32'));
 });
 test('private release and every immutable file identity are checked', () => {
-  const release = { id: b.privateRelease.id, tag_name: 'v0.1.17', draft: true, prerelease: false, target_commitish: c.SOURCE.commit,
+  const release = { id: b.privateRelease.id, tag_name: 'v0.1.18', draft: true, prerelease: false, target_commitish: c.SOURCE.commit,
     assets: Object.entries(b.assets).map(([name, p]) => ({ id: p.id, name, state: 'uploaded', size: p.size, digest: `sha256:${p.sha256}` })) };
   acquire.verifyRelease(release);
   for (const mutate of [r => r.draft = false, r => r.target_commitish = 'b'.repeat(40), r => r.assets[0].id++,
@@ -55,7 +55,7 @@ test('migration retains exit guards and its snapshot writer remains disabled', (
 });
 test('17 direct protocol rejects 16 and has no local native entrypoint', () => {
   const direct = require('./native-self-update-direct-017.cjs');
-  const state = { version: '0.1.17', protocol: 1, integrated: true, services: { integrated: true, features: ['setup', 'mcp'] } };
+  const state = { version: '0.1.18', protocol: 1, integrated: true, services: { integrated: true, features: ['setup', 'mcp'] } };
   direct.assertProtocol(state); assert.throws(() => direct.assertProtocol({ ...state, version: '0.1.16' }));
   const migration = require('./native-windows-017-migration.cjs');
   assert.throws(() => migration.admission({}, 'win32'));
@@ -76,4 +76,15 @@ test('production transport requires exact pins and runner scope before TLS creat
   assert.ok(guard > start && tls > guard);
   assert.ok(source.slice(start, tls).includes("contract.actualScope?.kind === 'production017-input'"));
   assert.ok(source.slice(start, tls).includes('contract = bindSigned012EmptyDiscovery(contract, env)'));
+});
+test('incoming-only and custom-server roles remain independent of fixture19', () => {
+  const workflow = fs.readFileSync(path.join(__dirname, '../.github/workflows/windows-017-production.yml'), 'utf8');
+  assert.ok(workflow.includes('options: [all, custom-server, standard, incoming-only]'));
+  const incoming = workflow.split('  incoming:')[1].split('  incoming-migration:')[0];
+  const migration = workflow.split('  incoming-migration:')[1];
+  assert.ok(incoming.includes("inputs.migration_scope != 'custom-server'"));
+  assert.ok(migration.includes("inputs.migration_scope != 'incoming-only'"));
+  assert.ok(incoming.includes('needs: preflight') && migration.includes('needs: preflight'));
+  assert.ok(incoming.includes('incoming12') && incoming.includes('incoming14') && incoming.includes('fresh'));
+  assert.doesNotMatch(workflow, /needs:.*(?:fixture|outgoing)|fixture19|0\.1\.19/);
 });
