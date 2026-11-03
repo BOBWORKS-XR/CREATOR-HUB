@@ -3,18 +3,25 @@
 **Unity tools in one window.** Open Creator SDK / Altspace and Banter projects,
 use Creator Works MCP and create or inspect projects with Project Setup.
 
-**Platform scope:** unified 0.1.14 targets Windows x64. Linux/Flatpak remain
-unpublished development work; macOS support is suspended. Existing Mac/Linux
-downloads remain historical builds, not supported unified updates.
+**Platform scope:** Windows x64 is the maintained binary release target. Official
+Linux packages (AppImage, DEB, RPM and Flatpak) are discontinued; new macOS builds
+are suspended. Existing Mac/Linux downloads remain historical builds, not
+supported unified updates.
 
-## Creator Hub 0.1.14
+Experienced contributors can [build from source](docs/BUILD-FROM-SOURCE.md). See the
+[experimental Unix packaging notes](docs/EXPERIMENTAL-UNIX-PACKAGING.md): this is
+not a claim of Windows feature parity, working host integration or qualified
+installation/update support. We welcome Linux and Mac maintainers familiar with
+Rust/Tauri, native packaging, settings migration, MCP and signed update testing.
+
+## Creator Hub 0.1.18
 
 Project Setup and MCP are included in Hub, with one installer and update stream.
 Their source histories are retained under `modules/project-setup` and
 `modules/mcp`. Future development lives in this repository.
 
-[Windows installer and release](https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/tag/v0.1.14)
-and [exact package checks and publication status](docs/RELEASE-0.1.14.md).
+[Windows installer and release](https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/tag/v0.1.18)
+and [exact package qualification](packaging/windows/0.1.18-qualification.json).
 Existing Hub users can check for updates. Standalone users install Hub and follow
 the first-launch migration review. Recognized MCP 2.7.7 / Setup 0.3.7 installations
 get verified backups, reviewed AI-client routing and separately approved removal
@@ -24,8 +31,8 @@ overwritten or removed.
 
 The standalone repositories, historical downloads and old signed updater files
 remain available. Their update feeds are not silently redirected to Hub.
-Creator Plugins is retiring on October 20, 2026. The app shows a temporary notice,
-not an active catalogue; until that date visit [creatorplugins.store](https://creatorplugins.store/).
+Creator Plugins retired on October 20, 2026. Its retired catalogue UI is removed;
+existing assets in Unity projects are not removed.
 
 See [the unified product and migration requirements](docs/UNIFIED-CREATOR-HUB.md).
 The following sections are retained release history, not current unified-product

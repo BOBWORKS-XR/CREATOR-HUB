@@ -28,7 +28,7 @@ jobs:
           cache: npm
       - run: npm ci
       - name: Test qualification, refusal, Windows scope and legacy feed controls
-        run: node --test scripts/windows-release-qualification.test.cjs scripts/check-unified-sources.test.cjs scripts/publish-hub-draft.test.cjs scripts/release-checksums.test.mjs scripts/check-release-feed.test.cjs scripts/release-workflow.test.cjs scripts/release-platform-scope.test.cjs scripts/release-ref.test.cjs
+        run: node --test scripts/windows-release-qualification.test.cjs scripts/windows-release-target.test.cjs scripts/windows-016-release-qualification.test.cjs scripts/windows-017-draft-stage.test.cjs scripts/windows-018-public-acceptance.test.cjs scripts/check-unified-sources.test.cjs scripts/publish-hub-draft.test.cjs scripts/release-checksums.test.mjs scripts/check-release-feed.test.cjs scripts/release-workflow.test.cjs scripts/release-platform-scope.test.cjs scripts/release-ref.test.cjs
       - name: Validate immutable qualified draft without building or publishing
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -36,9 +36,18 @@ jobs:
         run: |
           $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
           if ($env:GITHUB_REF_TYPE -ceq 'tag' -and $env:GITHUB_REF_NAME -cne "v$version") { throw 'Tag differs from the checked-out package version.' }
-          $receipt = 'packaging/windows/0.1.14-qualification.json'
           # Create the final tag while the qualified release is still a clean draft.
-          node scripts/check-unified-sources.cjs --release --version "$version" --platform windows-x86_64 --receipt "$receipt" --verify-draft
+          $targetVersion = node -p "require('./scripts/windows-release-target.cjs').getTarget().version"
+          if ($LASTEXITCODE -ne 0) { throw 'Release target metadata is unavailable.' }
+          if ($version -ceq $targetVersion) {
+            $receipt = "packaging/windows/$version-qualification.json"
+            $digest = (Get-Content -LiteralPath "$receipt.sha256" -Raw).Trim()
+            if ($digest -cnotmatch '^[a-f0-9]{64}$') { throw 'Reviewed final receipt digest is missing or invalid.' }
+            node scripts/check-unified-sources.cjs --release --version "$version" --platform windows-x86_64 --receipt "$receipt" --sha256 "$digest" --association "$env:GITHUB_SHA" --verify-draft
+          } elseif ($version -ceq '0.1.14') {
+            $receipt = 'packaging/windows/0.1.14-qualification.json'
+            node scripts/check-unified-sources.cjs --release --version "$version" --platform windows-x86_64 --receipt "$receipt" --verify-draft
+          } else { throw 'This version has no reviewed Windows qualification route.' }
           if ($LASTEXITCODE -ne 0) { throw 'Exact Windows qualification or current remote evidence refused.' }
           node scripts/check-release-feed.cjs "$version" --draft
           if ($LASTEXITCODE -ne 0) { throw 'Legacy public-client feed budget refused.' }
