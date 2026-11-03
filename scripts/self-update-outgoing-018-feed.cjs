@@ -165,14 +165,14 @@ function createIncoming016Contract(input) {
 function createDirectOutgoing018Contract(input) {
   keys(input, ['targetVersion', 'baseline', 'descriptor', 'descriptorSignature', 'installer', 'manifest', 'pins'], 'direct outgoing input');
   keys(input.baseline, ['version', 'installer', 'exe'], 'direct outgoing baseline');
-  assert.equal(input.baseline.version, '0.1.17', 'Genuine direct17 baseline required');
-  assert.equal(input.targetVersion, '0.1.18', 'Only acceptance-only direct18 target admitted');
+  assert.equal(input.baseline.version, '0.1.18', 'Genuine direct18 baseline required');
+  assert.equal(input.targetVersion, '0.1.19', 'Only acceptance-only direct19 target admitted');
   for (const field of ['installer', 'exe']) assert.match(input.baseline[field], /^[a-f0-9]{64}$/);
   assert.notEqual(input.baseline.installer, input.pins.installer, 'Same installer cannot be a higher-version target');
   assert.notEqual(input.baseline.exe, input.pins.executable, 'Same executable cannot be a higher-version target');
   return validatedContract(input, Object.freeze({ ...input.baseline }), {
-    descriptor: { assetName: 'Creator_Hub_0.1.18_x64-acceptance-only-setup.exe', minHubVersion: '0.1.17' },
-    actualScope: { kind: 'direct-outgoing-017-018', acceptanceOnly: true, labDiscovery: true,
+    descriptor: { assetName: 'Creator_Hub_0.1.19_x64-acceptance-only-setup.exe', minHubVersion: '0.1.18' },
+    actualScope: { kind: 'direct-outgoing-018-019', acceptanceOnly: true, labDiscovery: true,
       publicDiscovery: false, liveAiAcceptance: false, productAcceptance: false, releaseReady: false },
   });
 }

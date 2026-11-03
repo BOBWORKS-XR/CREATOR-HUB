@@ -5,24 +5,25 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const feed = require('./self-update-outgoing-018-feed.cjs');
 const binding = require('./fixtures/windows-outgoing-018-binding.json');
-const KIND = 'direct-outgoing-017-018';
-const ASSET = 'Creator_Hub_0.1.18_x64-acceptance-only-setup.exe';
-const BASELINE_ASSET = 'Creator.Hub_0.1.17_x64-setup.exe';
+const KIND = 'direct-outgoing-018-019';
+const ASSET = 'Creator_Hub_0.1.19_x64-acceptance-only-setup.exe';
+const BASELINE_ASSET = 'Creator.Hub_0.1.18_x64-setup.exe';
 const CASES = Object.freeze({ 'mcp-restore': ['mcp', 'true'], 'setup-restore': ['setup', 'true'], 'setup-no-restore': ['setup', 'false'] });
 const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 const generation = module => hash(JSON.stringify({ executable: module.executable, version: module.version,
   files: Object.fromEntries(Object.entries(module.files).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) }));
 function validateBinding(value = binding) {
-  assert.equal(value.enabled, true, 'Private signed18 metadata is not bound');
-  assert.equal(value.kind, KIND); assert.equal(value.baseline.version, '0.1.17'); assert.equal(value.target.version, '0.1.18');
-  assert.deepEqual(value.baseline.source, { commit: 'ec7f1d218c187caac30d0170aaaca2dfcdf83766', tree: '11efac78fc7509e8da08de3af7262bfc6369ce5c' });
-  assert.deepEqual(value.target.source, { commit: 'd58513d27d35b6c3bd200367e358e20162cc0efa', tree: 'e2f3f8750346dedc9c739912c9aa24eb7e8b7dcf' });
-  assert.equal(value.target.recoveryReceiptSha256, 'b03ae78dbae79e246b21fc2f16ba23c48050448d86d87b015aa26924264a19f0');
-  assert.equal(value.target.rawSourceUnchanged, false); assert.equal(value.target.originalBuildExitCode, 1);
-  assert.equal(value.baseline.installer.sha256, '4b8f3f34ed0d3ca06ba92230b37f8f8b4f75da772cb285a4129d9b3068dd4f9e');
-  assert.equal(value.baseline.executable.sha256, 'ab73d243fc6ba7ec956bf59b12679f736ecbefa7131bac678347e5a7b1618337');
-  assert.equal(value.target.installer.sha256, '65518b1f4ce59b9468c3b4d77a04ff7d7145eefa99131abdbbf97748db568f00');
-  assert.equal(value.target.executable.sha256, 'ce1ebfd38bae2e670fac7f9876b41914e1ee55e5605f703af4aa76aec5cccb10');
+  assert.equal(value.enabled, true, 'Private signed19 metadata is not bound');
+  assert.equal(value.kind, KIND); assert.equal(value.baseline.version, '0.1.18'); assert.equal(value.target.version, '0.1.19');
+  assert.equal(value.baseline.releaseId, 433204480); assert.equal(value.baseline.assetId, 707135294);
+  assert.deepEqual(value.baseline.source, { commit: '930a2886b6872a08a4a25be4738a5a01a4e911d2', tree: 'a1af9bf6c56b221352f8b3feb1fd65259200e9dc' });
+  assert.deepEqual(value.target.source, { commit: 'b6c806254746563e81a6715231d7ef6dfa081fc1', tree: 'b5da014e744deab40788d745ca76c052dae28541' });
+  assert.equal(value.target.verificationReceiptSha256, '4e2e33bb0eb31dc20182105e02a454cac50c93a5e847974889258357b990c00e');
+  assert.equal(value.target.sourceUnchanged, true); assert.equal(value.target.buildExitCode, 0);
+  assert.equal(value.baseline.installer.sha256, 'c09e3f73ca3e7fab74db2c204a17f6277d5b7817c650f090bd77af00a6f0f3f9');
+  assert.equal(value.baseline.executable.sha256, 'ae1d15ff3919ee9947e21d8542bcab50abf044e1bf047ce2c87abac4ccebfdc9');
+  assert.equal(value.target.installer.sha256, '32c73fdd3b8ee2858065b0c685101fc1475edbd9140f512d26ee4f9fc153a059');
+  assert.equal(value.target.executable.sha256, 'a47ff32717e2d03bfe759f7f4eea358202c9ca8f9ca10947e7290b9f42021521');
   assert.equal(value.baseline.asset, BASELINE_ASSET); assert.equal(value.target.asset, ASSET);
   for (const item of [value.baseline, value.target]) {
     assert.equal(item.generation, generation(item.manifest.modules.mcp));
@@ -30,19 +31,22 @@ function validateBinding(value = binding) {
     assert.equal(Object.keys(files).length, 15); for (const sha of Object.values(files)) assert.match(sha, /^[a-f0-9]{64}$/);
   }
   assert.notEqual(value.baseline.generation, value.target.generation);
-  assert.equal(value.baseline.generation, '7ab7242c624f56d69b914e87e30a1bf68be9b1d7a6e9318cd993993cd9303fab');
-  assert.equal(value.target.generation, '31dfb7a9ec10dfafed9113a6c3051211465264cbf8e447ce65d0870f7a61895b');
-  assert.equal(value.baseline.manifest.modules.mcp.version, '2.7.7'); assert.equal(value.target.manifest.modules.mcp.version, '2.7.8-fixture.18');
+  assert.equal(value.baseline.generation, '6e7bc066e10469680d0018d513c8acc20702822b93fec1232088080bd654faef');
+  assert.equal(value.target.generation, 'c88438dd4e1fcc4400a8c4162915ddb40b6258224a3736d11fdb2a0b599e7b86');
+  assert.equal(value.baseline.manifest.modules.mcp.version, '2.7.7'); assert.equal(value.target.manifest.modules.mcp.version, '2.7.8-fixture.19');
   for (const item of [value.target.descriptor, value.target.descriptorSignature, value.target.latest]) {
     assert.ok(item && item.bytes > 0); assert.match(item.sha256, /^[a-f0-9]{64}$/);
   }
   assert.ok(value.target.privateRelease && Number.isSafeInteger(value.target.privateRelease.id) && value.target.privateRelease.id > 0);
+  assert.equal(value.target.privateRelease.id, 433260274);
   assert.equal(value.target.privateRelease.source, value.target.source.commit);
-  assert.match(value.target.privateRelease.tag, /^lab-windows-outgoing-018-[0-9]+$/);
+  assert.match(value.target.privateRelease.tag, /^lab-windows-outgoing-019-[0-9]+$/);
   assert.deepEqual(Object.keys(value.target.privateRelease.assets).sort(), [ASSET, 'creator-hub-windows-x86_64.json', 'creator-hub-windows-x86_64.json.minisig', 'latest.json'].sort());
-  assert.equal(value.exceptionQualification.fixtureUsableForOutgoingTest, true);
-  assert.equal(value.exceptionQualification.productionSourceGuardException, false); assert.equal(value.exceptionQualification.outgoingNativeAccepted, false);
-  assert.match(value.exceptionQualification.sha256, /^[a-f0-9]{64}$/);
+  assert.equal(value.fixtureQualification.fixtureUsableForOutgoingTest, true);
+  assert.equal(value.fixtureQualification.productionSourceGuardException, false); assert.equal(value.fixtureQualification.outgoingNativeAccepted, false);
+  assert.equal(value.fixtureQualification.sha256, '4e2e33bb0eb31dc20182105e02a454cac50c93a5e847974889258357b990c00e');
+  assert.equal(value.fixtureQualification.sourceUnchanged, true);
+  assert.equal(value.fixtureQualification.buildExitCode, 0);
 }
 function assertHost(env = process.env, platform = process.platform) {
   assert.equal(platform, 'win32');
@@ -69,8 +73,8 @@ function assertAdmission(env = process.env, platform = process.platform) {
 function configFor(directory) {
   validateBinding(); assert.ok(path.isAbsolute(directory));
   return { schemaVersion: 1, kind: KIND, sourceCommit: binding.target.source.commit,
-    baseline: { version: '0.1.17', installer: binding.baseline.installer.sha256, exe: binding.baseline.executable.sha256 },
-    targetVersion: '0.1.18', directory, pins: { descriptor: binding.target.descriptor.sha256,
+    baseline: { version: '0.1.18', installer: binding.baseline.installer.sha256, exe: binding.baseline.executable.sha256 },
+    targetVersion: '0.1.19', directory, pins: { descriptor: binding.target.descriptor.sha256,
       descriptorSignature: binding.target.descriptorSignature.sha256, installer: binding.target.installer.sha256,
       executable: binding.target.executable.sha256, manifest: binding.target.latest.sha256 },
     runtime: { baselineDescriptor: binding.baseline.manifest.managedRouting.files['routing/runtime.json'],
@@ -96,7 +100,7 @@ function readHash(file, expected) {
   const stat = fs.lstatSync(file); assert.ok(stat.isFile() && !stat.isSymbolicLink());
   assert.equal(hash(feed.readBounded(file, 512 * 1024 * 1024)), expected, path.basename(file));
 }
-function itemFor(version) { assert.ok(['0.1.17', '0.1.18'].includes(version)); return version === '0.1.17' ? binding.baseline : binding.target; }
+function itemFor(version) { assert.ok(['0.1.18', '0.1.19'].includes(version)); return version === '0.1.18' ? binding.baseline : binding.target; }
 function assertInstalledResources(directory, version) {
   const item = itemFor(version); readHash(path.join(directory, 'creator-hub.exe'), item.executable.sha256);
   const files = { ...item.manifest.modules.mcp.files, ...item.manifest.modules.setup.files, ...item.manifest.managedRouting.files };

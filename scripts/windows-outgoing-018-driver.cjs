@@ -15,23 +15,23 @@ async function retry(read, seconds = 30) {
   throw last || Error('Timed out');
 }
 function assertProtocol(state, version) {
-  assert.ok(['0.1.17', '0.1.18'].includes(version));
+  assert.ok(['0.1.18', '0.1.19'].includes(version));
   assert.equal(state.version, version); assert.equal(state.protocol, 1); assert.equal(state.integrated, true);
   assert.deepEqual(state.services, { integrated: true, features: ['setup', 'mcp'] });
 }
 function assertTicket(ticket, lastTool, hub) {
-  assert.equal(ticket.schemaVersion, 1); assert.equal(ticket.fromVersion, '0.1.17'); assert.equal(ticket.toVersion, '0.1.18');
+  assert.equal(ticket.schemaVersion, 1); assert.equal(ticket.fromVersion, '0.1.18'); assert.equal(ticket.toVersion, '0.1.19');
   assert.equal(ticket.views.length, 1); const view = ticket.views[0];
   assert.equal(view.app, lastTool); assert.equal(view.direct, true); assert.equal(view.bundled, true);
   assert.equal(path.win32.normalize(view.path).toLowerCase(), path.win32.normalize(hub).toLowerCase());
 }
 async function completeStartup(page, version, report) {
-  assert.ok(['0.1.17', '0.1.18'].includes(version));
+  assert.ok(['0.1.18', '0.1.19'].includes(version));
   const terms = page.locator('#usage-terms-dialog'), guide = page.locator('#convergence-dialog');
   if (report.migratedContinuation) {
     assert.equal(await terms.isVisible(), false, 'Migrated terms must remain accepted');
     assert.equal(await guide.isVisible(), false, 'Completed migration must not reopen');
-  } else if (version === '0.1.17') {
+  } else if (version === '0.1.18') {
     await terms.waitFor({ state: 'visible' });
     await page.locator('#usage-terms-checkbox').check(); await page.locator('#usage-terms-continue').click();
     await terms.waitFor({ state: 'hidden' });
@@ -45,7 +45,7 @@ async function completeStartup(page, version, report) {
   await page.waitForFunction(() => document.querySelector('#convergence-dialog')?.open || !document.querySelector('#check-updates').disabled,
     null, { timeout: 120000 });
   assert.equal(await guide.isVisible(), false, 'The deferred unchanged review must stay deferred');
-  if (version === '0.1.18' && !report.migratedContinuation) report.migrationDeferralPreserved = true;
+  if (version === '0.1.19' && !report.migratedContinuation) report.migrationDeferralPreserved = true;
 }
 async function setUpdatePreferences(page, restore) {
   await direct.showHome(page);
@@ -172,7 +172,7 @@ async function main() {
   }
   function active(version) {
     const value = JSON.parse(target.readBounded(route.active, 4096));
-    const expected = config.runtime[version === '0.1.17' ? 'baselineDescriptor' : 'targetDescriptor'];
+    const expected = config.runtime[version === '0.1.18' ? 'baselineDescriptor' : 'targetDescriptor'];
     assert.equal(value.descriptorSha256, expected); assert.match(value.generation, /^[a-f0-9]{64}$/);
     const body = target.readBounded(path.join(path.dirname(route.active), 'descriptors', expected, 'runtime.json'), target.LIMITS.metadata);
     assert.equal(target.hash(body), expected); assert.equal(JSON.parse(body).hubVersion, version);
@@ -191,8 +191,8 @@ async function main() {
   try {
     assert.deepEqual(inventory().filter(p => /creator-hub\.exe$/i.test(p.image)), []);
     if (!migrated) execFileSync(installer, ['/S', '/NS'], { windowsHide: true, timeout: 180000, stdio: 'pipe' });
-    assert.equal(hashFile(hub), config.baseline.exe); report.beforePeVersion = peVersion(17);
-    target.assertInstalledResources(path.dirname(hub), '0.1.17');
+    assert.equal(hashFile(hub), config.baseline.exe); report.beforePeVersion = peVersion(18);
+    target.assertInstalledResources(path.dirname(hub), '0.1.18');
     if (!migrated) {
       const settings = '{"channels":[],"auto_start":false,"futureOption":{"keep":true}}\n';
       protect(path.join(roaming, 'creator-works-mcp/launcher-config.json'), settings);
@@ -205,12 +205,12 @@ async function main() {
     policyEnabled = true; policy('Enable');
     child = spawn(hub, [], { windowsHide: true, stdio: 'ignore', env: { ...process.env, WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: '--remote-debugging-port=9238' } });
     rootRecord = await retry(() => record(child.pid)); report.beforeRoot = rootRecord;
-    await connect('0.1.17');
-    await direct.checkPages({ page, showApp: show, processes: moduleGuis, requests,
+    await connect('0.1.18');
+    await direct.checkPages({ page, showApp: show, processes: moduleGuis, requests, expectedVersion: target.binding.baseline.version,
       screenshot: name => page.screenshot({ path: path.join(out, `baseline-${name}.png`) }) });
     if (!migrated) await direct.prepareManagedRoute(page, { clientConfig, active: route.active,
       approve: () => retry(() => button('Enable managed routing')) });
-    report.beforeRoute = active('0.1.17');
+    report.beforeRoute = active('0.1.18');
     if (migrated) {
       assert.equal(report.beforeRoute.descriptorSha256, migrated.activeRoute.descriptorSha256);
       assert.equal(report.beforeRoute.generation, migrated.activeRoute.generation);
@@ -225,7 +225,7 @@ async function main() {
       const rows = inventory(), router = rows.find(p => p.pid === sdkTransport.pid);
       assert.ok(router); assert.equal(router.image.toLowerCase(), route.command.toLowerCase());
       const node = rows.filter(p => p.parentPid === router.pid && /node\.exe$/i.test(p.image));
-      assert.equal(node.length, 1); target.assertGenerationProcess(node[0].image, local, '0.1.17');
+      assert.equal(node.length, 1); target.assertGenerationProcess(node[0].image, local, '0.1.18');
       assert.equal(sdkClient.getServerVersion().version, '2.7.7'); return [router, node[0]];
     });
     report.heldProcessesBefore = sdkRecords;
@@ -240,16 +240,16 @@ async function main() {
     await retry(() => assertSavedPreferences(JSON.parse(fs.readFileSync(prefPath)), restore));
     protectedFiles.push({ file: prefPath, sha256: hashFile(prefPath) });
     const draft = await page.locator('#feature-setup [data-field="name"]').inputValue();
-    if (!migrated) await page.evaluate(() => localStorage.setItem('outgoing-preserved', 'direct17-to18'));
+    if (!migrated) await page.evaluate(() => localStorage.setItem('outgoing-preserved', 'direct18-to19'));
     await retry(async () => assert.equal(await page.locator('#hub-update-button').isEnabled(), true), 90);
     const status = await page.evaluate(() => window.CreatorHubNative.invoke('hub_update_status', { online: false, preview: false }));
-    assert.equal(status.currentVersion, '0.1.17'); assert.equal(status.availableVersion, '0.1.18'); assert.equal(status.installBlocked, null);
+    assert.equal(status.currentVersion, '0.1.18'); assert.equal(status.availableVersion, '0.1.19'); assert.equal(status.installBlocked, null);
     // The native prompt precedes download/cache reuse. Cancel must preserve both states.
     if (migrated) migrated.guard.verify();
     await page.locator('#hub-update-button').click(); await retry(() => button('Not now'));
     await retry(async () => assert.equal(await page.locator('#hub-update-button').isEnabled(), true));
     sameProcess(rootRecord); assert.equal(hashFile(hub), config.baseline.exe); await preserved();
-    if (migrated) { assert.deepEqual(active('0.1.17'), report.beforeRoute); report.activeRouteUnchangedAfterCancel = true; }
+    if (migrated) { assert.deepEqual(active('0.1.18'), report.beforeRoute); report.activeRouteUnchangedAfterCancel = true; }
     assert.equal(await page.locator('#feature-setup [data-field="name"]').inputValue(), draft);
     assert.equal(fs.existsSync(ticket), false); report.cancelPreserved = true;
     watch = setInterval(() => { try { observedTicket = JSON.parse(target.readBounded(ticket, 32768)); } catch {} }, 20);
@@ -258,11 +258,11 @@ async function main() {
     await retry(() => assert.equal(child.exitCode, 0), 180);
     await browser.close().catch(() => {}); browser = null; page = null;
     await retry(() => assert.equal(hashFile(hub), config.pins.executable), 180);
-    report.afterPeVersion = peVersion(18);
-    target.assertInstalledResources(path.dirname(hub), '0.1.18');
+    report.afterPeVersion = peVersion(19);
+    target.assertInstalledResources(path.dirname(hub), '0.1.19');
     // Deliberately no launch here: a replacement process must appear automatically.
     rootRecord = await retry(() => { const rows = inventory().filter(p => p.image.toLowerCase() === hub.toLowerCase() && p.pid !== child.pid); assert.equal(rows.length, 1); return rows[0]; }, 90);
-    report.afterRoot = rootRecord; await connect('0.1.18');
+    report.afterRoot = rootRecord; await connect('0.1.19');
     clearInterval(watch); watch = null;
     if (restore) {
       assertTicket(observedTicket, lastTool, hub); await direct.checkRestored(page);
@@ -271,7 +271,7 @@ async function main() {
       if (lastTool === 'mcp') await continueMcpGuide(page);
     } else { assert.equal(observedTicket, undefined); await direct.checkHome(page); }
     assert.equal(fs.existsSync(ticket), false);
-    if (!migrated) assert.equal(await page.evaluate(() => localStorage.getItem('outgoing-preserved')), 'direct17-to18');
+    if (!migrated) assert.equal(await page.evaluate(() => localStorage.getItem('outgoing-preserved')), 'direct18-to19');
     await preserved();
     await page.screenshot({ path: path.join(out, 'automatic-restart.png') });
     report.restoredLastTool = restore ? lastTool : null;
@@ -286,9 +286,9 @@ async function main() {
       direct.assertService(feature, service);
     }
     if (!migrated) await direct.prepareManagedRoute(page, { clientConfig, active: route.active, approve: () => { throw Error('Existing route must not require new consent'); } });
-    report.afterRoute = active('0.1.18');
+    report.afterRoute = active('0.1.19');
     assert.notEqual(report.afterRoute.generation, report.beforeRoute.generation);
-    target.assertActiveResources(local, '0.1.17', report.beforeRoute, false);
+    target.assertActiveResources(local, '0.1.18', report.beforeRoute, false);
     assert.equal(sdkClient.getServerVersion().version, '2.7.7');
     const reconnect = new Client({ name: 'outgoing-direct-new-connection', version: '1' });
     try {
@@ -297,9 +297,9 @@ async function main() {
       const router = record(transport.pid); assert.notEqual(router.pid, sdkRecords[0].pid);
       assert.equal(router.image.toLowerCase(), route.command.toLowerCase());
       const nodes = inventory().filter(p => p.parentPid === router.pid && /node\.exe$/i.test(p.image));
-      assert.equal(nodes.length, 1); target.assertGenerationProcess(nodes[0].image, local, '0.1.18');
+      assert.equal(nodes.length, 1); target.assertGenerationProcess(nodes[0].image, local, '0.1.19');
       assert.notEqual(nodes[0].image.toLowerCase(), sdkRecords[1].image.toLowerCase());
-      assert.equal(reconnect.getServerVersion().version, '2.7.8-fixture.18');
+      assert.equal(reconnect.getServerVersion().version, '2.7.8-fixture.19');
       report.reconnectedProcesses = [router, nodes[0]];
       report.reconnectedServerVersion = reconnect.getServerVersion();
     }
@@ -308,7 +308,7 @@ async function main() {
     report.heldProcessesAfter = sdkRecords.map(saved => record(saved.pid));
     report.heldServerVersion = sdkClient.getServerVersion();
     const registry = execFileSync('reg.exe', ['query', 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Creator Hub', '/v', 'DisplayVersion'], { encoding: 'utf8', windowsHide: true });
-    assert.equal(registry.match(/DisplayVersion\s+REG_SZ\s+(\S+)/)?.[1], '0.1.18');
+    assert.equal(registry.match(/DisplayVersion\s+REG_SZ\s+(\S+)/)?.[1], '0.1.19');
     assert.deepEqual(report.pageErrors || [], []);
     Object.assign(report, { passed: true, nativeUpdateAccepted: true, automaticRestart: true,
       existingConnectionSurvived: true, newConnectionVerified: true, restorationVerified: true, observedTicket,

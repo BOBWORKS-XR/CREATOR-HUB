@@ -6,6 +6,7 @@ const path = require('node:path');
 const target = require('./windows-outgoing-018-target.cjs');
 const input = require('./windows-outgoing-018-input.cjs');
 const driver = require('./windows-outgoing-018-driver.cjs');
+const direct = require('./native-outgoing-direct-017.cjs');
 const { binding } = target;
 const reviewSha = target.hash(fs.readFileSync(path.join(__dirname, 'fixtures/windows-outgoing-018-binding.json')));
 function env(caseName = 'mcp-restore') {
@@ -17,13 +18,18 @@ function env(caseName = 'mcp-restore') {
     GITHUB_SHA: 'a'.repeat(40), EXPECTED_HARNESS_COMMIT: 'a'.repeat(40), CREATOR_OUTGOING_CASE: caseName,
     CREATOR_OUTGOING_LAST_TOOL: last, CREATOR_OUTGOING_RESTORE: restore, CREATOR_OUTGOING_REVIEW_SHA256: reviewSha };
 }
-test('actual source, old failure and changed18 generation are mandatory', () => {
+test('actual source, successful fixture19 build and changed generation are mandatory', () => {
   target.validateBinding();
-  for (const mutate of [v => v.target.version = '0.1.17', v => v.baseline.source.commit = 'b'.repeat(40),
-    v => v.target.source.tree = 'c'.repeat(40), v => v.target.originalBuildExitCode = 0,
-    v => v.target.rawSourceUnchanged = true, v => v.target.installer.sha256 = 'd'.repeat(64),
-    v => v.target.generation = v.baseline.generation, v => v.target.recoveryReceiptSha256 = 'e'.repeat(64),
-    v => v.exceptionQualification.fixtureUsableForOutgoingTest = false]) {
+  for (const mutate of [v => v.target.version = '0.1.18', v => v.baseline.source.commit = 'b'.repeat(40),
+    v => v.target.source.tree = 'c'.repeat(40), v => v.target.buildExitCode = 1,
+    v => v.target.sourceUnchanged = false, v => v.target.installer.sha256 = 'd'.repeat(64),
+    v => v.target.generation = v.baseline.generation, v => v.target.verificationReceiptSha256 = 'e'.repeat(64),
+    v => v.fixtureQualification.fixtureUsableForOutgoingTest = false]) {
+    const value = structuredClone(binding); mutate(value); assert.throws(() => target.validateBinding(value));
+  }
+});
+test('both private input releases require the actual staged release and asset IDs', () => {
+  for (const mutate of [v => { delete v.baseline.releaseId; }, v => v.baseline.assetId++, v => v.target.privateRelease.id++]) {
     const value = structuredClone(binding); mutate(value); assert.throws(() => target.validateBinding(value));
   }
 });
@@ -45,23 +51,34 @@ test('private asset identity checks refuse changed release, body identity or pub
 });
 test('config permits only its absolute directory to vary', () => {
   const config = target.configFor(path.resolve('test-data')); target.assertBound(config);
-  for (const mutate of [c => c.sourceCommit = 'a'.repeat(40), c => c.targetVersion = '0.1.17',
+  for (const mutate of [c => c.sourceCommit = 'a'.repeat(40), c => c.targetVersion = '0.1.18',
     c => c.baseline.exe = c.pins.executable, c => c.runtime.targetDescriptor = c.runtime.baselineDescriptor,
     c => c.pins.manifest = 'a'.repeat(64), c => c.directory = 'relative']) {
     const value = structuredClone(config); mutate(value); assert.throws(() => target.assertBound(value));
   }
 });
-test('actual protocol and restore ticket bind 17 to 18', () => {
-  for (const version of ['0.1.17', '0.1.18']) driver.assertProtocol({ version, protocol: 1, integrated: true,
+test('actual protocol and restore ticket bind 18 to 19', () => {
+  for (const version of ['0.1.18', '0.1.19']) driver.assertProtocol({ version, protocol: 1, integrated: true,
     services: { integrated: true, features: ['setup', 'mcp'] } }, version);
   assert.throws(() => driver.assertProtocol({ version: '0.1.16' }, '0.1.16'));
   const hub = 'C:\\runner\\Creator Hub\\creator-hub.exe';
-  const ticket = { schemaVersion: 1, fromVersion: '0.1.17', toVersion: '0.1.18',
+  const ticket = { schemaVersion: 1, fromVersion: '0.1.18', toVersion: '0.1.19',
     views: [{ app: 'mcp', direct: true, bundled: true, path: hub }] };
   driver.assertTicket(ticket, 'mcp', hub);
-  for (const mutate of [t => t.fromVersion = '0.1.16', t => t.toVersion = '0.1.17', t => t.views[0].direct = false]) {
+  for (const mutate of [t => t.fromVersion = '0.1.16', t => t.toVersion = '0.1.18', t => t.views[0].direct = false]) {
     const value = structuredClone(ticket); mutate(value); assert.throws(() => driver.assertTicket(value, 'mcp', hub));
   }
+});
+test('shared page helper accepts only the explicit18 baseline while preserving its17 default', async () => {
+  const state = { version: '0.1.18', protocol: 1, integrated: true, services: { integrated: true, features: ['setup', 'mcp'] } };
+  const page = { evaluate: async () => state };
+  await direct.checkProtocol(page, '0.1.18');
+  await assert.rejects(direct.checkProtocol(page));
+  await assert.rejects(direct.checkProtocol(page, '0.1.19'));
+  state.version = '0.1.17'; await direct.checkProtocol(page);
+  assert.throws(() => direct.assertProtocol(state, '0.1.18'));
+  const source = fs.readFileSync(path.join(__dirname, 'windows-outgoing-018-driver.cjs'), 'utf8');
+  assert.ok(source.includes('expectedVersion: target.binding.baseline.version'));
 });
 test('restore preference is applied through real driver controls', async () => {
   const values = [];
@@ -77,7 +94,7 @@ test('held router and changed generation checks precede success and no manual su
   assert.equal((source.match(/spawn\(hub,/g) || []).length, 1);
   for (const token of ['target.assertInstalledResources', 'target.assertGenerationProcess', 'target.assertActiveResources',
     'assert.notEqual(nodes[0].image.toLowerCase(), sdkRecords[1].image.toLowerCase())',
-    "assert.equal(reconnect.getServerVersion().version, '2.7.8-fixture.18')", "assert.equal(sdkClient.getServerVersion().version, '2.7.7')",
+    "assert.equal(reconnect.getServerVersion().version, '2.7.8-fixture.19')", "assert.equal(sdkClient.getServerVersion().version, '2.7.7')",
     'assert.notEqual(report.afterRoute.generation, report.beforeRoute.generation)', 'sameProcess(sentinelRecord)', 'await roundTrip(sdkClient)']) assert.ok(source.includes(token), token);
   assert.ok(source.indexOf('target.assertInstalledResources') < source.indexOf('passed: true, nativeUpdateAccepted'));
 });
@@ -89,7 +106,7 @@ test('named PowerShell invocation is used and native timeouts are unchanged', ()
   assert.ok(!/runs-on: (?:ubuntu|macos)/.test(workflow));
 });
 test('wrong active generation and process path refuse before inspecting files', () => {
-  for (const version of ['0.1.17', '0.1.18']) {
+  for (const version of ['0.1.18', '0.1.19']) {
     assert.throws(() => target.assertActiveResources('C:/not-used', version, { schemaVersion: 1, descriptorSha256: 'a'.repeat(64), generation: 'b'.repeat(64) }));
     assert.throws(() => target.assertGenerationProcess('C:/wrong/node.exe', 'C:/not-used', version));
   }
@@ -100,14 +117,14 @@ function successfulReceipt(caseName) {
   const held = [{ pid: 20, startTicks: '1', image: 'router.exe' }, { pid: 21, startTicks: '2', image: 'old-node.exe' }];
   const report = { kind: target.KIND, sourceCommit: binding.target.source.commit, baseline: config.baseline, pins: config.pins,
     lastTool: tool, restore: restore === 'true', restoredLastTool: restore === 'true' ? tool : null,
-    beforePeVersion: [0, 1, 17, 0], afterPeVersion: [0, 1, 18, 0], beforeRoot: { pid: 10 }, afterRoot: { pid: 11 },
+    beforePeVersion: [0, 1, 18, 0], afterPeVersion: [0, 1, 19, 0], beforeRoot: { pid: 10 }, afterRoot: { pid: 11 },
     heldProcessesBefore: held, heldProcessesAfter: structuredClone(held), heldServerVersion: { version: '2.7.7' },
-    reconnectedServerVersion: { version: '2.7.8-fixture.18' }, beforeRoute: { generation: binding.baseline.generation }, afterRoute: { generation: binding.target.generation } };
+    reconnectedServerVersion: { version: '2.7.8-fixture.19' }, beforeRoute: { generation: binding.baseline.generation }, afterRoute: { generation: binding.target.generation } };
   for (const key of ['passed', 'nativeUpdateAccepted', 'automaticRestart', 'cancelPreserved', 'existingConnectionSurvived',
     'newConnectionVerified', 'restorationVerified', 'policyRestored', 'settingsPreserved', 'acceptanceOnly', 'changedMcpGenerationProven',
     'installedResourcesVerifiedBeforeAndAfter', 'heldGenerationRetained']) report[key] = true;
   for (const key of ['publicDiscovery', 'liveAiAcceptance', 'releaseReady']) report[key] = false;
-  const lifecycle = { kind: 'lab-lifecycle-result', scenario: target.KIND, actualScope: 'exact-direct17-to-changed18-acceptance-fixture-lab-only',
+  const lifecycle = { kind: 'lab-lifecycle-result', scenario: target.KIND, actualScope: 'exact-direct18-to-changed19-acceptance-fixture-lab-only',
     driverExitCode: 0, servedRouteCount: 5, rejectedRequestCount: 0, lifecycleSucceeded: true, cleanupVerified: true,
     systemTlsVerified: true, labDiscovery: true, publicDiscovery: false, productAcceptance: false, releaseReady: false };
   return { config, report, lifecycle };

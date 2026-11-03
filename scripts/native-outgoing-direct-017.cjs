@@ -11,20 +11,21 @@ function directTarget(target, source) {
   return target === VERSION;
 }
 
-function assertProtocol(state) {
-  assert.equal(state.version, VERSION, 'Direct smoke requires the exact native 0.1.17 build');
+function assertProtocol(state, expectedVersion = VERSION) {
+  assert.ok([VERSION, '0.1.18'].includes(expectedVersion), 'Only reviewed direct baselines are supported');
+  assert.equal(state.version, expectedVersion, 'Direct smoke requires the exact native baseline build');
   assert.equal(state.protocol, 1, 'Native direct-feature protocol is required');
   assert.equal(state.integrated, true, 'A hosted 0.1.17 build cannot satisfy direct acceptance');
   assert.deepEqual(state.services, { integrated: true, features: ['setup', 'mcp'] });
 }
 
-async function checkProtocol(page) {
+async function checkProtocol(page, expectedVersion = VERSION) {
   assertProtocol(await page.evaluate(async () => ({
     version: window.CreatorHubNative.version,
     protocol: window.__CREATOR_HUB_FEATURE_PROTOCOL__,
     integrated: window.CreatorHubNative.integratedFeatures,
     services: await window.CreatorHubNative.invoke('feature_status'),
-  })));
+  })), expectedVersion);
 }
 
 function watchRequests(page) {
@@ -94,10 +95,10 @@ async function checkMcpLockedConflict(page, prefix) {
   assert.equal(await page.locator(`${prefix} [data-field="product-review"]`).isEnabled(), true);
 }
 
-async function checkPages({ page, showApp, processes, requests, screenshot, expectedMcpConflict = false, verifyFixture }) {
+async function checkPages({ page, showApp, processes, requests, screenshot, expectedMcpConflict = false, verifyFixture, expectedVersion = VERSION }) {
   assert.equal(typeof expectedMcpConflict, 'boolean');
   if (expectedMcpConflict) assert.equal(typeof verifyFixture, 'function');
-  await checkProtocol(page);
+  await checkProtocol(page, expectedVersion);
   const services = {};
   for (const feature of ['setup', 'mcp']) {
     await showApp(feature);
