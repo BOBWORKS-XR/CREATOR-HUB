@@ -1257,8 +1257,7 @@ function checkFinalPayload(value, bodies) {
     .map(n => `${value.draft.assets[n].sha256}  ${n}\n`).join(''));
 }
 function finalIo() {
-  const get = (route, max, binary) => require('node:child_process').execFileSync('gh', ghApiArgs(route, binary),
-    { windowsHide: true, timeout: 60000, maxBuffer: max });
+  const get = createGhReader();
   return { request: async route => JSON.parse(get(route, route.startsWith('git/blobs/') ? 8 * 1024 * 1024 : 2 * 1024 * 1024, false)), download: async (route, max) => get(route, max, true) };
 }
 async function verifyReleaseAssociation(value, reviewed, io) {
@@ -1355,12 +1354,33 @@ function ghApiArgs(route, binary) {
   assert.match(route, /^(?:actions\/(?:runs|jobs|artifacts)\/|git\/(?:commits|blobs|trees)\/|compare\/[a-f0-9]{40}\.\.\.[a-f0-9]{40}$|releases\/)/);
   return ['api', ...(binary && route.startsWith('releases/assets/') ? ['-H', 'Accept:application/octet-stream'] : []), `repos/BOBWORKS-XR/CREATOR-HUB/${route}`];
 }
+const ghRawCapabilities = new WeakMap();
+function createGhReader(execute = require('node:child_process').execFileSync) {
+  return (route, maxBuffer, binary = false) => {
+    const args = ghApiArgs(route, binary);
+    assert.ok(Number.isSafeInteger(maxBuffer) && maxBuffer > 0, 'Bounded capture required');
+    if (binary) {
+      assert.match(route, /^(?:actions\/(?:jobs\/[0-9]+\/logs|artifacts\/[0-9]+\/zip)|releases\/assets\/[0-9]+)$/,
+        'Unknown raw capture route');
+      if (!ghRawCapabilities.has(execute)) {
+        const help = execute('gh', ['api', '--help'], { encoding: 'utf8', windowsHide: true, timeout: 10000, maxBuffer: 128 * 1024, stdio: 'pipe' });
+        ghRawCapabilities.set(execute, /^\s*--allow-escape-sequences(?:\s|$)/m.test(String(help)));
+      }
+      if (ghRawCapabilities.get(execute)) args.splice(1, 0, '--allow-escape-sequences');
+    }
+    // Raw data never inherits a terminal. Preserve bytes for the existing hash checks.
+    const bytes = execute('gh', args, { windowsHide: true, timeout: 60000, maxBuffer, stdio: 'pipe' });
+    assert.ok(Buffer.isBuffer(bytes), 'Raw API capture must return bytes');
+    return bytes;
+  };
+}
 module.exports = { R2, KNOWN, DETAILS, MISSING, SOURCE_TREES, ASSETS, OUTGOING, DIAGNOSTIC, INCOMING_DIAGNOSTIC, OBSERVED_DRAFT, REUSE, checkReuseApproval, checkCommitTree, readZipMember, checkDraftMetadata, checkTestOnlyPayload, checkProductionPins, checkProductionPayload, checkDraftBytes, checkDraftReadback, checkKnownReport, checkKnownProof, checkExistingRemote, checkOutgoingCase, checkOutgoingProvenance, verifyExistingEvidence, checkDiagnosticContents, checkDiagnosticRemote, checkIncomingDiagnosticContents, checkIncomingDiagnosticRemote, verifyIncomingDiagnostic, verifyObservedDraft, verifyObservedPreflight, ghApiArgs, loadCandidateReceipt, verifyCandidateRemote, FINAL_PARENT, FINAL_SOURCE, FINAL_SOURCE_CI, validateSourceCi, verifySourceCi, FINAL_ASSETS, FINAL_ROLES, PRODUCTION_KEY_SHA256, OUTGOING18_RECOVERY, validateOutgoing18Recovery, verifyOutgoing18Recovery, validateFinalQualification, checkFinalPayload, checkFinalReport, finalProofWorkflow, loadQualification, verifyRemote };
 Object.assign(module.exports, { RELEASE_TARGET, FINAL_VERSION, NEXT_VERSION, R6_SOURCE, captureSourceCi });
 Object.assign(module.exports, { validateLocalEvidence, captureLocalEvidence });
 Object.assign(module.exports, { validateLocalRestartEvidence });
 Object.assign(module.exports, { isCombinedRole, checkNativeLane, checkMigrationCase });
 Object.assign(module.exports, { FINAL_JOB_NAMES, checkFinalDraftMetadata });
+Object.assign(module.exports, { createGhReader });
 Object.assign(module.exports, { checkReportSource });
 Object.assign(module.exports, { ASSOCIATION_FILES });
 Object.assign(module.exports, { checkAssociationAttributes });
@@ -1374,8 +1394,7 @@ if (require.main === module) {
       (args[0] === '--check-preflight' && (args.length === 3 || (args.length === 6 && args[3] === '--reuse-approval'))),
     'Read-only evidence or preflight verification only');
     const { execFileSync } = require('node:child_process');
-    const get = (route, maxBuffer, binary = false) => execFileSync('gh', ghApiArgs(route, binary),
-      { windowsHide: true, timeout: 60000, maxBuffer });
+    const get = createGhReader(execFileSync);
     const io = { request: async route => JSON.parse(get(route, route.startsWith('git/blobs/') ? 8 * 1024 * 1024 : 2 * 1024 * 1024)), download: async (route, max) => get(route, max, true) };
     let result;
     if (args[0] === '--check-evidence') result = await verifyExistingEvidence(io);

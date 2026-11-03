@@ -1,0 +1,55 @@
+name: Recheck Qualified Windows 0.1.18 (No Rebuild)
+
+on:
+  push:
+    branches: ['validation/windows-018-release-recheck-transport']
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  qualified-windows-recheck:
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/validation/windows-018-release-recheck-transport' && github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.repository_id == '1364807512' }}
+    runs-on: windows-latest
+    timeout-minutes: 20
+    permissions:
+      # Same scope as release.yml for private draft readback; no write command.
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Verify finite test-only child and unchanged release association
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: pwsh
+        run: |
+          $association = '15d21076eb2e1504f19ca786979365ae174d008b'
+          $parent = (git show -s --format=%P HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $parent -cne $association) { throw 'Validation must directly parent immutable association15d.' }
+          $allowed = @('.github/workflows/windows-018-release-validation.yml', 'scripts/windows-release-qualification.test.cjs', 'scripts/windows-016-release-qualification.cjs')
+          $changed = @(git diff --name-only $association HEAD)
+          if ($LASTEXITCODE -ne 0 -or @(Compare-Object ($allowed | Sort-Object) ($changed | Sort-Object)).Count -ne 0) { throw 'Unexpected validation checkout delta.' }
+          $tag = gh api repos/BOBWORKS-XR/CREATOR-HUB/git/ref/tags/v0.1.18 --jq '.object.sha'
+          if ($LASTEXITCODE -ne 0 -or $tag.Trim() -cne $association) { throw 'Immutable release tag differs.' }
+          $digest = (Get-FileHash -LiteralPath packaging/windows/0.1.18-qualification.json -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($digest -cne '2684e9a0b0e885f5cb4a6e0d91a7aef4900a60e8f3989e15f2ecb41789e03e9e') { throw 'Qualification bytes differ.' }
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: Run complete release controls including real .NET archive tests
+        run: node --test scripts/windows-release-qualification.test.cjs scripts/windows-release-target.test.cjs scripts/windows-016-release-qualification.test.cjs scripts/windows-017-draft-stage.test.cjs scripts/windows-018-public-acceptance.test.cjs scripts/check-unified-sources.test.cjs scripts/publish-hub-draft.test.cjs scripts/release-checksums.test.mjs scripts/check-release-feed.test.cjs scripts/release-workflow.test.cjs scripts/release-platform-scope.test.cjs scripts/release-ref.test.cjs
+      - name: Verify original association, signed assets and legacy feed without mutation
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: pwsh
+        run: |
+          node scripts/check-unified-sources.cjs --release --version 0.1.18 --platform windows-x86_64 --receipt packaging/windows/0.1.18-qualification.json --sha256 2684e9a0b0e885f5cb4a6e0d91a7aef4900a60e8f3989e15f2ecb41789e03e9e --association 15d21076eb2e1504f19ca786979365ae174d008b --verify-draft
+          if ($LASTEXITCODE -ne 0) { throw 'Original association qualification refused.' }
+          node scripts/check-release-feed.cjs 0.1.18 --draft
+          if ($LASTEXITCODE -ne 0) { throw 'Legacy feed budget refused.' }
