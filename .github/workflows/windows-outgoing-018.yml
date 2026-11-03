@@ -1,0 +1,113 @@
+name: Windows exact17 to private18 restore and changed-generation acceptance
+on:
+  push:
+    branches: [validation/windows-menu-merge-20261027]
+    paths:
+      - .github/workflows/windows-outgoing-018.yml
+      - scripts/windows-outgoing-018-*.cjs
+      - scripts/self-update-outgoing-018-feed.cjs
+      - scripts/native-self-update-outgoing-018.ps1
+      - scripts/native-outgoing-direct-017.cjs
+      - scripts/fixtures/windows-outgoing-018-binding.json
+  workflow_dispatch:
+    inputs:
+      expected_harness_commit:
+        type: string
+        required: true
+      binding_sha256:
+        type: string
+        required: true
+permissions:
+  contents: read
+jobs:
+  preflight:
+    if: github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.ref == 'refs/heads/validation/windows-menu-merge-20261027'
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - run: npm ci --ignore-scripts
+      - run: node --test scripts/windows-outgoing-018-test.cjs
+  acceptance:
+    needs: preflight
+    if: github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: write # Existing draft-asset GET authorization; no write API calls.
+    runs-on: windows-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - case: mcp-restore
+            last_tool: mcp
+            restore: 'true'
+          - case: setup-restore
+            last_tool: setup
+            restore: 'true'
+          - case: setup-no-restore
+            last_tool: setup
+            restore: 'false'
+    env:
+      EXPECTED_HARNESS_COMMIT: ${{ inputs.expected_harness_commit }}
+      CREATOR_OUTGOING_REVIEW_SHA256: ${{ inputs.binding_sha256 }}
+      CREATOR_OUTGOING_CASE: ${{ matrix.case }}
+      CREATOR_OUTGOING_LAST_TOOL: ${{ matrix.last_tool }}
+      CREATOR_OUTGOING_RESTORE: ${{ matrix.restore }}
+    steps:
+      - name: Bind exact workflow before checkout
+        shell: pwsh
+        run: |
+          if ($env:EXPECTED_HARNESS_COMMIT -cnotmatch '^[a-f0-9]{40}$' -or $env:EXPECTED_HARNESS_COMMIT -cne $env:GITHUB_SHA -or $env:CREATOR_OUTGOING_REVIEW_SHA256 -cnotmatch '^[a-f0-9]{64}$') { throw 'Exact reviewed source and binding required.' }
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@v6
+        with:
+          ref: ec7f1d218c187caac30d0170aaaca2dfcdf83766
+          path: product
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - name: Bind exact official SDK test source
+        shell: pwsh
+        run: |
+          if ((git -C product rev-parse HEAD) -cne 'ec7f1d218c187caac30d0170aaaca2dfcdf83766' -or (git -C product rev-parse 'HEAD^{tree}') -cne '11efac78fc7509e8da08de3af7262bfc6369ce5c') { throw 'Product source differs.' }
+      - run: npm ci --ignore-scripts
+      - run: npm --prefix product/modules/mcp ci --ignore-scripts
+      - name: Read exact private baseline and signed future fixture
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $result=node scripts/windows-outgoing-018-input.cjs acquire | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $result.configSha256 -cnotmatch '^[a-f0-9]{64}$') { throw 'Private fixture admission refused.' }
+          "CREATOR_OUTGOING_CONFIG_SHA256=$($result.configSha256)" | Add-Content -LiteralPath $env:GITHUB_ENV -Encoding utf8
+      - name: Native update restore and held-router generation checks
+        shell: pwsh
+        run: |
+          $parameters=@{Outgoing018=$true;ContractPath=(Join-Path $PWD artifacts/outgoing-018/runner-config.json);BaselineInstallerPath=(Join-Path $PWD artifacts/outgoing-018/data/Creator.Hub_0.1.17_x64-setup.exe);TimeoutSeconds=480}
+          & ./scripts/native-self-update-outgoing-018.ps1 @parameters | Tee-Object -FilePath artifacts/outgoing-018/lifecycle.jsonl
+          if ($LASTEXITCODE -ne 0) { throw 'Outgoing native lifecycle failed.' }
+          $reports=@(Get-ChildItem -LiteralPath artifacts -Directory -Filter 'native-suite-*' | ForEach-Object { Get-ChildItem -LiteralPath $_.FullName -File -Filter outgoing-report.json })
+          if ($reports.Count -ne 1) { throw 'Exactly one outgoing report required.' }
+          node scripts/windows-outgoing-018-input.cjs receipt $reports[0].FullName (Join-Path $PWD artifacts/outgoing-018/lifecycle.jsonl)
+          if ($LASTEXITCODE -ne 0) { throw 'Native outgoing report or cleanup refused.' }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-outgoing-018-${{ matrix.case }}-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 14
+          if-no-files-found: warn
+          path: |
+            artifacts/outgoing-018/*.json
+            artifacts/outgoing-018/*.jsonl
+            artifacts/native-suite-*/*.json
+            artifacts/native-suite-*/*.png
+            !artifacts/native-suite-*/startup.json
