@@ -1,0 +1,180 @@
+name: Windows R6 production17 incoming and same-profile migration (private only)
+on:
+  push:
+    branches: [validation/windows-menu-merge-20261027]
+    paths:
+      - .github/workflows/windows-017-production.yml
+      - scripts/*017*.cjs
+      - scripts/*017*.ps1
+      - scripts/fixtures/windows-017-production-binding.json
+  workflow_dispatch:
+    inputs:
+      expected_harness_commit:
+        type: string
+        required: true
+permissions:
+  contents: read
+jobs:
+  preflight:
+    if: github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.ref == 'refs/heads/validation/windows-menu-merge-20261027'
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - run: npm ci --ignore-scripts
+      - run: node --test scripts/windows-017-production.test.cjs scripts/windows-017-updater.test.cjs scripts/windows-017-owned-close.test.cjs scripts/windows-017-migration-phase.test.cjs
+  incoming:
+    needs: preflight
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write # Private draft GET access only; no write operations.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - case: fresh
+            baseline: '0.1.12'
+          - case: incoming12
+            baseline: '0.1.12'
+          - case: incoming14
+            baseline: '0.1.14'
+    env:
+      EXPECTED_HARNESS_COMMIT: ${{ inputs.expected_harness_commit }}
+      CREATOR_WINDOWS_017_PRODUCTION: '1'
+      CREATOR_PRODUCTION_017_BASELINE: ${{ matrix.baseline }}
+    steps:
+      - name: Require exact reviewed harness before checkout
+        shell: pwsh
+        run: |
+          if ($env:EXPECTED_HARNESS_COMMIT -cnotmatch '^[a-f0-9]{40}$' -or $env:EXPECTED_HARNESS_COMMIT -cne $env:GITHUB_SHA) { throw 'Wrong harness source.' }
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@v6
+        with:
+          ref: ec7f1d218c187caac30d0170aaaca2dfcdf83766
+          path: product
+          persist-credentials: false
+      - name: Bind exact MCP client source tree
+        shell: pwsh
+        run: |
+          if ((git -C product rev-parse HEAD) -cne 'ec7f1d218c187caac30d0170aaaca2dfcdf83766' -or (git -C product rev-parse 'HEAD^{tree}') -cne '11efac78fc7509e8da08de3af7262bfc6369ce5c') { throw 'Wrong product source.' }
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - run: npm ci --ignore-scripts
+      - run: npm --prefix product/modules/mcp ci --ignore-scripts
+      - name: Acquire four exact signed production data files from the private draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/windows-017-acquire.cjs
+      - name: Stage unchanged exact public baseline
+        if: matrix.case != 'fresh'
+        shell: pwsh
+        run: |
+          node -e "const c=require('./scripts/windows-017-production.cjs');process.stdout.write(JSON.stringify(c.BASELINE))" | Set-Content baseline.json -Encoding utf8NoBOM
+          if ($LASTEXITCODE -ne 0) { throw 'Baseline pin lookup failed.' }
+          $baseline=Get-Content baseline.json -Raw | ConvertFrom-Json
+          Invoke-WebRequest -Uri "https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/download/v$($baseline.version)/$($baseline.asset)" -OutFile baseline.exe -TimeoutSec 180
+          if ((Get-FileHash baseline.exe).Hash.ToLowerInvariant() -cne $baseline.installer) { throw 'Published baseline changed.' }
+      - name: Actual signed update and automatic restart with production metadata
+        if: matrix.case != 'fresh'
+        shell: pwsh
+        run: |
+          $args=@('-ContractPath',(Join-Path $PWD artifacts/production-017-control/config.json),'-BaselineInstallerPath',(Join-Path $PWD baseline.exe),'-TimeoutSeconds','480')
+          if ($env:CREATOR_PRODUCTION_017_BASELINE -ceq '0.1.14') { $args += '-Incoming017' }
+          & ./scripts/native-self-update-lab-017.ps1 @args | Tee-Object artifacts/production-017-control/lifecycle.jsonl
+          if ($LASTEXITCODE -ne 0) { throw 'Production incoming lifecycle failed.' }
+      - name: Fresh native pages, equivalent settings and normal restart
+        if: matrix.case == 'fresh'
+        run: node scripts/native-windows-017-fresh.cjs "${{ github.workspace }}/artifacts/incoming-017/candidate/Creator.Hub_0.1.17_x64-setup.exe"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-017-production-${{ matrix.case }}-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 14
+          if-no-files-found: warn
+          path: |
+            artifacts/incoming-017/input-binding.json
+            artifacts/production-017-control/*.json*
+            artifacts/native-suite-*/*.json
+            artifacts/native-suite-*/*.png
+            !artifacts/native-suite-*/startup.json
+  incoming-migration:
+    needs: preflight
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write # Private draft GET access only; no write operations.
+    env:
+      EXPECTED_HARNESS_COMMIT: ${{ inputs.expected_harness_commit }}
+      CREATOR_WINDOWS_017_PRODUCTION: '1'
+      CREATOR_PRODUCTION_017_BASELINE: '0.1.12'
+    steps:
+      - name: Require exact reviewed harness before checkout
+        shell: pwsh
+        run: |
+          if ($env:EXPECTED_HARNESS_COMMIT -cnotmatch '^[a-f0-9]{40}$' -or $env:EXPECTED_HARNESS_COMMIT -cne $env:GITHUB_SHA) { throw 'Wrong harness source.' }
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@v6
+        with:
+          ref: ec7f1d218c187caac30d0170aaaca2dfcdf83766
+          path: product
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - name: Bind exact MCP client source tree
+        shell: pwsh
+        run: |
+          if ((git -C product rev-parse HEAD) -cne 'ec7f1d218c187caac30d0170aaaca2dfcdf83766' -or (git -C product rev-parse 'HEAD^{tree}') -cne '11efac78fc7509e8da08de3af7262bfc6369ce5c') { throw 'Wrong product source.' }
+      - run: npm ci --ignore-scripts
+      - run: npm --prefix product/modules/mcp ci --ignore-scripts
+      - name: Acquire identical four signed production files
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/windows-017-acquire.cjs
+      - name: Stage original Hub12 MCP2.7.7 and Setup0.3.7 installers
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path artifacts/legacy-baselines | Out-Null
+          node -e "process.stdout.write(JSON.stringify(require('./scripts/native-installed-baseline.cjs').baselines))" | Set-Content artifacts/legacy-baselines.json -Encoding utf8NoBOM
+          if ($LASTEXITCODE -ne 0) { throw 'Baseline lookup failed.' }
+          foreach($b in (Get-Content artifacts/legacy-baselines.json -Raw | ConvertFrom-Json)) {
+            $file=Join-Path $PWD "artifacts/legacy-baselines/$($b.asset)"
+            Invoke-WebRequest -Uri "https://github.com/BOBWORKS-XR/$($b.repo)/releases/download/v$($b.version)/$($b.asset)" -OutFile $file -TimeoutSec 180
+            if ((Get-FileHash $file).Hash.ToLowerInvariant() -cne $b.sha256) { throw 'Original baseline differs.' }
+          }
+      - name: Same synthetic profile signed update then native merge and restart
+        shell: pwsh
+        run: |
+          foreach($entry in @(Get-ChildItem Env:)) {
+            if ($entry.Name -match '^(?i:CREATOR_|WEBVIEW2_|NODE_OPTIONS$|NODE_PATH$|NODE_TLS_REJECT_UNAUTHORIZED$|NODE_EXTRA_CA_CERTS$|SSL_CERT_FILE$|SSL_CERT_DIR$|CURL_CA_BUNDLE$|REQUESTS_CA_BUNDLE$|ALL_PROXY$|HTTP_PROXY$|HTTPS_PROXY$)') { Remove-Item -LiteralPath "Env:$($entry.Name)" }
+          }
+          $env:CREATOR_WINDOWS_017_MIGRATION='1'
+          $env:INCOMING_EXPECTED_SOURCE=$env:GITHUB_SHA
+          node -e "require('./scripts/native-windows-017-migration.cjs').productionMigrationMain(process.argv.slice(1)).catch(e=>{console.error(e.message);process.exitCode=1})" (Join-Path $PWD artifacts/incoming-017/candidate) (Join-Path $PWD artifacts/legacy-baselines)
+          if ($LASTEXITCODE -ne 0) { throw 'Same-profile incoming and migration failed.' }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-017-production-migration-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 14
+          if-no-files-found: warn
+          path: |
+            artifacts/incoming-017/input-binding.json
+            artifacts/production-017-control/*.json
+            artifacts/native-suite-*/*.json
+            artifacts/native-suite-*/*.jsonl
+            artifacts/native-suite-*/*.png
+            !artifacts/native-suite-*/startup.json
