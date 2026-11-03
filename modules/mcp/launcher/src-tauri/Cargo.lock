@@ -479,7 +479,7 @@ dependencies = [
 
 [[package]]
 name = "creator-works-mcp-launcher"
-version = "2.7.7"
+version = "2.7.8-fixture.19"
 dependencies = [
  "base64 0.22.1",
  "creator-hub-mcp-router",
