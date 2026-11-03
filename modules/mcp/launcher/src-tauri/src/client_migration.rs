@@ -38,6 +38,15 @@ fn target(path: &Path) -> Result<String, String> {
         .ok_or("Runtime paths must be UTF-8.".into())
 }
 
+fn same_router_path(command: &str, expected: &str) -> bool {
+    // Ordinary Windows setup writes forward slashes; do not adopt a different path.
+    if cfg!(windows) {
+        command.replace('\\', "/") == expected.replace('\\', "/")
+    } else {
+        command == expected
+    }
+}
+
 fn reviewable(value: &str) -> Result<(), String> {
     if value.len() > 4096 || value.chars().any(char::is_control) {
         return Err(
@@ -386,7 +395,7 @@ impl Plan {
                 if owned
                     && (!managed
                         || entry.get("command").and_then(toml_edit::Item::as_str)
-                            == Some(node.as_str())
+                            .is_some_and(|command| same_router_path(command, &node))
                             && entry
                                 .get("args")
                                 .and_then(toml_edit::Item::as_array)
@@ -502,9 +511,11 @@ impl Plan {
                     .and_then(|env| env.get(client_ownership::OWNER_KEY));
                 let owned = owner == Some(&Value::String(client_ownership::OWNER.into()));
                 let routed = if matches!(format, Format::OpenCode) {
-                    entry["command"] == serde_json::json!([node])
+                    entry["command"].as_array().is_some_and(|command| command.len() == 1
+                        && command[0].as_str().is_some_and(|command| same_router_path(command, &node)))
                 } else {
-                    entry["command"] == node && entry["args"] == serde_json::json!([])
+                    entry["command"].as_str().is_some_and(|command| same_router_path(command, &node))
+                        && entry["args"] == serde_json::json!([])
                 };
                 if owned && (!managed || routed) {
                     return Ok(None);

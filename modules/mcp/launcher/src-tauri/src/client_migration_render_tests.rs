@@ -36,6 +36,75 @@ impl Fixture {
     }
 }
 
+#[cfg(windows)]
+#[test]
+fn owned_codex_router_from_normal_setup_is_recognized_with_forward_slashes() {
+    let f = Fixture::new();
+    let router = crate::normalized_existing_path(f.router.clone())
+        .to_string_lossy()
+        .replace('\\', "/");
+    let original = format!(
+        "[mcp_servers.creator-works]\ncommand={}\nargs=[]\n[mcp_servers.creator-works.env]\n{}='{}'\n",
+        serde_json::to_string(&router).unwrap(),
+        client_ownership::OWNER_KEY,
+        client_ownership::OWNER,
+    );
+    let file = f.root.join("codex-config.toml");
+    fs::write(&file, &original).unwrap();
+    let result = Plan::review_router("Codex", &file, Format::Codex, &f.router);
+    assert!(result.is_ok(), "App-created router entry was refused: {:?}", result.err());
+    assert!(result.unwrap().is_none(), "Equivalent current router must not require a rewrite");
+    assert_eq!(fs::read_to_string(file).unwrap(), original);
+}
+
+#[cfg(windows)]
+#[test]
+fn owned_json_and_opencode_router_separator_variants_are_read_only() {
+    let f = Fixture::new();
+    let forward = crate::normalized_existing_path(f.router.clone())
+        .to_string_lossy()
+        .replace('\\', "/");
+    for format in [Format::Json, Format::OpenCode] {
+        let entry = if matches!(format, Format::OpenCode) {
+            serde_json::json!({"mcp":{"creator-works":{"type":"local","command":[forward],
+                "environment":{"CREATOR_WORKS_CONFIG_OWNER":client_ownership::OWNER}}}})
+        } else {
+            serde_json::json!({"mcpServers":{"creator-works":{"command":forward,"args":[],
+                "env":{"CREATOR_WORKS_CONFIG_OWNER":client_ownership::OWNER}}}})
+        };
+        let file = f.root.join("owned-router.json");
+        let original = entry.to_string();
+        fs::write(&file, &original).unwrap();
+        assert!(Plan::review_router("Fixture", &file, format, &f.router)
+            .unwrap().is_none());
+        assert_eq!(fs::read_to_string(&file).unwrap(), original);
+    }
+}
+
+#[test]
+fn owned_router_separator_support_does_not_adopt_other_commands_or_arguments() {
+    let f = Fixture::new();
+    let command = crate::normalized_existing_path(f.router.clone())
+        .to_string_lossy().to_string();
+    let owned = serde_json::json!({"command":command,"args":[],
+        "env":{"CREATOR_WORKS_CONFIG_OWNER":client_ownership::OWNER}});
+    for change in ["other-path", "extra-argument", "unowned", "different-owner"] {
+        let mut entry = owned.clone();
+        match change {
+            "other-path" => entry["command"] = serde_json::json!(f.root.join("other-router")),
+            "extra-argument" => entry["args"] = serde_json::json!(["unexpected"]),
+            "unowned" => { entry["env"].as_object_mut().unwrap().clear(); },
+            "different-owner" => entry["env"][client_ownership::OWNER_KEY] = serde_json::json!("other"),
+            _ => unreachable!(),
+        }
+        let file = f.root.join("refused-router.json");
+        let original = serde_json::json!({"mcpServers":{"creator-works":entry}}).to_string();
+        fs::write(&file, &original).unwrap();
+        assert!(Plan::review_router("Fixture", &file, Format::Json, &f.router).is_err(), "{change}");
+        assert_eq!(fs::read_to_string(file).unwrap(), original);
+    }
+}
+
 #[test]
 fn router_review_preserves_internal_jsonc_comments_and_custom_bytes() {
     let f = Fixture::new();
