@@ -40,6 +40,24 @@ test('Git child receives only bounded system settings and no preload or Git over
   assert.doesNotMatch(clean.PATH, /untrusted/);
   assert.equal(clean.GIT_CONFIG_NOSYSTEM, '1'); assert.equal(clean.GIT_CONFIG_GLOBAL, 'NUL');
 });
+test('refusals expose only bounded stage codes, never raw child output or errors', () => {
+  for (const name of diagnostic.PROOF_STAGES) {
+    assert.equal(diagnostic.proofFailure(`PROFILE_PROOF_REFUSED:${name}\r\n`), `PROOF_${name}`);
+  }
+  for (const stderr of [null, '', 'C:\\private\\path S-1-5-21-1-2-3-1001', 'PROFILE_PROOF_REFUSED:NOT_A_STAGE\n',
+    'PROFILE_PROOF_REFUSED:PROFILE_OWNER_MISMATCH\nC:\\private', 'PROFILE_PROOF_REFUSED:PROFILE_ACL_WRITE\nextra']) {
+    assert.equal(diagnostic.proofFailure(stderr), 'PROOF_CHILD');
+  }
+  let captured;
+  try { diagnostic.at('SOURCE_CHECK', () => { throw Error('private path'); }); } catch (error) { captured = error; }
+  assert.equal(diagnostic.publicFailure(captured), 'SOURCE_CHECK');
+  assert.equal(diagnostic.publicFailure(Error('private SID')), 'PROOF_CHILD');
+  const ps = fs.readFileSync(path.join(__dirname, 'native-incoming-migration-profile-proof.ps1'), 'utf8');
+  const stages = [...ps.matchAll(/\$stage = '([A-Z_]+)'/g)].map(match => match[1]);
+  assert.deepEqual([...new Set(stages)].sort(), [...diagnostic.PROOF_STAGES].sort());
+  assert.match(ps, /Error\.WriteLine\('PROFILE_PROOF_REFUSED:' \+ \$stage\)/);
+  assert.doesNotMatch(ps, /WriteLine\(\$_|WriteLine\(\$Error/);
+});
 test('workflow isolates opt-in from native acceptance and proof does not write fixtures', () => {
   const workflow = fs.readFileSync(path.join(__dirname, '../.github/workflows/windows-incoming-016.yml'), 'utf8');
   const acceptance = workflow.split('  acceptance:')[1].split('  signed012:')[0];

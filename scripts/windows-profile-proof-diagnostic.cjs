@@ -3,6 +3,24 @@
 const assert = require('node:assert/strict');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
+const PROOF_STAGES = Object.freeze(['ADMISSION', 'REQUEST', 'TOKEN', 'PROFILE_REGISTRY', 'PROFILE_MATCH', 'PROFILE_OWNER_READ',
+  'PROFILE_OWNER_MISMATCH', 'ROOTS', 'PATH_INPUT', 'PATH_SCOPE', 'PATH_ATTRIBUTES', 'PATH_REPARSE', 'PROFILE_ACL_READ', 'PROFILE_ACL_WRITE', 'OUTPUT']);
+const CODES = new Set(['LAUNCHER_ADMISSION', 'SOURCE_CHECK', 'PROOF_CHILD', 'PROOF_CONTRACT',
+  ...PROOF_STAGES.map(stage => `PROOF_${stage}`)]);
+class Refusal extends Error {
+  constructor(code) { super('Diagnostic refused'); this.code = code; }
+}
+function at(code, callback) {
+  try { return callback(); } catch { throw new Refusal(code); }
+}
+function proofFailure(stderr) {
+  if (typeof stderr !== 'string') return 'PROOF_CHILD';
+  const match = /^PROFILE_PROOF_REFUSED:([A-Z_]+)\r?\n?$/.exec(stderr);
+  return match && PROOF_STAGES.includes(match[1]) ? `PROOF_${match[1]}` : 'PROOF_CHILD';
+}
+function publicFailure(error) {
+  return error instanceof Refusal && CODES.has(error.code) ? error.code : 'PROOF_CHILD';
+}
 
 function admit(env, platform) {
   assert.equal(platform, 'win32');
@@ -34,11 +52,13 @@ function gitEnvironment(env) {
     GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0' };
 }
 function run(env = process.env) {
-  admit(env, process.platform);
+  at('LAUNCHER_ADMISSION', () => admit(env, process.platform));
   const gitExe = path.join(env.ProgramFiles, 'Git', 'cmd', 'git.exe');
-  const git = spawnSync(gitExe, ['-c', `safe.directory=${env.GITHUB_WORKSPACE}`, 'rev-parse', 'HEAD'],
-    { cwd: env.GITHUB_WORKSPACE, env: gitEnvironment(env), encoding: 'utf8', timeout: 10000, maxBuffer: 8192, windowsHide: true });
-  assert.equal(git.status, 0); assert.equal(git.stdout.trim(), env.GITHUB_SHA);
+  at('SOURCE_CHECK', () => {
+    const git = spawnSync(gitExe, ['-c', `safe.directory=${env.GITHUB_WORKSPACE}`, 'rev-parse', 'HEAD'],
+      { cwd: env.GITHUB_WORKSPACE, env: gitEnvironment(env), encoding: 'utf8', timeout: 10000, maxBuffer: 8192, windowsHide: true });
+    assert.equal(git.status, 0); assert.equal(git.stdout.trim(), env.GITHUB_SHA);
+  });
   const paths = [env.USERPROFILE, env.APPDATA, env.LOCALAPPDATA, env.GITHUB_WORKSPACE, env.RUNNER_TEMP,
     path.join(env.APPDATA, 'creator-hub-profile-proof-nonexistent'), path.join(env.LOCALAPPDATA, 'creator-hub-profile-proof-nonexistent')];
   const keys = ['SystemRoot', 'windir', 'PATH', 'PATHEXT', 'TEMP', 'TMP', 'ProgramFiles', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'GITHUB_WORKSPACE', 'RUNNER_TEMP',
@@ -46,16 +66,16 @@ function run(env = process.env) {
     'GITHUB_WORKFLOW_REF', 'CREATOR_PROFILE_PROOF_DIAGNOSTIC', 'CREATOR_INCOMING_MIGRATION_SOURCE', 'GITHUB_SHA', 'GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT'];
   const childEnv = Object.fromEntries(keys.filter(key => env[key] !== undefined).map(key => [key, env[key]]));
   const shell = path.join(env.ProgramFiles, 'PowerShell', '7', 'pwsh.exe');
-  const child = spawnSync(shell, ['-NoProfile', '-NonInteractive', '-File', path.join(__dirname, 'native-incoming-migration-profile-proof.ps1')],
-    { input: JSON.stringify({ paths }), encoding: 'utf8', env: childEnv, timeout: 30000, maxBuffer: 16384, windowsHide: true });
-  assert.equal(child.status, 0, 'Profile proof refused or did not complete');
-  checkProof(JSON.parse(child.stdout), env, paths.length);
+  const child = at('PROOF_CHILD', () => spawnSync(shell, ['-NoProfile', '-NonInteractive', '-File', path.join(__dirname, 'native-incoming-migration-profile-proof.ps1')],
+    { input: JSON.stringify({ paths }), encoding: 'utf8', env: childEnv, timeout: 30000, maxBuffer: 16384, windowsHide: true }));
+  if (child.status !== 0) throw new Refusal(proofFailure(child.stderr));
+  at('PROOF_CONTRACT', () => checkProof(JSON.parse(child.stdout), env, paths.length));
   return { kind: 'read-only-hosted-profile-diagnostic', source: env.GITHUB_SHA, runId: env.GITHUB_RUN_ID,
     sourceHeadMatched: true, profileChecksPassed: true, fixtureWrites: false, identityAttestation: false,
     handleBound: false, compromisedRunnerResistance: false, snapshotAuthorized: false, releaseReady: false };
 }
 if (require.main === module) {
   try { process.stdout.write(`${JSON.stringify(run())}\n`); }
-  catch { process.stderr.write('Read-only hosted profile diagnostic refused.\n'); process.exitCode = 1; }
+  catch (error) { process.stderr.write(`Read-only hosted profile diagnostic refused: ${publicFailure(error)}\n`); process.exitCode = 1; }
 }
-module.exports = { admit, checkProof, gitEnvironment, run };
+module.exports = { admit, checkProof, gitEnvironment, run, at, proofFailure, publicFailure, PROOF_STAGES };
