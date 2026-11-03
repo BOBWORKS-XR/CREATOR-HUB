@@ -142,7 +142,7 @@ fn backup_path(path: &Path, bytes: &[u8]) -> PathBuf {
             Sha256::digest(bytes)
         ))
 }
-fn transactions(paths: &Paths) -> Result<Vec<recovery::Transaction>, String> {
+fn transactions(paths: &Paths) -> Result<Vec<recovery::Report>, String> {
     storage::reject_links(&paths.journal)?;
     let entries = match fs::read_dir(&paths.journal) {
         Ok(entries) => entries,
@@ -161,7 +161,7 @@ fn transactions(paths: &Paths) -> Result<Vec<recovery::Transaction>, String> {
             return Err("Too many product settings journals; inspect manually.".into());
         }
         // A journal cannot select destinations: both established stores are independently derived.
-        result.push(recovery::Transaction::open_allowlisted(
+        result.push(recovery::Transaction::inspect_retained_allowlisted(
             &path,
             &[paths.current.clone(), paths.legacy.clone()],
         )?);
@@ -192,10 +192,7 @@ fn inspect_paths(paths: &Paths) -> Result<Report, String> {
             }
         }
     }
-    let recovery = transactions(paths)?
-        .into_iter()
-        .map(|transaction| transaction.inspect())
-        .collect::<Result<_, _>>()?;
+    let recovery = transactions(paths)?;
     Ok(Report {
         status,
         current_path: paths.current.clone(),
@@ -984,11 +981,14 @@ fn review_with(
     let mut reviewed_recovery = false;
     let mut any_approved = false;
     let mut any_declined = false;
-    for transaction in transactions(paths)? {
-        let report = transaction.inspect()?;
+    for report in transactions(paths)? {
         if report.historical_completed {
             continue;
         }
+        let transaction = recovery::Transaction::open_allowlisted(
+            &report.journal,
+            &[paths.current.clone(), paths.legacy.clone()],
+        )?;
         reviewed_recovery = true;
         transaction.resume(|report| {
             let approved = approve_recovery(report);

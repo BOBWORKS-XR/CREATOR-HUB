@@ -107,6 +107,8 @@ pub(crate) struct Report {
     /// Valid completed history stays historical after a later approved setup.
     /// This does not claim the current settings still equal this old after-image.
     pub historical_completed: bool,
+    /// Retained evidence only: no historical target was read or authorized for recovery.
+    pub history_only: bool,
 }
 
 struct Lock(File);
@@ -384,9 +386,7 @@ impl Transaction {
         Ok(transaction)
     }
 
-    /// Explicit scope is mandatory. The journal is local evidence, not authorization.
-    /// Missing targets are allowed for read-only classification, never recreated.
-    pub(crate) fn open(directory: &Path, expected_paths: &[PathBuf]) -> Result<Self, String> {
+    fn read_manifest(directory: &Path) -> Result<Self, String> {
         storage::reject_links(directory)?;
         let directory =
             fs::canonicalize(directory).map_err(|_| "Migration journal is unavailable.")?;
@@ -400,6 +400,14 @@ impl Transaction {
         {
             return Err("Invalid migration journal identity.".into());
         }
+        Ok(Self { directory, pending })
+    }
+
+    /// Explicit scope is mandatory. The journal is local evidence, not authorization.
+    /// Missing targets are allowed for read-only classification, never recreated.
+    pub(crate) fn open(directory: &Path, expected_paths: &[PathBuf]) -> Result<Self, String> {
+        let transaction = Self::read_manifest(directory)?;
+        let pending = &transaction.pending;
         let expected: Vec<_> = expected_paths
             .iter()
             .map(|path| canonical_scope_target(path))
@@ -420,9 +428,88 @@ impl Transaction {
         {
             return Err("Recovery scope does not match the reviewed journal.".into());
         }
-        let transaction = Self { directory, pending };
         transaction.validate()?;
         Ok(transaction)
+    }
+
+    /// Unlike opening a Transaction, this grants no write capability. Completed
+    /// journals from an earlier data location are checked using local evidence
+    /// only; their paths must never be followed, repaired or made resumable.
+    pub(crate) fn inspect_retained_allowlisted(
+        directory: &Path,
+        allowed_paths: &[PathBuf],
+    ) -> Result<Report, String> {
+        match Self::open_allowlisted(directory, allowed_paths) {
+            Ok(transaction) => return transaction.inspect(),
+            Err(error) if error == "Recovery journal includes an unapproved settings path." => {}
+            Err(error) => return Err(error),
+        }
+        storage::reject_links(directory)?;
+        let parent = directory
+            .parent()
+            .ok_or("Recovery history has no parent.")?;
+        let _lock = lock(parent)?;
+        let transaction = Self::read_manifest(directory)?;
+        let completed: Pending = record(&transaction.directory.join("completed.json"))?
+            .ok_or("Recovery journal includes an unapproved settings path.")?;
+        if completed != transaction.pending {
+            return Err("Invalid completion evidence.".into());
+        }
+        let mut targets = std::collections::BTreeSet::new();
+        for (index, entry) in transaction.pending.files.iter().enumerate() {
+            if entry.client.is_empty()
+                || entry.client.len() > 256
+                || entry.client.chars().any(char::is_control)
+                || !entry.path.is_absolute()
+                || entry.path.file_name().is_none()
+                || entry
+                    .path
+                    .components()
+                    .any(|part| matches!(part, std::path::Component::ParentDir))
+                || entry.path.to_string_lossy().chars().any(char::is_control)
+                || !targets.insert(&entry.path)
+                || entry.before_sha256 == entry.after_sha256
+            {
+                return Err("Invalid retained migration history member.".into());
+            }
+            for (kind, expected) in [
+                ("before", &entry.before_sha256),
+                ("after", &entry.after_sha256),
+            ] {
+                let image = storage::read_bytes(&transaction.image(index, kind))?
+                    .ok_or("Missing retained migration image.")?;
+                if digest(&image) != *expected {
+                    return Err(
+                        "Retained migration image is corrupt; no settings were changed.".into(),
+                    );
+                }
+            }
+            let intent: Intent = record(&transaction.evidence(index, "intent"))?
+                .ok_or("Retained completion has no publication intent.")?;
+            let native: NativeResult = record(&transaction.evidence(index, "native"))?
+                .ok_or("Retained completion has no successful native publication record.")?;
+            let outcome: Outcome = record(&transaction.evidence(index, "outcome"))?
+                .ok_or("Retained completion has no applied outcome.")?;
+            if intent != transaction.intent(index)
+                || native.schema != SCHEMA
+                || !native.success
+                || native.error.is_some()
+                || outcome.schema != SCHEMA
+                || outcome.status != Status::Applied
+                || outcome.native_error.is_some()
+            {
+                return Err(
+                    "Retained completion evidence is inconsistent; review required.".into(),
+                );
+            }
+        }
+        Ok(Report {
+            journal: transaction.directory,
+            files: Vec::new(),
+            completed: false,
+            historical_completed: true,
+            history_only: true,
+        })
     }
 
     /// A central batch journal may use a subset of independently known client
@@ -648,6 +735,7 @@ impl Transaction {
         }
         Ok(Report {
             journal: self.directory.clone(),
+            history_only: false,
             historical_completed: completed.is_some(),
             completed: completed.is_some()
                 && files.iter().all(|file| file.status == Status::Applied),

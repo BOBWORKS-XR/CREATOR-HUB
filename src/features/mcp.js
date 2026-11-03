@@ -112,7 +112,7 @@ export function mount(root, api) {
     lines($('product-evidence'), [report.currentPath ? `Current: ${report.currentPath}` : null, report.legacyPath ? `Older settings: ${report.legacyPath}` : null,
       report.evidencePath ? `Evidence: ${report.evidencePath}` : null,
       ...report.backups.map(path => `Retained backup: ${path}`),
-      ...report.recovery.flatMap(item => [`Recovery journal: ${item.journal}${item.historical_completed ? ' (completed history)' : ' (requires review)'}`,
+      ...report.recovery.flatMap(item => [`Recovery journal: ${item.journal}${item.history_only ? ' (completed history from another settings location; read-only)' : item.historical_completed ? ' (completed history)' : ' (requires review)'}`,
         ...(item.files || []).map(file => `${file.client}: ${file.status} · ${file.path}`)])]);
     const blocked = interrupted || (!productReviewed && ['legacy-only', 'conflict'].includes(report.status));
     productVisibility();

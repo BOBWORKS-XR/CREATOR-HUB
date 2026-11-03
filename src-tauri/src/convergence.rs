@@ -128,8 +128,7 @@ fn restore_settings_import_recovery(plan: &mut Plan, base: &stores::Roots) -> Re
             if count > 32 {
                 return Err("Settings recovery history exceeds its review bound.".into());
             }
-            let report = crate::convergence_recovery::Transaction::open_allowlisted(&path, &allowed)?
-                .inspect()?;
+            let report = crate::convergence_recovery::Transaction::inspect_retained_allowlisted(&path, &allowed)?;
             if !report.completed && !report.historical_completed {
                 return Ok(Some(SettingsImportRecovery::Transaction(report.journal)));
             }
@@ -846,8 +845,7 @@ fn check_settings_recovery(base: &stores::Roots) -> Result<PathBuf, String> {
                     .into(),
             );
         }
-        let status = crate::convergence_recovery::Transaction::open_allowlisted(&path, &allowed)?
-            .inspect()?;
+        let status = crate::convergence_recovery::Transaction::inspect_retained_allowlisted(&path, &allowed)?;
         if !status.completed && !status.historical_completed {
             return Err(format!("An earlier MCP settings change needs recovery review at {}. Resolve it in MCP before importing projects; both configurations were kept.", path.display()));
         }
@@ -3605,6 +3603,44 @@ mod tests {
         .unwrap();
         assert!(report.completed);
         assert_eq!(report.files.len(), 2);
+    }
+
+    #[test]
+    fn completed_preview_history_preserves_scope_and_allows_current_project_import() {
+        let (_temp, base, mut plan) = conflicting_plan();
+        let current = config_with(vec![project("current", &base.local_data.join("current"))]);
+        let legacy = config_with(vec![project("old", &base.local_data.join("old"))]);
+        for (index, value) in [current.clone(), legacy].iter().enumerate() {
+            let file = plan.stores[index].store().path(&base).unwrap();
+            fs::write(file, serde_json::to_vec(value).unwrap()).unwrap();
+            plan.stores[index] = stores::Snapshot::inspect(plan.stores[index].store(), &base).unwrap();
+        }
+        let preview = base.local_data.join("old-preview-settings.json");
+        fs::create_dir_all(&base.local_data).unwrap();
+        fs::write(&preview, b"old preview").unwrap();
+        let journal = stores::Store::McpCurrent.path(&base).unwrap().parent().unwrap().join(".creator-hub-product-settings");
+        let transaction = crate::convergence_recovery::Transaction::prepare(&journal, vec![
+            crate::convergence_recovery::ReviewedWrite::new("Earlier preview settings", &preview, b"old preview", b"completed preview")
+        ]).unwrap();
+        let report = transaction.resume(|_| true).unwrap();
+        assert!(report.completed);
+        let journal_path = report.journal;
+        fs::remove_file(&preview).unwrap();
+        let metadata = fs::read(journal_path.join("completed.json")).unwrap();
+        restore_settings_import_recovery(&mut plan, &base).unwrap();
+        assert!(plan.settings_import_recovery.is_none());
+        retain_fixture(&mut plan);
+        assert_eq!(import_missing_projects(&mut plan, &base).unwrap(), 1);
+        let merged: Value = serde_json::from_slice(plan.stores[0].bytes().unwrap()).unwrap();
+        assert_eq!(merged["channels"].as_array().unwrap().len(), 2);
+        for (key, value) in current.as_object().unwrap() {
+            if key != "channels" { assert_eq!(&merged[key], value); }
+        }
+        assert_eq!(fs::read(journal_path.join("completed.json")).unwrap(), metadata);
+        assert!(!preview.exists());
+        assert!(crate::convergence_recovery::Transaction::open_allowlisted(&journal_path, &[
+            stores::Store::McpCurrent.path(&base).unwrap(), stores::Store::McpLegacy.path(&base).unwrap()
+        ]).is_err());
     }
 
     #[test]

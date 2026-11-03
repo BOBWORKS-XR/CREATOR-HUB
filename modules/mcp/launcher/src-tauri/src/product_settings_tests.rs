@@ -73,6 +73,53 @@ fn pending_review_save(fixture: &Fixture, path: &Path) -> recovery::Transaction 
     .unwrap()
 }
 
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+#[test]
+fn completed_preview_location_history_does_not_disable_product_settings_review() {
+    let fixture = Fixture::new();
+    let current = after();
+    let legacy = fixture.legacy();
+    fs::write(&fixture.paths.current, &current).unwrap();
+    let preview = fixture.root.path().join("packaged-preview-config.json");
+    let transaction = pending_review_save(&fixture, &preview);
+    assert!(transaction.resume(|_| true).unwrap().completed);
+    fs::remove_file(&preview).unwrap();
+    let report = fixture.inspect();
+    assert_eq!(report.status, Status::Conflict);
+    assert_eq!(report.recovery.len(), 1);
+    assert!(report.recovery[0].history_only);
+    let receipt = review_with(
+        &fixture.paths,
+        |_| panic!("Foreign history must not be resumable"),
+        |_| true,
+    )
+    .unwrap();
+    assert!(receipt.approved);
+    assert!(receipt.report.recovery[0].history_only);
+    assert_eq!(fs::read(&fixture.paths.current).unwrap(), current);
+    assert_eq!(fs::read(&fixture.paths.legacy).unwrap(), legacy);
+    assert!(!preview.exists());
+    assert!(receipt.report.backups.len() == 2);
+}
+
+#[test]
+fn incomplete_preview_location_history_still_blocks_settings_review() {
+    let fixture = Fixture::new();
+    let current = after();
+    fs::write(&fixture.paths.current, &current).unwrap();
+    let preview = fixture.root.path().join("packaged-preview-config.json");
+    let _transaction = pending_review_save(&fixture, &preview);
+    assert!(inspect_paths(&fixture.paths).is_err());
+    assert!(review_with(
+        &fixture.paths,
+        |_| panic!("Foreign scope must not be offered"),
+        |_| panic!("Backup approval must not bypass recovery")
+    )
+    .is_err());
+    assert_eq!(fs::read(&fixture.paths.current).unwrap(), current);
+    assert_eq!(fs::read(&preview).unwrap(), after());
+}
+
 #[test]
 fn review_receipt_preserves_report_wire_and_uses_only_the_actual_backup_decision() {
     for status in [
@@ -520,7 +567,9 @@ fn single_store_duplicate_unknown_keys_refuse_inspection_load_and_save() {
                 accepted.push(format!("{label}: explicit save changed an active store"));
             }
             if fixture.paths.journal.exists() || backup_path(selected, &original).exists() {
-                accepted.push(format!("{label}: publication or backup evidence was created"));
+                accepted.push(format!(
+                    "{label}: publication or backup evidence was created"
+                ));
             }
         }
     }

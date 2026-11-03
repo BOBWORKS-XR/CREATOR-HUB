@@ -223,6 +223,123 @@ fn missing_scope_leaf_remains_inspectable_by_both_recovery_entry_points() {
     f.images(&transaction);
 }
 
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+#[test]
+fn completed_foreign_history_is_read_only_and_never_opens_a_transaction() {
+    let f = Fixture::new(1);
+    let transaction = f.prepare();
+    assert!(transaction.resume(|_| true).unwrap().completed);
+    let approved = f.root.join("native-settings.json");
+    fs::write(&approved, b"native preferences").unwrap();
+    // A retired location may no longer be a usable settings file. History
+    // inspection must not open, validate, recreate or write that old target.
+    fs::remove_file(&f.paths[0]).unwrap();
+    fs::create_dir(&f.paths[0]).unwrap();
+    let pending = fs::read(transaction.directory.join("pending.json")).unwrap();
+    let completed = fs::read(transaction.directory.join("completed.json")).unwrap();
+    let report = Transaction::inspect_retained_allowlisted(
+        &transaction.directory,
+        std::slice::from_ref(&approved),
+    )
+    .unwrap();
+    assert!(report.historical_completed && report.history_only);
+    assert!(!report.completed);
+    assert!(
+        report.files.is_empty(),
+        "Unapproved paths must not become resumable file reports"
+    );
+    assert!(Transaction::open_allowlisted(&transaction.directory, &[approved.clone()]).is_err());
+    assert_eq!(fs::read(&approved).unwrap(), b"native preferences");
+    assert!(f.paths[0].is_dir());
+    assert_eq!(
+        fs::read(transaction.directory.join("pending.json")).unwrap(),
+        pending
+    );
+    assert_eq!(
+        fs::read(transaction.directory.join("completed.json")).unwrap(),
+        completed
+    );
+    f.images(&transaction);
+}
+
+#[test]
+fn incomplete_foreign_history_still_blocks_without_creating_approved_settings() {
+    let f = Fixture::new(1);
+    let transaction = f.prepare();
+    let approved = f.root.join("native-settings.json");
+    assert!(
+        Transaction::inspect_retained_allowlisted(&transaction.directory, &[approved.clone()])
+            .is_err()
+    );
+    assert!(!approved.exists());
+    assert!(!transaction.directory.join("completed.json").exists());
+    assert!(!transaction.evidence(0, "intent").exists());
+    f.originals();
+    f.images(&transaction);
+}
+
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+#[test]
+fn foreign_completed_history_refuses_missing_corrupt_or_inconsistent_local_evidence() {
+    for kind in [
+        "completed",
+        "before",
+        "after",
+        "intent",
+        "native",
+        "outcome",
+    ] {
+        for missing in [true, false] {
+            let f = Fixture::new(1);
+            let transaction = f.prepare();
+            assert!(transaction.resume(|_| true).unwrap().completed);
+            let file = match kind {
+                "completed" => transaction.directory.join("completed.json"),
+                "before" | "after" => transaction.image(0, kind),
+                _ => transaction.evidence(0, kind),
+            };
+            if missing {
+                fs::remove_file(&file).unwrap();
+            } else {
+                fs::write(&file, b"corrupt retained evidence").unwrap();
+            }
+            let approved = f.root.join("native-settings.json");
+            fs::write(&approved, b"keep native preferences").unwrap();
+            assert!(
+                Transaction::inspect_retained_allowlisted(
+                    &transaction.directory,
+                    &[approved.clone()]
+                )
+                .is_err(),
+                "{kind} missing={missing}"
+            );
+            assert_eq!(fs::read(&approved).unwrap(), b"keep native preferences");
+            assert_eq!(fs::read(&f.paths[0]).unwrap(), Fixture::after(0));
+            if missing {
+                assert!(!file.exists());
+            } else {
+                assert_eq!(fs::read(file).unwrap(), b"corrupt retained evidence");
+            }
+        }
+    }
+}
+
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+#[test]
+fn in_scope_completed_history_uses_the_existing_strict_target_validation() {
+    let f = Fixture::new(1);
+    let transaction = f.prepare();
+    assert!(transaction.resume(|_| true).unwrap().completed);
+    let report =
+        Transaction::inspect_retained_allowlisted(&transaction.directory, &f.paths).unwrap();
+    assert!(report.completed && report.historical_completed);
+    assert!(!report.history_only);
+    assert_eq!(report.files.len(), 1);
+    fs::write(transaction.image(0, "before"), b"corrupt").unwrap();
+    assert!(Transaction::inspect_retained_allowlisted(&transaction.directory, &f.paths).is_err());
+    assert_eq!(fs::read(&f.paths[0]).unwrap(), Fixture::after(0));
+}
+
 #[test]
 fn preparation_faults_retain_originals_and_exact_images_without_publishing() {
     for boundary in [
@@ -639,13 +756,14 @@ fn declining_partially_applied_batch_preserves_all_retained_bytes() {
     assert_eq!(files(&f.root), before);
     assert!(!t.directory.join("completed.json").exists());
     f.images(&t);
-    assert!(t
-        .resume_with(|_| true, &mut |at| {
+    assert!(
+        t.resume_with(|_| true, &mut |at| {
             assert_ne!(at, Boundary::BeforePublish(0));
             Ok(())
         })
         .unwrap()
-        .completed);
+        .completed
+    );
     for (index, target) in f.paths.iter().enumerate() {
         assert_eq!(fs::read(target).unwrap(), Fixture::after(index));
     }

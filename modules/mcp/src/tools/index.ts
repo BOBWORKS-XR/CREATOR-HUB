@@ -111,7 +111,8 @@ export function registerTools(selection: ToolGroupSelection = "all"): Tool[] {
     },
     {
       name: "get_mcp_reference",
-      description: "Search bundled reference entries or read one entry in bounded pages. Use creator-docs for the AltVR Creator SDK documentation, not the legacy Banter catalogs. Manual results include compatibility corrections. Partial excerpts have continuation offsets; no network service is used.",
+      description: "Search bundled references or page an entry. For AltVR Creator SDK, use creator-docs, not legacy Banter. Partial excerpts include continuation offsets and manual corrections. Offline and read-only.",
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
       inputSchema: {
         type: "object",
         properties: {
