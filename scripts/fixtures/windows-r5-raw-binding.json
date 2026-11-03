@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "enabled": false,
+  "enabled": true,
   "version": "0.1.17",
   "outgoingFixtureVersion": "0.1.18",
   "source": {
@@ -8,19 +8,57 @@
     "tree": "11efac78fc7509e8da08de3af7262bfc6369ce5c"
   },
   "installer": {
-    "bytes": null,
-    "sha256": null
+    "bytes": 38246135,
+    "sha256": "4b8f3f34ed0d3ca06ba92230b37f8f8b4f75da772cb285a4129d9b3068dd4f9e"
   },
   "executable": {
-    "bytes": null,
-    "sha256": null
+    "bytes": 19379712,
+    "sha256": "ab73d243fc6ba7ec956bf59b12679f736ecbefa7131bac678347e5a7b1618337"
   },
   "manifest": {
-    "bytes": null,
-    "sha256": null,
-    "sha256Canonical": null,
-    "document": null
+    "bytes": 2053,
+    "sha256": "2e391106534a951fb11eae7d7f605a864799611916b08a58355168f9ff6031d9",
+    "sha256Canonical": "b45b7cba4784779cf1f0e88d06c0c056543a6f7d2eb603b2ef3abd20ff960ee9",
+    "document": {
+      "schemaVersion": 1,
+      "platform": "windows",
+      "arch": "x86_64",
+      "modules": {
+        "mcp": {
+          "executable": "mcp/creator-works-mcp-launcher.exe",
+          "version": "2.7.7",
+          "files": {
+            "mcp/creator-works-mcp-launcher.exe": "4c1ee6271e712e6e73a01269a5fcead815b6880e8305737f951a065fbde8e1e7",
+            "mcp/server/creator-works-mcp.mjs": "24adc371d6e4cfe7c257e0f466a5e5f0fce6b26178714221ac85f08d9f443a78",
+            "mcp/server/runtime/node.exe": "c6335d08331c23d68b9f2b18adb102002d76ef150b47248e954c507e0d033664",
+            "mcp/server/runtime/LICENSE": "8efdacdc1cfa3460aeb7fe98e3c54337b971d5da70e6eee292b73b981acb220c",
+            "mcp/server/runtime/VERSION": "98182b41c9ce3357797985cf12dc3b0124490ef88bc918a905373e7688e6aec9",
+            "mcp/server/unity-extension/Editor/BanterMCPBridge.cs": "b9272bef3538c31a959759b27b95ff592466667eb4d6919cef1aba7b3acaa1da",
+            "mcp/server/unity-extension/Editor/CreatorWorksMCPLogo.png": "f3f68baa0d887de92e6cf7aba8beae7ff8ea5c44b13444f018413041ade19ea7",
+            "mcp/server/LICENSE": "b1cfe8ff7191d3e9c6c6b0f832adcd2ebece8e6070ef72d2f7afc1c082fb757f",
+            "mcp/server/THIRD_PARTY_NOTICES.md": "5e9f0fe9b73afe7c6c056a33124ead3110fc03c309f845e9dd6c76b0a9b00560"
+          }
+        },
+        "setup": {
+          "executable": "setup/creator-project-setup.exe",
+          "version": "0.3.7",
+          "files": {
+            "setup/creator-project-setup.exe": "99c9598340401c8cbf3892524280c26c303fe2fd479bfb6b2ca2445c73e96bd3"
+          }
+        }
+      },
+      "managedRouting": {
+        "protocol": 1,
+        "files": {
+          "routing/creator-hub-mcp-router.exe": "28dab129c215bc7835bef1441e01db7be46d976639c356e84998f6bfde6615a3",
+          "routing/router.json": "0673956592c25d1e021af0bb6eb68909d185a6c145bd0490fdc6a0d58628ae97",
+          "routing/router.minisig": "90f31c89c45ca694f554f23909cb30660679c97e88bdff368e303278147e1071",
+          "routing/runtime.json": "dc46a104a2c880ac9d304d98aac1a7b9510dfa202e495295ed63e037079611f6",
+          "routing/runtime.minisig": "b5e9e0e69668bb483e1b1ff6cd02a2a53881e91b50f0334fa2e56dafcf637c63"
+        }
+      }
+    }
   },
-  "buildResultSha256": null,
-  "buildInputsSha256": null
+  "buildResultSha256": "1c30835ef07347c37930c6911a77883f1ea86c25dd23d629c2f586e5edc25251",
+  "buildInputsSha256": "b23adb96db948f13f3c75994d69050fd56d0ae9fd72624ba9726b8ff362b8812"
 }
