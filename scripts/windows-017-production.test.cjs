@@ -61,3 +61,19 @@ test('17 direct protocol rejects 16 and has no local native entrypoint', () => {
   assert.throws(() => migration.admission({}, 'win32'));
   assert.equal(migration.TARGET.installer, c.TARGET.installer);
 });
+test('workflow uses named PowerShell parameter splatting, not positional strings', () => {
+  const workflow = fs.readFileSync(path.join(__dirname, '../.github/workflows/windows-017-production.yml'), 'utf8');
+  assert.ok(workflow.includes('$parameters=@{ContractPath='));
+  assert.ok(workflow.includes('TimeoutSeconds=480}'));
+  assert.ok(workflow.includes('native-self-update-lab-017.ps1 @parameters'));
+  assert.ok(!workflow.includes('native-self-update-lab-017.ps1 @args'));
+});
+test('production transport requires exact pins and runner scope before TLS creation', () => {
+  const source = fs.readFileSync(path.join(__dirname, 'self-update-lab-feed-017.cjs'), 'utf8');
+  const start = source.indexOf('async function startLabProxy');
+  const guard = source.indexOf('production.assertHost(env); production.validatePins(contract.pins);', start);
+  const tls = source.indexOf('transport.tls.createSecureContext', start);
+  assert.ok(guard > start && tls > guard);
+  assert.ok(source.slice(start, tls).includes("contract.actualScope?.kind === 'production017-input'"));
+  assert.ok(source.slice(start, tls).includes('contract = bindSigned012EmptyDiscovery(contract, env)'));
+});

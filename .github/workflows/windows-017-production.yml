@@ -12,6 +12,10 @@ on:
       expected_harness_commit:
         type: string
         required: true
+      incoming_only:
+        description: Recheck failed signed incoming and combined cases; retain completed fresh-native receipt.
+        type: boolean
+        default: false
 permissions:
   contents: read
 jobs:
@@ -37,14 +41,7 @@ jobs:
       contents: write # Private draft GET access only; no write operations.
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - case: fresh
-            baseline: '0.1.12'
-          - case: incoming12
-            baseline: '0.1.12'
-          - case: incoming14
-            baseline: '0.1.14'
+      matrix: ${{ fromJSON(inputs.incoming_only && '{"include":[{"case":"incoming12","baseline":"0.1.12"},{"case":"incoming14","baseline":"0.1.14"}]}' || '{"include":[{"case":"fresh","baseline":"0.1.12"},{"case":"incoming12","baseline":"0.1.12"},{"case":"incoming14","baseline":"0.1.14"}]}') }}
     env:
       EXPECTED_HARNESS_COMMIT: ${{ inputs.expected_harness_commit }}
       CREATOR_WINDOWS_017_PRODUCTION: '1'
@@ -88,9 +85,9 @@ jobs:
         if: matrix.case != 'fresh'
         shell: pwsh
         run: |
-          $args=@('-ContractPath',(Join-Path $PWD artifacts/production-017-control/config.json),'-BaselineInstallerPath',(Join-Path $PWD baseline.exe),'-TimeoutSeconds','480')
-          if ($env:CREATOR_PRODUCTION_017_BASELINE -ceq '0.1.14') { $args += '-Incoming017' }
-          & ./scripts/native-self-update-lab-017.ps1 @args | Tee-Object artifacts/production-017-control/lifecycle.jsonl
+          $parameters=@{ContractPath=(Join-Path $PWD artifacts/production-017-control/config.json);BaselineInstallerPath=(Join-Path $PWD baseline.exe);TimeoutSeconds=480}
+          if ($env:CREATOR_PRODUCTION_017_BASELINE -ceq '0.1.14') { $parameters.Incoming017=$true }
+          & ./scripts/native-self-update-lab-017.ps1 @parameters | Tee-Object artifacts/production-017-control/lifecycle.jsonl
           if ($LASTEXITCODE -ne 0) { throw 'Production incoming lifecycle failed.' }
       - name: Fresh native pages, equivalent settings and normal restart
         if: matrix.case == 'fresh'

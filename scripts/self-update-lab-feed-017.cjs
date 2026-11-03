@@ -354,7 +354,16 @@ function labReport(contract, state) {
 async function startLabProxy(contract, tlsOptions, env = process.env, transport = { http, tls }) {
   assertRunner(env);
   assert.ok(contracts.has(contract), 'Use a validated lab contract');
-  contract = bindSigned012EmptyDiscovery(contract, env);
+  if (contract.actualScope?.kind === 'production017-input') {
+    const production = require('./windows-017-production.cjs');
+    production.assertHost(env); production.validatePins(contract.pins);
+    assert.equal(contract.targetVersion, production.TARGET.version);
+    assert.equal(contract.baseline.version, env.CREATOR_PRODUCTION_017_BASELINE);
+    assert.equal(contract.routes.length, contract.baseline.version === '0.1.12' ? 7 : 5);
+    assert.equal(Boolean(contract.syntheticDiscovery), contract.baseline.version === '0.1.12');
+  } else {
+    contract = bindSigned012EmptyDiscovery(contract, env);
+  }
   keys(tlsOptions, ['pfx', 'passphrase'], 'ephemeral TLS options');
   bounded(tlsOptions.pfx, 64 * 1024, 'TLS PFX');
   const context = transport.tls.createSecureContext({ ...tlsOptions, minVersion: 'TLSv1.2' });
