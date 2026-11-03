@@ -254,18 +254,45 @@ test('actual shared .NET ZIP decoding hashes members and refuses duplicate or es
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   const file = path.join(directory, 'fixture.zip');
   function zip(names) {
-    fs.rmSync(file, { force: true });
-    const script = `$ErrorActionPreference='Stop'; Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
-      $spec=[Console]::In.ReadToEnd() | ConvertFrom-Json
-      $zip=[IO.Compression.ZipFile]::Open($spec.file, [IO.Compression.ZipArchiveMode]::Create)
-      try { foreach($name in $spec.names) { $entry=$zip.CreateEntry($name); $writer=[IO.StreamWriter]::new($entry.Open())
-        try { $writer.Write('synthetic report') } finally { $writer.Dispose() } } } finally { $zip.Dispose() }`;
-    execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script],
-      { input: JSON.stringify({ file, names }), encoding: 'utf8', windowsHide: true, timeout: 10000 });
+    // Construct the fixture in-process; the assertions still run the real .NET decoder.
+    const body = Buffer.from('synthetic report'), local = [], central = [];
+    let crc = 0xffffffff, offset = 0;
+    for (const byte of body) {
+      crc ^= byte;
+      for (let bit = 0; bit < 8; bit++) crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0);
+    }
+    crc = (crc ^ 0xffffffff) >>> 0;
+    for (const name of names) {
+      const n = Buffer.from(name), h = Buffer.alloc(30), c = Buffer.alloc(46);
+      h.writeUInt32LE(0x04034b50); h.writeUInt16LE(20, 4); h.writeUInt32LE(crc, 14);
+      h.writeUInt32LE(body.length, 18); h.writeUInt32LE(body.length, 22); h.writeUInt16LE(n.length, 26);
+      c.writeUInt32LE(0x02014b50); c.writeUInt16LE(20, 4); c.writeUInt16LE(20, 6); c.writeUInt32LE(crc, 16);
+      c.writeUInt32LE(body.length, 20); c.writeUInt32LE(body.length, 24); c.writeUInt16LE(n.length, 28); c.writeUInt32LE(offset, 42);
+      local.push(h, n, body); central.push(c, n); offset += h.length + n.length + body.length;
+    }
+    const directoryBytes = Buffer.concat(central), end = Buffer.alloc(22);
+    end.writeUInt32LE(0x06054b50); end.writeUInt16LE(names.length, 8); end.writeUInt16LE(names.length, 10);
+    end.writeUInt32LE(directoryBytes.length, 12); end.writeUInt32LE(offset, 16);
+    fs.writeFileSync(file, Buffer.concat([...local, directoryBytes, end]));
     return fs.readFileSync(file);
   }
   assert.deepEqual(q.inspectArchive(zip(['native/report.json'])), { 'native/report.json': record(Buffer.from('synthetic report')).sha256 });
   assert.throws(() => q.inspectArchive(zip(['report.json', 'REPORT.JSON'])));
   assert.throws(() => q.inspectArchive(zip(['../report.json'])));
   assert.equal(fs.existsSync(path.join(directory, 'native')), false);
+});
+
+test('validation-only dispatch keeps immutable association15d and limits changes to its two harness files', () => {
+  const source = fs.readFileSync(path.join(__dirname, '../.github/workflows/windows-018-release-validation.yml'), 'utf8');
+  assert.match(source, /on:\s*\r?\n  workflow_dispatch:/);
+  assert.doesNotMatch(source, /^  (?:push|pull_request):/m);
+  assert.match(source, /runs-on: windows-latest/);
+  assert.match(source, /fetch-depth: 2/);
+  assert.match(source, /\$parent -cne \$association/);
+  assert.match(source, /Compare-Object \(\$allowed \| Sort-Object\) \(\$changed \| Sort-Object\)/);
+  assert.match(source, /'\.github\/workflows\/windows-018-release-validation\.yml', 'scripts\/windows-release-qualification\.test\.cjs'/);
+  assert.match(source, /git\/ref\/tags\/v0\.1\.18/);
+  assert.match(source, /--association 15d21076eb2e1504f19ca786979365ae174d008b --verify-draft/);
+  assert.match(source, /--sha256 2684e9a0b0e885f5cb4a6e0d91a7aef4900a60e8f3989e15f2ecb41789e03e9e/);
+  assert.doesNotMatch(source, /--association.*GITHUB_SHA|cargo (?:build|test)|build:unified|tauri-action|gh (?:release|api --method)|macos-|ubuntu-/);
 });
