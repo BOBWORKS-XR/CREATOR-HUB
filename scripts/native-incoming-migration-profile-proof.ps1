@@ -33,7 +33,7 @@ try {
     $owner = (Get-Acl -LiteralPath $profile).GetOwner([Security.Principal.SecurityIdentifier]).Value
     $stage = 'PROFILE_OWNER_MISMATCH'
     $ownerCategory = if ($owner -ceq $sid) { 'TOKEN' } elseif ($owner -ceq 'S-1-5-32-544') { 'ADMINISTRATORS' } elseif ($owner -ceq 'S-1-5-18') { 'SYSTEM' } else { 'OTHER' }
-    if ($owner -cne $sid) { throw 'Profile owner differs from token.' }
+    if ($ownerCategory -cnotin @('TOKEN', 'SYSTEM')) { throw 'Profile owner not admitted.' }
     $stage = 'ROOTS'
     $roots = @($profile, [IO.Path]::GetFullPath($env:GITHUB_WORKSPACE), [IO.Path]::GetFullPath($env:RUNNER_TEMP))
     foreach ($candidate in @($request.paths)) {

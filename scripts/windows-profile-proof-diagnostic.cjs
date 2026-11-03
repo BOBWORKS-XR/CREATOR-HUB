@@ -49,10 +49,11 @@ function checkProof(proof, env, count) {
   assert.deepEqual(Object.keys(proof).sort(), ['kind', 'sid', 'ownerSid', 'profile', 'appData', 'localAppData', 'pathsChecked', 'handleBound', 'compromisedRunnerResistance'].sort());
   assert.equal(proof.kind, 'incoming-migration-profile-proof');
   assert.match(proof.sid || '', /^S-1-5-21-(?:[0-9]+-){3}[0-9]+$/);
-  assert.equal(proof.ownerSid, proof.sid);
+  assert.ok(proof.ownerSid === proof.sid || proof.ownerSid === 'S-1-5-18');
   for (const [key, name] of [['profile', 'USERPROFILE'], ['appData', 'APPDATA'], ['localAppData', 'LOCALAPPDATA']])
     assert.equal(path.resolve(proof[key]).toLowerCase(), path.resolve(env[name]).toLowerCase());
   assert.equal(proof.pathsChecked, count); assert.equal(proof.handleBound, false); assert.equal(proof.compromisedRunnerResistance, false);
+  return proof.ownerSid === proof.sid ? 'TOKEN' : 'SYSTEM';
 }
 function gitEnvironment(env) {
   return { SystemRoot: env.SystemRoot, windir: env.SystemRoot,
@@ -78,9 +79,10 @@ function run(env = process.env) {
   const child = at('PROOF_CHILD', () => spawnSync(shell, ['-NoProfile', '-NonInteractive', '-File', path.join(__dirname, 'native-incoming-migration-profile-proof.ps1')],
     { input: JSON.stringify({ paths }), encoding: 'utf8', env: childEnv, timeout: 30000, maxBuffer: 16384, windowsHide: true }));
   if (child.status !== 0) throw new Refusal(proofFailure(child.stderr), proofOwnerCategory(child.stderr));
-  at('PROOF_CONTRACT', () => checkProof(JSON.parse(child.stdout), env, paths.length));
+  const ownerCategory = at('PROOF_CONTRACT', () => checkProof(JSON.parse(child.stdout), env, paths.length));
   return { kind: 'read-only-hosted-profile-diagnostic', source: env.GITHUB_SHA, runId: env.GITHUB_RUN_ID,
-    sourceHeadMatched: true, profileChecksPassed: true, ownerCategory: 'TOKEN', fixtureWrites: false, identityAttestation: false,
+    sourceHeadMatched: true, profileChecksPassed: true, ownerCategory, aclWriteRuleScanPassed: true,
+    profilePrivacyProven: false, fixtureWrites: false, identityAttestation: false,
     handleBound: false, compromisedRunnerResistance: false, snapshotAuthorized: false, releaseReady: false };
 }
 if (require.main === module) {

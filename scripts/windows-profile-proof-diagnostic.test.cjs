@@ -25,8 +25,10 @@ test('hosted job admission refuses changed context or source', () => {
   assert.throws(() => diagnostic.admit({ ...env, CREATOR_INCOMING_MIGRATION_SOURCE: 'b'.repeat(40) }, 'win32'));
 });
 test('proof contract rejects identity, path, count and scope drift', () => {
-  diagnostic.checkProof(proof(), env, 7);
+  assert.equal(diagnostic.checkProof(proof(), env, 7), 'TOKEN');
+  assert.equal(diagnostic.checkProof({ ...proof(), ownerSid: 'S-1-5-18' }, env, 7), 'SYSTEM');
   for (const change of [p => p.sid = 'bad', p => p.ownerSid = 'S-1-5-21-1-2-3-2', p => p.profile = env.RUNNER_TEMP,
+    p => p.ownerSid = 'S-1-5-32-544',
     p => p.appData = env.RUNNER_TEMP, p => p.localAppData = env.RUNNER_TEMP, p => p.pathsChecked = 6,
     p => p.handleBound = true, p => p.compromisedRunnerResistance = true, p => p.extra = true]) {
     const value = proof(); change(value); assert.throws(() => diagnostic.checkProof(value, env, 7));
@@ -58,7 +60,7 @@ test('refusals expose only bounded stage codes, never raw child output or errors
   assert.match(ps, /Error\.WriteLine\('PROFILE_PROOF_REFUSED:' \+ \$stage\)/);
   assert.doesNotMatch(ps, /WriteLine\(\$_|WriteLine\(\$Error/);
 });
-test('owner category is bounded and never changes the owner mismatch refusal', () => {
+test('owner category is bounded and unexpected owners still refuse', () => {
   for (const category of ['ADMINISTRATORS', 'SYSTEM', 'OTHER']) {
     const line = `PROFILE_PROOF_REFUSED:PROFILE_OWNER_MISMATCH:${category}\r\n`;
     assert.equal(diagnostic.proofFailure(line), 'PROOF_PROFILE_OWNER_MISMATCH');
@@ -78,8 +80,15 @@ test('owner category is bounded and never changes the owner mismatch refusal', (
   assert.equal(diagnostic.publicOwnerCategory(error), 'SYSTEM');
   error.ownerCategory = 'S-1-5-18'; assert.equal(diagnostic.publicOwnerCategory(error), undefined);
   const ps = fs.readFileSync(path.join(__dirname, 'native-incoming-migration-profile-proof.ps1'), 'utf8');
-  assert.match(ps, /if \(\$owner -cne \$sid\) \{ throw 'Profile owner differs from token\.' \}/);
+  assert.match(ps, /if \(\$ownerCategory -cnotin @\('TOKEN', 'SYSTEM'\)\) \{ throw 'Profile owner not admitted\.' \}/);
   assert.match(ps, /\$ownerCategory -cin @\('ADMINISTRATORS', 'SYSTEM', 'OTHER'\)/);
+  assert.ok(ps.indexOf("$stage = 'PROFILE_OWNER_MISMATCH'") < ps.indexOf("$stage = 'PROFILE_ACL_READ'"));
+  assert.match(ps, /\$stage = 'PROFILE_ACL_WRITE'/);
+  assert.match(ps, /\$acl\.GetAccessRules\(\$true, \$true, \[Security\.Principal\.SecurityIdentifier\]\)/);
+  assert.match(ps, /\$rule\.IdentityReference\.Value -cnotin @\(\$sid, 'S-1-5-18', 'S-1-5-32-544'\)/);
+  const source = fs.readFileSync(path.join(__dirname, 'windows-profile-proof-diagnostic.cjs'), 'utf8');
+  assert.match(source, /aclWriteRuleScanPassed: true/); assert.match(source, /profilePrivacyProven: false/);
+  assert.match(source, /snapshotAuthorized: false/);
 });
 test('workflow isolates opt-in from native acceptance and proof does not write fixtures', () => {
   const workflow = fs.readFileSync(path.join(__dirname, '../.github/workflows/windows-incoming-016.yml'), 'utf8');
