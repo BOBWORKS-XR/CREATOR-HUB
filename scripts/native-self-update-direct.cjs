@@ -4,27 +4,29 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 
 const VERSION = '0.1.16';
+const DIRECT_VERSIONS = Object.freeze([VERSION, '0.1.18']);
 const removedResource = /Creator-Community|community[._-](?:catalogue|catalog|projects)|community\.(?:js|css)(?:[?#]|$)|creator-plugins\.png(?:[?#]|$)/i;
 
 function directTarget(target, source) {
   assert.equal(target, source, 'Update UI must be bound to the checked-out product version');
-  return target === VERSION;
+  return DIRECT_VERSIONS.includes(target);
 }
 
-function assertProtocol(state) {
-  assert.equal(state.version, VERSION, 'Direct smoke requires the exact native 0.1.16 build');
+function assertProtocol(state, version = VERSION) {
+  assert.ok(DIRECT_VERSIONS.includes(version), 'Unreviewed direct target');
+  assert.equal(state.version, version, 'Direct smoke requires the exact target native build');
   assert.equal(state.protocol, 1, 'Native direct-feature protocol is required');
   assert.equal(state.integrated, true, 'A hosted 0.1.16 build cannot satisfy direct acceptance');
   assert.deepEqual(state.services, { integrated: true, features: ['setup', 'mcp'] });
 }
 
-async function checkProtocol(page) {
+async function checkProtocol(page, version = VERSION) {
   assertProtocol(await page.evaluate(async () => ({
     version: window.CreatorHubNative.version,
     protocol: window.__CREATOR_HUB_FEATURE_PROTOCOL__,
     integrated: window.CreatorHubNative.integratedFeatures,
     services: await window.CreatorHubNative.invoke('feature_status'),
-  })));
+  })), version);
 }
 
 function watchRequests(page) {
@@ -94,10 +96,10 @@ async function checkMcpLockedConflict(page, prefix) {
   assert.equal(await page.locator(`${prefix} [data-field="product-review"]`).isEnabled(), true);
 }
 
-async function checkPages({ page, showApp, processes, requests, screenshot, expectedMcpConflict = false, verifyFixture }) {
+async function checkPages({ page, showApp, processes, requests, screenshot, expectedMcpConflict = false, verifyFixture, version = VERSION }) {
   assert.equal(typeof expectedMcpConflict, 'boolean');
   if (expectedMcpConflict) assert.equal(typeof verifyFixture, 'function');
-  await checkProtocol(page);
+  await checkProtocol(page, version);
   const services = {};
   for (const feature of ['setup', 'mcp']) {
     await showApp(feature);

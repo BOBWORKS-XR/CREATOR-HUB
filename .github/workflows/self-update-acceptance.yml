@@ -29,15 +29,18 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
-      - run: node --test scripts/self-update-baselines.test.cjs scripts/check-release-feed.test.cjs
+      - run: node --test scripts/self-update-baselines.test.cjs scripts/check-release-feed.test.cjs scripts/native-self-update-direct.test.cjs scripts/public-self-update-018.test.cjs
       - name: Read the packaged target version
         id: target
         shell: pwsh
         env:
           REQUESTED_TARGET_VERSION: ${{ inputs.target_version }}
+          HOSTED_FIXTURE: ${{ inputs.hosted_fixture }}
+          FIXTURE_RUN: ${{ inputs.fixture_run }}
         run: |
           $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
           if ($env:REQUESTED_TARGET_VERSION -notmatch '^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$' -or $env:REQUESTED_TARGET_VERSION -ne $version) { throw 'Target version must match the checked-out app version.' }
+          if ($version -eq '0.1.18' -and ($env:HOSTED_FIXTURE -ne 'false' -or $env:FIXTURE_RUN)) { throw 'Public18 refuses hosted fixtures.' }
           "version=$version" >> $env:GITHUB_OUTPUT
       - name: Select the pinned previous public stable baseline
         id: baseline
@@ -47,6 +50,24 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Public self-update baseline selection failed.' }
           $baseline = $selected | ConvertFrom-Json
           "version=$($baseline.version)" >> $env:GITHUB_OUTPUT
+      - name: Checkout immutable SDK dependency inputs without product build
+        if: ${{ inputs.target_version == '0.1.18' }}
+        uses: actions/checkout@v6
+        env:
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: core.autocrlf
+          GIT_CONFIG_VALUE_0: 'false'
+        with:
+          ref: 930a2886b6872a08a4a25be4738a5a01a4e911d2
+          path: .public-sdk
+          persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /modules/mcp/package.json
+            /modules/mcp/package-lock.json
+      - name: Install immutable official SDK for reconnect checks
+        if: ${{ inputs.target_version == '0.1.18' }}
+        run: npm ci --prefix .public-sdk/modules/mcp --ignore-scripts
       - uses: dtolnay/rust-toolchain@1.99.0
         if: ${{ inputs.hosted_fixture }}
       - name: Build test-only version fixture from current runtime source
@@ -85,6 +106,7 @@ jobs:
           git diff --quiet $fixture.sourceRevision HEAD -- package.json package-lock.json src src-tauri
           if ($LASTEXITCODE -ne 0) { throw 'Runtime source changed since the fixture was built.' }
       - name: Download and pin the exact published Windows update target
+        if: ${{ inputs.target_version != '0.1.18' }}
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -110,6 +132,27 @@ jobs:
           "CREATOR_SELF_UPDATE_TARGET_VERSION=$version" >> $env:GITHUB_ENV
           "CREATOR_SELF_UPDATE_INSTALLER_SHA256=$((Get-FileHash $installer -Algorithm SHA256).Hash.ToLowerInvariant())" >> $env:GITHUB_ENV
           "CREATOR_SELF_UPDATE_EXECUTABLE_SHA256=$((Get-FileHash $exe -Algorithm SHA256).Hash.ToLowerInvariant())" >> $env:GITHUB_ENV
+      - name: Bind public18 feed, immutable assets and all packaged resources
+        if: ${{ inputs.target_version == '0.1.18' }}
+        shell: pwsh
+        env:
+          CREATOR_PUBLIC_SELF_UPDATE_018: '1'
+          CREATOR_SELF_UPDATE_TARGET_VERSION: '0.1.18'
+        run: |
+          node scripts/public-self-update-018.cjs prepare
+          if ($LASTEXITCODE -ne 0) { throw 'Public18 input binding failed.' }
+          $folder = 'artifacts/self-update-target'
+          $installer = Join-Path $folder 'Creator.Hub_0.1.18_x64-setup.exe'
+          $sevenZip = (Get-Command 7z.exe -ErrorAction SilentlyContinue).Source
+          if (-not $sevenZip) { $sevenZip = 'C:\Program Files\7-Zip\7z.exe' }
+          & $sevenZip x $installer ("-o$folder/extracted") '-y' | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw 'Public18 extraction failed.' }
+          node scripts/public-self-update-018.cjs verify
+          if ($LASTEXITCODE -ne 0) { throw 'Public18 packaged resources differ.' }
+          "CREATOR_PUBLIC_SELF_UPDATE_018=1" >> $env:GITHUB_ENV
+          "CREATOR_SELF_UPDATE_TARGET_VERSION=0.1.18" >> $env:GITHUB_ENV
+          "CREATOR_SELF_UPDATE_INSTALLER_SHA256=c09e3f73ca3e7fab74db2c204a17f6277d5b7817c650f090bd77af00a6f0f3f9" >> $env:GITHUB_ENV
+          "CREATOR_SELF_UPDATE_EXECUTABLE_SHA256=ae1d15ff3919ee9947e21d8542bcab50abf044e1bf047ce2c87abac4ccebfdc9" >> $env:GITHUB_ENV
       - name: Check the exact public feed used by installed Hub versions
         run: node scripts/check-release-feed.cjs ${{ inputs.target_version }}
       - name: Test in-app update and automatic restart into the exact public build
@@ -127,5 +170,11 @@ jobs:
             artifacts/native-suite-*/startup.json
             artifacts/native-suite-*/dialogs.json
             artifacts/native-suite-*/webview-policy.json
+            artifacts/self-update-target/public-*.json
+            artifacts/self-update-target/creator-hub-windows-x86_64.json
+            artifacts/self-update-target/creator-hub-windows-x86_64.json.minisig
+            artifacts/self-update-target/latest.json
+            artifacts/self-update-target/SHA256SUMS.txt
+            artifacts/self-update-target/Creator.Hub_0.1.18_x64-setup.exe.sig
             dist/Creator-Hub-hosted-update-fixture/fixture.json
           if-no-files-found: warn

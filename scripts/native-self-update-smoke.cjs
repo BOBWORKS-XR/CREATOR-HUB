@@ -25,6 +25,14 @@ const to = {
   installer: process.env.CREATOR_SELF_UPDATE_INSTALLER_SHA256,
   exe: process.env.CREATOR_SELF_UPDATE_EXECUTABLE_SHA256,
 };
+const public18 = process.env.CREATOR_PUBLIC_SELF_UPDATE_018 === '1' ? require('./public-self-update-018.cjs') : null;
+if (process.env.CREATOR_PUBLIC_SELF_UPDATE_018 && !public18) throw Error('Invalid public18 mode');
+if (public18) {
+  public18.admit();
+  assert.equal(to.installer, public18.binding.assets['Creator.Hub_0.1.18_x64-setup.exe'].sha256);
+  assert.equal(to.exe, public18.binding.executable.sha256);
+  public18.verifySdk();
+}
 assert.equal(to.version, require('../package.json').version, 'Update acceptance pins for the intended release; testing an older update is not sufficient');
 const directTarget = direct.directTarget(to.version, require('../package.json').version);
 const from = public12Lab ? { ...public12Lab.BASELINE } : selectBaseline(to.version);
@@ -35,6 +43,7 @@ const labTarget = public12Lab || (directTarget ? require('./windows-incoming-016
 const lab = process.env.CREATOR_SELF_UPDATE_LAB_CONFIG
   ? labTarget.selectLab(process.env.CREATOR_SELF_UPDATE_LAB_CONFIG, to, fixture)
   : null;
+if (to.version === '0.1.18' && !lab && !public12Lab) assert.ok(public18, 'Public18 requires immutable public admission');
 if (public12Lab) assert.ok(lab && directTarget, 'Exact public12 R2 signed lab contract is required');
 if (fixture) {
   assert.equal(fixture.testOnly, true);
@@ -62,6 +71,8 @@ if (incomingPreinstalled) {
 const out = incomingPreinstalled ? preinstalledFixture.owned.signedUpdateRoot(preinstalledFixture.fixtureRoot) : path.resolve('artifacts', `native-suite-${Date.now()}`);
 if (incomingPreinstalled) fs.mkdirSync(out); else fs.mkdirSync(out, { recursive: true });
 const report = { passed: false, from, to, harnessSource: process.env.GITHUB_SHA, checks: [], userMachineUsed: false, selfUpdateTested: false };
+if (public18) Object.assign(report, { kind: 'public-014-to-018', publicProof: public18.verifyPrepared(),
+  targetSource: public18.binding.source, publicBindingSha256: public18.bindingSha256, harnessAdditionalLaunch: false });
 report.discoveryKind = lab ? 'controlled-lab-not-public-discovery' : 'public-github-discovery';
 report.labDiscovery = Boolean(lab);
 report.publicDiscovery = !lab;
@@ -130,7 +141,7 @@ async function connect(waitReady = true, updated = false) {
     report.checks.push('Accepted the required usage terms through the visible dialog on the disposable runner');
   }
   if (updated && directTarget) {
-    await direct.checkProtocol(page);
+    await direct.checkProtocol(page, to.version);
     await page.waitForFunction(() => document.querySelector('#convergence-dialog')?.open || !document.querySelector('#check-updates').disabled,
       null, { timeout: 180000 });
     if (incomingPreinstalled) {
@@ -222,7 +233,7 @@ async function checkUpdatedBuiltIns() {
   assert.ok(inventory.apps.every(app => app.builtIn && app.trusted && !app.issue));
   if (directTarget) {
     if (incomingPreinstalled) preinstalledFixture.owned.checkFixtureBytes({ env: process.env, out: preinstalledFixture.fixtureRoot, recorded: preinstalledFixture.recorded });
-    report.directServices = await direct.checkPages({ page, showApp: app => labTarget.showPage(page, app), processes, requests: directRequests,
+    report.directServices = await direct.checkPages({ page, version: to.version, showApp: app => labTarget.showPage(page, app), processes, requests: directRequests,
       expectedMcpConflict: incomingPreinstalled, verifyFixture: incomingPreinstalled ? () => preinstalledFixture.owned.checkFixtureBytes({ env: process.env, out: preinstalledFixture.fixtureRoot, recorded: preinstalledFixture.recorded }) : undefined,
       screenshot: app => page.screenshot({ path: path.join(out, `direct-${app}.png`), animations: 'disabled' }) });
     if (incomingPreinstalled) {
@@ -253,7 +264,7 @@ async function checkUpdatedBuiltIns() {
     if (app === 'mcp') await frames[app].locator('#connection-guide-close').click();
   }
   }
-  const sdk = require('node:module').createRequire(path.resolve('modules/mcp/package.json'));
+  const sdk = public18 ? public18.verifySdk() : require('node:module').createRequire(path.resolve('modules/mcp/package.json'));
   const { Client } = sdk('@modelcontextprotocol/sdk/client/index.js');
   const { StdioClientTransport } = sdk('@modelcontextprotocol/sdk/client/stdio.js');
   const command = managedLocations(process.env.LOCALAPPDATA).command;
@@ -265,6 +276,7 @@ async function checkUpdatedBuiltIns() {
       assert.ok((await client.listTools()).tools.some(tool => tool.name === 'get_mcp_reference'));
       const response = await client.callTool({ name: 'get_mcp_reference', arguments: { source: 'creator-docs', query: 'PersistFileBridge', limit: 1 } });
       assert.equal(JSON.parse(response.content[0].text).success, true);
+      if (public18) report.sdkConnections = (report.sdkConnections || 0) + 1;
     } finally { await client.close(); }
   }
   report.managedRouteReconnectTested = true;
@@ -272,7 +284,7 @@ async function checkUpdatedBuiltIns() {
     await direct.checkCleanDocument(page, directRequests);
     assert.deepEqual(processes(), [], 'SDK service reconnect must not launch module GUIs');
     report.directHubUpdateTested = true;
-    report.checks.push('Exact 0.1.16 native direct MCP/Setup pages return real internal-service results, retain a navigation draft, make no renderer Plugins catalogue/asset requests and launch no private GUI; the signed router connects and reconnects through the unchanged official SDK checks. Not native-HTTP capture, live AI or Unity acceptance.');
+    report.checks.push(`Exact ${to.version} native direct MCP/Setup pages return real internal-service results, retain a navigation draft, make no renderer Plugins catalogue/asset requests and launch no private GUI; the signed router connects and reconnects through the unchanged official SDK checks. Not native-HTTP capture, live AI or Unity acceptance.`);
     return;
   }
   report.checks.push('After signed installation/restart, actual built-in Setup/MCP open through native consent; signed managed router connects and reconnects with the official SDK and serves bundled Creator docs. Not live AI/model or Editor acceptance.');
@@ -337,6 +349,12 @@ async function startUnrelatedRuntime() {
   await connect();
   assert.equal((await page.locator('.footer-version').innerText()).trim(), from.version);
   if (directTarget) directSettings = direct.settingsSnapshot(process.env.APPDATA, process.env.LOCALAPPDATA);
+  if (public18) {
+    report.settingsBefore = directSettings;
+    baselineRecord = public18.observeRoot({ rows: restartedInventory(), pid: child.pid, hub, expectedHash: from.exe, imageHash: () => hash(hub) });
+    assert.equal(baselineRecord.parentPid, process.pid);
+    report.beforeRoot = baselineRecord;
+  }
   if (fixture) {
     for (const app of Object.keys(apps)) {
       await showApp(app);
@@ -381,10 +399,12 @@ async function startUnrelatedRuntime() {
     report.checks.push('Native Cancel leaves both hosted backends, unsaved Setup form, MCP settings and unrelated Node runtime intact');
   }
   report.checks.push(`Native Not now preserves the running ${from.version} executable and settings`);
+  if (public18) report.cancelPreserved = true;
   if (incomingPreinstalled) {
     const updater = require('./windows-incoming-migration-updater.cjs');
     baselineRecord = updater.captureBaseline({ ...restartedArgs(), pid: child.pid, parentPid: process.pid });
   }
+  if (public18) approvalLowerBoundTicks = public18.ticks();
   await page.locator('#hub-update-button').click();
   if (incomingPreinstalled) {
     approvalLowerBoundTicks = require('./windows-incoming-migration-updater.cjs').utcTickLowerBound(Date.now());
@@ -403,6 +423,16 @@ async function startUnrelatedRuntime() {
   }, 120);
   ownedPid = restarted.ProcessId;
   report.restartedPid = ownedPid;
+  if (public18) {
+    restartedRecord = public18.observeRoot({ rows: restartedInventory(), pid: ownedPid, hub, expectedHash: to.exe, imageHash: () => hash(hub) });
+    public18.checkRestart(baselineRecord, restartedRecord, approvalLowerBoundTicks);
+    report.afterRoot = restartedRecord;
+    report.approvalLowerBoundTicks = approvalLowerBoundTicks;
+    report.automaticRestart = true;
+    report.resourceProbe = { phase: 'after-automatic-root', attempts: 1, passed: false };
+    report.installedResources = public18.verifyResources(path.dirname(hub));
+    report.resourceProbe.passed = true;
+  }
   if (incomingPreinstalled) {
     const updater = require('./windows-incoming-migration-updater.cjs');
     const captured = updater.captureRestarted({ ...restartedArgs(), pid: ownedPid });
@@ -487,6 +517,10 @@ async function startUnrelatedRuntime() {
     assert.equal(unrelatedRuntime.exitCode, null);
     assert.deepEqual(report.pageErrors || [], []);
     report.checks.push('Native cancellation and automatic signed restart preserve the exact MCP/legacy/Setup settings images, unmanaged sentinel, browser preference and unrelated Node runtime.');
+    if (public18) {
+      report.settingsAfter = direct.settingsSnapshot(process.env.APPDATA, process.env.LOCALAPPDATA);
+      report.settingsPreserved = true;
+    }
   }
   report.checks.push(`Actual in-app consent downloads/verifies, exits ${from.version}, installs exact ${to.version} and automatically restarts without a manual launch`);
   report.checks.push(`Restarted footer and uninstall registry show ${to.version}; browser preference and unmanaged installation file survive`);
@@ -504,7 +538,11 @@ async function startUnrelatedRuntime() {
   }
   report.selfUpdateTested = true;
   report.passed = true;
-})().catch(error => { report.error = String(error.stack || error); process.exitCode = 1; }).finally(async () => {
+})().catch(error => {
+  report.error = String(error.stack || error);
+  if (error.resourceDiagnostic) report.resourceFailure = error.resourceDiagnostic;
+  process.exitCode = 1;
+}).finally(async () => {
   if (!report.passed) {
     try { if (page) report.pageState = await page.evaluate(() => ({
       view: document.querySelector('.tool-detail:not(.hidden)')?.id || null,
@@ -535,6 +573,14 @@ async function startUnrelatedRuntime() {
       const result = updater.cleanupObservedRestart({ record: restartedRecord, attempted: restartedCloseAttempted, close: closeRestartedOnce });
       if (result.state !== 'verified') { report.closeError = 'Restarted Hub cleanup unverified.'; report.passed = false; process.exitCode = 1; }
     } catch (error) { report.closeError = String(error); report.passed = false; process.exitCode = 1; }
+  } else if (public18 && restartedRecord) {
+    try {
+      const current = public18.observeRoot({ rows: restartedInventory(), pid: restartedRecord.pid, hub, expectedHash: to.exe, imageHash: () => hash(hub) });
+      assert.deepEqual(current, restartedRecord);
+      native(restartedRecord.pid, 'close');
+      await retry(() => assert.equal(restartedInventory().some(row => row.pid === restartedRecord.pid && row.startTicks === restartedRecord.startTicks), false));
+      report.rootCleanupVerified = true;
+    } catch (error) { report.closeError = String(error); report.passed = false; process.exitCode = 1; }
   } else if (!incomingPreinstalled) {
     try { if (ownedPid) native(ownedPid, 'close'); } catch {}
   }
@@ -543,8 +589,13 @@ async function startUnrelatedRuntime() {
   if (child?.exitCode === null) child.unref();
   if (unrelatedRuntime?.exitCode === null) {
     fs.writeFileSync(runtimeStop, 'exit', { flag: 'wx' });
-    try { await retry(() => assert.equal(unrelatedRuntime.exitCode, 0)); }
+    try { await retry(() => assert.equal(unrelatedRuntime.exitCode, 0)); if (public18) report.runtimeCleanupVerified = true; }
     catch (error) { report.runtimeCleanupError = String(error); report.passed = false; process.exitCode = 1; }
+  }
+  if (public18 && report.passed) {
+    if (report.rootCleanupVerified !== true || report.runtimeCleanupVerified !== true || report.sdkConnections !== 2) {
+      report.error = 'Public18 cleanup or SDK reconnect incomplete'; report.passed = false; process.exitCode = 1;
+    }
   }
   fs.writeFileSync(path.join(out, 'self-update-report.json'), JSON.stringify(report, null, 2));
   console.log(JSON.stringify({ out, ...report }, null, 2));

@@ -61,7 +61,13 @@ test('self-update acceptance accepts explicit target hashes and derives the targ
 test('self-update workflow builds and admits the exact baseline required by its native harness', () => {
   const source = require('node:fs').readFileSync(require.resolve('./native-self-update-smoke.cjs'), 'utf8');
   assert.match(source, /require\('\.\/self-update-baselines\.cjs'\)/);
-  assert.match(source, /const from = selectBaseline\(to\.version\)/);
+  const declaration = source.match(/^const from = .*;$/m)?.[0];
+  assert.ok(declaration);
+  const selected = require('node:vm').runInNewContext(declaration + '\nfrom', {
+    public12Lab: null, to: { version: '0.1.18' }, selectBaseline: require('./self-update-baselines.cjs').selectBaseline,
+  });
+  assert.deepEqual(selected, require('./self-update-baselines.cjs').selectBaseline('0.1.18'));
+  assert.equal(selected.version, '0.1.14');
   assert.match(source, /assertPreviousStable\(report\.feed\.previousStable, from\)/);
   const acceptance = source.slice(source.indexOf('\n(async () => {'));
   const feedGate = acceptance.indexOf('assertPreviousStable(report.feed.previousStable, from)');

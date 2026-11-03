@@ -100,8 +100,9 @@ class Page extends EventEmitter {
   }
 }
 
-test('direct mode is exactly 0.1.16 and source-bound, never inferred from a missing legacy selector', () => {
+test('direct mode explicitly admits 0.1.16 and 0.1.18 only and remains source-bound', () => {
   assert.equal(direct.directTarget('0.1.16', '0.1.16'), true);
+  assert.equal(direct.directTarget('0.1.18', '0.1.18'), true);
   for (const version of ['0.1.12', '0.1.14', '0.1.15', '0.1.16-rc.1', '0.1.17']) assert.equal(direct.directTarget(version, version), false);
   for (const source of ['0.1.14', '0.1.15', undefined]) assert.throws(() => direct.directTarget('0.1.16', source), /checked-out product/);
   direct.assertProtocol(protocol());
@@ -109,6 +110,20 @@ test('direct mode is exactly 0.1.16 and source-bound, never inferred from a miss
     s => s.services.integrated = false, s => s.services.features.pop(), s => s.services.features.push('plugins')]) {
     const state = protocol(); mutate(state); assert.throws(() => direct.assertProtocol(state));
   }
+});
+
+test('public18 protocol and actual direct page checks are explicitly version-bound', async () => {
+  const page = new Page(); page.state.version = '0.1.18';
+  await assert.rejects(direct.checkProtocol(page));
+  await direct.checkProtocol(page, '0.1.18');
+  await direct.checkPages({ page, version: '0.1.18', requests: [], processes: () => [],
+    showApp: async feature => { page.current = feature; }, screenshot: async () => {} });
+  for (const version of ['0.1.17', '0.1.19', '0.1.18-rc.1']) {
+    assert.equal(direct.directTarget(version, version), false);
+    assert.throws(() => direct.assertProtocol({ ...protocol(), version }, version));
+  }
+  page.state.protocol = 0;
+  await assert.rejects(direct.checkProtocol(page, '0.1.18'));
 });
 
 test('incoming report binds the dispatched harness SHA independently of candidate product source', () => {
@@ -274,8 +289,9 @@ test('settings proof hashes only the three product stores and detects changed, r
   fs.rmSync(config); assert.deepEqual(direct.settingsSnapshot(roaming, local), before);
 });
 
-test('current direct selectors and native services match the checked-out 0.1.16 product, without retired catalogue commands', () => {
-  assert.equal(require('../package.json').version, direct.VERSION);
+test('current harness target is an explicit direct version and retains native selectors without retired catalogue commands', () => {
+  const version = require('../package.json').version;
+  assert.equal(direct.directTarget(version, version), true);
   const app = fs.readFileSync(path.join(root, 'src/app.js'), 'utf8');
   assert.match(app, /current = 'projects'/); assert.match(app, /check: check && !directFeatures/);
   assert.match(fs.readFileSync(path.join(root, 'src/native.js'), 'utf8'), /integratedFeatures: window\.__CREATOR_HUB_FEATURE_PROTOCOL__ === 1/);
@@ -294,7 +310,7 @@ test('current direct selectors and native services match the checked-out 0.1.16 
     'assert.equal(hash(configPath), configHash)', 'assert.equal(unrelatedRuntime.exitCode, null)', 'assert.equal(hash(sentinel), sentinelHash)']) assert.ok(smoke.includes(contract));
 });
 
-test('actual target function keeps SDK reconnect for 16 and never enters hosted approvals/frames/stop controls', async () => {
+for (const targetVersion of ['0.1.16', '0.1.18']) test(`actual target function keeps SDK reconnect for ${targetVersion} without hosted approvals/frames/stop controls`, async () => {
   const start = smoke.indexOf('async function checkUpdatedBuiltIns() {'), end = smoke.indexOf('\nasync function installCompanions()', start);
   assert.ok(start >= 0 && end > start);
   const events = [], report = { checks: [] };
@@ -308,8 +324,10 @@ test('actual target function keeps SDK reconnect for 16 and never enters hosted 
   const forbidden = () => { throw Error('Legacy GUI/frame control reached by direct 16'); };
   const check = vm.runInNewContext(`processes = () => [];\n(${smoke.slice(start, end)})`, {
     assert, path, process: { env: { LOCALAPPDATA: path.resolve('fixture-local'), USERPROFILE: path.resolve('fixture-home') } },
-    directTarget: true, incomingPreinstalled: false, report, page: { evaluate: async () => ({ supported: true, apps: [{ builtIn: true, trusted: true }, { builtIn: true, trusted: true }] }) },
-    direct: { checkPages: async ({ page, showApp }) => {
+    directTarget: true, incomingPreinstalled: false, public18: targetVersion === '0.1.18' ? { verifySdk: () => sdk } : null, to: { version: targetVersion }, report,
+    page: { evaluate: async () => ({ supported: true, apps: [{ builtIn: true, trusted: true }, { builtIn: true, trusted: true }] }) },
+    direct: { checkPages: async ({ page, showApp, version }) => {
+      assert.equal(version, targetVersion);
       events.push('direct-pages'); await showApp('setup'); await showApp('mcp'); return {};
     },
       prepareManagedRoute: async () => { events.push('native-route'); return { ...mcp(), managedRouting: true }; },
@@ -323,13 +341,14 @@ test('actual target function keeps SDK reconnect for 16 and never enters hosted 
   assert.deepEqual(events, ['direct-pages', 'semantic-setup', 'semantic-mcp', 'native-route', 'sdk-connect', 'sdk-close', 'sdk-connect', 'sdk-close', 'clean-document']);
   assert.equal(report.directHubUpdateTested, true); assert.equal(report.managedRouteReconnectTested, true);
   assert.equal(report.directServices.mcp.managedRouting, true);
+  assert.equal(report.sdkConnections, targetVersion === '0.1.18' ? 2 : undefined);
 });
 
 test('preinstalled diagnostic checks services without reviewing or changing seeded routes', async () => {
   const start = smoke.indexOf('async function checkUpdatedBuiltIns() {'), end = smoke.indexOf('\nasync function installCompanions()', start);
   const events = [], report = { checks: [] }, forbidden = () => { throw Error('route mutation or SDK reached'); };
   const check = vm.runInNewContext(`(${smoke.slice(start, end)})`, {
-    assert, path, process: { env: {} }, directTarget: true, incomingPreinstalled: true, report,
+    assert, path, process: { env: {} }, directTarget: true, incomingPreinstalled: true, public18: null, to: { version: '0.1.16' }, report,
     page: { evaluate: async () => ({ supported: true, apps: [{ builtIn: true, trusted: true }, { builtIn: true, trusted: true }] }) },
     preinstalledFixture: { fixtureRoot: 'synthetic', recorded: {}, owned: { checkFixtureBytes: () => events.push('fixture') } },
     direct: { checkPages: async options => { assert.equal(options.expectedMcpConflict, true); options.verifyFixture(); events.push('pages'); return {}; }, prepareManagedRoute: forbidden },
@@ -353,7 +372,7 @@ test('historical hosted target function still requires both private approvals, f
   }
   const sdk = name => name.endsWith('/stdio.js') ? { StdioClientTransport: class {} } : { Client };
   const check = vm.runInNewContext(`(${smoke.slice(start, end)})`, {
-    assert, path, process: { env: { LOCALAPPDATA: path.resolve('fixture-local') } }, directTarget: false,
+    assert, path, process: { env: { LOCALAPPDATA: path.resolve('fixture-local') } }, directTarget: false, public18: null,
     direct: new Proxy({}, { get: () => { throw Error('Historical hosted target entered direct helper'); } }), report, apps, backends, frames,
     page: {
       evaluate: async () => ({ supported: true, apps: [{ builtIn: true, trusted: true }, { builtIn: true, trusted: true }] }),
