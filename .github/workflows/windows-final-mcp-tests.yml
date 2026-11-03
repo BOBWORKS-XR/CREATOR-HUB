@@ -1,4 +1,4 @@
-name: Exact R7 MCP npm tests (clean Windows, no native build)
+name: Exact R8 MCP npm tests (clean Windows, no native build)
 on:
   push:
     branches: [validation/windows-menu-merge-20261027]
@@ -17,15 +17,15 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: 032bb101823fcfff1c5b85f863bb7381db8285e4
+          ref: 930a2886b6872a08a4a25be4738a5a01a4e911d2
           persist-credentials: false
-      - name: Verify exact R7 product checkout before repository code
+      - name: Verify exact R8 product checkout before repository code
         run: |
           $ErrorActionPreference = 'Stop'
           $commit = git rev-parse HEAD
-          if ($LASTEXITCODE -ne 0 -or $commit -cne '032bb101823fcfff1c5b85f863bb7381db8285e4') { throw 'R7 commit differs.' }
+          if ($LASTEXITCODE -ne 0 -or $commit -cne '930a2886b6872a08a4a25be4738a5a01a4e911d2') { throw 'R8 commit differs.' }
           $tree = git rev-parse 'HEAD^{tree}'
-          if ($LASTEXITCODE -ne 0 -or $tree -cne '6a1441ea078a1a35f1580ad91b83dd546dc2e536') { throw 'R7 tree differs.' }
+          if ($LASTEXITCODE -ne 0 -or $tree -cne 'a1af9bf6c56b221352f8b3feb1fd65259200e9dc') { throw 'R8 tree differs.' }
           Write-Output "productCommit=$commit productTree=$tree workflowCommit=$env:GITHUB_SHA"
       - uses: actions/setup-node@v6
         with:
@@ -45,7 +45,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: windows-r7-mcp-npm-${{ github.run_id }}-${{ github.run_attempt }}
+          name: windows-r8-mcp-npm-${{ github.run_id }}-${{ github.run_attempt }}
           retention-days: 7
           if-no-files-found: warn
           path: mcp-npm-tests.log
