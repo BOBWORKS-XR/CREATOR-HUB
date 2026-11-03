@@ -1,24 +1,24 @@
 {
   "schemaVersion": 1,
   "enabled": true,
-  "version": "0.1.17",
-  "outgoingFixtureVersion": "0.1.18",
+  "version": "0.1.18",
+  "outgoingFixtureVersion": "0.1.19",
   "source": {
-    "commit": "ec7f1d218c187caac30d0170aaaca2dfcdf83766",
-    "tree": "11efac78fc7509e8da08de3af7262bfc6369ce5c"
+    "commit": "032bb101823fcfff1c5b85f863bb7381db8285e4",
+    "tree": "6a1441ea078a1a35f1580ad91b83dd546dc2e536"
   },
   "installer": {
-    "bytes": 38246135,
-    "sha256": "4b8f3f34ed0d3ca06ba92230b37f8f8b4f75da772cb285a4129d9b3068dd4f9e"
+    "bytes": 38242944,
+    "sha256": "f2d6cfea9f116819de193dd1ff0162f5620e00230a59e8282a3a346b19bc140a"
   },
   "executable": {
-    "bytes": 19379712,
-    "sha256": "ab73d243fc6ba7ec956bf59b12679f736ecbefa7131bac678347e5a7b1618337"
+    "bytes": 19361280,
+    "sha256": "43dd8e2b17396520e2b2fca3b25b1569a76a01cec0bcf5ecef385fec499ba62d"
   },
   "manifest": {
     "bytes": 2053,
-    "sha256": "2e391106534a951fb11eae7d7f605a864799611916b08a58355168f9ff6031d9",
-    "sha256Canonical": "b45b7cba4784779cf1f0e88d06c0c056543a6f7d2eb603b2ef3abd20ff960ee9",
+    "sha256": "f7666a38ccd3f4ad91e0de056dd32bdf52390229a6876b93ba0befaa4bf08327",
+    "sha256Canonical": "03ef8056837bb9bc7ec3c4b04b015cf35bcafd650d2fe17535bae6bb8172aab8",
     "document": {
       "schemaVersion": 1,
       "platform": "windows",
@@ -28,7 +28,7 @@
           "executable": "mcp/creator-works-mcp-launcher.exe",
           "version": "2.7.7",
           "files": {
-            "mcp/creator-works-mcp-launcher.exe": "4c1ee6271e712e6e73a01269a5fcead815b6880e8305737f951a065fbde8e1e7",
+            "mcp/creator-works-mcp-launcher.exe": "0396a6e519094a930978fd188fb0339e795814cb5c24e6756c0ba99dd2ef225d",
             "mcp/server/creator-works-mcp.mjs": "24adc371d6e4cfe7c257e0f466a5e5f0fce6b26178714221ac85f08d9f443a78",
             "mcp/server/runtime/node.exe": "c6335d08331c23d68b9f2b18adb102002d76ef150b47248e954c507e0d033664",
             "mcp/server/runtime/LICENSE": "8efdacdc1cfa3460aeb7fe98e3c54337b971d5da70e6eee292b73b981acb220c",
@@ -43,22 +43,22 @@
           "executable": "setup/creator-project-setup.exe",
           "version": "0.3.7",
           "files": {
-            "setup/creator-project-setup.exe": "99c9598340401c8cbf3892524280c26c303fe2fd479bfb6b2ca2445c73e96bd3"
+            "setup/creator-project-setup.exe": "f87e4bd643159840b9920faab8da1700f31f4aa986a4138e2fb92827ee96935d"
           }
         }
       },
       "managedRouting": {
         "protocol": 1,
         "files": {
-          "routing/creator-hub-mcp-router.exe": "28dab129c215bc7835bef1441e01db7be46d976639c356e84998f6bfde6615a3",
-          "routing/router.json": "0673956592c25d1e021af0bb6eb68909d185a6c145bd0490fdc6a0d58628ae97",
-          "routing/router.minisig": "90f31c89c45ca694f554f23909cb30660679c97e88bdff368e303278147e1071",
-          "routing/runtime.json": "dc46a104a2c880ac9d304d98aac1a7b9510dfa202e495295ed63e037079611f6",
-          "routing/runtime.minisig": "b5e9e0e69668bb483e1b1ff6cd02a2a53881e91b50f0334fa2e56dafcf637c63"
+          "routing/creator-hub-mcp-router.exe": "1634add175777541b36fd91301535090a3833e6418e00f89252a9a1944afa4dd",
+          "routing/router.json": "52097de8ca97ab3134a0cb663a458d15c78bf8949809d36c306424a502abe5f0",
+          "routing/router.minisig": "3130b037ced20e8fdd0aff2164523c2010e268c15da2211be23357218b75cbc8",
+          "routing/runtime.json": "c2c36c431df7b027a396035e981c29e762e26f7368edd40e36292c21a8d714a1",
+          "routing/runtime.minisig": "cfadbd03638f06a291a2ee2acb9daedeadae12018cf6278eb1e3f6feb8378346"
         }
       }
     }
   },
-  "buildResultSha256": "1c30835ef07347c37930c6911a77883f1ea86c25dd23d629c2f586e5edc25251",
-  "buildInputsSha256": "b23adb96db948f13f3c75994d69050fd56d0ae9fd72624ba9726b8ff362b8812"
+  "buildResultSha256": "c1c7e949f6de018029624265d4cff1c79805a65003ebce690560b78139764744",
+  "buildInputsSha256": "ae3083efb07ea982a5ab7ca6aaa43a0d4168cf838c405291fef7e66396721c39"
 }

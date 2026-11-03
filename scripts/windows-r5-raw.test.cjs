@@ -13,7 +13,7 @@ function fixture() {
     mcp: { version: '2.7.7', files: Object.fromEntries(Object.entries(files).filter(([name]) => name.startsWith('mcp/'))) },
     setup: { version: '0.3.7', files: Object.fromEntries(Object.entries(files).filter(([name]) => name.startsWith('setup/'))) } },
     managedRouting: { protocol: 1, files: Object.fromEntries(Object.entries(files).filter(([name]) => name.startsWith('routing/'))) } };
-  const value = { schemaVersion: 1, enabled: true, version: '0.1.17', outgoingFixtureVersion: '0.1.18', source: { ...r5.SOURCE },
+  const value = { schemaVersion: 1, enabled: true, version: '0.1.18', outgoingFixtureVersion: '0.1.19', source: { ...r5.SOURCE },
     installer: { bytes: 12, sha256: sha('installer') }, executable: { bytes: 13, sha256: sha('exe') },
     manifest: { bytes: 123, sha256: sha('raw manifest'), sha256Canonical: legacy.hash(Buffer.from(JSON.stringify(manifest))), document: manifest },
     buildResultSha256: sha('build result'), buildInputsSha256: sha('build inputs') };
@@ -24,17 +24,17 @@ const runner = () => ({ GITHUB_ACTIONS: 'true', RUNNER_ENVIRONMENT: 'github-host
   GITHUB_REF: 'refs/heads/validation/windows-menu-merge-20261027',
   GITHUB_WORKFLOW_REF: `BOBWORKS-XR/CREATOR-HUB/${r5.WORKFLOW}@refs/heads/validation/windows-menu-merge-20261027`,
   CREATOR_WINDOWS_R5_RAW_INSTALL: '1', CREATOR_WINDOWS_ARTIFACT_INSTALL: '1', GITHUB_SHA: 'a'.repeat(40), EXPECTED_HARNESS_COMMIT: 'a'.repeat(40) });
-test('unpopulated R6 pins refuse; no R4 binary fallback exists', () => {
+test('unpopulated R7 pins refuse; no R4 binary fallback exists', () => {
   assert.throws(() => r5.validatePins({ ...r5.pinned, enabled: false }), /not populated/);
   assert.throws(() => r5.createAdapter({ ...r5.pinned, enabled: false }), /not populated/);
-  assert.equal(r5.pinned.source.commit, 'ec7f1d218c187caac30d0170aaaca2dfcdf83766');
-  assert.equal(r5.pinned.version, '0.1.17'); assert.equal(r5.pinned.outgoingFixtureVersion, '0.1.18');
+  assert.equal(r5.pinned.source.commit, '032bb101823fcfff1c5b85f863bb7381db8285e4');
+  assert.equal(r5.pinned.version, '0.1.18'); assert.equal(r5.pinned.outgoingFixtureVersion, '0.1.19');
   if (!r5.pinned.enabled) assert.equal(r5.pinned.installer.sha256, null);
   else r5.validatePins(r5.pinned);
 });
 test('finite source/version contract refuses 16, wrong tree and missing module pins', () => {
   r5.validatePins(fixture());
-  for (const mutate of [v => v.version = '0.1.16', v => v.outgoingFixtureVersion = '0.1.17',
+  for (const mutate of [v => v.version = '0.1.16', v => v.outgoingFixtureVersion = '0.1.18',
     v => v.source.commit = 'f262a5a06d19a1af327eb081f7c740971187b315', v => v.source.tree = 'a'.repeat(40),
     v => v.installer.sha256 = null, v => v.buildResultSha256 = '0'.repeat(64), v => v.manifest.sha256Canonical = sha('bad')]) {
     const value = fixture(); mutate(value); assert.throws(() => r5.validatePins(value));
@@ -57,10 +57,10 @@ test('native admission requires the exact reviewed manual Windows context', () =
 });
 test('private identity stays bound to the exact R5 installer and build receipt', () => {
   const value = fixture(), adapter = r5.createAdapter(value);
-  const input = { schemaVersion: 1, releaseId: 123, releaseTag: 'lab-r5', assetId: 456, assetName: 'Creator.Hub_0.1.17_x64-r5-setup.exe',
+  const input = { schemaVersion: 1, releaseId: 123, releaseTag: 'lab-r5', assetId: 456, assetName: 'Creator.Hub_0.1.18_x64-r5-setup.exe',
     bytes: value.installer.bytes, sha256: value.installer.sha256, receiptSha256: value.buildResultSha256 };
-  adapter.boundIdentity(input); assert.equal(adapter.ASSET, 'Creator.Hub_0.1.17_x64-setup.exe');
-  assert.equal(adapter.VERSION, '0.1.17');
+  adapter.boundIdentity(input); assert.equal(adapter.ASSET, 'Creator.Hub_0.1.18_x64-setup.exe');
+  assert.equal(adapter.VERSION, '0.1.18');
   for (const mutate of [v => v.assetId = 0, v => v.assetName = '../escape', v => v.bytes++, v => v.sha256 = sha('stale'), v => v.receiptSha256 = sha('old receipt')]) {
     const copy = { ...input }; mutate(copy); assert.throws(() => adapter.boundIdentity(copy));
   }
