@@ -816,7 +816,8 @@ async function main(args = process.argv.slice(2), mode) {
       assert.equal(execFileSync('python', ['-c', "import tomllib; print('tomllib-ready')"],
         { env: environment, encoding: 'utf8', windowsHide: true, timeout: 15000 }).trim(), 'tomllib-ready');
       for (const helper of ['native-window.ps1', 'native-webview-policy.ps1', 'native-startup-diagnostics.ps1']) regular(path.resolve('scripts', helper));
-      installLegacyBaselines({ baselines, input, environment, report, localAppData: process.env.LOCALAPPDATA, registrations });
+      installLegacyBaselines({ baselines, input, environment, report, localAppData: process.env.LOCALAPPDATA, registrations,
+        install: (file, baseline, env, output) => require('./windows-baseline-diagnostics.cjs').install(file, baseline, env, output, out, installBaseline) });
       const seeded = seedMigrationFixture({ f, stores });
       retainedRuntime = seeded.retainedRuntime;
       const projectBefore = seeded.projectBefore;

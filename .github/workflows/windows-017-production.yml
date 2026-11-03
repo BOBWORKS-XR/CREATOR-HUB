@@ -39,7 +39,7 @@ jobs:
       - name: Parse actual PowerShell and exercise named arguments in this pwsh process
         shell: pwsh
         run: ./scripts/preflight-powershell.ps1
-      - run: node --test scripts/windows-017-production.test.cjs scripts/windows-017-updater.test.cjs scripts/windows-017-owned-close.test.cjs scripts/windows-017-migration-phase.test.cjs scripts/windows-setup-owned-case.test.cjs scripts/windows-unverified-server-case.test.cjs
+      - run: node --test scripts/windows-017-production.test.cjs scripts/windows-017-updater.test.cjs scripts/windows-017-owned-close.test.cjs scripts/windows-017-migration-phase.test.cjs scripts/windows-setup-owned-case.test.cjs scripts/windows-unverified-server-case.test.cjs scripts/windows-baseline-diagnostics.test.cjs
   incoming:
     needs: preflight
     if: github.event_name == 'workflow_dispatch' && inputs.migration_scope != 'custom-server'
@@ -186,5 +186,6 @@ jobs:
             artifacts/production-017-control/*.json
             artifacts/native-suite-*/*.json
             artifacts/native-suite-*/*.jsonl
+            artifacts/native-suite-*/baseline-diagnostic-*/result.json
             artifacts/native-suite-*/*.png
             !artifacts/native-suite-*/startup.json
