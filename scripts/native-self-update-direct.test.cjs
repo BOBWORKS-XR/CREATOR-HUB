@@ -28,6 +28,7 @@ class Page extends EventEmitter {
     this.resources = []; this.calls = []; this.actions = []; this.values = new Map(); this.guide = true;
     this.state = protocol(); this.mcp = mcp(); this.setup = setup(); this.ready = true; this.enabled = true; this.errorVisible = false;
     this.conflict = false; this.conflictLocked = true; this.conflictPanel = true; this.conflictReviewEnabled = true;
+    this.projectEnabled = false; this.guideEnabled = false;
     this.conflictText = 'Current and older MCP settings differ. Both originals are kept. Review before loading this form.';
     this.restored = 'Your Hub page has been restored.'; this.pending = []; this.review = { status: 'unchanged', count: 0 };
   }
@@ -73,7 +74,12 @@ class Page extends EventEmitter {
   locator(selector) {
     return {
       isEnabled: async () => selector.includes('[data-field="product-review"]') ? this.conflictReviewEnabled
-        : selector.includes('#feature-mcp [data-field="controls"]') && this.conflict ? !this.conflictLocked : this.enabled,
+        : selector.includes('#feature-mcp [data-field="project"]') && this.conflict ? (!this.conflictLocked || this.projectEnabled)
+        : selector.includes('#feature-mcp [data-field="guide"]') && this.conflict ? (!this.conflictLocked || this.guideEnabled) : this.enabled,
+      evaluate: async fn => {
+        assert.ok(selector.includes('[data-field="controls"]'));
+        return fn({ tagName: 'FIELDSET', disabled: this.conflictLocked });
+      },
       textContent: async () => this.conflictText,
       isVisible: async () => {
         if (selector.includes('[data-field="product-panel"]')) return this.conflictPanel;
@@ -155,7 +161,8 @@ test('pre-migration diagnostic accepts only locked fixture conflict without revi
   assert.equal(page.calls.filter(call => call.args?.feature === 'mcp').length, 0);
   assert.ok(!page.actions.some(action => action.includes('product-review')));
   for (const mutate of [p => { p.conflict = false; }, p => { p.conflictLocked = false; },
-    p => { p.conflictPanel = false; }, p => { p.conflictText = 'Other'; }, p => { p.conflictReviewEnabled = false; },
+    p => { p.conflictPanel = false; }, p => { p.projectEnabled = true; }, p => { p.guideEnabled = true; },
+    p => { p.conflictText = 'Other'; }, p => { p.conflictReviewEnabled = false; },
     p => { p.errorVisible = true; }]) {
     const altered = new Page(); altered.conflict = true; mutate(altered);
     await assert.rejects(direct.checkPages(opts(altered)));
@@ -168,6 +175,31 @@ test('pre-migration diagnostic accepts only locked fixture conflict without revi
   await assert.rejects(direct.checkPages({ ...opts(spawned), processes: () => spawned.current === 'mcp' ? [{}] : [] }), /private module GUI/);
   const ordinary = new Page(); ordinary.conflict = true;
   await assert.rejects(direct.checkPages({ ...opts(ordinary), expectedMcpConflict: false }));
+});
+
+test('real DOM checks a disabled fieldset and its child controls without approving review', { timeout: 30000 }, async t => {
+  const { chromium } = require('playwright');
+  const candidates = [chromium.executablePath(),
+    path.join(process.env['ProgramFiles(x86)'] || 'C:/Program Files (x86)', 'Microsoft/Edge/Application/msedge.exe'),
+    path.join(process.env.ProgramFiles || 'C:/Program Files', 'Google/Chrome/Application/chrome.exe')];
+  const executablePath = candidates.find(file => fs.existsSync(file));
+  if (!executablePath) return t.skip('No local Playwright-compatible browser available');
+  const browser = await chromium.launch({ executablePath, headless: true });
+  try {
+    const page = await browser.newPage();
+    await page.setContent(`<main id="feature-mcp"><p data-field="error" hidden></p>
+      <section data-field="product-panel"><p data-field="product-status">Current and older MCP settings differ. Both originals are kept. Review before loading this form.</p>
+      <button data-field="product-review">Review</button></section>
+      <fieldset data-field="controls" disabled><input data-field="project"><button data-field="guide">Guide</button></fieldset></main>`);
+    const fieldset = page.locator('#feature-mcp [data-field="controls"]');
+    assert.equal(await fieldset.isEnabled(), true, 'Pinned Playwright does not classify the fieldset itself as disabled');
+    await direct.checkMcpLockedConflict(page, '#feature-mcp');
+    await fieldset.evaluate(element => { element.disabled = false; });
+    await assert.rejects(direct.checkMcpLockedConflict(page, '#feature-mcp'));
+    await fieldset.evaluate(element => { element.disabled = true; element.insertAdjacentHTML('afterbegin', '<legend><input data-field="project"></legend>'); element.querySelector(':scope > input').remove(); });
+    assert.equal(await page.locator('#feature-mcp [data-field="project"]').isEnabled(), true);
+    await assert.rejects(direct.checkMcpLockedConflict(page, '#feature-mcp'));
+  } finally { await browser.close(); }
 });
 
 test('Plugins and catalogue checks cover historical startup resources as well as requests after attachment', async () => {

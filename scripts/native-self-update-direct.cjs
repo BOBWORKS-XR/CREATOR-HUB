@@ -80,6 +80,20 @@ function assertService(feature, value) {
   }
 }
 
+async function checkMcpLockedConflict(page, prefix) {
+  assert.equal(await page.locator(prefix).isVisible(), true);
+  assert.equal(await page.locator(`${prefix} [data-field="controls"]`).evaluate(element =>
+    element.tagName === 'FIELDSET' && element.disabled === true), true);
+  for (const field of ['project', 'guide']) {
+    assert.equal(await page.locator(`${prefix} [data-field="${field}"]`).isEnabled(), false);
+  }
+  assert.equal(await page.locator(`${prefix} [data-field="error"]`).isVisible(), false);
+  assert.equal(await page.locator(`${prefix} [data-field="product-panel"]`).isVisible(), true);
+  assert.equal(await page.locator(`${prefix} [data-field="product-status"]`).textContent(),
+    'Current and older MCP settings differ. Both originals are kept. Review before loading this form.');
+  assert.equal(await page.locator(`${prefix} [data-field="product-review"]`).isEnabled(), true);
+}
+
 async function checkPages({ page, showApp, processes, requests, screenshot, expectedMcpConflict = false, verifyFixture }) {
   assert.equal(typeof expectedMcpConflict, 'boolean');
   if (expectedMcpConflict) assert.equal(typeof verifyFixture, 'function');
@@ -94,13 +108,7 @@ async function checkPages({ page, showApp, processes, requests, screenshot, expe
         return root && !root.hidden && root.getAttribute('aria-busy') === 'false'
           && root.querySelector('[data-field="status"]')?.textContent === 'Review saved settings';
       }, prefix, { timeout: 90000 });
-      assert.equal(await page.locator(prefix).isVisible(), true);
-      assert.equal(await page.locator(`${prefix} [data-field="controls"]`).isEnabled(), false);
-      assert.equal(await page.locator(`${prefix} [data-field="error"]`).isVisible(), false);
-      assert.equal(await page.locator(`${prefix} [data-field="product-panel"]`).isVisible(), true);
-      assert.equal(await page.locator(`${prefix} [data-field="product-status"]`).textContent(),
-        'Current and older MCP settings differ. Both originals are kept. Review before loading this form.');
-      assert.equal(await page.locator(`${prefix} [data-field="product-review"]`).isEnabled(), true);
+      await checkMcpLockedConflict(page, prefix);
       assert.deepEqual(processes(), [], 'Direct navigation must not launch either private module GUI');
       await checkCleanDocument(page, requests);
       verifyFixture();
@@ -190,4 +198,4 @@ function settingsSnapshot(roaming, local) {
 }
 
 module.exports = { VERSION, directTarget, assertProtocol, checkProtocol, watchRequests, checkCleanDocument,
-  checkHome, showHome, assertService, checkPages, checkRestored, deferFixtureMigration, prepareManagedRoute, settingsSnapshot };
+  checkHome, showHome, assertService, checkMcpLockedConflict, checkPages, checkRestored, deferFixtureMigration, prepareManagedRoute, settingsSnapshot };
