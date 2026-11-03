@@ -122,6 +122,17 @@ async function checkRestored(page) {
   assert.equal(await page.locator('#view-native-features').isVisible(), true, 'Old restoration tickets must select a direct tool');
 }
 
+async function deferFixtureMigration({ page, readStatus, verifyFixture }) {
+  await page.locator('#convergence-dialog').waitFor({ state: 'visible', timeout: 180000 });
+  const state = await readStatus();
+  assert.equal(state.stage, 'review'); assert.equal(state.required, true); assert.deepEqual(state.backups, []);
+  verifyFixture();
+  await page.locator('#convergence-later').click();
+  await page.locator('#convergence-dialog').waitFor({ state: 'hidden' });
+  await page.locator('#convergence-reopen').waitFor({ state: 'visible' });
+  verifyFixture();
+}
+
 async function prepareManagedRoute(page, { clientConfig, active, approve }) {
   assert.equal(fs.existsSync(clientConfig), false, 'Route smoke requires absent Codex settings; migration needs its own reviewed fixture');
   const needsConsent = !fs.existsSync(active);
@@ -157,4 +168,4 @@ function settingsSnapshot(roaming, local) {
 }
 
 module.exports = { VERSION, directTarget, assertProtocol, checkProtocol, watchRequests, checkCleanDocument,
-  checkHome, showHome, assertService, checkPages, checkRestored, prepareManagedRoute, settingsSnapshot };
+  checkHome, showHome, assertService, checkPages, checkRestored, deferFixtureMigration, prepareManagedRoute, settingsSnapshot };

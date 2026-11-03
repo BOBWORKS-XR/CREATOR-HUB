@@ -20,6 +20,7 @@ const CONTEXT = Object.freeze({ GITHUB_ACTIONS: 'true', RUNNER_ENVIRONMENT: 'git
   RUNNER_OS: 'Windows', RUNNER_ARCH: 'X64', GITHUB_REPOSITORY: 'BOBWORKS-XR/CREATOR-HUB',
   GITHUB_EVENT_NAME: 'workflow_dispatch',
   GITHUB_REF: 'refs/heads/validation/windows-menu-merge-20261027', CREATOR_WINDOWS_016_MIGRATION: '1' });
+const INCOMING_PARENT_MODE = Symbol('incoming-signed-migration-diagnostic');
 const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 const BASELINE_OUTPUT_MESSAGES = new Set([
@@ -45,6 +46,29 @@ function baselineFailure(error, baseline) {
 function installBaseline(file, baseline, environment, report, run = execFileSync) {
   try { return run(file, ['/S', '/NS'], { env: environment, windowsHide: true, timeout: 180000, stdio: 'pipe' }); }
   catch (error) { report.baselineInstallerFailure = baselineFailure(error, baseline); throw error; }
+}
+function installLegacyBaselines({ baselines, input, environment, report, localAppData, registrations,
+  install = installBaseline, read = regular, digest = hash }) {
+  report.baselines = [];
+  for (const baseline of baselines) {
+    install(path.join(input.baselines, baseline.asset), baseline, environment, report);
+    report.baselines.push({ product: baseline.product, version: baseline.version, installerSha256: baseline.sha256,
+      executableSha256: digest(read(path.join(localAppData, baseline.product, baseline.binary), 200 * 1024 * 1024)) });
+  }
+  const beforeInstall = registrations();
+  assert.equal(beforeInstall.length, 3);
+  for (const item of baselines) assert.equal(beforeInstall.find(value => value.name === item.product && value.hive === 'HKCU:')?.version, item.version);
+}
+async function installMigrationTarget({ installer, environment, hub, hubHash, unchanged, retained, report, registrations,
+  baselines, connect, entry, run = execFileSync, inspect = inspectInstalledResources }) {
+  run(installer, ['/UPDATE', '/S', '/NS'], { env: environment, windowsHide: true, timeout: 180000, stdio: 'pipe' });
+  assert.equal(hubHash(), TARGET.exe); unchanged(); retained();
+  const manifest = inspect(path.dirname(hub));
+  report.installedResourcesVerified = true; report.resourcePins = RESOURCE_PINS;
+  assert.deepEqual(registrations().map(item => item.name).sort(), baselines.map(item => item.product).sort());
+  const oldClient = await connect(entry);
+  report.checks.push('Pinned baseline installers and exact direct16 payload installed; original stores/clients retained and old SDK transport connected before native migration');
+  return { manifest, oldClient };
 }
 
 // Independently frozen from the R2 installer payload. The signed runtime
@@ -220,6 +244,25 @@ function fixture(env, out, paths = path) {
   return { projectA, projectB, oldRoot, oldServer, oldNode, current, legacy, missingChannel, stores, clients, untouched, entry };
 }
 
+function seedMigrationFixture({ f, stores, fsOps = fs, checkLinks = rejectLinks, read = regular, digest = hash, image = projectImage }) {
+  for (const project of [f.projectA, f.projectB]) {
+    for (const directory of ['Assets', 'ProjectSettings', 'Packages']) fsOps.mkdirSync(path.join(project, directory), { recursive: true });
+    fsOps.writeFileSync(path.join(project, 'ProjectSettings', 'ProjectVersion.txt'), 'm_EditorVersion: 6000.3.21f1\n', { flag: 'wx' });
+    fsOps.writeFileSync(path.join(project, 'Packages', 'manifest.json'), '{"dependencies":{}}\n', { flag: 'wx' });
+    f.untouched.push({ path: path.join(project, 'Assets', 'AuthoredContent.txt'), bytes: Buffer.from('Never modify a Unity project during migration\n') });
+  }
+  for (const item of [...stores, ...f.untouched.filter(item => !stores.includes(item))]) {
+    checkLinks(item.path); assert.equal(fsOps.existsSync(item.path), false);
+    fsOps.mkdirSync(path.dirname(item.path), { recursive: true }); fsOps.writeFileSync(item.path, item.bytes, { flag: 'wx' });
+  }
+  const retainedRuntime = fsOps.readdirSync(path.join(f.oldRoot, 'server'), { recursive: true, withFileTypes: true })
+    .filter(item => item.isFile()).map(item => {
+      const file = path.join(item.parentPath || item.path, item.name); return { file, sha256: digest(read(file, 200 * 1024 * 1024)) };
+    });
+  assert.equal(retainedRuntime.length, 9, 'Exact baseline server inventory required');
+  return { fixture: f, retainedRuntime, projectBefore: image([f.projectA, f.projectB]) };
+}
+
 function verifyMerged(f, currentBytes, legacyBytes, server) {
   assert.ok(typeof server === 'string' && server.length > 0 && server !== f.oldServer, 'The saved server must actually move to Hub');
   const expected = { ...f.current, channels: [...f.current.channels, f.missingChannel], mcp_server_path: server };
@@ -369,9 +412,241 @@ async function retry(action, seconds = 45) {
   throw last || Error('Native migration deadline exceeded');
 }
 
-async function main(args = process.argv.slice(2)) {
+const guidePageBindings = new WeakMap();
+// The live capture must come from the trusted runner, not from fixture data.
+function verifyGuideOwnership(live, hub) {
+  assert.ok(Number.isSafeInteger(live.process?.pid) && live.process.pid > 0, 'A live owned Hub process is required');
+  assert.equal(live.image, hub, 'The live interface must identify the expected Hub image');
+  assert.equal(live.process.exitCode, null, 'The owned Hub must still be running');
+  const captured = live.captureOwnership();
+  assert.equal(captured.imageSha256, TARGET.exe, 'The live Hub image must be exact R2');
+  require('./windows-migration-r2-candidate.cjs').assertOwnedDebugging(captured.diagnostics, live.process.pid, hub);
+  assert.deepEqual(captured.processes, [{ ProcessId: live.process.pid, ParentProcessId: process.pid, ExecutablePath: hub }]);
+}
+function verifyBrowserPage(browser, page) {
+  const context = page.context();
+  assert.equal(context.browser(), browser, 'Guide page belongs to a different browser');
+  assert.ok(browser.contexts().includes(context) && context.pages().includes(page), 'Guide page is not in the connected browser');
+  assert.match(page.url(), /^https?:\/\/tauri\.localhost(?:\/|$)/, 'Unexpected guide page origin');
+}
+function rememberGuidePage(live, hub, browser, page) {
+  verifyGuideOwnership(live, hub); verifyBrowserPage(browser, page);
+  guidePageBindings.set(page, { browser, process: live.process, pid: live.process.pid, image: hub });
+}
+function verifyGuidePage(live, hub) {
+  const page = live.page, binding = guidePageBindings.get(page);
+  assert.ok(binding, 'Guide page has no verified CDP binding');
+  assert.equal(binding.browser, live.browser, 'Guide browser differs from the verified CDP connection');
+  assert.equal(binding.process, live.process, 'Guide process differs from the verified CDP binding');
+  assert.equal(binding.pid, live.process.pid); assert.equal(binding.image, hub);
+  verifyBrowserPage(binding.browser, page);
+}
+
+async function runGuideRestart({ fixture: seededFixture, projectBefore, connect }, context) {
+  const { live, f, retry, readStatus, nativeDecision, unchanged, retained, report, connectionDecision, verifyBackups,
+    read, manifest, oldClient, registrations, baselines, projectImage, out, hub, termsAlreadyAccepted = false } = context;
+  assert.ok(f && Array.isArray(f.stores) && Array.isArray(f.clients) && Array.isArray(f.untouched), 'A seeded migration fixture is required');
+  assert.equal(seededFixture, f, 'Guide must consume the same synthetic fixture object');
+  const { policy, open, launch, close } = live;
+  const effects = { fs, hash, regular, inspectActiveRoute, verifyMerged, verifyClient, execFileSync, inspectInstalledResources,
+    localAppData: process.env.LOCALAPPDATA, managedTarget: () => require('./native-managed-target.cjs'), ...context.effects };
+  policy('Enable'); await open();
+  verifyGuideOwnership(live, hub);
+  verifyGuidePage(live, hub);
+  if (termsAlreadyAccepted) {
+    await live.page.locator('#usage-terms-dialog').waitFor({ state: 'hidden' });
+  } else {
+    await live.page.locator('#usage-terms-dialog').waitFor({ state: 'visible' });
+    await live.page.locator('#usage-terms-checkbox').check(); await live.page.locator('#usage-terms-continue').click();
+    await live.page.locator('#usage-terms-dialog').waitFor({ state: 'hidden' });
+  }
+  if (termsAlreadyAccepted) {
+    const pending = await retry(readStatus);
+    assert.equal(pending.stage, 'review'); assert.equal(pending.required, true); assert.deepEqual(pending.backups, []);
+    await live.page.locator('#convergence-reopen').waitFor({ state: 'visible', timeout: 180000 });
+    await live.page.locator('#convergence-reopen').click();
+  }
+  await live.page.locator('#convergence-move').waitFor({ state: 'visible' });
+  const initial = await retry(readStatus);
+  assert.equal(initial.streamlined, true); assert.equal(initial.stage, 'review'); assert.equal(initial.required, true);
+  assert.deepEqual(initial.backups, []);
+  await live.page.locator('#convergence-move').click(); await nativeDecision(false);
+  await live.page.waitForFunction(() => document.querySelector('#convergence-dialog')?.getAttribute('aria-busy') === 'false');
+  unchanged(); retained();
+  const cancelled = await readStatus(); assert.equal(cancelled.stage, 'review'); assert.deepEqual(cancelled.backups, []);
+  for (const item of [...f.stores, ...f.clients]) assert.equal(effects.fs.existsSync(backupFile(item.path, item.bytes)), false);
+  report.cancelAccepted = true;
+  // Observation is deliberately not advertised as atomic before-write proof.
+  const observed = new Map(); let observationError;
+  const sample = () => {
+    try {
+      for (const item of [...f.stores.slice(0, 2), ...f.clients]) {
+        if (observed.has(item.path)) continue;
+        let bytes;
+        try { bytes = read(item.path); }
+        catch (error) {
+          // An in-progress locked/atomic source cannot establish a before/after
+          // observation. Final idle reads below remain mandatory.
+          if (!['ENOENT', 'EACCES', 'EPERM', 'EBUSY'].includes(error.code)) throw error;
+          report.transientSourceReadSkips = (report.transientSourceReadSkips || 0) + 1; continue;
+        }
+        if (bytes.equals(item.bytes)) continue;
+        verifyBackups(f.stores); verifyBackups([item]); observed.set(item.path, { file: item.path, backup: backupFile(item.path, item.bytes) });
+      }
+    } catch (error) { observationError ||= error; }
+  };
+  live.observer = setInterval(sample, 20);
+  await live.page.locator('#convergence-move').click(); await nativeDecision(true);
+  await connectionDecision();
+  await live.page.locator('#convergence-title').filter({ hasText: /^Move complete$/ }).waitFor({ timeout: 180000 });
+  sample(); clearInterval(live.observer); live.observer = null;
+  if (observationError) throw observationError;
+  assert.equal(observed.size, 5); report.backupsPresentAtFirstObservedChange = [...observed.values()];
+  const completed = await readStatus(); assert.equal(completed.stage, 'complete'); assert.equal(completed.required, false);
+  assert.deepEqual(completed.legacyApps, []); verifyBackups([...f.stores, ...f.clients]); retained();
+  const current = read(f.stores[0].path), earlier = read(f.stores[1].path);
+  const server = JSON.parse(current).mcp_server_path;
+  assert.equal(effects.hash(effects.regular(server, 64 * 1024 * 1024)), manifest.modules.mcp.files['mcp/server/creator-works-mcp.mjs']);
+  const active = effects.inspectActiveRoute(effects.localAppData, manifest);
+  assert.equal(effects.fs.realpathSync(server), effects.fs.realpathSync(path.join(active.payload, 'mcp/server/creator-works-mcp.mjs')));
+  report.activeRoute = active;
+  effects.verifyMerged(f, current, earlier, server);
+  const { managedLocations, verifyMigratedTarget } = effects.managedTarget();
+  const route = managedLocations(effects.localAppData), migrated = [];
+  for (const item of f.clients) {
+    const document = item.id === 'codex' ? JSON.parse(effects.execFileSync('python', ['-c',
+      "import json,sys,tomllib; print(json.dumps(tomllib.load(open(sys.argv[1],'rb'))))", item.path],
+    { encoding: 'utf8', windowsHide: true, timeout: 15000 })) : JSON.parse(read(item.path));
+    const entry = effects.verifyClient(f, item, document, route.command);
+    if (item.id === 'codex') assert.match(read(item.path).toString('utf8'), /^# Keep this comment\r?\n/);
+    verifyMigratedTarget(entry, manifest, null, effects.localAppData); migrated.push(entry);
+    const client = await connect(entry); await client.close();
+  }
+  assert.ok((await oldClient.listTools({}, { timeout: 15000 })).tools.length > 0);
+  const reconnectOld = await connect(f.entry); await reconnectOld.close();
+  assert.deepEqual(registrations(), [{ hive: 'HKCU:', name: 'Creator Hub', version: TARGET.version }]);
+  for (const baseline of baselines.slice(1)) for (const name of [baseline.binary, 'uninstall.exe']) {
+    assert.equal(effects.fs.existsSync(path.join(effects.localAppData, baseline.product, name)), false);
+  }
+  assert.deepEqual(projectImage([f.projectA, f.projectB]), projectBefore, 'Migration may not edit or add Unity project files');
+  report.checks.push('Single-guide native approval completed import/routing/retirement; exact backups, current preferences, unknown fields, projects, three clients and compatibility runtime verified');
+  await live.page.screenshot({ path: path.join(out, 'migration-complete.png') });
+  await live.page.locator('#convergence-later').click();
+  const retainedAfter = [...f.stores, ...f.clients, ...f.untouched].map(item => ({ file: item.path, bytes: read(item.path) }));
+  await close(); await launch();
+  verifyGuideOwnership(live, hub);
+  verifyGuidePage(live, hub);
+  await live.page.waitForFunction(() => { const check = document.querySelector('#check-updates'); return check && !check.disabled; }, null, { timeout: 180000 });
+  const repeated = await retry(readStatus);
+  assert.equal(repeated.required, false); assert.deepEqual(repeated.legacyApps, []);
+  assert.equal(await live.page.locator('#convergence-dialog').isVisible(), false);
+  assert.equal(await live.page.locator('#usage-terms-dialog').isVisible(), false);
+  for (const item of retainedAfter) assert.deepEqual(read(item.file), item.bytes);
+  retained(); verifyBackups([...f.stores, ...f.clients]);
+  assert.deepEqual(effects.inspectActiveRoute(effects.localAppData, manifest), active);
+  effects.inspectInstalledResources(path.dirname(hub));
+  assert.deepEqual(projectImage([f.projectA, f.projectB]), projectBefore);
+  assert.deepEqual(registrations(), [{ hive: 'HKCU:', name: 'Creator Hub', version: TARGET.version }]);
+  assert.ok((await oldClient.listTools({}, { timeout: 15000 })).tools.length > 0);
+  for (const entry of [f.entry, ...migrated]) { const client = await connect(entry); await client.close(); }
+  await close();
+  assert.equal(report.nativeDecisions.length, 2, 'One native cancellation and one native approval; no additional decisions');
+  report.checks.push('Normal close/relaunch is idempotent: no repeated guide/terms, no settings reset, old live transport and all managed routes reconnect');
+  report.nativeGuideAccepted = true; report.repeatStartupAccepted = true; report.settingsPreserved = true;
+  report.passed = true;
+}
+
+async function runMigrationPhases(setupInstall, guideRestart) {
+  const setup = await setupInstall();
+  return guideRestart(setup);
+}
+
+async function cleanupMigration({ observer, oldClient, child, browser, policyState, policy, native, retry, report,
+  clear = clearInterval, exists = fs.existsSync }) {
+  if (observer) clear(observer);
+  if (oldClient) try { await oldClient.close(); } catch (error) { report.sdkCleanupError = String(error); report.passed = false; }
+  if (child?.exitCode === null) {
+    try { native('close'); await retry(() => assert.equal(child.exitCode, 0), 15); }
+    catch (error) { report.closeError = String(error); report.passed = false; child.unref(); }
+  }
+  if (browser) await browser.close().catch(error => { report.browserCloseError = String(error); report.passed = false; });
+  try { if (exists(policyState)) policy('Restore'); report.policyRestored = true; }
+  catch (error) { report.policyError = String(error); report.passed = false; }
+}
+
+function runSignedIncomingParent({ environment, out, fixture: seededFixture, baselineInstaller, projectBefore, projectImage: image }, overrides = {}) {
+  const owned = overrides.owned || require('./windows-incoming-migration-owned-snapshot.cjs');
+  const readFile = overrides.readFile || regular, writeFile = overrides.writeFile || fs.writeFileSync;
+  const run = overrides.run || execFileSync, checkLinks = overrides.checkLinks || rejectLinks;
+  const env = { ...environment, CREATOR_PUBLIC12_R2_LAB: '1', CREATOR_PUBLIC12_R2_EMPTY_DISCOVERY: '1',
+    CREATOR_INCOMING_MIGRATION_DIAGNOSTIC: '1', CREATOR_INCOMING_MIGRATION_SOURCE: environment.GITHUB_SHA,
+    CREATOR_INCOMING_MIGRATION_FIXTURE_ROOT: out };
+  owned.admit(env);
+  const configFile = path.resolve('artifacts/public12-r2-control/config.json');
+  checkLinks(configFile);
+  const config = JSON.parse(readFile(configFile, 256 * 1024));
+  owned.bindFeed(config, env);
+  const rows = owned.fixturePlan(env, out);
+  const known = [...seededFixture.stores, ...seededFixture.clients, ...seededFixture.untouched];
+  assert.equal(rows.length, 17); assert.equal(known.length, 13);
+  const knownPaths = new Set();
+  for (const item of known) {
+    assert.ok(!knownPaths.has(item.path)); knownPaths.add(item.path);
+    assert.ok(rows.some(row => row.path === item.path && row.bytes.equals(item.bytes)), 'Seeded fixture differs');
+  }
+  const projectFiles = [seededFixture.projectA, seededFixture.projectB].flatMap(project =>
+    [path.join(project, 'ProjectSettings', 'ProjectVersion.txt'), path.join(project, 'Packages', 'manifest.json')]);
+  assert.deepEqual(rows.filter(row => !knownPaths.has(row.path)).map(row => row.path).sort(), projectFiles.sort());
+  const recorded = { source: env.GITHUB_SHA, runId: env.GITHUB_RUN_ID, runAttempt: env.GITHUB_RUN_ATTEMPT,
+    fixtureRoot: out, files: owned.metadata(rows) };
+  owned.checkPreinstalledFixture({ env, out, recorded });
+  const receiptPath = path.join(out, 'incoming-preinstalled.json'); checkLinks(receiptPath);
+  writeFile(receiptPath, JSON.stringify(recorded), { flag: 'wx' });
+  assert.ok(path.isAbsolute(env.ProgramFiles || '') && path.isAbsolute(baselineInstaller));
+  const shell = path.join(env.ProgramFiles, 'PowerShell', '7', 'pwsh.exe');
+  const lifecycleFile = path.join(out, 'signed-update-lifecycle.jsonl'); checkLinks(lifecycleFile);
+  let output;
+  try {
+    output = run(shell, ['-NoProfile', '-NonInteractive', '-File', path.resolve('scripts/native-self-update-lab.ps1'),
+      '-ContractPath', configFile, '-BaselineInstallerPath', baselineInstaller, '-TimeoutSeconds', '480'],
+    { env, encoding: 'utf8', windowsHide: true, timeout: 600000, maxBuffer: 2 * 1024 * 1024 });
+  } catch (error) {
+    if (typeof error.stdout === 'string' && Buffer.byteLength(error.stdout) <= 2 * 1024 * 1024)
+      writeFile(lifecycleFile, error.stdout, { flag: 'wx' });
+    throw error;
+  }
+  assert.equal(typeof output, 'string');
+  assert.ok(Buffer.byteLength(output) <= 2 * 1024 * 1024);
+  writeFile(lifecycleFile, output, { flag: 'wx' });
+  const events = output.split(/\r?\n/).filter(Boolean).map(line => JSON.parse(line.replace(/^\uFEFF/, '')));
+  const final = events.filter(item => item.kind === 'lab-lifecycle-result'); assert.equal(final.length, 1);
+  const updateFile = path.join(owned.signedUpdateRoot(out), 'self-update-report.json'); checkLinks(updateFile);
+  const update = JSON.parse(readFile(updateFile, 2 * 1024 * 1024));
+  owned.checkClosedSignedUpdate({ env, update, close: update.restartedClose, lifecycle: final[0] });
+  owned.checkFixtureBytes({ env, out, recorded });
+  assert.deepEqual(image([seededFixture.projectA, seededFixture.projectB]), projectBefore);
+  return { signedUpdateObserved: true, normalCloseObserved: true, labCleanupObserved: true,
+    processTransfer: false, migrationNetworkObserved: false, migrationIsolationProven: false,
+    publicDiscovery: false, migrationProven: false, releaseReady: false };
+}
+
+async function incomingDiagnosticMain(args = process.argv.slice(2)) {
+  admission();
+  assert.match(process.env.INCOMING_EXPECTED_SOURCE || '', /^[a-f0-9]{40}$/);
+  assert.equal(process.env.INCOMING_EXPECTED_SOURCE, process.env.GITHUB_SHA, 'Expected diagnostic source differs');
+  require('./windows-incoming-migration-owned-snapshot.cjs').admit({ ...process.env,
+    CREATOR_INCOMING_MIGRATION_DIAGNOSTIC: '1', CREATOR_INCOMING_MIGRATION_SOURCE: process.env.GITHUB_SHA });
+  return main(args, INCOMING_PARENT_MODE);
+}
+
+async function main(args = process.argv.slice(2), mode) {
+  assert.ok(mode === undefined || mode === INCOMING_PARENT_MODE, 'Unknown migration mode');
   // Admission precedes reads, installation, fixture creation, policy or UI calls.
   admission();
+  if (mode === INCOMING_PARENT_MODE) {
+    const owned = require('./windows-incoming-migration-owned-snapshot.cjs');
+    owned.admit({ ...process.env, CREATOR_INCOMING_MIGRATION_DIAGNOSTIC: '1', CREATOR_INCOMING_MIGRATION_SOURCE: process.env.GITHUB_SHA });
+  }
   const input = parseArgs(args);
   rejectLinks(input.candidate);
   const dataIsDirectory = fs.lstatSync(input.candidate).isDirectory();
@@ -418,7 +693,7 @@ async function main(args = process.argv.slice(2)) {
   const hub = path.join(process.env.LOCALAPPDATA, 'Creator Hub', 'creator-hub.exe');
   const environment = Object.fromEntries(Object.entries(process.env).filter(([name]) =>
     !/TOKEN|SECRET|PASSWORD|PRIVATE_KEY|SIGNING|CREDENTIAL|AUTHORIZATION|PROXY|^(?:NODE_|WEBVIEW2_|CREATOR_|TAURI_)/i.test(name)));
-  let child, browser, page, oldClient, observer, chromium, manifest;
+  let child, browser, page, oldClient, observer, chromium, manifest, live;
   const read = file => regular(file);
   const hubHash = () => hash(regular(hub, 200 * 1024 * 1024));
   const native = action => execFileSync('powershell.exe', ['-NoProfile', '-File', path.resolve('scripts/native-window.ps1'),
@@ -426,7 +701,7 @@ async function main(args = process.argv.slice(2)) {
   const policy = action => execFileSync('powershell.exe', ['-NoProfile', '-File', path.resolve('scripts/native-webview-policy.ps1'),
     '-Action', action, '-StateFile', policyState], { windowsHide: true, timeout: 30000 });
   const unchanged = () => { for (const item of stores) assert.deepEqual(read(item.path), item.bytes); };
-  let retainedRuntime = [], retainedAfter;
+  let retainedRuntime = [];
   const retained = () => {
     for (const item of f.untouched) assert.deepEqual(read(item.path), item.bytes);
     assert.deepEqual(read(f.stores[2].path), f.stores[2].bytes);
@@ -473,7 +748,7 @@ async function main(args = process.argv.slice(2)) {
     assert.equal(hubHash(), TARGET.exe); assert.deepEqual(processes(), []);
     child = spawn(hub, [], { env: { ...environment,
       WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: '--remote-debugging-port=9238 --remote-debugging-address=127.0.0.1',
-      WEBVIEW2_USER_DATA_FOLDER: path.join(out, 'webview') }, windowsHide: true, stdio: 'ignore' });
+      ...(mode === INCOMING_PARENT_MODE ? {} : { WEBVIEW2_USER_DATA_FOLDER: path.join(out, 'webview') }) }, windowsHide: true, stdio: 'ignore' });
     child.on('error', error => { report.launchError = String(error); });
     await retry(() => {
       assert.equal(child.exitCode, null); assert.equal(report.launchError, undefined);
@@ -486,6 +761,7 @@ async function main(args = process.argv.slice(2)) {
       const pages = browser.contexts().flatMap(context => context.pages()).filter(view => /^https?:\/\/tauri\.localhost(?:\/|$)/.test(view.url()));
       assert.equal(pages.length, 1); return pages[0];
     });
+    rememberGuidePage(live, hub, browser, page);
     page.setDefaultTimeout(45000);
     await page.waitForFunction(() => window.CreatorHubNative?.integratedFeatures === true);
     assert.deepEqual(processes(), [{ ProcessId: child.pid, ParentProcessId: process.pid, ExecutablePath: hub }], 'Only the exact direct Hub process may host the guide');
@@ -499,146 +775,54 @@ async function main(args = process.argv.slice(2)) {
     await retry(() => assert.deepEqual(processes(), []));
   };
   try {
-    // Fail missing npm/Python/helper prerequisites before installing any baseline.
-    chromium = require('@playwright/test').chromium;
-    assert.equal(typeof chromium.connectOverCDP, 'function');
-    const sdk = createRequire(path.resolve('modules/mcp/package.json'));
-    const { Client } = sdk('@modelcontextprotocol/sdk/client/index.js');
-    const { StdioClientTransport } = sdk('@modelcontextprotocol/sdk/client/stdio.js');
-    assert.equal(typeof Client, 'function'); assert.equal(typeof StdioClientTransport, 'function');
-    assert.equal(execFileSync('python', ['-c', "import tomllib; print('tomllib-ready')"],
-      { env: environment, encoding: 'utf8', windowsHide: true, timeout: 15000 }).trim(), 'tomllib-ready');
-    for (const helper of ['native-window.ps1', 'native-webview-policy.ps1', 'native-startup-diagnostics.ps1']) regular(path.resolve('scripts', helper));
-    report.baselines = [];
-    for (const baseline of baselines) {
-      installBaseline(path.join(input.baselines, baseline.asset), baseline, environment, report);
-      report.baselines.push({ product: baseline.product, version: baseline.version, installerSha256: baseline.sha256,
-        executableSha256: hash(regular(path.join(process.env.LOCALAPPDATA, baseline.product, baseline.binary), 200 * 1024 * 1024)) });
-    }
-    const beforeInstall = registrations();
-    assert.equal(beforeInstall.length, 3);
-    for (const item of baselines) assert.equal(beforeInstall.find(value => value.name === item.product && value.hive === 'HKCU:')?.version, item.version);
-    for (const project of [f.projectA, f.projectB]) {
-      for (const directory of ['Assets', 'ProjectSettings', 'Packages']) fs.mkdirSync(path.join(project, directory), { recursive: true });
-      fs.writeFileSync(path.join(project, 'ProjectSettings', 'ProjectVersion.txt'), 'm_EditorVersion: 6000.3.21f1\n', { flag: 'wx' });
-      fs.writeFileSync(path.join(project, 'Packages', 'manifest.json'), '{"dependencies":{}}\n', { flag: 'wx' });
-      f.untouched.push({ path: path.join(project, 'Assets', 'AuthoredContent.txt'), bytes: Buffer.from('Never modify a Unity project during migration\n') });
-    }
-    for (const item of [...stores, ...f.untouched.filter(item => !stores.includes(item))]) {
-      rejectLinks(item.path); assert.equal(fs.existsSync(item.path), false);
-      fs.mkdirSync(path.dirname(item.path), { recursive: true }); fs.writeFileSync(item.path, item.bytes, { flag: 'wx' });
-    }
-    retainedRuntime = fs.readdirSync(path.join(f.oldRoot, 'server'), { recursive: true, withFileTypes: true })
-      .filter(item => item.isFile()).map(item => {
-        const file = path.join(item.parentPath || item.path, item.name); return { file, sha256: hash(regular(file, 200 * 1024 * 1024)) };
-      });
-    assert.equal(retainedRuntime.length, 9, 'Exact baseline server inventory required');
-    const projectBefore = projectImage([f.projectA, f.projectB]);
-    const connect = async entry => {
-      const transport = new StdioClientTransport({ ...entry, env: { ...environment, ...entry.env }, stderr: 'pipe' });
-      transport.stderr?.resume();
-      const client = new Client({ name: 'disposable-direct16-migration', version: '1' });
-      try { await client.connect(transport, { timeout: 15000 }); transport.stderr?.resume();
-        assert.ok((await client.listTools({}, { timeout: 15000 })).tools.length > 0); return client;
-      } catch (error) { await client.close().catch(() => {}); throw error; }
+    const setupInstall = async () => {
+      // Fail missing npm/Python/helper prerequisites before installing any baseline.
+      chromium = require('@playwright/test').chromium;
+      assert.equal(typeof chromium.connectOverCDP, 'function');
+      const sdk = createRequire(path.resolve('modules/mcp/package.json'));
+      const { Client } = sdk('@modelcontextprotocol/sdk/client/index.js');
+      const { StdioClientTransport } = sdk('@modelcontextprotocol/sdk/client/stdio.js');
+      assert.equal(typeof Client, 'function'); assert.equal(typeof StdioClientTransport, 'function');
+      assert.equal(execFileSync('python', ['-c', "import tomllib; print('tomllib-ready')"],
+        { env: environment, encoding: 'utf8', windowsHide: true, timeout: 15000 }).trim(), 'tomllib-ready');
+      for (const helper of ['native-window.ps1', 'native-webview-policy.ps1', 'native-startup-diagnostics.ps1']) regular(path.resolve('scripts', helper));
+      installLegacyBaselines({ baselines, input, environment, report, localAppData: process.env.LOCALAPPDATA, registrations });
+      const seeded = seedMigrationFixture({ f, stores });
+      retainedRuntime = seeded.retainedRuntime;
+      const projectBefore = seeded.projectBefore;
+      const connect = async entry => {
+        const transport = new StdioClientTransport({ ...entry, env: { ...environment, ...entry.env }, stderr: 'pipe' });
+        transport.stderr?.resume();
+        const client = new Client({ name: 'disposable-direct16-migration', version: '1' });
+        try { await client.connect(transport, { timeout: 15000 }); transport.stderr?.resume();
+          assert.ok((await client.listTools({}, { timeout: 15000 })).tools.length > 0); return client;
+        } catch (error) { await client.close().catch(() => {}); throw error; }
+      };
+      if (mode === INCOMING_PARENT_MODE) {
+        report.incomingDiagnostic = { signedUpdateObserved: false, normalCloseObserved: false, labCleanupObserved: false,
+          processCleanupState: 'unverified', processTransfer: false, migrationNetworkObserved: false,
+          migrationIsolationProven: false, publicDiscovery: false, migrationProven: false, releaseReady: false };
+        report.incomingDiagnostic = runSignedIncomingParent({ environment, out, fixture: seeded.fixture,
+          baselineInstaller: path.join(input.baselines, baselines[0].asset), projectBefore, projectImage });
+        assert.equal(hubHash(), TARGET.exe); unchanged(); retained();
+        manifest = inspectInstalledResources(path.dirname(hub));
+        report.installedResourcesVerified = true; report.resourcePins = RESOURCE_PINS;
+        assert.deepEqual(registrations().map(item => item.name).sort(), baselines.map(item => item.product).sort());
+        oldClient = await connect(f.entry);
+      } else {
+        ({ manifest, oldClient } = await installMigrationTarget({ installer, environment, hub, hubHash, unchanged, retained,
+          report, registrations, baselines, connect, entry: f.entry }));
+      }
+      return { fixture: seeded.fixture, projectBefore, connect };
     };
-    execFileSync(installer, ['/UPDATE', '/S', '/NS'], { env: environment, windowsHide: true, timeout: 180000, stdio: 'pipe' });
-    assert.equal(hubHash(), TARGET.exe); unchanged(); retained();
-    manifest = inspectInstalledResources(path.dirname(hub));
-    report.installedResourcesVerified = true; report.resourcePins = RESOURCE_PINS;
-    assert.deepEqual(registrations().map(item => item.name).sort(), baselines.map(item => item.product).sort());
-    oldClient = await connect(f.entry);
-    report.checks.push('Pinned baseline installers and exact direct16 payload installed; original stores/clients retained and old SDK transport connected before native migration');
-    policy('Enable'); await launch();
-    await page.locator('#usage-terms-dialog').waitFor({ state: 'visible' });
-    await page.locator('#usage-terms-checkbox').check(); await page.locator('#usage-terms-continue').click();
-    await page.locator('#usage-terms-dialog').waitFor({ state: 'hidden' });
-    await page.locator('#convergence-move').waitFor({ state: 'visible' });
-    const initial = await retry(readStatus);
-    assert.equal(initial.streamlined, true); assert.equal(initial.stage, 'review'); assert.equal(initial.required, true);
-    assert.deepEqual(initial.backups, []);
-    await page.locator('#convergence-move').click(); await nativeDecision(false);
-    await page.waitForFunction(() => document.querySelector('#convergence-dialog')?.getAttribute('aria-busy') === 'false');
-    unchanged(); retained();
-    const cancelled = await readStatus(); assert.equal(cancelled.stage, 'review'); assert.deepEqual(cancelled.backups, []);
-    for (const item of [...f.stores, ...f.clients]) assert.equal(fs.existsSync(backupFile(item.path, item.bytes)), false);
-    report.cancelAccepted = true;
-    // Observation is deliberately not advertised as atomic before-write proof.
-    const observed = new Map(); let observationError;
-    const sample = () => {
-      try {
-        for (const item of [...f.stores.slice(0, 2), ...f.clients]) {
-          if (observed.has(item.path)) continue;
-          let bytes;
-          try { bytes = read(item.path); }
-          catch (error) {
-            // An in-progress locked/atomic source cannot establish a before/after
-            // observation. Final idle reads below remain mandatory.
-            if (!['ENOENT', 'EACCES', 'EPERM', 'EBUSY'].includes(error.code)) throw error;
-            report.transientSourceReadSkips = (report.transientSourceReadSkips || 0) + 1; continue;
-          }
-          if (bytes.equals(item.bytes)) continue;
-          verifyBackups(f.stores); verifyBackups([item]); observed.set(item.path, { file: item.path, backup: backupFile(item.path, item.bytes) });
-        }
-      } catch (error) { observationError ||= error; }
-    };
-    observer = setInterval(sample, 20);
-    await page.locator('#convergence-move').click(); await nativeDecision(true);
-    await connectionDecision();
-    await page.locator('#convergence-title').filter({ hasText: /^Move complete$/ }).waitFor({ timeout: 180000 });
-    sample(); clearInterval(observer); observer = null;
-    if (observationError) throw observationError;
-    assert.equal(observed.size, 5); report.backupsPresentAtFirstObservedChange = [...observed.values()];
-    const completed = await readStatus(); assert.equal(completed.stage, 'complete'); assert.equal(completed.required, false);
-    assert.deepEqual(completed.legacyApps, []); verifyBackups([...f.stores, ...f.clients]); retained();
-    const current = read(f.stores[0].path), earlier = read(f.stores[1].path);
-    const server = JSON.parse(current).mcp_server_path;
-    assert.equal(hash(regular(server, 64 * 1024 * 1024)), manifest.modules.mcp.files['mcp/server/creator-works-mcp.mjs']);
-    const active = inspectActiveRoute(process.env.LOCALAPPDATA, manifest);
-    assert.equal(fs.realpathSync(server), fs.realpathSync(path.join(active.payload, 'mcp/server/creator-works-mcp.mjs')));
-    report.activeRoute = active;
-    verifyMerged(f, current, earlier, server);
-    const { managedLocations, verifyMigratedTarget } = require('./native-managed-target.cjs');
-    const route = managedLocations(process.env.LOCALAPPDATA), migrated = [];
-    for (const item of f.clients) {
-      const document = item.id === 'codex' ? JSON.parse(execFileSync('python', ['-c',
-        "import json,sys,tomllib; print(json.dumps(tomllib.load(open(sys.argv[1],'rb'))))", item.path],
-      { encoding: 'utf8', windowsHide: true, timeout: 15000 })) : JSON.parse(read(item.path));
-      const entry = verifyClient(f, item, document, route.command);
-      if (item.id === 'codex') assert.match(read(item.path).toString('utf8'), /^# Keep this comment\r?\n/);
-      verifyMigratedTarget(entry, manifest, null, process.env.LOCALAPPDATA); migrated.push(entry);
-      const client = await connect(entry); await client.close();
-    }
-    assert.ok((await oldClient.listTools({}, { timeout: 15000 })).tools.length > 0);
-    const reconnectOld = await connect(f.entry); await reconnectOld.close();
-    assert.deepEqual(registrations(), [{ hive: 'HKCU:', name: 'Creator Hub', version: TARGET.version }]);
-    for (const baseline of baselines.slice(1)) for (const name of [baseline.binary, 'uninstall.exe']) {
-      assert.equal(fs.existsSync(path.join(process.env.LOCALAPPDATA, baseline.product, name)), false);
-    }
-    assert.deepEqual(projectImage([f.projectA, f.projectB]), projectBefore, 'Migration may not edit or add Unity project files');
-    report.checks.push('Single-guide native approval completed import/routing/retirement; exact backups, current preferences, unknown fields, projects, three clients and compatibility runtime verified');
-    await page.screenshot({ path: path.join(out, 'migration-complete.png') });
-    await page.locator('#convergence-later').click();
-    retainedAfter = [...f.stores, ...f.clients, ...f.untouched].map(item => ({ file: item.path, bytes: read(item.path) }));
-    await close(); await launch();
-    await page.waitForFunction(() => { const check = document.querySelector('#check-updates'); return check && !check.disabled; }, null, { timeout: 180000 });
-    const repeated = await retry(readStatus);
-    assert.equal(repeated.required, false); assert.deepEqual(repeated.legacyApps, []);
-    assert.equal(await page.locator('#convergence-dialog').isVisible(), false);
-    assert.equal(await page.locator('#usage-terms-dialog').isVisible(), false);
-    for (const item of retainedAfter) assert.deepEqual(read(item.file), item.bytes);
-    retained(); verifyBackups([...f.stores, ...f.clients]);
-    assert.deepEqual(inspectActiveRoute(process.env.LOCALAPPDATA, manifest), active);
-    inspectInstalledResources(path.dirname(hub));
-    assert.deepEqual(projectImage([f.projectA, f.projectB]), projectBefore);
-    assert.deepEqual(registrations(), [{ hive: 'HKCU:', name: 'Creator Hub', version: TARGET.version }]);
-    assert.ok((await oldClient.listTools({}, { timeout: 15000 })).tools.length > 0);
-    for (const entry of [f.entry, ...migrated]) { const client = await connect(entry); await client.close(); }
-    await close();
-    assert.equal(report.nativeDecisions.length, 2, 'One native cancellation and one native approval; no additional decisions');
-    report.checks.push('Normal close/relaunch is idempotent: no repeated guide/terms, no settings reset, old live transport and all managed routes reconnect');
-    report.nativeGuideAccepted = true; report.repeatStartupAccepted = true; report.settingsPreserved = true;
-    report.passed = true;
+    live = { policy, open: launch, launch, close, image: hub, get process() { return child; }, get browser() { return browser; }, get page() { return page; },
+      captureOwnership: () => ({ imageSha256: hubHash(), processes: processes(), diagnostics: JSON.parse(execFileSync('powershell.exe',
+        ['-NoProfile', '-File', path.resolve('scripts/native-startup-diagnostics.ps1')],
+        { encoding: 'utf8', timeout: 20000, windowsHide: true, maxBuffer: 256 * 1024 }).replace(/^\uFEFF/, '')) }),
+      get observer() { return observer; }, set observer(value) { observer = value; } };
+    await runMigrationPhases(setupInstall, setup => runGuideRestart(setup, { live, f, retry, readStatus, nativeDecision,
+      unchanged, retained, report, connectionDecision, verifyBackups, read, manifest, oldClient, registrations, baselines, projectImage, out, hub,
+      termsAlreadyAccepted: mode === INCOMING_PARENT_MODE }));
   } catch (error) {
     report.error = report.baselineInstallerFailure ? 'Baseline installer failed; see redacted baselineInstallerFailure.' : String(error.stack || error); process.exitCode = 1;
     if (page) {
@@ -649,15 +833,7 @@ async function main(args = process.argv.slice(2)) {
       await page.screenshot({ path: path.join(out, 'failure.png') }).catch(() => {});
     }
   } finally {
-    if (observer) clearInterval(observer);
-    if (oldClient) try { await oldClient.close(); } catch (error) { report.sdkCleanupError = String(error); report.passed = false; }
-    if (child?.exitCode === null) {
-      try { native('close'); await retry(() => assert.equal(child.exitCode, 0), 15); }
-      catch (error) { report.closeError = String(error); report.passed = false; child.unref(); }
-    }
-    if (browser) await browser.close().catch(error => { report.browserCloseError = String(error); report.passed = false; });
-    try { if (fs.existsSync(policyState)) policy('Restore'); report.policyRestored = true; }
-    catch (error) { report.policyError = String(error); report.passed = false; }
+    await cleanupMigration({ observer, oldClient, child, browser, policyState, policy, native, retry, report });
     if (!report.passed) { report.nativeGuideAccepted = false; process.exitCode = 1; }
     // Retain all fixture data, legacy runtime files, before-images and diagnostics.
     fs.writeFileSync(path.join(out, 'migration-016-report.json'), JSON.stringify(report, null, 2) + '\n', { flag: 'wx' });
@@ -667,7 +843,7 @@ async function main(args = process.argv.slice(2)) {
   return report;
 }
 
-module.exports = { TARGET, CONTEXT, admission, parseArgs, inside, hash, backupFile, fixture, verifyMerged, verifyClient, redactBaselineOutput, baselineFailure, installBaseline,
+module.exports = { TARGET, CONTEXT, admission, parseArgs, inside, hash, backupFile, fixture, verifyMerged, verifyClient, redactBaselineOutput, baselineFailure, installBaseline, installLegacyBaselines, installMigrationTarget, runMigrationPhases, runGuideRestart, cleanupMigration, incomingDiagnosticMain,
   installerPath, validateProvenance, RESOURCE_PINS, MCP_FILES, INPUT_FILES, resourcePlan, moduleGeneration, verifyActiveReceipt,
   inspectInstalledResources, inspectActiveRoute, assertDialog, connectionReview, assertConnectionDialog, dialogCommand, DIALOG_ACTION, REGISTRATIONS, PROCESSES, reportTemplate, main };
 if (require.main === module) main().catch(error => { console.error(String(error.stack || error)); process.exitCode = 1; });

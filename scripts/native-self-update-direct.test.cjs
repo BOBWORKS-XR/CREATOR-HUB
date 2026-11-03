@@ -245,7 +245,7 @@ test('actual target function keeps SDK reconnect for 16 and never enters hosted 
   const forbidden = () => { throw Error('Legacy GUI/frame control reached by direct 16'); };
   const check = vm.runInNewContext(`processes = () => [];\n(${smoke.slice(start, end)})`, {
     assert, path, process: { env: { LOCALAPPDATA: path.resolve('fixture-local'), USERPROFILE: path.resolve('fixture-home') } },
-    directTarget: true, report, page: { evaluate: async () => ({ supported: true, apps: [{ builtIn: true, trusted: true }, { builtIn: true, trusted: true }] }) },
+    directTarget: true, incomingPreinstalled: false, report, page: { evaluate: async () => ({ supported: true, apps: [{ builtIn: true, trusted: true }, { builtIn: true, trusted: true }] }) },
     direct: { checkPages: async ({ page, showApp }) => {
       events.push('direct-pages'); await showApp('setup'); await showApp('mcp'); return {};
     },
@@ -260,6 +260,21 @@ test('actual target function keeps SDK reconnect for 16 and never enters hosted 
   assert.deepEqual(events, ['direct-pages', 'semantic-setup', 'semantic-mcp', 'native-route', 'sdk-connect', 'sdk-close', 'sdk-connect', 'sdk-close', 'clean-document']);
   assert.equal(report.directHubUpdateTested, true); assert.equal(report.managedRouteReconnectTested, true);
   assert.equal(report.directServices.mcp.managedRouting, true);
+});
+
+test('preinstalled diagnostic checks services without reviewing or changing seeded routes', async () => {
+  const start = smoke.indexOf('async function checkUpdatedBuiltIns() {'), end = smoke.indexOf('\nasync function installCompanions()', start);
+  const events = [], report = { checks: [] }, forbidden = () => { throw Error('route mutation or SDK reached'); };
+  const check = vm.runInNewContext(`(${smoke.slice(start, end)})`, {
+    assert, path, process: { env: {} }, directTarget: true, incomingPreinstalled: true, report,
+    page: { evaluate: async () => ({ supported: true, apps: [{ builtIn: true, trusted: true }, { builtIn: true, trusted: true }] }) },
+    preinstalledFixture: { fixtureRoot: 'synthetic', recorded: {}, owned: { checkFixtureBytes: () => events.push('fixture') } },
+    direct: { checkPages: async () => { events.push('pages'); return {}; }, prepareManagedRoute: forbidden },
+    labTarget: { showPage() {} }, processes() {}, directRequests: [], out: '.', managedLocations: forbidden, require: forbidden,
+  });
+  await check();
+  assert.deepEqual(events, ['fixture', 'pages', 'fixture']);
+  assert.equal(report.managedRouteReconnectTested, false); assert.equal(report.directHubUpdateTested, true);
 });
 
 test('historical hosted target function still requires both private approvals, frames, SDK reconnect and owned closure', async () => {

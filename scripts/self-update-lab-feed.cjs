@@ -225,9 +225,22 @@ function allowPathDiagnostics(env, contract) {
     && contract.pins.installer === '7326d054ac23b7ac560e2c3488933203a33f0033586b1c33988ce7f316e4c51a'
     && contract.pins.executable === 'fac846563720eb4dae665a814ea28d0556800ebaf75aba7e8ee0be7f1979a5cd';
 }
+function allowIncomingSyntheticDiscovery(env, contract) {
+  return env.CREATOR_INCOMING_MIGRATION_DIAGNOSTIC === '1' && env.CREATOR_PUBLIC12_R2_LAB === '1' && env.CREATOR_PUBLIC12_R2_EMPTY_DISCOVERY === '1'
+    && env.GITHUB_ACTIONS === 'true' && env.RUNNER_ENVIRONMENT === 'github-hosted' && env.RUNNER_OS === 'Windows' && env.RUNNER_ARCH === 'X64'
+    && env.GITHUB_REPOSITORY === 'BOBWORKS-XR/CREATOR-HUB' && env.GITHUB_REPOSITORY_ID === '1364807512'
+    && env.GITHUB_EVENT_NAME === 'workflow_dispatch' && env.GITHUB_JOB === 'incoming-migration-diagnostic' && env.GITHUB_RUN_ATTEMPT === '1'
+    && /^[1-9][0-9]*$/.test(env.GITHUB_RUN_ID || '') && /^[a-f0-9]{40}$/.test(env.GITHUB_SHA || '')
+    && env.GITHUB_SHA === env.CREATOR_INCOMING_MIGRATION_SOURCE
+    && env.GITHUB_REF === 'refs/heads/validation/windows-menu-merge-20261027'
+    && env.GITHUB_WORKFLOW_REF === 'BOBWORKS-XR/CREATOR-HUB/.github/workflows/windows-incoming-016.yml@refs/heads/validation/windows-menu-merge-20261027'
+    && contract.targetVersion === '0.1.16' && contract.baseline.version === '0.1.12'
+    && Object.keys(contract.pins).length === Object.keys(SIGNED012_PINS).length
+    && Object.entries(SIGNED012_PINS).every(([key, value]) => contract.pins[key] === value);
+}
 function bindSigned012EmptyDiscovery(contract, env) {
   if (env.CREATOR_PUBLIC12_R2_EMPTY_DISCOVERY !== '1') return contract;
-  assert.ok(allowPathDiagnostics(env, contract), 'Synthetic discovery requires the exact signed012 runner');
+  assert.ok(allowPathDiagnostics(env, contract) || allowIncomingSyntheticDiscovery(env, contract), 'Synthetic discovery requires a reviewed runner');
   assert.ok(contracts.has(contract), 'Use a validated lab contract');
   assert.deepEqual(contract.pins, SIGNED012_PINS, 'Only the independently reviewed signed012 metadata is admitted');
   assert.equal(contract.baseline.installer, '0cd8a4493dd9a5b77fbc5fe160582a2b2698fea43aedd9118b2d5b3bd3c51a18');
@@ -439,7 +452,7 @@ async function main() {
 
 module.exports = { DESCRIPTOR, FEED_PATH, LIMITS, UNIFIED_OUTGOING_BASELINE, assertRunner, baselineFor, createContract,
   createUnifiedOutgoingContract, createIncoming016Contract, createDirectOutgoing017Contract, loadContract, readBounded, assertBaselineBytes, assertUnifiedOutgoingBaselineBytes,
-  connectHost, allowPathDiagnostics, bindSigned012EmptyDiscovery, SIGNED012_PINS, SIGNED012_EMPTY_PATHS,
+  connectHost, allowPathDiagnostics, allowIncomingSyntheticDiscovery, bindSigned012EmptyDiscovery, SIGNED012_PINS, SIGNED012_EMPTY_PATHS,
   newState, recordRejection, requestHandler, labReport, startLabProxy };
 if (require.main === module) main().catch(() => {
   // Do not serialize TLS control input, parser errors, headers or candidate contents.

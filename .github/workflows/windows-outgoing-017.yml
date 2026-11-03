@@ -252,7 +252,7 @@ jobs:
       - run: npm ci
       - run: npm --prefix modules/mcp ci
       - name: Test diagnostic and unchanged isolation refusal
-        run: node --test scripts/windows-mixed-public-diagnostic.test.cjs scripts/windows-migrated-outgoing-handoff.test.cjs
+        run: node --test scripts/windows-mixed-public-diagnostic.test.cjs scripts/windows-migrated-outgoing-handoff.test.cjs scripts/windows-migration-phase-boundary.test.cjs
       - name: Pin exact outgoing R2 and successor data
         shell: pwsh
         run: |

@@ -2,6 +2,11 @@
 if (process.env.GITHUB_ACTIONS !== 'true' || process.env.RUNNER_ENVIRONMENT !== 'github-hosted' || process.env.RUNNER_OS !== 'Windows') {
   throw Error('Self-update installation is restricted to a disposable GitHub-hosted Windows runner.');
 }
+const incomingPreinstalled = process.env.CREATOR_INCOMING_MIGRATION_DIAGNOSTIC !== undefined;
+if (incomingPreinstalled) {
+  if (process.env.CREATOR_INCOMING_MIGRATION_DIAGNOSTIC !== '1') throw Error('Invalid preinstalled diagnostic mode.');
+  require('./windows-incoming-migration-owned-snapshot.cjs').admit();
+}
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -40,9 +45,22 @@ if (fixture) {
   from.installer = fixture.installerSha256; from.exe = fixture.executableSha256;
 }
 const hub = path.join(process.env.LOCALAPPDATA, 'Creator Hub', 'creator-hub.exe');
-assert.equal(fs.existsSync(hub), false, 'Expected a fresh runner without Hub installed');
-const out = path.resolve('artifacts', `native-suite-${Date.now()}`);
-fs.mkdirSync(out, { recursive: true });
+let preinstalledFixture;
+if (incomingPreinstalled) {
+  assert.equal(process.env.CREATOR_INCOMING_MIGRATION_DIAGNOSTIC, '1');
+  assert.ok(public12Lab && lab && directTarget && !fixture, 'Only the exact signed012 diagnostic is admitted');
+  const owned = require('./windows-incoming-migration-owned-snapshot.cjs');
+  assert.deepEqual(lab.pins, owned.FEED_PINS);
+  const fixtureRoot = process.env.CREATOR_INCOMING_MIGRATION_FIXTURE_ROOT;
+  assert.ok(path.isAbsolute(fixtureRoot || ''));
+  const recorded = owned.readPreinstalledReceipt(process.env, fixtureRoot);
+  owned.checkPreinstalledFixture({ env: process.env, out: fixtureRoot, recorded });
+  preinstalledFixture = { owned, fixtureRoot, recorded };
+} else {
+  assert.equal(fs.existsSync(hub), false, 'Expected a fresh runner without Hub installed');
+}
+const out = incomingPreinstalled ? preinstalledFixture.owned.signedUpdateRoot(preinstalledFixture.fixtureRoot) : path.resolve('artifacts', `native-suite-${Date.now()}`);
+if (incomingPreinstalled) fs.mkdirSync(out); else fs.mkdirSync(out, { recursive: true });
 const report = { passed: false, from, to, harnessSource: process.env.GITHUB_SHA, checks: [], userMachineUsed: false, selfUpdateTested: false };
 report.discoveryKind = lab ? 'controlled-lab-not-public-discovery' : 'public-github-discovery';
 report.labDiscovery = Boolean(lab);
@@ -68,6 +86,23 @@ async function retry(fn, seconds = 30) {
   throw last || Error('Timed out');
 }
 let child, browser, page, ownedPid, unrelatedRuntime;
+let baselineRecord, approvalLowerBoundTicks, restartedRecord, restartedCloseAttempted = false;
+function restartedInventory() {
+  return JSON.parse(powershell('scripts/native-unified-outgoing-process.ps1').replace(/^\uFEFF/, ''));
+}
+function restartedArgs() {
+  const close = require('./windows-incoming-migration-owned-close.cjs');
+  return { hub, inventory: restartedInventory, imageHash: () => hash(hub), checkRecord: close.checkRecord, closeOwned: close.closeOwned };
+}
+function closeRestartedOnce() {
+  assert.equal(restartedCloseAttempted, false, 'Restarted Hub close may not be retried');
+  restartedCloseAttempted = true;
+  try {
+    const updater = require('./windows-incoming-migration-updater.cjs');
+    const receipt = updater.closeRestarted({ ...restartedArgs(), record: restartedRecord });
+    report.restartedClose = receipt; ownedPid = undefined; return receipt;
+  } catch (error) { report.closeError = 'Restarted Hub close not verified.'; throw error; }
+}
 const runtimeStop = path.join(out, 'stop-unrelated-runtime');
 const apps = {
   setup: path.join(process.env.LOCALAPPDATA, 'Creator Project Setup', 'creator-project-setup.exe'),
@@ -98,7 +133,12 @@ async function connect(waitReady = true, updated = false) {
     await direct.checkProtocol(page);
     await page.waitForFunction(() => document.querySelector('#convergence-dialog')?.open || !document.querySelector('#check-updates').disabled,
       null, { timeout: 180000 });
-    if (await page.locator('#convergence-dialog').isVisible()) {
+    if (incomingPreinstalled) {
+      await direct.deferFixtureMigration({ page,
+        readStatus: () => page.evaluate(() => window.CreatorHubNative.invoke('convergence_status')),
+        verifyFixture: () => preinstalledFixture.owned.checkFixtureBytes({ env: process.env, out: preinstalledFixture.fixtureRoot, recorded: preinstalledFixture.recorded }) });
+      report.migrationDeferred = true;
+    } else if (await page.locator('#convergence-dialog').isVisible()) {
       await page.locator('#convergence-later').click();
       report.migrationDeferred = true;
     }
@@ -181,8 +221,15 @@ async function checkUpdatedBuiltIns() {
   assert.equal(inventory.apps.length, 2);
   assert.ok(inventory.apps.every(app => app.builtIn && app.trusted && !app.issue));
   if (directTarget) {
+    if (incomingPreinstalled) preinstalledFixture.owned.checkFixtureBytes({ env: process.env, out: preinstalledFixture.fixtureRoot, recorded: preinstalledFixture.recorded });
     report.directServices = await direct.checkPages({ page, showApp: app => labTarget.showPage(page, app), processes, requests: directRequests,
       screenshot: app => page.screenshot({ path: path.join(out, `direct-${app}.png`), animations: 'disabled' }) });
+    if (incomingPreinstalled) {
+      preinstalledFixture.owned.checkFixtureBytes({ env: process.env, out: preinstalledFixture.fixtureRoot, recorded: preinstalledFixture.recorded });
+      report.managedRouteReconnectTested = false; report.directHubUpdateTested = true;
+      report.checks.push('Direct services checked without reviewing or modifying the seeded client routes; routing remains for migration.');
+      return;
+    }
     const locations = managedLocations(process.env.LOCALAPPDATA);
     report.directServices.mcp = await direct.prepareManagedRoute(page, { active: locations.active,
       clientConfig: path.join(process.env.USERPROFILE, '.codex', 'config.toml'),
@@ -270,8 +317,10 @@ async function startUnrelatedRuntime() {
   if (!fixture && !lab) execFileSync('curl.exe', ['--fail', '--location', '--silent', '--show-error', '--max-time', '120', '--output', installer,
     `https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/download/v${from.version}/${from.asset}`], { windowsHide: true, timeout: 130000 });
   assert.equal(hash(installer), from.installer);
-  const setup = spawn(installer, ['/S', '/NS'], { windowsHide: true, stdio: 'ignore' });
-  await retry(() => assert.equal(setup.exitCode, 0), 120);
+  if (!incomingPreinstalled) {
+    const setup = spawn(installer, ['/S', '/NS'], { windowsHide: true, stdio: 'ignore' });
+    await retry(() => assert.equal(setup.exitCode, 0), 120);
+  }
   assert.equal(hash(hub), from.exe);
   if (lab) labTarget.checkBaseline(lab, installer, hub);
   if (fixture) await installCompanions();
@@ -331,8 +380,16 @@ async function startUnrelatedRuntime() {
     report.checks.push('Native Cancel leaves both hosted backends, unsaved Setup form, MCP settings and unrelated Node runtime intact');
   }
   report.checks.push(`Native Not now preserves the running ${from.version} executable and settings`);
+  if (incomingPreinstalled) {
+    const updater = require('./windows-incoming-migration-updater.cjs');
+    baselineRecord = updater.captureBaseline({ ...restartedArgs(), pid: child.pid, parentPid: process.pid });
+  }
   await page.locator('#hub-update-button').click();
-  await retry(() => native(child.pid, 'button', 'Update Hub'));
+  if (incomingPreinstalled) {
+    approvalLowerBoundTicks = require('./windows-incoming-migration-updater.cjs').utcTickLowerBound(Date.now());
+    native(child.pid, 'button', 'Update Hub');
+  }
+  else await retry(() => native(child.pid, 'button', 'Update Hub'));
   await retry(() => assert.equal(child.exitCode, 0), 180);
   report.originalExitCode = child.exitCode;
   if (browser) { await browser.close().catch(() => {}); browser = null; page = null; }
@@ -345,6 +402,13 @@ async function startUnrelatedRuntime() {
   }, 120);
   ownedPid = restarted.ProcessId;
   report.restartedPid = ownedPid;
+  if (incomingPreinstalled) {
+    const updater = require('./windows-incoming-migration-updater.cjs');
+    const captured = updater.captureRestarted({ ...restartedArgs(), pid: ownedPid });
+    const observation = updater.observeRestart({ ...restartedArgs(), baseline: baselineRecord,
+      approvalLowerBoundTicks, restarted: captured });
+    restartedRecord = captured; report.observedRestart = observation;
+  }
   await connect(!fixture, true);
   if (directTarget && !fixture) await direct.checkHome(page);
   if (fixture) {
@@ -433,6 +497,10 @@ async function startUnrelatedRuntime() {
       await retry(() => assert.ok(!processes().some(p => p.ProcessId === backends[app])));
     }
   }
+  if (incomingPreinstalled) {
+    preinstalledFixture.owned.checkFixtureBytes({ env: process.env, out: preinstalledFixture.fixtureRoot, recorded: preinstalledFixture.recorded });
+    closeRestartedOnce();
+  }
   report.selfUpdateTested = true;
   report.passed = true;
 })().catch(error => { report.error = String(error.stack || error); process.exitCode = 1; }).finally(async () => {
@@ -458,7 +526,17 @@ async function startUnrelatedRuntime() {
     try { if (ownedPid) fs.writeFileSync(path.join(out, 'dialogs.json'), native(ownedPid, 'snapshot')); } catch (error) { report.dialogError = String(error); }
     try { if (page) await page.screenshot({ path: path.join(out, 'failure.png') }); } catch {}
   }
-  try { if (ownedPid) native(ownedPid, 'close'); } catch {}
+  if (incomingPreinstalled && ownedPid && child && ownedPid === child.pid && child.exitCode === null) {
+    try { native(ownedPid, 'close'); } catch {}
+  } else if (incomingPreinstalled && ownedPid) {
+    try {
+      const updater = require('./windows-incoming-migration-updater.cjs');
+      const result = updater.cleanupObservedRestart({ record: restartedRecord, attempted: restartedCloseAttempted, close: closeRestartedOnce });
+      if (result.state !== 'verified') { report.closeError = 'Restarted Hub cleanup unverified.'; report.passed = false; process.exitCode = 1; }
+    } catch (error) { report.closeError = String(error); report.passed = false; process.exitCode = 1; }
+  } else if (!incomingPreinstalled) {
+    try { if (ownedPid) native(ownedPid, 'close'); } catch {}
+  }
   if (browser) await browser.close().catch(() => {});
   try { policy('Restore'); report.policyRestored = true; } catch (error) { report.policyError = String(error); report.passed = false; process.exitCode = 1; }
   if (child?.exitCode === null) child.unref();

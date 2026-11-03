@@ -321,6 +321,21 @@ test('path diagnostics require the exact signed012 runner and R2 contract', () =
   assert.equal(lab.allowPathDiagnostics(env, { ...contract, targetVersion: '0.1.17' }), false);
   assert.equal(lab.allowPathDiagnostics(env, { ...contract, pins: { ...contract.pins, installer: 'a'.repeat(64) } }), false);
 });
+test('incoming migration synthetic discovery has separate exact admission without path diagnostics', () => {
+  const sha = 'a'.repeat(40);
+  const env = { CREATOR_INCOMING_MIGRATION_DIAGNOSTIC: '1', CREATOR_PUBLIC12_R2_LAB: '1', CREATOR_PUBLIC12_R2_EMPTY_DISCOVERY: '1', GITHUB_ACTIONS: 'true',
+    RUNNER_ENVIRONMENT: 'github-hosted', RUNNER_OS: 'Windows', RUNNER_ARCH: 'X64', GITHUB_REPOSITORY: 'BOBWORKS-XR/CREATOR-HUB',
+    GITHUB_REPOSITORY_ID: '1364807512', GITHUB_EVENT_NAME: 'workflow_dispatch', GITHUB_JOB: 'incoming-migration-diagnostic',
+    GITHUB_RUN_ATTEMPT: '1', GITHUB_RUN_ID: '123', GITHUB_SHA: sha, CREATOR_INCOMING_MIGRATION_SOURCE: sha,
+    GITHUB_REF: 'refs/heads/validation/windows-menu-merge-20261027',
+    GITHUB_WORKFLOW_REF: 'BOBWORKS-XR/CREATOR-HUB/.github/workflows/windows-incoming-016.yml@refs/heads/validation/windows-menu-merge-20261027' };
+  const contract = { targetVersion: '0.1.16', baseline: { version: '0.1.12' }, pins: { ...lab.SIGNED012_PINS } };
+  assert.equal(lab.allowIncomingSyntheticDiscovery(env, contract), true);
+  assert.equal(lab.allowPathDiagnostics(env, contract), false);
+  for (const key of Object.keys(env)) assert.equal(lab.allowIncomingSyntheticDiscovery({ ...env, [key]: 'foreign' }, contract), false, key);
+  for (const key of Object.keys(contract.pins)) assert.equal(lab.allowIncomingSyntheticDiscovery(env, { ...contract, pins: { ...contract.pins, [key]: '0'.repeat(64) } }), false);
+  assert.equal(lab.allowIncomingSyntheticDiscovery(env, { ...contract, pins: { ...contract.pins, extra: 'x' } }), false);
+});
 
 const signed012Directory = process.env.CREATOR_TEST_SIGNED012_DIR;
 const signed012ConfigPath = path.resolve(__dirname, '../artifacts/public12-r2-control/config.json');

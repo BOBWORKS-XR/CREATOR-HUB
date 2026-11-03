@@ -145,7 +145,7 @@ test('new native lane is explicit/manual, read-only, data-bound and tests before
     'scripts/self-update-lab-feed.test.cjs', 'scripts/native-self-update-lab.test.cjs',
     'scripts/native-unified-outgoing-target.test.cjs'],
   'Serialize PowerShell-heavy test files without dropping any pre-native regression');
-  assert.match(workflow, /workflow_dispatch:/); assert.match(workflow, /options: \[fresh, guarded, incoming, migration, signed012, profile-proof-diagnostic\]/);
+  assert.match(workflow, /workflow_dispatch:/); assert.match(workflow, /options: \[fresh, guarded, incoming, migration, signed012, profile-proof-diagnostic, incoming-migration-diagnostic\]/);
   assert.match(workflow, /push:\s+branches: \[validation\/windows-menu-merge-20261027\]/);
   assert.match(workflow, /acceptance:\s+if: github\.repository == 'BOBWORKS-XR\/CREATOR-HUB' && github\.event_name == 'workflow_dispatch'/);
   assert.ok(workflow.includes("(inputs.mode == 'fresh' || inputs.mode == 'guarded')"));

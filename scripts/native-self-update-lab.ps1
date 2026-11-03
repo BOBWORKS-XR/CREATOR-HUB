@@ -237,6 +237,21 @@ if ($CleanupWatch) {
     exit 0
 }
 
+$driverBootstrap = @'
+'use strict';
+let frame = '', finished = false;
+const timer = setTimeout(() => fail(), 30000);
+function fail() { if (finished) return; finished = true; clearTimeout(timer); process.exit(1); }
+process.stdin.setEncoding('utf8');
+process.stdin.on('error', fail);
+process.stdin.on('data', chunk => { frame += chunk; if (frame.length > 16) fail(); });
+process.stdin.on('end', () => {
+  if (finished || !['START\n', 'START\r\n'].includes(frame)) return fail();
+  finished = true; clearTimeout(timer);
+  try { require(process.argv[1]); } catch { process.exitCode = 1; }
+});
+'@
+
 # Reuse the reviewed feed API; secrets enter on a bounded stdin frame, not node argv.
 $proxyBootstrap = @'
 if (process.env.GITHUB_ACTIONS !== 'true' || process.env.RUNNER_ENVIRONMENT !== 'github-hosted' || process.env.RUNNER_OS !== 'Windows') {
@@ -336,6 +351,9 @@ $caKey = $null; $leafKey = $null; $pfx = $null; $passwordBytes = $null; $passwor
 $validator = $null; $watcher = $null; $proxy = $null; $driver = $null
 $validatorRecord = $null; $proxyRecord = $null; $driverRecord = $null; $watcherRecord = $null
 $trustOwned = $false; $failed = $false; $cleanupVerified = $true; $systemTlsVerified = $false
+$incomingMigration = $env:CREATOR_INCOMING_MIGRATION_DIAGNOSTIC -ceq '1'
+$driverStarted = $false; $driverRegistered = $false; $driverGateOpened = $false
+$successorCleanupVerified = $false; $hubCleanupState = 'not-started'; $hubCleanupUnknown = $false
 $driverExitCode = $null; $feedResult = $null; $rootThumbprint = $null; $leafThumbprint = $null
 $phase = 'timeout'; $failureDetails = $null
 $script:processIdentityFailure = $null
@@ -346,6 +364,12 @@ $actualScope = if ($Outgoing017) { 'exact-direct16-to-root-only17-acceptance-fix
 $reportedScenario = if ($Outgoing017) { 'direct-outgoing-016-017' } else { $Scenario }
 try {
     Set-LabPhase 'timeout'
+    if (Test-Path Env:CREATOR_INCOMING_MIGRATION_DIAGNOSTIC) {
+        if (-not $incomingMigration -or $env:GITHUB_JOB -cne 'incoming-migration-diagnostic' -or
+            $env:GITHUB_RUN_ATTEMPT -cne '1' -or $env:GITHUB_SHA -cnotmatch '^[a-f0-9]{40}$' -or
+            $env:GITHUB_SHA -cne $env:CREATOR_INCOMING_MIGRATION_SOURCE -or $Incoming016 -or $Outgoing017 -or
+            $Scenario -cne 'public-stable' -or $env:CREATOR_PUBLIC12_R2_LAB -cne '1') { throw 'Incoming migration lab context refused.' }
+    }
     if ($Outgoing017 -and ($Incoming016 -or $Scenario -cne 'public-stable')) { throw 'Outgoing17 cannot be combined with another scenario.' }
     if ($Incoming016 -and $Scenario -cne 'public-stable') { throw 'Incoming16 cannot be combined with a historical scenario.' }
     if ($TimeoutSeconds -lt 1 -or $TimeoutSeconds -gt 480) { throw 'Driver timeout must be 1..480 seconds.' }
@@ -485,19 +509,26 @@ try {
 
     Set-LabPhase 'driver-start'
     $driver = [Diagnostics.Process]::new()
-    $driver.StartInfo = New-LabStartInfo $nodePath @($driverPath) $ready.proxyUrl
+    if ($incomingMigration) { $driver.StartInfo = New-LabStartInfo $nodePath @('-e', $driverBootstrap, $driverPath) $ready.proxyUrl }
+    else { $driver.StartInfo = New-LabStartInfo $nodePath @($driverPath) $ready.proxyUrl }
     $driver.StartInfo.Environment['CREATOR_SELF_UPDATE_LAB_CONFIG'] = $ContractPath
     $driver.StartInfo.Environment['CREATOR_SELF_UPDATE_LAB_BASELINE'] = $BaselineInstallerPath
     $driver.StartInfo.Environment['CREATOR_SELF_UPDATE_TARGET_VERSION'] = $validated.targetVersion
     $driver.StartInfo.Environment['CREATOR_SELF_UPDATE_INSTALLER_SHA256'] = $validated.installerSha256
     $driver.StartInfo.Environment['CREATOR_SELF_UPDATE_EXECUTABLE_SHA256'] = $validated.executableSha256
-    [void]$driver.Start(); $driverRecord = Get-LabProcessRecord $driver $nodePath
+    if (-not $driver.Start()) { throw 'Driver did not start.' }
+    if ($incomingMigration) { $driverStarted = $true }
+    $driverRecord = Get-LabProcessRecord $driver $nodePath
     $driverOutputDrain = $driver.StandardOutput.BaseStream.CopyToAsync([IO.Stream]::Null)
     $driverErrorDrain = $driver.StandardError.BaseStream.CopyToAsync([IO.Stream]::Null)
     Set-LabPhase 'driver-register'
     $watcher.StandardInput.WriteLine(($driverRecord | ConvertTo-Json -Compress)); $watcher.StandardInput.Flush()
     $registered = Read-LabLine $watcher.StandardOutput | ConvertFrom-Json
     if ($registered.kind -cne 'lab-process-registered') { throw 'Driver ownership not registered.' }
+    if ($incomingMigration) {
+        $driverRegistered = $true; $driverGateOpened = $true
+        $driver.StandardInput.WriteLine('START'); $driver.StandardInput.Flush()
+    }
     $driver.StandardInput.Close()
     Set-LabPhase 'driver-wait'
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
@@ -506,12 +537,38 @@ try {
     }
     $driverExitCode = $driver.ExitCode
     if ($driverExitCode -ne 0) { throw 'Driver did not succeed.' }
+    if ($incomingMigration) {
+        $fixtureRoot = [IO.Path]::GetFullPath($env:CREATOR_INCOMING_MIGRATION_FIXTURE_ROOT)
+        $artifacts = [IO.Path]::GetFullPath((Join-Path $env:GITHUB_WORKSPACE 'artifacts'))
+        $fixtureLeaf = [IO.Path]::GetFileName($fixtureRoot)
+        if ([IO.Path]::GetDirectoryName($fixtureRoot) -ine $artifacts -or $fixtureLeaf -cnotmatch '^native-suite-[0-9]+$') { throw 'Fixture output refused.' }
+        $suffix = $fixtureLeaf.Substring('native-suite-'.Length)
+        $reportFile = Join-Path $artifacts ("native-suite-${suffix}001/self-update-report.json")
+        $reportItem = Get-Item -LiteralPath $reportFile
+        if ($reportItem.PSIsContainer -or ($reportItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $reportItem.Length -lt 1 -or $reportItem.Length -gt 2MB) { throw 'Updater report unavailable.' }
+        $driverReport = Get-Content -LiteralPath $reportFile -Raw | ConvertFrom-Json
+        $closed = $driverReport.restartedClose; $observed = $driverReport.observedRestart
+        if ($driverReport.passed -ne $true -or $driverReport.selfUpdateTested -ne $true -or $driverReport.policyRestored -ne $true -or
+            $closed.kind -cne 'incoming-migration-owned-close-only' -or $closed.state -cne 'verified' -or $closed.pid -ne $driverReport.restartedPid -or
+            $closed.startTicks -cne $observed.restartedStartTicks -or $closed.exitCode -ne 0 -or $closed.releaseReady -ne $false -or
+            $closed.migrationContinuationAvailable -ne $false -or
+            [IO.Path]::GetFullPath($closed.executable) -ine [IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'Creator Hub/creator-hub.exe')) -or
+            $observed.ancestryProven -ne $false -or $observed.securityAttestation -ne $false) { throw 'Restarted Hub cleanup unverified.' }
+        $inventoryText = & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'native-unified-outgoing-process.ps1')
+        if ($LASTEXITCODE -ne 0) { throw 'Hub process inventory unavailable.' }
+        if (@($inventoryText | ConvertFrom-Json | Where-Object { $_.image -match '(?i)creator-hub\.exe$' }).Count -ne 0) { throw 'Hub process remains after close.' }
+        $successorCleanupVerified = $true
+    }
 } catch {
     $failed = $true
     $failureDetails = Get-LabFailure $phase $_
     [Console]::Error.WriteLine('Lab lifecycle refused or failed; no native/public acceptance established.')
 } finally {
     Set-LabPhase 'cleanup-driver'
+    if ($incomingMigration -and $driverStarted -and -not $driverGateOpened) {
+        try { $driver.StandardInput.Close(); if (-not $driver.WaitForExit(12000)) { $cleanupVerified = $false } }
+        catch { $cleanupVerified = $false }
+    }
     foreach ($record in @($driverRecord, $validatorRecord)) {
         if ($record) { try { Stop-LabProcess $record } catch { $cleanupVerified = $false } }
     }
@@ -542,8 +599,13 @@ try {
     if ($passwordBytes) { [Array]::Clear($passwordBytes, 0, $passwordBytes.Length) }
     $password = $null; $tlsControl = $null
     foreach ($resource in @($leaf, $unsignedLeaf, $ca, $leafKey, $caKey, $publicRoot, $rootStore, $driver, $proxy, $validator, $watcher)) { if ($resource) { $resource.Dispose() } }
+    if ($incomingMigration) {
+        $hubCleanupState = if (-not $driverStarted) { 'not-started' } elseif ($successorCleanupVerified) { 'verified' } else { 'unknown' }
+        $hubCleanupUnknown = $hubCleanupState -ceq 'unknown'
+        if ($hubCleanupUnknown) { $cleanupVerified = $false }
+    }
 }
-[ordered]@{kind='lab-lifecycle-result'; lifecycleSucceeded=(-not $failed -and $cleanupVerified); cleanupVerified=$cleanupVerified;
+$result = [ordered]@{kind='lab-lifecycle-result'; lifecycleSucceeded=(-not $failed -and $cleanupVerified); cleanupVerified=$cleanupVerified;
     scenario=$reportedScenario; actualScope=$actualScope; liveAiAcceptance=$false; productAcceptance=$false;
     systemTlsVerified=$systemTlsVerified; trustScope='disposable-vm-local-machine'; labDiscovery=$true; publicDiscovery=$false; nativeAcceptanceTested=$false; releaseReady=$false;
     driverExitCode=$driverExitCode; failureDetails=$failureDetails; processIdentityFailure=$script:processIdentityFailure; rootThumbprint=$rootThumbprint; leafThumbprint=$leafThumbprint; driver=$driverRecord; proxy=$proxyRecord; cleanupWatcher=$watcherRecord;
@@ -555,6 +617,11 @@ try {
     rejectedPathOverflow=$(if ($feedResult -and $env:CREATOR_PUBLIC12_R2_PATH_DIAGNOSTIC -ceq '1') { $feedResult.rejectedPathOverflow } else { $null });
     syntheticDiscovery=$(if ($feedResult -and $env:CREATOR_PUBLIC12_R2_EMPTY_DISCOVERY -ceq '1') { $feedResult.syntheticDiscovery } else { $null });
     connectionResetEventCount=$(if ($feedResult) { $feedResult.connectionResetEventCount } else { $null });
-    connectionResetSummary=$(if ($feedResult) { @($feedResult.connectionResetSummary) } else { @() })} | ConvertTo-Json -Depth 4 -Compress
+    connectionResetSummary=$(if ($feedResult) { @($feedResult.connectionResetSummary) } else { @() })}
+if ($incomingMigration) {
+    $result['hubCleanupState'] = $hubCleanupState; $result['hubCleanupUnknown'] = $hubCleanupUnknown
+    $result['driverRegistered'] = $driverRegistered; $result['driverGateOpened'] = $driverGateOpened
+}
+$result | ConvertTo-Json -Depth 4 -Compress
 if ($failed -or -not $cleanupVerified) { exit 1 }
 exit 0

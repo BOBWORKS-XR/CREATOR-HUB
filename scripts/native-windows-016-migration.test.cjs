@@ -339,6 +339,7 @@ test('receipt cannot conflate bounded native guide proof with full migration or 
 test('driver uses only ordinary guide controls, read-only inspection and one exact native confirmation per decision', () => {
   const source = fs.readFileSync(path.join(__dirname, 'native-windows-016-migration.cjs'), 'utf8');
   const main = source.slice(source.indexOf('async function main('));
+  const guide = source.slice(source.indexOf('async function runGuideRestart('), source.indexOf('async function runMigrationPhases('));
   assert.ok(main.indexOf('admission();') < main.indexOf('parseArgs(args)'));
   assert.ok(main.indexOf('admission();') < main.indexOf('fs.statSync'));
   assert.ok(main.includes("path.resolve('artifacts', `native-suite-${Date.now()}`)"));
@@ -348,25 +349,25 @@ test('driver uses only ordinary guide controls, read-only inspection and one exa
   assert.equal(valid.test('native-suite-016-migration-1234'), false);
   assert.equal(valid.test('native-016-migration-1234'), false);
   assert.deepEqual([...main.matchAll(/\.invoke\('([^']+)'/g)].map(match => match[1]), ['convergence_status']);
-  assert.equal([...main.matchAll(/locator\('#convergence-move'\)\.click\(\)/g)].length, 2);
-  assert.match(main, /nativeDecision\(false\)/); assert.match(main, /nativeDecision\(true\)/);
-  assert.doesNotMatch(main, /taskkill|\.kill\(|Stop-Process|dispatchEvent|addInitScript|\.route\(|exposeFunction|auth\.json|\.rmSync\(|unlinkSync|rm -rf/);
+  assert.equal([...guide.matchAll(/locator\('#convergence-move'\)\.click\(\)/g)].length, 2);
+  assert.match(guide, /nativeDecision\(false\)/); assert.match(guide, /nativeDecision\(true\)/);
+  assert.doesNotMatch(main + guide, /taskkill|\.kill\(|Stop-Process|dispatchEvent|addInitScript|\.route\(|exposeFunction|auth\.json|\.rmSync\(|unlinkSync|rm -rf/);
   assert.match(main, /assertOwnedDebugging\(state, child\.pid, hub\)/);
   assert.match(main, /@modelcontextprotocol\/sdk\/client\/stdio\.js/);
-  assert.match(main, /await oldClient\.listTools/); assert.match(main, /await connect\(f\.entry\)/);
-  assert.match(main, /verifyMigratedTarget\(entry, manifest/);
-  assert.ok(main.includes("manifest.modules.mcp.files['mcp/server/creator-works-mcp.mjs']"));
-  assert.match(main, /await close\(\); await launch\(\)/);
-  assert.match(main, /repeatStartupAccepted = true/);
+  assert.match(guide, /await oldClient\.listTools/); assert.match(source, /await connect\(entry\)/);
+  assert.match(guide, /verifyMigratedTarget\(entry, manifest/);
+  assert.ok(guide.includes("manifest.modules.mcp.files['mcp/server/creator-works-mcp.mjs']"));
+  assert.match(guide, /await close\(\); await launch\(\)/);
+  assert.match(guide, /repeatStartupAccepted = true/);
   assert.match(main, /if \(!report\.passed\) \{ report\.nativeGuideAccepted = false/);
   assert.match(main, /migrationAccepted: false, signedUpdateAccepted: false, releaseReady: false/);
 });
 
 test('seeded migration waits for its actual guide, not unrelated updater readiness', () => {
   const source = fs.readFileSync(path.join(__dirname, 'native-windows-016-migration.cjs'), 'utf8');
-  const terms = source.indexOf("await page.locator('#usage-terms-dialog').waitFor({ state: 'hidden' })");
-  const ready = source.indexOf("await page.locator('#convergence-move').waitFor({ state: 'visible' })", terms);
-  const firstClick = source.indexOf("await page.locator('#convergence-move').click()", ready);
+  const terms = source.indexOf("await live.page.locator('#usage-terms-dialog').waitFor({ state: 'hidden' })");
+  const ready = source.indexOf("await live.page.locator('#convergence-move').waitFor({ state: 'visible' })", terms);
+  const firstClick = source.indexOf("await live.page.locator('#convergence-move').click()", ready);
   const confirm = source.indexOf('await nativeDecision(false)', firstClick);
   assert.ok(terms > 0 && ready > terms && firstClick > ready && confirm > firstClick);
   assert.doesNotMatch(source.slice(terms, firstClick), /check-updates|convergence-later.*click/);
@@ -384,7 +385,7 @@ test('installed EXE and server checks respect their actual bounded artifact size
 
 test('runtime harness dependencies and helper files are checked before baseline installation', () => {
   const source = fs.readFileSync(path.join(__dirname, 'native-windows-016-migration.cjs'), 'utf8');
-  const installer = source.indexOf('installBaseline(path.join(input.baselines, baseline.asset)');
+  const installer = source.indexOf('installLegacyBaselines({ baselines, input, environment, report, localAppData:');
   assert.ok(installer > 0, 'The baseline installer call must remain present');
   for (const marker of ["require('@playwright/test').chromium", "sdk('@modelcontextprotocol/sdk/client/stdio.js')",
     "print('tomllib-ready')", "regular(path.resolve('scripts', helper))"]) {
@@ -399,12 +400,13 @@ test('data-only driver keeps provenance and fixed installer admission before all
   for (const marker of ['admission();', 'validateProvenance(', "assert.equal(hash(regular(installer, TARGET.bytes)), TARGET.installer)",
     'assert.equal(fs.statSync(installer).size, TARGET.bytes)']) assert.ok(main.indexOf(marker) >= 0 && main.indexOf(marker) < firstNative);
   assert.doesNotMatch(source, /installer-checksum\.json|builtin-manifest\.json|verifyStage\(|build-unified\.cjs|assertCandidateMetadata/);
-  const install = main.indexOf("execFileSync(installer, ['/UPDATE', '/S', '/NS']");
-  const inspect = main.indexOf('manifest = inspectInstalledResources(path.dirname(hub))');
-  const launch = main.indexOf("policy('Enable'); await launch()");
-  assert.ok(install > 0 && inspect > install && launch > inspect);
-  assert.match(main, /verifyMigratedTarget\(entry, manifest/);
-  assert.match(main, /inspectActiveRoute\(process\.env\.LOCALAPPDATA, manifest\)/);
+  const install = main.indexOf('await installMigrationTarget(');
+  const guideCall = main.indexOf('runMigrationPhases(setupInstall, setup => runGuideRestart(');
+  const installBody = source.slice(source.indexOf('async function installMigrationTarget('), source.indexOf('// Independently frozen'));
+  assert.ok(install > 0 && guideCall > install);
+  assert.ok(installBody.indexOf("run(installer, ['/UPDATE', '/S', '/NS']") < installBody.indexOf('inspect(path.dirname(hub))'));
+  assert.match(source, /verifyMigratedTarget\(entry, manifest/);
+  assert.match(source, /effects\.inspectActiveRoute\(effects\.localAppData, manifest\)/);
   assert.match(source, /pinnedRead\(path\.join\(directory, 'creator-hub\.exe'\), TARGET\.exe\)/);
   assert.match(source, /activeFile, 2048\), activeBytes/);
 });
