@@ -312,9 +312,10 @@ test('exact outgoing binding survives core.autocrlf=true checkout without relaxi
   const os = require('node:os');
   const { execFileSync } = require('node:child_process');
   const relative = 'scripts/fixtures/windows-outgoing-019-binding.json';
-  const rule = `${relative} -text\n`;
+  const rule = `${relative} -text`;
   const attributes = fs.readFileSync(path.join(__dirname, '../.gitattributes'), 'utf8');
-  assert.equal(attributes.split(rule).length, 2, 'One exact binding byte-preservation rule required');
+  const attributeLines = attributes.split(/\r?\n/);
+  assert.equal(attributeLines.filter(line => line === rule).length, 1, 'One exact binding byte-preservation rule required');
   const original = fs.readFileSync(bindingFile);
   assert.equal(original.includes(13), false, 'Frozen binding must retain its original LF bytes');
   const expectedHash = target.hash(original);
@@ -351,12 +352,17 @@ test('exact outgoing binding survives core.autocrlf=true checkout without relaxi
     assert.ok(git(['cat-file', 'blob', `${tree}:${relative}`]).equals(original), 'Source blob changed');
     return fs.readFileSync(path.join(worktree, relative));
   }
-  const preserved = checkout('protected', attributes);
-  assert.ok(preserved.equals(original)); assert.equal(target.hash(preserved), expectedHash);
-  const unprotected = checkout('unprotected-control', attributes.replace(rule, ''));
-  assert.notEqual(target.hash(unprotected), expectedHash, 'Control must reproduce the missing-rule failure');
-  assert.equal(unprotected.toString(), original.toString().replace(/\n/g, '\r\n'));
-  if (checkedInBinding.enabled) assert.equal(target.hash(unprotected), '5bf9c580a1028e758a0eba22c106d6c816fe91552cf13d6c47ca46437e409501');
+  for (const [label, eol] of [['lf', '\n'], ['crlf', '\r\n']]) {
+    const attrText = attributeLines.join(eol), formLines = attrText.split(/\r?\n/);
+    assert.equal(formLines.filter(line => line === rule).length, 1, `${label}: exact rule must be parsed`);
+    const preserved = checkout(`protected-${label}`, attrText);
+    assert.ok(preserved.equals(original)); assert.equal(target.hash(preserved), expectedHash);
+    const unprotected = checkout(`unprotected-${label}`, formLines.filter(line => line !== rule).join(eol));
+    assert.notEqual(target.hash(unprotected), expectedHash, 'Control must reproduce the missing-rule failure');
+    assert.equal(unprotected.toString(), original.toString().replace(/\n/g, '\r\n'));
+    if (checkedInBinding.enabled) assert.equal(target.hash(unprotected), '5bf9c580a1028e758a0eba22c106d6c816fe91552cf13d6c47ca46437e409501');
+    t.diagnostic(`${label.toUpperCase()} attributes: exact binding preserved; missing-rule CRLF control rejected`);
+  }
   assert.equal(refs(), '', 'Disposable checkout must not create refs');
   assert.equal(fs.existsSync(path.join(gitDir, 'index')), false, 'Only explicit disposable indexes may be used');
 });
