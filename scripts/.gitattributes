@@ -1,1 +1,5 @@
 windows-outgoing-017-review.json text eol=lf
+
+public-self-update-019*.cjs text eol=lf
+native-public-*-019.* text eol=lf
+fixtures/windows-public-019-binding.json -text

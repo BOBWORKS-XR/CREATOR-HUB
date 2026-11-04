@@ -1,0 +1,603 @@
+// Exact public018-to019 acceptance, only on a disposable hosted Windows runner.
+if (process.env.CREATOR_PUBLIC_SELF_UPDATE_019 !== '1') throw Error('Explicit public019 mode is required');
+if (process.env.GITHUB_ACTIONS !== 'true' || process.env.RUNNER_ENVIRONMENT !== 'github-hosted' || process.env.RUNNER_OS !== 'Windows') {
+  throw Error('Self-update installation is restricted to a disposable GitHub-hosted Windows runner.');
+}
+const incomingPreinstalled = process.env.CREATOR_INCOMING_MIGRATION_DIAGNOSTIC !== undefined;
+if (incomingPreinstalled) {
+  if (process.env.CREATOR_INCOMING_MIGRATION_DIAGNOSTIC !== '1') throw Error('Invalid preinstalled diagnostic mode.');
+  require('./windows-incoming-migration-owned-snapshot.cjs').admit();
+}
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const crypto = require('node:crypto');
+const { spawn, execFileSync } = require('node:child_process');
+const { chromium } = require('@playwright/test');
+const { checkLive } = require('./check-release-feed.cjs');
+const { verifyPluginsIcon } = require('./verify-plugins-icon.cjs');
+const { selectBaseline, assertPreviousStable } = require('./self-update-baselines.cjs');
+const { managedLocations } = require('./native-managed-target.cjs');
+const direct = require('./native-public-update-direct-019.cjs');
+const public12Lab = process.env.CREATOR_PUBLIC12_R2_LAB === '1' ? require('./windows-public12-r2-lab.cjs') : null;
+if (public12Lab) public12Lab.assertHost();
+const to = {
+  version: process.env.CREATOR_SELF_UPDATE_TARGET_VERSION || require('../package.json').version,
+  installer: process.env.CREATOR_SELF_UPDATE_INSTALLER_SHA256,
+  exe: process.env.CREATOR_SELF_UPDATE_EXECUTABLE_SHA256,
+};
+const public19 = process.env.CREATOR_PUBLIC_SELF_UPDATE_019 === '1' ? require('./public-self-update-019.cjs') : null;
+if (process.env.CREATOR_PUBLIC_SELF_UPDATE_019 && !public19) throw Error('Invalid public19 mode');
+if (public19) {
+  public19.admit();
+  assert.equal(to.installer, public19.binding.assets['Creator.Hub_0.1.19_x64-setup.exe'].sha256);
+  assert.equal(to.exe, public19.binding.executable.sha256);
+  public19.verifySdk();
+}
+assert.equal(to.version, require('../package.json').version, 'Update acceptance pins for the intended release; testing an older update is not sufficient');
+const directTarget = direct.directTarget(to.version, require('../package.json').version);
+const from = public12Lab ? { ...public12Lab.BASELINE } : selectBaseline(to.version);
+assert.match(to.installer || '', /^[a-f0-9]{64}$/, 'Supply the exact published target installer SHA-256');
+assert.match(to.exe || '', /^[a-f0-9]{64}$/, 'Supply the exact packaged target executable SHA-256');
+const fixture = process.env.CREATOR_HOSTED_UPDATE_FIXTURE ? JSON.parse(fs.readFileSync(process.env.CREATOR_HOSTED_UPDATE_FIXTURE, 'utf8')) : null;
+const labTarget = public12Lab || (directTarget ? require('./windows-incoming-016.cjs') : require('./self-update-lab-target.cjs'));
+const lab = process.env.CREATOR_SELF_UPDATE_LAB_CONFIG
+  ? labTarget.selectLab(process.env.CREATOR_SELF_UPDATE_LAB_CONFIG, to, fixture)
+  : null;
+if (to.version === '0.1.19' && !lab && !public12Lab) assert.ok(public19, 'Public19 requires immutable public admission');
+if (public12Lab) assert.ok(lab && directTarget, 'Exact public12 R2 signed lab contract is required');
+if (fixture) {
+  assert.equal(fixture.testOnly, true);
+  assert.equal(fixture.fromVersion, from.version);
+  assert.equal(fixture.toVersion, to.version);
+  assert.match(fixture.installerSha256, /^[a-f0-9]{64}$/);
+  assert.match(fixture.executableSha256, /^[a-f0-9]{64}$/);
+  from.installer = fixture.installerSha256; from.exe = fixture.executableSha256;
+}
+const hub = path.join(process.env.LOCALAPPDATA, 'Creator Hub', 'creator-hub.exe');
+let preinstalledFixture;
+if (incomingPreinstalled) {
+  assert.equal(process.env.CREATOR_INCOMING_MIGRATION_DIAGNOSTIC, '1');
+  assert.ok(public12Lab && lab && directTarget && !fixture, 'Only the exact signed012 diagnostic is admitted');
+  const owned = require('./windows-incoming-migration-owned-snapshot.cjs');
+  assert.deepEqual(lab.pins, owned.FEED_PINS);
+  const fixtureRoot = process.env.CREATOR_INCOMING_MIGRATION_FIXTURE_ROOT;
+  assert.ok(path.isAbsolute(fixtureRoot || ''));
+  const recorded = owned.readPreinstalledReceipt(process.env, fixtureRoot);
+  owned.checkPreinstalledFixture({ env: process.env, out: fixtureRoot, recorded });
+  preinstalledFixture = { owned, fixtureRoot, recorded };
+} else {
+  assert.equal(fs.existsSync(hub), false, 'Expected a fresh runner without Hub installed');
+}
+const out = incomingPreinstalled ? preinstalledFixture.owned.signedUpdateRoot(preinstalledFixture.fixtureRoot) : path.resolve('artifacts', `native-suite-${Date.now()}`);
+if (incomingPreinstalled) fs.mkdirSync(out); else fs.mkdirSync(out, { recursive: true });
+const report = { passed: false, from, to, harnessSource: process.env.GITHUB_SHA, checks: [], userMachineUsed: false, selfUpdateTested: false };
+if (public19) Object.assign(report, { kind: 'public-018-to-019', publicProof: public19.verifyPrepared(),
+  targetSource: public19.binding.source, publicBindingSha256: public19.bindingSha256, harnessAdditionalLaunch: false });
+report.discoveryKind = lab ? 'controlled-lab-not-public-discovery' : 'public-github-discovery';
+report.labDiscovery = Boolean(lab);
+report.publicDiscovery = !lab;
+if (lab) report.releaseReady = false;
+report.sourceKind = public12Lab ? 'targeted-public-0.1.12-not-previous-stable' : fixture ? 'version-only-runtime-fixture-not-public-stable' : 'unmodified-public-stable';
+if (public12Lab) Object.assign(report, { testOnlyDescriptor: true, nativeAcceptance: false, publicDiscovery: false, releaseReady: false });
+if (fixture) report.fixture = fixture;
+const policyState = path.join(out, 'webview-policy.json');
+const hash = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+function powershell(script, args = []) {
+  return execFileSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', path.resolve(script), ...args], { encoding: 'utf8', timeout: 30000, windowsHide: true });
+}
+function native(pid, action, value = '') { return powershell('scripts/native-public-window-019.ps1', ['-TargetPid', String(pid), '-ExpectedExecutable', hub, '-Action', action, '-Value', value]); }
+function policy(action) { return powershell('scripts/native-webview-policy.ps1', ['-Action', action, '-StateFile', policyState]); }
+function diagnostics() { return JSON.parse(powershell('scripts/native-startup-diagnostics.ps1').replace(/^\uFEFF/, '')); }
+async function retry(fn, seconds = 30) {
+  let last;
+  for (const end = Date.now() + seconds * 1000; Date.now() < end;) {
+    try { return await fn(); } catch (error) { last = error; await delay(250); }
+  }
+  throw last || Error('Timed out');
+}
+let child, browser, page, ownedPid, unrelatedRuntime;
+let baselineRecord, approvalLowerBoundTicks, restartedRecord, restartedCloseAttempted = false;
+function restartedInventory() {
+  return JSON.parse(powershell('scripts/native-unified-outgoing-process.ps1').replace(/^\uFEFF/, ''));
+}
+function restartedArgs() {
+  const close = require('./windows-incoming-migration-owned-close.cjs');
+  return { hub, inventory: restartedInventory, imageHash: () => hash(hub), checkRecord: close.checkRecord, closeOwned: close.closeOwned };
+}
+function closeRestartedOnce() {
+  assert.equal(restartedCloseAttempted, false, 'Restarted Hub close may not be retried');
+  restartedCloseAttempted = true;
+  try {
+    const updater = require('./windows-incoming-migration-updater.cjs');
+    const receipt = updater.closeRestarted({ ...restartedArgs(), record: restartedRecord });
+    report.restartedClose = receipt; ownedPid = undefined; return receipt;
+  } catch (error) { report.closeError = 'Restarted Hub close not verified.'; throw error; }
+}
+const runtimeStop = path.join(out, 'stop-unrelated-runtime');
+const apps = {
+  setup: path.join(process.env.LOCALAPPDATA, 'Creator Project Setup', 'creator-project-setup.exe'),
+  mcp: path.join(process.env.LOCALAPPDATA, 'Creator Works MCP', 'creator-works-mcp-launcher.exe'),
+};
+const configPath = path.join(process.env.APPDATA, 'creator-works-mcp', 'launcher-config.json');
+const backends = {}, frames = {};
+let configHash, directRequests, directSettings;
+async function connect(waitReady = true, updated = false) {
+  if (public12Lab) await retry(() => public12Lab.assertOwnedDebugging(diagnostics(), ownedPid, hub), 90);
+  browser = await retry(() => chromium.connectOverCDP('http://127.0.0.1:9238'), 90);
+  page = await retry(() => {
+    const found = browser.contexts().flatMap(context => context.pages()).find(p => p.url().includes('tauri.localhost'));
+    assert.ok(found); return found;
+  });
+  page.setDefaultTimeout(30000);
+  if (updated && directTarget) directRequests = direct.watchRequests(page);
+  page.on('pageerror', error => { (report.pageErrors ||= []).push(String(error)); });
+  await page.waitForFunction(() => window.CreatorHubNative);
+  const terms = page.locator('#usage-terms-dialog');
+  if (await terms.isVisible()) {
+    await page.locator('#usage-terms-checkbox').check();
+    await page.locator('#usage-terms-continue').click();
+    await page.waitForFunction(() => !document.querySelector('#usage-terms-dialog')?.open);
+    report.checks.push('Accepted the required usage terms through the visible dialog on the disposable runner');
+  }
+  if (updated && directTarget) {
+    await direct.checkProtocol(page, to.version);
+    await page.waitForFunction(() => document.querySelector('#convergence-dialog')?.open || !document.querySelector('#check-updates').disabled,
+      null, { timeout: 180000 });
+    if (incomingPreinstalled) {
+      await direct.deferFixtureMigration({ page,
+        readStatus: () => page.evaluate(() => window.CreatorHubNative.invoke('convergence_status')),
+        verifyFixture: () => preinstalledFixture.owned.checkFixtureBytes({ env: process.env, out: preinstalledFixture.fixtureRoot, recorded: preinstalledFixture.recorded }) });
+      report.migrationDeferred = true;
+    } else if (await page.locator('#convergence-dialog').isVisible()) {
+      await page.locator('#convergence-later').click();
+      report.migrationDeferred = true;
+    }
+  }
+  if (waitReady) await page.waitForFunction(() => !document.querySelector('#check-updates').disabled, null, { timeout: 180000 });
+  const state = diagnostics();
+  if (public12Lab) public12Lab.assertOwnedDebugging(state, ownedPid, hub);
+  assert.ok(state.listeners.length);
+  assert.ok(state.listeners.every(listener => ['127.0.0.1', '::1'].includes(listener.LocalAddress)));
+  return state;
+}
+async function showApps() {
+  await page.locator('#suite-trigger').click();
+  await page.locator('#suite-menu [data-view="hub"]').click();
+  await direct.checkHome(page);
+}
+async function showApp(app) {
+  await page.locator('#suite-trigger').click();
+  await page.locator(`#suite-menu [data-view="${app}"]`).click();
+}
+async function checkUpdatedDirectMenu() {
+  await page.getByRole('button', { name: 'Open menu', exact: true }).click();
+  const menu = page.getByRole('navigation', { name: 'Creator tools', exact: true });
+  await menu.waitFor({ state: 'visible' });
+  await page.waitForFunction(() => !document.querySelector('#suite-shell').getAnimations({ subtree: true })
+    .some(animation => animation.playState === 'running'));
+  for (const name of [/^Home\b/, /^MCP\b/, /^Setup \/ Repair\b/]) {
+    assert.equal(await menu.getByRole('button', { name }).isVisible(), true);
+  }
+  const layout = await menu.evaluate(element => {
+    const fits = node => node.scrollWidth <= node.clientWidth && node.scrollHeight <= node.clientHeight;
+    const within = (inner, outer) => inner.width > 0 && inner.height > 0
+      && inner.left >= outer.left - 1 && inner.right <= outer.right + 1
+      && inner.top >= outer.top - 1 && inner.bottom <= outer.bottom + 1;
+    return { fits: element.scrollWidth <= element.clientWidth, rows: [...element.querySelectorAll('.suite-item')].map(row => {
+      const title = row.querySelector('strong'), description = row.querySelector('small');
+      const status = row.querySelector('.suite-item-status');
+      const bounds = row.getBoundingClientRect(), titleBounds = title.getBoundingClientRect(), descriptionBounds = description.getBoundingClientRect();
+      const statusVisible = status && status.getClientRects().length > 0;
+      return { title: title.textContent.trim(), description: description.textContent.trim(),
+        icons: row.querySelectorAll('.icon,.suite-mark,img,svg,[role="img"]').length,
+        fits: fits(row) && fits(title) && fits(description) && within(titleBounds, bounds) && within(descriptionBounds, bounds)
+          && bounds.left >= element.getBoundingClientRect().left - 1 && bounds.right <= element.getBoundingClientRect().right + 1,
+        ordered: titleBounds.bottom <= descriptionBounds.top + 1
+          && (!statusVisible || descriptionBounds.bottom <= status.getBoundingClientRect().top + 1),
+        statusFits: !statusVisible || fits(status) && within(status.getBoundingClientRect(), bounds) };
+    }) };
+  });
+  assert.deepEqual(layout.rows.map(row => [row.title, row.description]), [
+    ['Home', 'Projects and updates'], ['MCP', 'AI bridge for Unity'],
+    ['Setup / Repair', 'Unity + Creator SDK project setup and repair'], ['Creator Converter', 'SideQuest / Coming soon'],
+  ]);
+  assert.ok(layout.fits && layout.rows.every(row => row.icons === 0 && row.fits && row.ordered && row.statusFits),
+    'Direct menu must be text-only, with contained non-overlapping text; wrapped titles and hidden status labels are allowed');
+  return layout;
+}
+function processes() {
+  return JSON.parse(execFileSync('powershell.exe', ['-NoProfile', '-Command',
+    "ConvertTo-Json -Compress -InputObject @(Get-CimInstance Win32_Process -Filter \"Name = 'creator-project-setup.exe' OR Name = 'creator-works-mcp-launcher.exe'\" | Select-Object ProcessId,ParentProcessId,ExecutablePath)"], { encoding: 'utf8', windowsHide: true }));
+}
+async function approveHosted(app) {
+  backends[app] = await retry(() => {
+    const found = processes().filter(p => p.ParentProcessId === ownedPid && p.ExecutablePath?.toLowerCase() === apps[app].toLowerCase());
+    assert.equal(found.length, 1); return found[0].ProcessId;
+  });
+  await retry(() => powershell('scripts/native-public-window-019.ps1', ['-TargetPid', String(backends[app]), '-ExpectedExecutable', apps[app],
+    '-Action', 'button', '-Value', app === 'mcp' ? 'Enable MCP controls' : 'Open in Hub']));
+}
+async function readyFrame(app) {
+  frames[app] = await retry(async () => {
+    const element = await page.locator(`#${app}-host-frame`).elementHandle();
+    const frame = element && await element.contentFrame(); assert.ok(frame); return frame;
+  });
+  if (app === 'setup') await frames[app].locator('#requirements .requirement').first().waitFor({ timeout: 90000 });
+  else await frames[app].waitForFunction(() => !document.querySelector('#workspaceControls').disabled);
+}
+async function checkUpdatedBuiltIns() {
+  const inventory = await page.evaluate(() => window.CreatorHubNative.invoke('app_inventory', { check: false, preview: true }));
+  assert.equal(inventory.supported, true);
+  assert.equal(inventory.apps.length, 2);
+  assert.ok(inventory.apps.every(app => app.builtIn && app.trusted && !app.issue));
+  if (directTarget) {
+    if (incomingPreinstalled) preinstalledFixture.owned.checkFixtureBytes({ env: process.env, out: preinstalledFixture.fixtureRoot, recorded: preinstalledFixture.recorded });
+    report.directServices = await direct.checkPages({ page, version: to.version, showApp: app => labTarget.showPage(page, app), processes, requests: directRequests,
+      expectedMcpConflict: incomingPreinstalled, verifyFixture: incomingPreinstalled ? () => preinstalledFixture.owned.checkFixtureBytes({ env: process.env, out: preinstalledFixture.fixtureRoot, recorded: preinstalledFixture.recorded }) : undefined,
+      screenshot: app => page.screenshot({ path: path.join(out, `direct-${app}.png`), animations: 'disabled' }) });
+    if (incomingPreinstalled) {
+      preinstalledFixture.owned.checkFixtureBytes({ env: process.env, out: preinstalledFixture.fixtureRoot, recorded: preinstalledFixture.recorded });
+      report.managedRouteReconnectTested = false; report.directHubUpdateTested = true;
+      report.checks.push('Setup service checked; MCP saved-settings conflict remained locked without review or service call; seeded fixture rechecked.');
+      return;
+    }
+    const locations = managedLocations(process.env.LOCALAPPDATA);
+    report.directServices.mcp = await direct.prepareManagedRoute(page, { active: locations.active,
+      clientConfig: path.join(process.env.USERPROFILE, '.codex', 'config.toml'),
+      approve: () => retry(() => native(ownedPid, 'button', 'Enable managed routing')) });
+  } else {
+  for (const app of ['setup', 'mcp']) {
+    await showApp(app);
+    if (app === 'mcp') await retry(() => native(ownedPid, 'button', 'Enable managed routing'));
+    const backend = await retry(() => {
+      const matches = processes().filter(process => process.ParentProcessId === ownedPid);
+      const name = app === 'mcp' ? 'creator-works-mcp-launcher.exe' : 'creator-project-setup.exe';
+      const found = matches.filter(process => path.basename(process.ExecutablePath || '').toLowerCase() === name);
+      assert.equal(found.length, 1); return found[0];
+    });
+    apps[app] = backend.ExecutablePath;
+    backends[app] = backend.ProcessId;
+    await retry(() => powershell('scripts/native-public-window-019.ps1', ['-TargetPid', String(backend.ProcessId),
+      '-ExpectedExecutable', backend.ExecutablePath, '-Action', 'button', '-Value', app === 'mcp' ? 'Enable MCP controls' : 'Open in Hub']));
+    await readyFrame(app);
+    if (app === 'mcp') await frames[app].locator('#connection-guide-close').click();
+  }
+  }
+  const sdk = public19 ? public19.verifySdk() : require('node:module').createRequire(path.resolve('modules/mcp/package.json'));
+  const { Client } = sdk('@modelcontextprotocol/sdk/client/index.js');
+  const { StdioClientTransport } = sdk('@modelcontextprotocol/sdk/client/stdio.js');
+  const command = managedLocations(process.env.LOCALAPPDATA).command;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const client = new Client({ name: 'signed-update-managed-reconnect', version: '1' });
+    const transport = new StdioClientTransport({ command, args: [], stderr: 'pipe' });
+    try {
+      await client.connect(transport);
+      assert.ok((await client.listTools()).tools.some(tool => tool.name === 'get_mcp_reference'));
+      const response = await client.callTool({ name: 'get_mcp_reference', arguments: { source: 'creator-docs', query: 'PersistFileBridge', limit: 1 } });
+      assert.equal(JSON.parse(response.content[0].text).success, true);
+      if (public19) report.sdkConnections = (report.sdkConnections || 0) + 1;
+    } finally { await client.close(); }
+  }
+  report.managedRouteReconnectTested = true;
+  if (directTarget) {
+    await direct.checkCleanDocument(page, directRequests);
+    assert.deepEqual(processes(), [], 'SDK service reconnect must not launch module GUIs');
+    report.directHubUpdateTested = true;
+    report.checks.push(`Exact ${to.version} native direct MCP/Setup pages return real internal-service results, retain a navigation draft, make no renderer Plugins catalogue/asset requests and launch no private GUI; the signed router connects and reconnects through the unchanged official SDK checks. Not native-HTTP capture, live AI or Unity acceptance.`);
+    return;
+  }
+  report.checks.push('After signed installation/restart, actual built-in Setup/MCP open through native consent; signed managed router connects and reconnects with the official SDK and serves bundled Creator docs. Not live AI/model or Editor acceptance.');
+  for (const app of ['setup', 'mcp']) {
+    await showApp(app);
+    await page.locator('#hosted-stop').click();
+    await retry(() => native(ownedPid, 'button', 'Close view'));
+    await retry(() => assert.ok(!processes().some(process => process.ProcessId === backends[app])));
+  }
+}
+async function installCompanions() {
+  const pins = require('./prerelease-apps.json');
+  for (const [app, exe] of Object.entries(apps)) {
+    assert.equal(fs.existsSync(exe), false);
+    const pin = pins[app], installer = path.join(out, pin.assetName);
+    const repo = app === 'setup' ? 'CREATOR-PROJECT-SETUP' : 'CREATOR-WORKS-UNITY-MCP';
+    execFileSync('curl.exe', ['--fail', '--location', '--silent', '--show-error', '--max-time', '180', '--output', installer,
+      `https://github.com/BOBWORKS-XR/${repo}/releases/download/v${pin.version}/${pin.assetName}`], { windowsHide: true, timeout: 190000 });
+    assert.equal(hash(installer), pin.installerSha256);
+    const setup = spawn(installer, ['/S', '/NS'], { windowsHide: true, stdio: 'ignore' });
+    await retry(() => assert.equal(setup.exitCode, 0), 120);
+    assert.equal(hash(exe), pin.executableSha256);
+  }
+  assert.equal(fs.existsSync(configPath), false);
+  fs.mkdirSync(path.dirname(configPath), { recursive: true });
+  fs.writeFileSync(configPath, JSON.stringify({ channels: [], active_channel_id: null, auto_start: false,
+    mcp_server_path: path.join(path.dirname(apps.mcp), 'server', 'creator-works-mcp.mjs'), tool_groups: 'core',
+    enable_custom_scripts: false, allow_all_tests: true, automatic_update_checks: false }), { flag: 'wx' });
+  configHash = hash(configPath);
+  await startUnrelatedRuntime();
+}
+async function startUnrelatedRuntime() {
+  unrelatedRuntime = spawn(process.execPath, [path.resolve('scripts/owned-hub-fixture.cjs'), runtimeStop], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+  let output = '';
+  unrelatedRuntime.stdout.on('data', chunk => { output += chunk; });
+  await retry(() => { assert.match(output, /ready/); assert.equal(unrelatedRuntime.exitCode, null); });
+}
+(async () => {
+  report.feed = lab ? labTarget.discoveryScope(lab) : await checkLive(to.version);
+  assertPreviousStable(report.feed.previousStable, from);
+  const installer = fixture ? fixture.installerPath : lab ? process.env.CREATOR_SELF_UPDATE_LAB_BASELINE : path.join(out, `Creator-Hub-${from.version}-Windows-setup.exe`);
+  if (lab) assert.ok(typeof installer === 'string' && path.isAbsolute(installer), 'Pre-download the pinned public baseline before enabling the lab proxy');
+  if (!fixture && !lab) execFileSync('curl.exe', ['--fail', '--location', '--silent', '--show-error', '--max-time', '120', '--output', installer,
+    `https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/download/v${from.version}/${from.asset}`], { windowsHide: true, timeout: 130000 });
+  assert.equal(hash(installer), from.installer);
+  if (!incomingPreinstalled) {
+    const setup = spawn(installer, ['/S', '/NS'], { windowsHide: true, stdio: 'ignore' });
+    await retry(() => assert.equal(setup.exitCode, 0), 120);
+  }
+  assert.equal(hash(hub), from.exe);
+  if (lab) labTarget.checkBaseline(lab, installer, hub);
+  if (fixture) await installCompanions();
+  else if (directTarget) await startUnrelatedRuntime();
+  const sentinel = path.join(path.dirname(hub), 'ci-self-update-sentinel.txt');
+  fs.writeFileSync(sentinel, 'Preserve unmanaged installed content.', { flag: 'wx' });
+  const sentinelHash = hash(sentinel);
+  policy('Enable');
+  child = spawn(hub, [], { windowsHide: true, stdio: 'ignore', env: { ...process.env,
+    WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: '--remote-debugging-port=9238' } });
+  ownedPid = child.pid;
+  report.originalPid = child.pid;
+  await connect();
+  assert.equal((await page.locator('.footer-version').innerText()).trim(), from.version);
+  if (directTarget) directSettings = direct.settingsSnapshot(process.env.APPDATA, process.env.LOCALAPPDATA);
+  if (public19) {
+    report.settingsBefore = directSettings;
+    baselineRecord = public19.observeRoot({ rows: restartedInventory(), pid: child.pid, hub, expectedHash: from.exe, imageHash: () => hash(hub) });
+    assert.equal(baselineRecord.parentPid, process.pid);
+    report.beforeRoot = baselineRecord;
+  }
+  if (fixture) {
+    for (const app of Object.keys(apps)) {
+      await showApp(app);
+      await approveHosted(app);
+      await readyFrame(app);
+    }
+    report.checks.push('Navigating to installed apps automatically opens each Hub view after its native permission prompt');
+    await showApp('setup');
+    await frames.setup.locator('#project-name').fill('Keep this draft when update is cancelled');
+    report.beforeBackendPids = { ...backends };
+  }
+  await showApps();
+  await retry(async () => assert.equal(await page.locator('#hub-update-button').isEnabled(), true), 120);
+  assert.ok((await page.locator('#hub-update-status').innerText()).includes(`Version ${to.version}`));
+  assert.equal(await page.locator('#hub-update-warning').isVisible(), false);
+  const state = await page.evaluate(() => window.CreatorHubNative.invoke('hub_update_status', { online: false, preview: true }));
+  assert.equal(state.currentVersion, from.version);
+  assert.equal(state.availableVersion, to.version);
+  assert.equal(state.installBlocked, null);
+  assert.equal(state.warning, null);
+  const preference = 'self-update-preserves-storage';
+  await page.evaluate(value => localStorage.setItem('creator-hub.ci-self-update', value), preference);
+  report.before = state;
+  report.checks.push(`${report.sourceKind} ${from.version} discovers ${lab ? 'controlled-lab' : 'public'} signed ${to.version} and enables its actual Update Hub button`);
+  await page.screenshot({ path: path.join(out, 'before-update.png') });
+  await page.locator('#hub-update-button').click();
+  await retry(() => native(child.pid, 'button', 'Not now'));
+  await retry(async () => assert.equal(await page.locator('#hub-update-button').isEnabled(), true));
+  assert.equal(child.exitCode, null);
+  assert.equal(hash(hub), from.exe);
+  assert.equal(hash(sentinel), sentinelHash);
+  if (directTarget) {
+    assert.deepEqual(direct.settingsSnapshot(process.env.APPDATA, process.env.LOCALAPPDATA), directSettings);
+    assert.equal(unrelatedRuntime.exitCode, null);
+  }
+  if (fixture) {
+    assert.equal(await frames.setup.locator('#project-name').inputValue(), 'Keep this draft when update is cancelled');
+    const live = processes().map(p => p.ProcessId);
+    assert.ok(Object.values(backends).every(pid => live.includes(pid)));
+    assert.equal(hash(configPath), configHash);
+    assert.equal(unrelatedRuntime.exitCode, null);
+    report.checks.push('Native Cancel leaves both hosted backends, unsaved Setup form, MCP settings and unrelated Node runtime intact');
+  }
+  report.checks.push(`Native Not now preserves the running ${from.version} executable and settings`);
+  if (public19) report.cancelPreserved = true;
+  if (incomingPreinstalled) {
+    const updater = require('./windows-incoming-migration-updater.cjs');
+    baselineRecord = updater.captureBaseline({ ...restartedArgs(), pid: child.pid, parentPid: process.pid });
+  }
+  if (public19) approvalLowerBoundTicks = public19.ticks();
+  await page.locator('#hub-update-button').click();
+  if (incomingPreinstalled) {
+    approvalLowerBoundTicks = require('./windows-incoming-migration-updater.cjs').utcTickLowerBound(Date.now());
+    native(child.pid, 'button', 'Update Hub');
+  }
+  else await retry(() => native(child.pid, 'button', 'Update Hub'));
+  await retry(() => assert.equal(child.exitCode, 0), 180);
+  report.originalExitCode = child.exitCode;
+  if (browser) { await browser.close().catch(() => {}); browser = null; page = null; }
+  await retry(() => assert.equal(hash(hub), to.exe), 180);
+  // Do not manually launch the replacement: automatic restart is the assertion.
+  const restarted = await retry(() => {
+    const state = diagnostics();
+    const matches = state.processes.filter(p => p.ExecutablePath?.toLowerCase() === hub.toLowerCase() && p.ProcessId !== child.pid);
+    assert.equal(matches.length, 1); return matches[0];
+  }, 120);
+  ownedPid = restarted.ProcessId;
+  report.restartedPid = ownedPid;
+  if (public19) {
+    restartedRecord = public19.observeRoot({ rows: restartedInventory(), pid: ownedPid, hub, expectedHash: to.exe, imageHash: () => hash(hub) });
+    public19.checkRestart(baselineRecord, restartedRecord, approvalLowerBoundTicks);
+    report.afterRoot = restartedRecord;
+    report.approvalLowerBoundTicks = approvalLowerBoundTicks;
+    report.automaticRestart = true;
+    report.resourceProbe = { phase: 'after-automatic-root', attempts: 1, passed: false };
+    report.installedResources = public19.verifyResources(path.dirname(hub));
+    report.resourceProbe.passed = true;
+  }
+  if (incomingPreinstalled) {
+    const updater = require('./windows-incoming-migration-updater.cjs');
+    const captured = updater.captureRestarted({ ...restartedArgs(), pid: ownedPid });
+    const observation = updater.observeRestart({ ...restartedArgs(), baseline: baselineRecord,
+      approvalLowerBoundTicks, restarted: captured });
+    restartedRecord = captured; report.observedRestart = observation;
+  }
+  await connect(!fixture, true);
+  if (directTarget && !fixture) await direct.checkHome(page);
+  if (fixture) {
+    if (directTarget) await direct.checkRestored(page);
+    else {
+    for (const app of Object.keys(apps)) await approveHosted(app);
+    await page.waitForFunction(() => document.querySelector('#hosted-restore-message').textContent.includes('views have reopened'));
+    }
+    await page.waitForFunction(() => !document.querySelector('#check-updates').disabled);
+    assert.equal(fs.existsSync(path.join(process.env.LOCALAPPDATA, 'CreatorHub', 'hub-updates', 'hosted-restore.json')), false);
+    assert.equal(hash(configPath), configHash);
+    assert.equal(unrelatedRuntime.exitCode, null);
+    const live = processes().map(p => p.ProcessId);
+    assert.ok(Object.values(report.beforeBackendPids).every(pid => !live.includes(pid)), 'All original owned backends exited');
+    if (directTarget) {
+      assert.deepEqual(live, [], 'Restored 0.1.16 tools must not reopen old private GUIs');
+      await direct.showHome(page);
+      report.directViewsUpdateTested = true;
+      report.checks.push('Legacy update restoration selects direct Hub tools, consumes the ticket, preserves MCP settings and the unrelated runtime, and does not reopen private GUIs.');
+    } else {
+    assert.equal(await page.locator('#view-hub').isVisible(), true, 'Restoring views keeps Apps as the initial page');
+    for (const app of Object.keys(apps)) {
+      await showApp(app);
+      await readyFrame(app);
+      await page.screenshot({ path: path.join(out, `restored-${app}.png`), animations: 'disabled' });
+    }
+    await showApps();
+    report.afterBackendPids = { ...backends };
+    report.hostedViewsUpdateTested = true;
+    report.checks.push('New updater closes owned views automatically, exact signed public target installs/restarts, both real views reopen after native permission, consumed ticket and unchanged MCP settings; unrelated Node survives');
+    }
+  }
+  assert.equal((await page.locator('.footer-version').innerText()).trim(), to.version);
+  assert.equal(await page.evaluate(() => localStorage.getItem('creator-hub.ci-self-update')), preference);
+  assert.equal(hash(sentinel), sentinelHash);
+  const registry = execFileSync('reg.exe', ['query', 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Creator Hub', '/v', 'DisplayVersion'], { encoding: 'utf8', windowsHide: true });
+  assert.equal(registry.match(/DisplayVersion\s+REG_SZ\s+(\S+)/)?.[1], to.version);
+  if (directTarget) await direct.checkHome(page);
+  else assert.equal(await page.locator('#view-hub').isVisible(), true, 'Restart opens Apps by default');
+  await page.screenshot({ path: path.join(out, 'after-restart.png') });
+  if (directTarget) {
+    report.directMenu = await checkUpdatedDirectMenu();
+    await page.locator('#suite-shell').screenshot({ path: path.join(out, 'updated-app-menu.png') });
+    report.checks.push('Restarted installed build shows semantic Home/MCP/Setup / Repair navigation, requested descriptions and text-only rows without overflow or overlap; titles may wrap and built-in status labels may be hidden');
+  } else {
+  await page.locator('#suite-trigger').click();
+  await page.waitForFunction(() => document.querySelector('#suite-shell').getBoundingClientRect().width >= 303);
+  const menuLayout = await page.evaluate(() => ['mcp', 'setup'].map(app => {
+    const row = document.querySelector(`#suite-menu [data-view="${app}"]`);
+    const title = row.querySelector('strong'), description = row.querySelector('small');
+    const status = document.querySelector(`#menu-status-${app}`);
+    return { app, titleFits: title.getBoundingClientRect().height <= parseFloat(getComputedStyle(title).lineHeight) + 1,
+      statusBelow: status.getBoundingClientRect().top >= description.getBoundingClientRect().bottom,
+      fits: row.scrollWidth <= row.clientWidth };
+  }));
+  assert.ok(menuLayout.every(row => row.titleFits && row.statusBelow && row.fits));
+  await page.locator('#suite-shell').screenshot({ path: path.join(out, 'updated-app-menu.png') });
+  report.checks.push('Restarted installed build shows the wider menu with single-line app names and status beneath each description');
+  }
+  if (directTarget) {
+    await direct.checkCleanDocument(page, directRequests);
+    await page.keyboard.press('Escape');
+    report.pluginsRemoved = true;
+  } else {
+  await page.locator('#suite-menu [data-view="plugins"]').click();
+  report.pluginsIcon = await verifyPluginsIcon(page, '#suite-trigger .plugins-mark img', hash('src/icons/creator-plugins.png'));
+  await page.locator('#suite-menu').waitFor({ state: 'hidden' });
+  await page.screenshot({ path: path.join(out, 'updated-plugins-icon.png') });
+  report.checks.push('Restarted app opens Apps and renders the exact accepted transparent Plugins icon');
+  }
+  if (lab) await checkUpdatedBuiltIns();
+  if (directTarget && !lab) await checkUpdatedBuiltIns();
+  if (directTarget) {
+    assert.deepEqual(direct.settingsSnapshot(process.env.APPDATA, process.env.LOCALAPPDATA), directSettings);
+    assert.equal(unrelatedRuntime.exitCode, null);
+    assert.deepEqual(report.pageErrors || [], []);
+    report.checks.push('Native cancellation and automatic signed restart preserve the exact MCP/legacy/Setup settings images, unmanaged sentinel, browser preference and unrelated Node runtime.');
+    if (public19) {
+      report.settingsAfter = direct.settingsSnapshot(process.env.APPDATA, process.env.LOCALAPPDATA);
+      report.settingsPreserved = true;
+    }
+  }
+  report.checks.push(`Actual in-app consent downloads/verifies, exits ${from.version}, installs exact ${to.version} and automatically restarts without a manual launch`);
+  report.checks.push(`Restarted footer and uninstall registry show ${to.version}; browser preference and unmanaged installation file survive`);
+  if (fixture && !directTarget) {
+    for (const app of Object.keys(apps)) {
+      await showApp(app);
+      await page.locator('#hosted-stop').click();
+      await retry(() => native(ownedPid, 'button', 'Close view'));
+      await retry(() => assert.ok(!processes().some(p => p.ProcessId === backends[app])));
+    }
+  }
+  if (incomingPreinstalled) {
+    preinstalledFixture.owned.checkFixtureBytes({ env: process.env, out: preinstalledFixture.fixtureRoot, recorded: preinstalledFixture.recorded });
+    closeRestartedOnce();
+  }
+  report.selfUpdateTested = true;
+  report.passed = true;
+})().catch(error => {
+  report.error = String(error.stack || error);
+  if (error.resourceDiagnostic) report.resourceFailure = error.resourceDiagnostic;
+  process.exitCode = 1;
+}).finally(async () => {
+  if (!report.passed) {
+    try { if (page) report.pageState = await page.evaluate(() => ({
+      view: document.querySelector('.tool-detail:not(.hidden)')?.id || null,
+      hostSetupDisabled: document.querySelector('#host-setup-button')?.disabled,
+      hostMcpDisabled: document.querySelector('#host-mcp-button')?.disabled,
+      setupStatus: document.querySelector('#compatibility-status')?.textContent,
+      setupDetail: document.querySelector('#compatibility-detail')?.textContent,
+      toolState: document.querySelector('#tool-state')?.textContent,
+      checkUpdatesDisabled: document.querySelector('#check-updates')?.disabled,
+      autoDownload: document.querySelector('#auto-download')?.checked,
+      catalogStatus: document.querySelector('#catalog-status')?.textContent,
+      hubUpdateStatus: document.querySelector('#hub-update-status')?.textContent,
+      progressVisible: !document.querySelector('#operation-progress')?.classList.contains('hidden'),
+      progressMessage: document.querySelector('#progress-message')?.textContent,
+      progressBytes: document.querySelector('#progress-bytes')?.textContent,
+      cancelDownloadVisible: !document.querySelector('#cancel-download')?.classList.contains('hidden'),
+      actionError: document.querySelector('#action-error')?.textContent,
+    })); } catch (error) { report.pageStateError = String(error); }
+    try { fs.writeFileSync(path.join(out, 'startup.json'), JSON.stringify(diagnostics(), null, 2)); } catch (error) { report.diagnosticError = String(error); }
+    try { if (ownedPid) fs.writeFileSync(path.join(out, 'dialogs.json'), native(ownedPid, 'snapshot')); } catch (error) { report.dialogError = String(error); }
+    try { if (page) await page.screenshot({ path: path.join(out, 'failure.png') }); } catch {}
+  }
+  if (incomingPreinstalled && ownedPid && child && ownedPid === child.pid && child.exitCode === null) {
+    try { native(ownedPid, 'close'); } catch {}
+  } else if (incomingPreinstalled && ownedPid) {
+    try {
+      const updater = require('./windows-incoming-migration-updater.cjs');
+      const result = updater.cleanupObservedRestart({ record: restartedRecord, attempted: restartedCloseAttempted, close: closeRestartedOnce });
+      if (result.state !== 'verified') { report.closeError = 'Restarted Hub cleanup unverified.'; report.passed = false; process.exitCode = 1; }
+    } catch (error) { report.closeError = String(error); report.passed = false; process.exitCode = 1; }
+  } else if (public19 && restartedRecord) {
+    try {
+      const current = public19.observeRoot({ rows: restartedInventory(), pid: restartedRecord.pid, hub, expectedHash: to.exe, imageHash: () => hash(hub) });
+      assert.deepEqual(current, restartedRecord);
+      native(restartedRecord.pid, 'close');
+      await retry(() => assert.equal(restartedInventory().some(row => row.pid === restartedRecord.pid && row.startTicks === restartedRecord.startTicks), false));
+      report.rootCleanupVerified = true;
+    } catch (error) { report.closeError = String(error); report.passed = false; process.exitCode = 1; }
+  } else if (!incomingPreinstalled) {
+    try { if (ownedPid) native(ownedPid, 'close'); } catch {}
+  }
+  if (browser) await browser.close().catch(() => {});
+  try { policy('Restore'); report.policyRestored = true; } catch (error) { report.policyError = String(error); report.passed = false; process.exitCode = 1; }
+  if (child?.exitCode === null) child.unref();
+  if (unrelatedRuntime?.exitCode === null) {
+    fs.writeFileSync(runtimeStop, 'exit', { flag: 'wx' });
+    try { await retry(() => assert.equal(unrelatedRuntime.exitCode, 0)); if (public19) report.runtimeCleanupVerified = true; }
+    catch (error) { report.runtimeCleanupError = String(error); report.passed = false; process.exitCode = 1; }
+  }
+  if (public19 && report.passed) {
+    if (report.rootCleanupVerified !== true || report.runtimeCleanupVerified !== true || report.sdkConnections !== 2) {
+      report.error = 'Public19 cleanup or SDK reconnect incomplete'; report.passed = false; process.exitCode = 1;
+    }
+  }
+  fs.writeFileSync(path.join(out, 'self-update-report.json'), JSON.stringify(report, null, 2));
+  console.log(JSON.stringify({ out, ...report }, null, 2));
+});

@@ -3,15 +3,8 @@ on:
   workflow_dispatch:
     inputs:
       target_version:
-        description: Exact public release version to test from the previous stable
+        description: Exact public version; this reviewed harness accepts only 0.1.19
         required: true
-        type: string
-      hosted_fixture:
-        description: Also test the new outgoing updater using a version-only runtime fixture, not public stable
-        type: boolean
-        default: false
-      fixture_run:
-        description: Reuse a test-only hosted fixture from an earlier run with identical runtime source
         type: string
 permissions:
   contents: read
@@ -19,104 +12,68 @@ permissions:
 jobs:
   self-update:
     runs-on: windows-latest
-    timeout-minutes: 45
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v6
+        env:
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: core.autocrlf
+          GIT_CONFIG_VALUE_0: 'false'
         with:
           persist-credentials: false
       - uses: actions/setup-node@v6
         with:
           node-version: 24
           cache: npm
+      - name: Validate exact public target
+        shell: pwsh
+        env:
+          REQUESTED_TARGET_VERSION: ${{ inputs.target_version }}
+        run: |
+          if ($env:REQUESTED_TARGET_VERSION -cne '0.1.19') { throw 'Only reviewed public 0.1.18 to 0.1.19 acceptance is allowed.' }
+          if ((Get-Content package.json -Raw | ConvertFrom-Json).version -cne '0.1.19') { throw 'Unexpected source version.' }
       - run: npm ci
-      - run: node --test scripts/self-update-baselines.test.cjs scripts/check-release-feed.test.cjs
-      - name: Read the packaged target version
-        id: target
-        shell: pwsh
+      - name: Test public binding and direct-mode safeguards
+        run: node --test scripts/self-update-baselines.test.cjs scripts/check-release-feed.test.cjs scripts/public-self-update-019.test.cjs scripts/native-public-update-019.test.cjs
+      - name: Checkout immutable SDK dependency inputs without building the app
+        uses: actions/checkout@v6
         env:
-          REQUESTED_TARGET_VERSION: ${{ inputs.target_version }}
-        run: |
-          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
-          if ($env:REQUESTED_TARGET_VERSION -notmatch '^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$' -or $env:REQUESTED_TARGET_VERSION -ne $version) { throw 'Target version must match the checked-out app version.' }
-          "version=$version" >> $env:GITHUB_OUTPUT
-      - name: Select the pinned previous public stable baseline
-        id: baseline
-        shell: pwsh
-        run: |
-          $selected = node scripts/self-update-baselines.cjs
-          if ($LASTEXITCODE -ne 0) { throw 'Public self-update baseline selection failed.' }
-          $baseline = $selected | ConvertFrom-Json
-          "version=$($baseline.version)" >> $env:GITHUB_OUTPUT
-      - uses: dtolnay/rust-toolchain@1.99.0
-        if: ${{ inputs.hosted_fixture }}
-      - name: Build test-only version fixture from current runtime source
-        if: ${{ inputs.hosted_fixture && inputs.fixture_run == '' }}
-        shell: pwsh
-        env:
-          SELECTED_FROM_VERSION: ${{ steps.baseline.outputs.version }}
-        run: ./scripts/Build-HostedUpdateFixture.ps1 -FromVersion $env:SELECTED_FROM_VERSION
-      - uses: actions/upload-artifact@v4
-        if: ${{ inputs.hosted_fixture && inputs.fixture_run == '' }}
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: core.autocrlf
+          GIT_CONFIG_VALUE_0: 'false'
         with:
-          name: TEST-ONLY-hosted-update-fixture
-          path: dist/Creator-Hub-hosted-update-fixture/
-          retention-days: 7
-          if-no-files-found: error
-      - name: Reuse the exact test-only hosted fixture
-        if: ${{ inputs.hosted_fixture && inputs.fixture_run != '' }}
-        uses: actions/download-artifact@v4
-        with:
-          name: TEST-ONLY-hosted-update-fixture
-          path: dist/Creator-Hub-hosted-update-fixture/
-          run-id: ${{ inputs.fixture_run }}
-          github-token: ${{ github.token }}
-      - name: Verify reused fixture matches the runtime source
-        if: ${{ inputs.hosted_fixture && inputs.fixture_run != '' }}
+          ref: ed3e7dabc2e83fea8b7cadce63bbeb502fed2306
+          path: .public-sdk
+          persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /modules/mcp/package.json
+            /modules/mcp/package-lock.json
+      - name: Install immutable official SDK for reconnect checks
+        run: npm ci --prefix .public-sdk/modules/mcp --ignore-scripts
+      - name: Download unauthenticated public assets and verify every payload
         shell: pwsh
         env:
-          REQUESTED_TARGET_VERSION: ${{ inputs.target_version }}
-          SELECTED_FROM_VERSION: ${{ steps.baseline.outputs.version }}
+          CREATOR_PUBLIC_SELF_UPDATE_019: '1'
+          CREATOR_SELF_UPDATE_TARGET_VERSION: '0.1.19'
         run: |
-          $fixture = Get-Content dist/Creator-Hub-hosted-update-fixture/fixture.json -Raw | ConvertFrom-Json
-          if ($fixture.testOnly -ne $true -or $fixture.fromVersion -ne $env:SELECTED_FROM_VERSION -or $fixture.toVersion -ne $env:REQUESTED_TARGET_VERSION) { throw 'Reused fixture has the wrong scope.' }
-          if ($fixture.sourceRevision -notmatch '^[a-f0-9]{40}$') { throw 'Reused fixture has no source revision.' }
-          git fetch --no-tags origin $fixture.sourceRevision
-          if ($LASTEXITCODE -ne 0) { throw 'Fixture source revision is unavailable.' }
-          git diff --quiet $fixture.sourceRevision HEAD -- package.json package-lock.json src src-tauri
-          if ($LASTEXITCODE -ne 0) { throw 'Runtime source changed since the fixture was built.' }
-      - name: Download and pin the exact published Windows update target
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REQUESTED_TARGET_VERSION: ${{ inputs.target_version }}
-        run: |
-          $version = $env:REQUESTED_TARGET_VERSION
+          node scripts/public-self-update-019.cjs prepare
+          if ($LASTEXITCODE -ne 0) { throw 'Public19 input binding failed.' }
           $folder = 'artifacts/self-update-target'
-          New-Item -ItemType Directory -Force -Path $folder | Out-Null
-          gh release download "v$version" --repo BOBWORKS-XR/CREATOR-HUB --pattern "Creator.Hub_${version}_x64-setup.exe" --pattern SHA256SUMS.txt --dir $folder
-          if ($LASTEXITCODE -ne 0) { throw 'Published update target download failed.' }
-          $assetName = "Creator.Hub_${version}_x64-setup.exe"
-          $expected = (Get-Content (Join-Path $folder 'SHA256SUMS.txt') | Where-Object { $_ -match ("  " + [regex]::Escape($assetName) + '$') } | ForEach-Object { ($_ -split '\s+')[0] })
-          if (@($expected).Count -ne 1) { throw 'Published checksum entry is missing or ambiguous.' }
-          $installer = Join-Path $folder $assetName
-          if ((Get-FileHash $installer -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expected) { throw 'Published installer differs from its checksum.' }
+          $installer = Join-Path $folder 'Creator.Hub_0.1.19_x64-setup.exe'
           $sevenZip = (Get-Command 7z.exe -ErrorAction SilentlyContinue).Source
           if (-not $sevenZip) { $sevenZip = 'C:\Program Files\7-Zip\7z.exe' }
           & $sevenZip x $installer ("-o$folder/extracted") '-y' | Out-Null
-          if ($LASTEXITCODE -ne 0) { throw 'Published installer extraction failed.' }
-          $exe = Join-Path $folder 'extracted/creator-hub.exe'
-          $preflight = Join-Path $folder 'extracted/$PLUGINSDIR/creator-hub-preflight.exe'
-          if ((Get-FileHash $exe).Hash -ne (Get-FileHash $preflight).Hash) { throw 'Published preflight and installed executables differ.' }
-          "CREATOR_SELF_UPDATE_TARGET_VERSION=$version" >> $env:GITHUB_ENV
-          "CREATOR_SELF_UPDATE_INSTALLER_SHA256=$((Get-FileHash $installer -Algorithm SHA256).Hash.ToLowerInvariant())" >> $env:GITHUB_ENV
-          "CREATOR_SELF_UPDATE_EXECUTABLE_SHA256=$((Get-FileHash $exe -Algorithm SHA256).Hash.ToLowerInvariant())" >> $env:GITHUB_ENV
-      - name: Check the exact public feed used by installed Hub versions
-        run: node scripts/check-release-feed.cjs ${{ inputs.target_version }}
-      - name: Test in-app update and automatic restart into the exact public build
+          if ($LASTEXITCODE -ne 0) { throw 'Public19 extraction failed.' }
+          node scripts/public-self-update-019.cjs verify
+          if ($LASTEXITCODE -ne 0) { throw 'Public19 packaged resources differ.' }
+      - name: Test actual public update, cancellation, restart and MCP reconnection
         env:
-          CREATOR_HOSTED_UPDATE_FIXTURE: ${{ inputs.hosted_fixture && 'dist/Creator-Hub-hosted-update-fixture/fixture.json' || '' }}
-          CREATOR_SELF_UPDATE_TARGET_VERSION: ${{ inputs.target_version }}
-        run: node scripts/native-self-update-smoke.cjs
+          CREATOR_PUBLIC_SELF_UPDATE_019: '1'
+          CREATOR_SELF_UPDATE_TARGET_VERSION: '0.1.19'
+          CREATOR_SELF_UPDATE_INSTALLER_SHA256: '1a0d85127827b854dcdd3ae89f4c5e2aca3824b81623f1b9b05e022871ee6419'
+          CREATOR_SELF_UPDATE_EXECUTABLE_SHA256: '5bd277950ac6409b6820005e28767bbd3dd1281ea84e5f87f9b1990ffcda5d12'
+        run: node scripts/native-public-update-019.cjs
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -127,5 +84,10 @@ jobs:
             artifacts/native-suite-*/startup.json
             artifacts/native-suite-*/dialogs.json
             artifacts/native-suite-*/webview-policy.json
-            dist/Creator-Hub-hosted-update-fixture/fixture.json
-          if-no-files-found: warn
+            artifacts/self-update-target/public-*.json
+            artifacts/self-update-target/creator-hub-windows-x86_64.json
+            artifacts/self-update-target/creator-hub-windows-x86_64.json.minisig
+            artifacts/self-update-target/latest.json
+            artifacts/self-update-target/SHA256SUMS.txt
+            artifacts/self-update-target/Creator.Hub_0.1.19_x64-setup.exe.sig
+          if-no-files-found: error

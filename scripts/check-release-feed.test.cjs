@@ -40,42 +40,40 @@ test('missing catalog assets, malformed feeds and size failures are not visibili
   }
 });
 test('self-update installation harness refuses non-disposable machines before doing work', () => {
-  const result = spawnSync(process.execPath, [require.resolve('./native-self-update-smoke.cjs')], { encoding: 'utf8', env: { ...process.env, GITHUB_ACTIONS: 'false' } });
+  const result = spawnSync(process.execPath, [require.resolve('./native-public-update-019.cjs')], { encoding: 'utf8', env: { ...process.env, GITHUB_ACTIONS: 'false', CREATOR_PUBLIC_SELF_UPDATE_019: '1' } });
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /restricted to a disposable GitHub-hosted Windows runner/);
 });
 
 test('self-update acceptance accepts explicit target hashes and derives the target version from the checked-out release', () => {
-  const source = require('node:fs').readFileSync(require.resolve('./native-self-update-smoke.cjs'), 'utf8');
+  const source = require('node:fs').readFileSync(require.resolve('./native-public-update-019.cjs'), 'utf8');
   assert.match(source, /CREATOR_SELF_UPDATE_TARGET_VERSION/);
   assert.match(source, /CREATOR_SELF_UPDATE_INSTALLER_SHA256/);
   assert.match(source, /CREATOR_SELF_UPDATE_EXECUTABLE_SHA256/);
   assert.match(source, /usage-terms-checkbox/);
   assert.doesNotMatch(source, /0\.1\.10-rc\.1|TO_BE_PINNED/);
   const workflow = require('node:fs').readFileSync(require('node:path').join(__dirname, '..', '.github', 'workflows', 'self-update-acceptance.yml'), 'utf8');
-  assert.match(workflow, /gh release download/);
-  assert.match(workflow, /Published installer differs from its checksum/);
+  assert.match(workflow, /node scripts\/public-self-update-019.cjs prepare/);
+  assert.match(workflow, /node scripts\/public-self-update-019.cjs verify/);
+  const downloader = require('node:fs').readFileSync(require.resolve('./public-self-update-019.cjs'), 'utf8');
+  assert.match(downloader, /assert.equal\(hash\(bytes\), pin.sha256/);
+  assert.doesNotMatch(workflow, /GH_TOKEN|gh release download/);
   assert.match(workflow, /inputs\.target_version/);
 });
 
-test('self-update workflow builds and admits the exact baseline required by its native harness', () => {
-  const source = require('node:fs').readFileSync(require.resolve('./native-self-update-smoke.cjs'), 'utf8');
+test('public self-update admits the exact baseline without building or using a fixture', () => {
+  const source = require('node:fs').readFileSync(require.resolve('./native-public-update-019.cjs'), 'utf8');
   assert.match(source, /require\('\.\/self-update-baselines\.cjs'\)/);
-  assert.match(source, /const from = selectBaseline\(to\.version\)/);
+  assert.match(source, /selectBaseline\(to\.version\)/);
   assert.match(source, /assertPreviousStable\(report\.feed\.previousStable, from\)/);
   const acceptance = source.slice(source.indexOf('\n(async () => {'));
   const feedGate = acceptance.indexOf('assertPreviousStable(report.feed.previousStable, from)');
   assert.ok(feedGate >= 0 && acceptance.indexOf('const setup = spawn(installer') > feedGate);
   const workflow = require('node:fs').readFileSync(require('node:path').join(__dirname, '..', '.github', 'workflows', 'self-update-acceptance.yml'), 'utf8');
-  assert.match(workflow, /\$selected = node scripts\/self-update-baselines\.cjs/);
-  assert.match(workflow, /if \(\$LASTEXITCODE -ne 0\) \{ throw 'Public self-update baseline selection failed\.'/);
-  assert.match(workflow, /"version=\$\(\$baseline\.version\)" >> \$env:GITHUB_OUTPUT/);
-  assert.equal((workflow.match(/SELECTED_FROM_VERSION: \$\{\{ steps\.baseline\.outputs\.version \}\}/g) || []).length, 2);
-  assert.match(workflow, /Build-HostedUpdateFixture\.ps1 -FromVersion \$env:SELECTED_FROM_VERSION/);
-  assert.match(workflow, /\$fixture\.fromVersion -ne \$env:SELECTED_FROM_VERSION/);
-  assert.ok(workflow.indexOf('id: target') < workflow.indexOf('id: baseline'));
-  assert.ok(workflow.indexOf('id: baseline') < workflow.indexOf('Build-HostedUpdateFixture.ps1'));
-  assert.doesNotMatch(workflow, /FromVersion 0\.1\.11|\$fixture\.fromVersion -ne '0\.1\.11'/);
+  assert.match(workflow, /Only reviewed public 0\.1\.18 to 0\.1\.19 acceptance is allowed/);
+  assert.doesNotMatch(workflow, /Build-HostedUpdateFixture|hosted_fixture|fixture_run|SELECTED_FROM_VERSION/);
+  const admission = require('node:fs').readFileSync(require.resolve('./public-self-update-019.cjs'), 'utf8');
+  assert.match(admission, /assert.equal\(selectBaseline\(binding.version\).version, '0.1.18'\)/);
 });
 test('draft gate accounts for full asset metadata and release notes before publication', () => {
   const current = bytes([{ ...release(), tag_name: 'v0.1.2', body: 'x'.repeat(240000) }]);
