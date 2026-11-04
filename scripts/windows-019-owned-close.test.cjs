@@ -39,6 +39,24 @@ test('only exact successful close-and-wait receipt is admitted', () => {
     assert.equal(refused.state, 'unknown'); assert.equal(refused.migrationContinuationAvailable, false); assert.equal(refused.releaseReady, false);
   }
 });
+test('PowerShell close guard pins the authoritative raw019 executable, not a historical fork', () => {
+  const contract = require('./windows-019-contract.cjs');
+  // Read disk explicitly: the other tests install synthetic pins in require.cache.
+  const binding = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures/windows-019-binding.json'), 'utf8'));
+  contract.validateRaw(binding);
+  const source = fs.readFileSync(path.join(__dirname, 'native-incoming-migration-owned-close-019.ps1'), 'utf8');
+  const check = text => {
+    const matches = [...text.matchAll(/\(Get-FileHash -LiteralPath \$expected -Algorithm SHA256\)\.Hash\.ToLowerInvariant\(\) -cne '([a-f0-9]{64})'/g)];
+    assert.equal(matches.length, 1, 'One exact executable hash guard is required');
+    assert.equal(matches[0][1], binding.executable.sha256, 'PowerShell executable pin differs from the validated raw019 binding');
+  };
+  check(source);
+  assert.throws(() => check(source.replace(binding.executable.sha256, 'ae1d15ff3919ee9947e21d8542bcab50abf044e1bf047ce2c87abac4ccebfdc9')));
+  assert.throws(() => check(source.replace(binding.executable.sha256, '')));
+  assert.throws(() => check(source + source));
+  assert.ok(source.includes("throw 'R2 executable differs.'"));
+  assert.doesNotMatch(source, /R8 executable differs/);
+});
 test('native helper holds identity handle, requests one normal close, waits and never kills', () => {
   const source = fs.readFileSync(path.join(__dirname, 'native-incoming-migration-owned-close-019.ps1'), 'utf8');
   for (const text of ['$process.SafeHandle', '$StartTicks', 'QueryFullProcessImageName', '$windows.Count -ne 1',
