@@ -43,6 +43,8 @@ jobs:
         shell: pwsh
         run: ./scripts/windows-019-preflight.ps1
       - run: node --test scripts/windows-019-harness.test.cjs scripts/windows-019-updater.test.cjs scripts/windows-019-owned-close.test.cjs scripts/windows-019-migration-phase.test.cjs scripts/windows-019-setup-owned-case.test.cjs scripts/windows-019-unverified-server-case.test.cjs scripts/windows-019-baseline-diagnostics.test.cjs
+      - name: Inherited guards must pass before native acceptance
+        run: node --test --test-concurrency=1 scripts/self-update-baselines.test.cjs scripts/self-update-lab-feed.test.cjs scripts/native-self-update-direct.test.cjs scripts/native-self-update-lab.test.cjs scripts/native-managed-target.test.cjs scripts/native-installed-baseline.test.cjs scripts/native-suite-smoke.test.cjs scripts/native-windows-016-migration.test.cjs
   incoming:
     needs: preflight
     if: github.event_name == 'workflow_dispatch' && inputs.migration_scope != 'custom-server'

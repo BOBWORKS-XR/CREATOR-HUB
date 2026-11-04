@@ -211,8 +211,8 @@ test('settings proof hashes only the three product stores and detects changed, r
   fs.rmSync(config); assert.deepEqual(direct.settingsSnapshot(roaming, local), before);
 });
 
-test('current direct selectors and native services match the checked-out 0.1.16 product, without retired catalogue commands', () => {
-  assert.equal(require('../package.json').version, direct.VERSION);
+test('shared direct selectors and native services match the checkout without retired catalogue commands', () => {
+  assert.equal(direct.VERSION, '0.1.16', 'The historical direct driver keeps its exact version');
   const app = fs.readFileSync(path.join(root, 'src/app.js'), 'utf8');
   assert.match(app, /current = 'projects'/); assert.match(app, /check: check && !directFeatures/);
   assert.match(fs.readFileSync(path.join(root, 'src/native.js'), 'utf8'), /integratedFeatures: window\.__CREATOR_HUB_FEATURE_PROTOCOL__ === 1/);
@@ -229,6 +229,24 @@ test('current direct selectors and native services match the checked-out 0.1.16 
   for (const contract of ['assertPreviousStable(report.feed.previousStable, from)', "native(child.pid, 'button', 'Not now')",
     "native(child.pid, 'button', 'Update Hub')", 'assert.equal(hash(hub), to.exe)', 'Do not manually launch the replacement',
     'assert.equal(hash(configPath), configHash)', 'assert.equal(unrelatedRuntime.exitCode, null)', 'assert.equal(hash(sentinel), sentinelHash)']) assert.ok(smoke.includes(contract));
+});
+
+// Checkout metadata may advance without relabelling the retained direct16 driver.
+test('current checkout version matches its exact direct driver and native source', () => {
+  const version = require('../package.json').version;
+  const current = version === '0.1.19' ? require('./native-self-update-direct-019.cjs') : direct;
+  assert.equal(version, current.VERSION);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(root, 'src-tauri/tauri.conf.json'), 'utf8')).version, version);
+});
+test('exact current19 adapter rejects source mismatch without relabelling historical directTarget16', () => {
+  const current = require('./native-self-update-direct-019.cjs');
+  assert.equal(current.VERSION, '0.1.19');
+  assert.equal(current.directTarget('0.1.19', '0.1.19'), true);
+  assert.throws(() => current.directTarget('0.1.19', '0.1.16'));
+  assert.equal(direct.VERSION, '0.1.16');
+  assert.equal(direct.directTarget('0.1.16', '0.1.16'), true);
+  assert.equal(direct.directTarget('0.1.19', '0.1.19'), false);
+  assert.throws(() => direct.directTarget('0.1.19', '0.1.16'));
 });
 
 test('actual target function keeps SDK reconnect for 16 and never enters hosted approvals/frames/stop controls', async () => {
