@@ -1,0 +1,183 @@
+{
+  "schemaVersion": 1,
+  "enabled": true,
+  "privateOnly": true,
+  "kind": "direct-outgoing-019-020",
+  "baseline": {
+    "source": {
+      "commit": "ed3e7dabc2e83fea8b7cadce63bbeb502fed2306",
+      "tree": "bd6328c41871465fe64e65e3f9d53c6f2ba0ed8d"
+    },
+    "version": "0.1.19",
+    "asset": "Creator.Hub_0.1.19_x64-setup.exe",
+    "installer": {
+      "bytes": 38353697,
+      "sha256": "1a0d85127827b854dcdd3ae89f4c5e2aca3824b81623f1b9b05e022871ee6419"
+    },
+    "executable": {
+      "bytes": 19591168,
+      "sha256": "5bd277950ac6409b6820005e28767bbd3dd1281ea84e5f87f9b1990ffcda5d12"
+    },
+    "manifest": {
+      "schemaVersion": 1,
+      "platform": "windows",
+      "arch": "x86_64",
+      "modules": {
+        "mcp": {
+          "executable": "mcp/creator-works-mcp-launcher.exe",
+          "version": "2.7.7",
+          "files": {
+            "mcp/creator-works-mcp-launcher.exe": "eb6473270bb9899f89b608205e50e7ffed3aa14b80d7e8661ec39e00642cb26e",
+            "mcp/server/creator-works-mcp.mjs": "24adc371d6e4cfe7c257e0f466a5e5f0fce6b26178714221ac85f08d9f443a78",
+            "mcp/server/runtime/node.exe": "c6335d08331c23d68b9f2b18adb102002d76ef150b47248e954c507e0d033664",
+            "mcp/server/runtime/LICENSE": "8efdacdc1cfa3460aeb7fe98e3c54337b971d5da70e6eee292b73b981acb220c",
+            "mcp/server/runtime/VERSION": "98182b41c9ce3357797985cf12dc3b0124490ef88bc918a905373e7688e6aec9",
+            "mcp/server/unity-extension/Editor/BanterMCPBridge.cs": "b9272bef3538c31a959759b27b95ff592466667eb4d6919cef1aba7b3acaa1da",
+            "mcp/server/unity-extension/Editor/CreatorWorksMCPLogo.png": "f3f68baa0d887de92e6cf7aba8beae7ff8ea5c44b13444f018413041ade19ea7",
+            "mcp/server/LICENSE": "b1cfe8ff7191d3e9c6c6b0f832adcd2ebece8e6070ef72d2f7afc1c082fb757f",
+            "mcp/server/THIRD_PARTY_NOTICES.md": "5e9f0fe9b73afe7c6c056a33124ead3110fc03c309f845e9dd6c76b0a9b00560"
+          }
+        },
+        "setup": {
+          "executable": "setup/creator-project-setup.exe",
+          "version": "0.3.7",
+          "files": {
+            "setup/creator-project-setup.exe": "f66a4527b9d0c01337a6f6e3efd02e98bff5efdddcd0cd4c5b3c9ca6a5704b33"
+          }
+        }
+      },
+      "managedRouting": {
+        "protocol": 1,
+        "files": {
+          "routing/creator-hub-mcp-router.exe": "2a68f35dc96a18c9b97de26d669961dbe1835f96f9fa2599cb4f1d4298aca74d",
+          "routing/router.json": "eb089c1edc7013dced329cef2893b23400c0e228739dd95484ffbeb0abaea777",
+          "routing/router.minisig": "f304e479b0820f1f91e6061455c537a6dc32b5e006fc735e42e6645b4d5d5747",
+          "routing/runtime.json": "85a9408940ae424960d63c7f3c7cb2364d34432d5866dc6a80fb80e1e762c433",
+          "routing/runtime.minisig": "fadb42106e2ebff5e0cdb0a6d40a64ea6dfc12d86877a19ca88bddc934235132"
+        }
+      }
+    },
+    "generation": "6336e342a58cedbdc1aca8e44ac128803a696f3998f84a7263d79ab4b2d500ad",
+    "verificationReceiptSha256": "b15c19cf8854b39bacb83afd731e0a4bd715427ae0989834cf96cfd321fb999f",
+    "sourceUnchanged": true,
+    "buildExitCode": 0,
+    "assetId": 708915966,
+    "releaseId": 433720791
+  },
+  "target": {
+    "source": {
+      "commit": "29e274db1009cf14622d0df4f0ecbaf13bc55e92",
+      "tree": "c96a29b7c29c872752f33eacd16c610e68cfcba5"
+    },
+    "version": "0.1.20",
+    "asset": "Creator_Hub_0.1.20_x64-acceptance-only-setup.exe",
+    "installer": {
+      "bytes": 38357791,
+      "sha256": "b47ad938e5a5b03487689358958aaa44d2852161a19a4e40f85c059793b07240"
+    },
+    "executable": {
+      "bytes": 19596288,
+      "sha256": "d231f9a4182f28bdb2bfa72379e8647f85976eeba2b9b6ad2a00bc2a29fde73e"
+    },
+    "manifest": {
+      "schemaVersion": 1,
+      "platform": "windows",
+      "arch": "x86_64",
+      "modules": {
+        "mcp": {
+          "executable": "mcp/creator-works-mcp-launcher.exe",
+          "version": "2.7.7-fixture.20",
+          "files": {
+            "mcp/creator-works-mcp-launcher.exe": "e3d637d802c6b6d6d3e0c36cc3327e76a50d943893696062ee691e44eaecd70c",
+            "mcp/server/creator-works-mcp.mjs": "8b7f07b47da95b45fb92f9f9ad263c195609fa5b667ddc5a33155a9fb270928a",
+            "mcp/server/runtime/node.exe": "c6335d08331c23d68b9f2b18adb102002d76ef150b47248e954c507e0d033664",
+            "mcp/server/runtime/LICENSE": "8efdacdc1cfa3460aeb7fe98e3c54337b971d5da70e6eee292b73b981acb220c",
+            "mcp/server/runtime/VERSION": "98182b41c9ce3357797985cf12dc3b0124490ef88bc918a905373e7688e6aec9",
+            "mcp/server/unity-extension/Editor/BanterMCPBridge.cs": "81fb25e7c1b878f3b684f7d6565e97d6aa139f6edcb0f30820e5abed9042a3c8",
+            "mcp/server/unity-extension/Editor/CreatorWorksMCPLogo.png": "f3f68baa0d887de92e6cf7aba8beae7ff8ea5c44b13444f018413041ade19ea7",
+            "mcp/server/LICENSE": "b1cfe8ff7191d3e9c6c6b0f832adcd2ebece8e6070ef72d2f7afc1c082fb757f",
+            "mcp/server/THIRD_PARTY_NOTICES.md": "5e9f0fe9b73afe7c6c056a33124ead3110fc03c309f845e9dd6c76b0a9b00560"
+          }
+        },
+        "setup": {
+          "executable": "setup/creator-project-setup.exe",
+          "version": "0.3.7",
+          "files": {
+            "setup/creator-project-setup.exe": "f07de337d7ca13578694848d72c08851d53d32bf139ae8d064ce307123c01880"
+          }
+        }
+      },
+      "managedRouting": {
+        "protocol": 1,
+        "files": {
+          "routing/creator-hub-mcp-router.exe": "e98113e7552ae5408da8a1da2dc714733d00dc9049133a28e49218369dfe152f",
+          "routing/router.json": "023008526374d9e9fc2beac15b868340e18e031ffba9da01d67bbced4172a4b8",
+          "routing/router.minisig": "76d6095ccbd8be51da64d70ebcbf33895338d36faaf80c0f65fd34940692ae48",
+          "routing/runtime.json": "33586531a6bd16422a2c999c82de3b1f97a2f32e3243103b2eece80781db48b7",
+          "routing/runtime.minisig": "2e9823bb54bed2e8a33d257254fb6c53532d71a58a9cc93cbce8f6dd4e26bd1c"
+        }
+      }
+    },
+    "generation": "34cc742ff14dc1445e27dc4087707b129feb44fdcce7320c9315ec28be360617",
+    "verificationReceiptSha256": "40c81e181ab5d37b28d8dbea2bb29519cccddf2043baf264c28d1950e27f85a5",
+    "sourceUnchanged": true,
+    "buildExitCode": 0,
+    "descriptor": {
+      "bytes": 521,
+      "sha256": "5004026b47465065d175cd07087191dcab5780fefe7c48184b9d74211e0d571c"
+    },
+    "descriptorSignature": {
+      "bytes": 305,
+      "sha256": "d9bc3a70da5e70546827e84ec57688ae7a1e7cc3fbf6781bba727a45c814c696"
+    },
+    "latest": {
+      "bytes": 704,
+      "sha256": "91b31557b02efc318272e7c9e2f30e6686b1089cf3139e6932b1b77ef90e3691"
+    },
+    "privateRelease": {
+      "id": 433731748,
+      "tag": "lab-windows-outgoing-020-20261104",
+      "source": "29e274db1009cf14622d0df4f0ecbaf13bc55e92",
+      "assets": {
+        "Creator_Hub_0.1.20_x64-acceptance-only-setup.exe": {
+          "id": 708947525,
+          "bytes": 38357791,
+          "sha256": "b47ad938e5a5b03487689358958aaa44d2852161a19a4e40f85c059793b07240"
+        },
+        "creator-hub-windows-x86_64.json": {
+          "id": 708949556,
+          "bytes": 521,
+          "sha256": "5004026b47465065d175cd07087191dcab5780fefe7c48184b9d74211e0d571c"
+        },
+        "creator-hub-windows-x86_64.json.minisig": {
+          "id": 708949837,
+          "bytes": 305,
+          "sha256": "d9bc3a70da5e70546827e84ec57688ae7a1e7cc3fbf6781bba727a45c814c696"
+        },
+        "latest.json": {
+          "id": 708950096,
+          "bytes": 704,
+          "sha256": "91b31557b02efc318272e7c9e2f30e6686b1089cf3139e6932b1b77ef90e3691"
+        }
+      }
+    }
+  },
+  "fixtureQualification": {
+    "sha256": "40c81e181ab5d37b28d8dbea2bb29519cccddf2043baf264c28d1950e27f85a5",
+    "kind": "outgoing20-fixture-only-verified",
+    "source": {
+      "commit": "29e274db1009cf14622d0df4f0ecbaf13bc55e92",
+      "tree": "c96a29b7c29c872752f33eacd16c610e68cfcba5"
+    },
+    "sourceUnchanged": true,
+    "buildExitCode": 0,
+    "inputCount": 1470,
+    "payloadFiles": 15,
+    "fixtureUsableForOutgoingTest": true,
+    "productionSourceGuardException": false,
+    "productionApproval": false,
+    "outgoingNativeAccepted": false,
+    "published": false,
+    "releaseReady": false
+  }
+}

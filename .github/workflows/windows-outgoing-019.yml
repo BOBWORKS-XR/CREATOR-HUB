@@ -1,0 +1,128 @@
+name: Windows exact19 to private20 restore and changed-generation acceptance
+on:
+  push:
+    branches: [validation/windows-menu-merge-20261027]
+    paths:
+      - .github/workflows/windows-outgoing-019.yml
+      - scripts/windows-outgoing-019-*.cjs
+      - scripts/windows-outgoing-019-binding-probe.ps1
+      - scripts/self-update-outgoing-019-feed.cjs
+      - scripts/self-update-outgoing-019-feed.test.cjs
+      - scripts/native-self-update-outgoing-019.ps1
+      - scripts/native-outgoing-direct-019.cjs
+      - scripts/native-outgoing-process-019.ps1
+      - scripts/fixtures/windows-outgoing-019-test-fixture.cjs
+      - scripts/fixtures/windows-outgoing-019-binding.json
+  workflow_dispatch:
+    inputs:
+      expected_harness_commit:
+        type: string
+        required: true
+      binding_sha256:
+        type: string
+        required: true
+permissions:
+  contents: read
+jobs:
+  preflight:
+    if: github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.ref == 'refs/heads/validation/windows-menu-merge-20261027'
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - run: npm ci --ignore-scripts
+      - run: node --test scripts/windows-outgoing-019-test.cjs scripts/self-update-outgoing-019-feed.test.cjs
+      - name: Parse actual native script and probe its named parameters
+        shell: pwsh
+        run: ./scripts/windows-outgoing-019-binding-probe.ps1
+  acceptance:
+    needs: preflight
+    if: github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: write # Existing draft-asset GET authorization; no write API calls.
+    runs-on: windows-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - case: mcp-restore
+            last_tool: mcp
+            restore: 'true'
+          - case: setup-restore
+            last_tool: setup
+            restore: 'true'
+          - case: setup-no-restore
+            last_tool: setup
+            restore: 'false'
+    env:
+      EXPECTED_HARNESS_COMMIT: ${{ inputs.expected_harness_commit }}
+      CREATOR_OUTGOING_REVIEW_SHA256: ${{ inputs.binding_sha256 }}
+      CREATOR_OUTGOING_CASE: ${{ matrix.case }}
+      CREATOR_OUTGOING_LAST_TOOL: ${{ matrix.last_tool }}
+      CREATOR_OUTGOING_RESTORE: ${{ matrix.restore }}
+    steps:
+      - name: Bind exact workflow before checkout
+        shell: pwsh
+        run: |
+          if ($env:EXPECTED_HARNESS_COMMIT -cnotmatch '^[a-f0-9]{40}$' -or $env:EXPECTED_HARNESS_COMMIT -cne $env:GITHUB_SHA -or $env:CREATOR_OUTGOING_REVIEW_SHA256 -cnotmatch '^[a-f0-9]{64}$') { throw 'Exact reviewed source and binding required.' }
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - run: npm ci --ignore-scripts
+      - name: Admit exact reviewed product source
+        id: binding
+        shell: pwsh
+        run: |
+          $source = node scripts/windows-outgoing-019-input.cjs source | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $source.commit -cnotmatch '^[a-f0-9]{40}$' -or $source.tree -cnotmatch '^[a-f0-9]{40}$') { throw 'Pending or invalid R2 base19/private20 binding.' }
+          "source_commit=$($source.commit)" | Add-Content -LiteralPath $env:GITHUB_OUTPUT -Encoding utf8
+          "source_tree=$($source.tree)" | Add-Content -LiteralPath $env:GITHUB_OUTPUT -Encoding utf8
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ steps.binding.outputs.source_commit }}
+          path: product
+          persist-credentials: false
+      - name: Bind exact official SDK test source
+        shell: pwsh
+        run: |
+          if ((git -C product rev-parse HEAD) -cne '${{ steps.binding.outputs.source_commit }}' -or (git -C product rev-parse 'HEAD^{tree}') -cne '${{ steps.binding.outputs.source_tree }}') { throw 'Product source differs.' }
+      - run: npm --prefix product/modules/mcp ci --ignore-scripts
+      - name: Read exact private baseline and signed future fixture
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $result=node scripts/windows-outgoing-019-input.cjs acquire | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $result.configSha256 -cnotmatch '^[a-f0-9]{64}$') { throw 'Private fixture admission refused.' }
+          "CREATOR_OUTGOING_CONFIG_SHA256=$($result.configSha256)" | Add-Content -LiteralPath $env:GITHUB_ENV -Encoding utf8
+      - name: Native update restore and held-router generation checks
+        shell: pwsh
+        run: |
+          $parameters=@{Outgoing019=$true;ContractPath=(Join-Path $PWD artifacts/outgoing-019/runner-config.json);BaselineInstallerPath=(Join-Path $PWD artifacts/outgoing-019/data/Creator.Hub_0.1.19_x64-setup.exe);TimeoutSeconds=480}
+          & ./scripts/native-self-update-outgoing-019.ps1 @parameters | Tee-Object -FilePath artifacts/outgoing-019/lifecycle.jsonl
+          if ($LASTEXITCODE -ne 0) { throw 'Outgoing native lifecycle failed.' }
+          $reports=@(Get-ChildItem -LiteralPath artifacts -Directory -Filter 'native-suite-*' | ForEach-Object { Get-ChildItem -LiteralPath $_.FullName -File -Filter outgoing-report.json })
+          if ($reports.Count -ne 1) { throw 'Exactly one outgoing report required.' }
+          node scripts/windows-outgoing-019-input.cjs receipt $reports[0].FullName (Join-Path $PWD artifacts/outgoing-019/lifecycle.jsonl)
+          if ($LASTEXITCODE -ne 0) { throw 'Native outgoing report or cleanup refused.' }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-outgoing-019-${{ matrix.case }}-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 14
+          if-no-files-found: warn
+          path: |
+            artifacts/outgoing-019/*.json
+            artifacts/outgoing-019/*.jsonl
+            artifacts/native-suite-*/*.json
+            artifacts/native-suite-*/*.png
+            !artifacts/native-suite-*/startup.json
