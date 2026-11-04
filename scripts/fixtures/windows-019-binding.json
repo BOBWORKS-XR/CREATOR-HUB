@@ -88,33 +88,33 @@
     "assetId": 707771437
   },
   "production": {
-    "releaseId": null,
-    "releaseTag": null,
-    "targetCommit": null,
-    "minHubVersion": null,
-    "identityProtocol": null,
-    "lifecycleProtocol": null,
-    "installerProtocol": null,
+    "releaseId": 433720791,
+    "releaseTag": "v0.1.19",
+    "targetCommit": "ed3e7dabc2e83fea8b7cadce63bbeb502fed2306",
+    "minHubVersion": "0.1.12",
+    "identityProtocol": 0,
+    "lifecycleProtocol": 0,
+    "installerProtocol": 1,
     "assets": {
       "Creator.Hub_0.1.19_x64-setup.exe": {
-        "id": null,
-        "size": null,
-        "sha256": null
+        "id": 708915966,
+        "size": 38353697,
+        "sha256": "1a0d85127827b854dcdd3ae89f4c5e2aca3824b81623f1b9b05e022871ee6419"
       },
       "creator-hub-windows-x86_64.json": {
-        "id": null,
-        "size": null,
-        "sha256": null
+        "id": 708915970,
+        "size": 505,
+        "sha256": "b98b6647f01cde8500162db99ee66517686844d7cffa0ebe9fc6287663860b9b"
       },
       "creator-hub-windows-x86_64.json.minisig": {
-        "id": null,
-        "size": null,
-        "sha256": null
+        "id": 708915969,
+        "size": 316,
+        "sha256": "ea9f83ef3372863f4eedd5c71653747f4a653292524881f2d3967a7e6cb2ec80"
       },
       "latest.json": {
-        "id": null,
-        "size": null,
-        "sha256": null
+        "id": 708915962,
+        "size": 676,
+        "sha256": "c0bb04f79b389113885ed64addf2336725b26f03aeff4e638c6d15c3069367a4"
       }
     }
   }
