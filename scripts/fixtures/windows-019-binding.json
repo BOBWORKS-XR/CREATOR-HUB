@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "enabled": false,
+  "version": "0.1.19",
+  "source": { "commit": null, "tree": null },
+  "build": { "resultSha256": null, "inputsSha256": null, "provenance": null },
+  "installer": { "name": "Creator.Hub_0.1.19_x64-setup.exe", "bytes": null, "sha256": null },
+  "executable": { "bytes": null, "sha256": null },
+  "manifest": { "bytes": null, "sha256": null, "sha256Canonical": null, "document": null },
+  "rawRelease": { "id": null, "tag": null, "assetId": null },
+  "production": {
+    "releaseId": null,
+    "releaseTag": null,
+    "targetCommit": null,
+    "minHubVersion": null,
+    "identityProtocol": null,
+    "lifecycleProtocol": null,
+    "installerProtocol": null,
+    "assets": {
+      "Creator.Hub_0.1.19_x64-setup.exe": { "id": null, "size": null, "sha256": null },
+      "creator-hub-windows-x86_64.json": { "id": null, "size": null, "sha256": null },
+      "creator-hub-windows-x86_64.json.minisig": { "id": null, "size": null, "sha256": null },
+      "latest.json": { "id": null, "size": null, "sha256": null }
+    }
+  }
+}

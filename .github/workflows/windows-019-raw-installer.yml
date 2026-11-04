@@ -1,0 +1,98 @@
+name: Windows 019 raw fresh and guarded installer (no release signatures)
+on:
+  push:
+    branches: [validation/windows-019-raw-installer]
+    paths:
+      - .github/workflows/windows-019-raw-installer.yml
+      - scripts/windows-019-raw.cjs
+      - scripts/windows-019-harness.test.cjs
+      - scripts/windows-019-contract.cjs
+      - scripts/windows-019-raw-install.cjs
+      - scripts/windows-019-acquire.cjs
+      - scripts/windows-019-preflight.ps1
+      - scripts/native*-019.*
+      - scripts/fixtures/windows-019-binding.json
+      - scripts/fixtures/windows-019-test-fixture.cjs
+  workflow_dispatch:
+    inputs:
+      expected_harness_commit:
+        type: string
+        required: true
+      release_id:
+        type: string
+        required: true
+      release_tag:
+        type: string
+        required: true
+      asset_id:
+        type: string
+        required: true
+      asset_name:
+        type: string
+        required: true
+permissions:
+  contents: read
+jobs:
+  preflight:
+    if: github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.ref == 'refs/heads/validation/windows-019-raw-installer'
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - run: npm ci --ignore-scripts
+      - run: node --test scripts/windows-019-harness.test.cjs
+      - shell: pwsh
+        run: ./scripts/windows-019-preflight.ps1
+  install:
+    needs: preflight
+    if: github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/validation/windows-019-raw-installer'
+    permissions:
+      contents: write # Existing private-draft GET API requires this; no write calls.
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [fresh, guarded]
+    runs-on: windows-latest
+    timeout-minutes: 15
+    env:
+      EXPECTED_HARNESS_COMMIT: ${{ inputs.expected_harness_commit }}
+      CREATOR_WINDOWS_ARTIFACT_INSTALL: '1'
+      CREATOR_WINDOWS_019_RAW_INSTALL: '1'
+    steps:
+      - name: Require reviewed workflow commit before checkout
+        shell: pwsh
+        run: |
+          if ($env:EXPECTED_HARNESS_COMMIT -cnotmatch '^[a-f0-9]{40}$' -or $env:EXPECTED_HARNESS_COMMIT -cne $env:GITHUB_SHA) { throw 'Harness source differs.' }
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - run: npm ci --ignore-scripts
+      - name: Refuse pending 019 pins before network or native actions
+        run: node scripts/windows-019-raw.cjs preflight
+      - name: GET only the exact private 019 installer
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ inputs.release_id }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          ASSET_ID: ${{ inputs.asset_id }}
+          ASSET_NAME: ${{ inputs.asset_name }}
+        run: node scripts/windows-019-acquire.cjs raw
+      - name: Exact installer-only fresh or public18 guarded case
+        run: node scripts/windows-019-raw.cjs ${{ matrix.mode }} raw-input private-input-binding-019.json installer-evidence
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-019-raw-${{ matrix.mode }}-${{ github.run_id }}
+          retention-days: 14
+          if-no-files-found: warn
+          path: |
+            private-input-binding-019.json
+            installer-evidence/installer-report.json
