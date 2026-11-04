@@ -10,3 +10,4 @@ packaging/flatpak/com.creatorworks.hub.desktop text eol=lf
 native/flatpak-host-launch/src/linux/identity.rs text eol=lf
 src-tauri/src/main.rs text eol=lf
 .github/workflows/linux-deb-helper-fixtures-014.yml text eol=lf
+scripts/fixtures/windows-outgoing-019-binding.json -text

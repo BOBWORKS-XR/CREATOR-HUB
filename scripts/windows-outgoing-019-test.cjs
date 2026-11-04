@@ -307,3 +307,56 @@ test('parsed workflow retains exactly three Windows profiles and pinned checkout
   const steps = workflow.jobs.acceptance.steps;
   assert.ok(steps.findIndex(step => step.run === 'npm ci --ignore-scripts') < steps.findIndex(step => step.id === 'binding'));
 });
+
+test('exact outgoing binding survives core.autocrlf=true checkout without relaxing raw hashes', t => {
+  const os = require('node:os');
+  const { execFileSync } = require('node:child_process');
+  const relative = 'scripts/fixtures/windows-outgoing-019-binding.json';
+  const rule = `${relative} -text\n`;
+  const attributes = fs.readFileSync(path.join(__dirname, '../.gitattributes'), 'utf8');
+  assert.equal(attributes.split(rule).length, 2, 'One exact binding byte-preservation rule required');
+  const original = fs.readFileSync(bindingFile);
+  assert.equal(original.includes(13), false, 'Frozen binding must retain its original LF bytes');
+  const expectedHash = target.hash(original);
+  if (checkedInBinding.enabled) assert.equal(expectedHash, 'bd056b98953187a057c9287147bb387317283f7d0914cf5dbe47f47056db1c86');
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'creator-outgoing-checkout-'));
+  t.diagnostic(`Disposable no-ref checkout: ${temporary}`);
+  t.after(() => {
+    assert.equal(path.dirname(temporary), path.resolve(os.tmpdir()));
+    assert.ok(path.basename(temporary).startsWith('creator-outgoing-checkout-'));
+    fs.rmSync(temporary, { recursive: true, force: true });
+  });
+  const gitDir = path.join(temporary, 'objects.git');
+  const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !/^GIT_/i.test(name)));
+  Object.assign(env, { GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: process.platform === 'win32' ? 'NUL' : '/dev/null',
+    GIT_NO_LAZY_FETCH: '1', GIT_OPTIONAL_LOCKS: '0', GIT_TERMINAL_PROMPT: '0' });
+  const execute = (args, input, extra = {}) => execFileSync('git', args, { cwd: temporary, env: { ...env, ...extra }, input,
+    windowsHide: true, timeout: 30000, maxBuffer: 1024 * 1024, stdio: ['pipe', 'pipe', 'pipe'] });
+  execute(['init', '--bare', '--quiet', gitDir]);
+  const refs = () => execute([`--git-dir=${gitDir}`, 'for-each-ref', '--format=%(refname) %(objectname)']).toString();
+  assert.equal(refs(), '');
+  function checkout(label, attrText) {
+    const worktree = path.join(temporary, label); fs.mkdirSync(worktree);
+    const extra = { GIT_INDEX_FILE: path.join(temporary, `${label}.index`) };
+    const git = (args, input) => execute([`--git-dir=${gitDir}`, `--work-tree=${worktree}`,
+      '-c', 'core.autocrlf=true', '-c', 'core.safecrlf=false', ...args], input, extra);
+    assert.equal(git(['config', '--get', 'core.autocrlf']).toString().trim(), 'true');
+    for (const [name, bytes] of [['.gitattributes', Buffer.from(attrText)], [relative, original], ['control.json', Buffer.from('{"lf":true}\n')]]) {
+      const blob = git(['hash-object', '-w', '--no-filters', '--stdin'], bytes).toString().trim();
+      git(['update-index', '--add', '--cacheinfo', `100644,${blob},${name}`]);
+    }
+    const tree = git(['write-tree']).toString().trim();
+    git(['read-tree', tree]); git(['checkout-index', '--all', '--force']);
+    assert.equal(fs.readFileSync(path.join(worktree, 'control.json'), 'utf8'), '{"lf":true}\r\n', 'Autocrlf conversion must be active');
+    assert.ok(git(['cat-file', 'blob', `${tree}:${relative}`]).equals(original), 'Source blob changed');
+    return fs.readFileSync(path.join(worktree, relative));
+  }
+  const preserved = checkout('protected', attributes);
+  assert.ok(preserved.equals(original)); assert.equal(target.hash(preserved), expectedHash);
+  const unprotected = checkout('unprotected-control', attributes.replace(rule, ''));
+  assert.notEqual(target.hash(unprotected), expectedHash, 'Control must reproduce the missing-rule failure');
+  assert.equal(unprotected.toString(), original.toString().replace(/\n/g, '\r\n'));
+  if (checkedInBinding.enabled) assert.equal(target.hash(unprotected), '5bf9c580a1028e758a0eba22c106d6c816fe91552cf13d6c47ca46437e409501');
+  assert.equal(refs(), '', 'Disposable checkout must not create refs');
+  assert.equal(fs.existsSync(path.join(gitDir, 'index')), false, 'Only explicit disposable indexes may be used');
+});
