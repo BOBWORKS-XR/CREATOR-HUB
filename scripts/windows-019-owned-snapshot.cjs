@@ -125,7 +125,7 @@ function checkClosedSignedUpdate({ env, update, close, lifecycle }) {
   assert.equal(path.resolve(close.executable).toLowerCase(), path.resolve(env.LOCALAPPDATA, 'Creator Hub', 'creator-hub.exe').toLowerCase());
   assert.equal(close.exitCode, 0); assert.equal(close.migrationContinuationAvailable, false); assert.equal(close.releaseReady, false);
   assert.equal(lifecycle.kind, 'lab-lifecycle-result'); assert.equal(lifecycle.lifecycleSucceeded, true);
-  assert.equal(lifecycle.scenario, 'public-stable'); assert.equal(lifecycle.actualScope, 'unmodified-public-0.1.12-lab-only');
+  assert.equal(lifecycle.scenario, 'public-stable'); assert.equal(lifecycle.actualScope, 'exact-public-0.1.12-to-0.1.19-lab-only');
   assert.equal(lifecycle.cleanupVerified, true); assert.equal(lifecycle.systemTlsVerified, true);
   assert.equal(lifecycle.hubCleanupState, 'verified'); assert.equal(lifecycle.hubCleanupUnknown, false);
   assert.equal(lifecycle.driverRegistered, true); assert.equal(lifecycle.driverGateOpened, true);
