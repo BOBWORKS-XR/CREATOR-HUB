@@ -1,5 +1,21 @@
 # Experimental Unix Candidate Packaging
 
+## Maintenance Status
+
+Windows x64 is the maintained binary release target. Official Linux AppImage,
+DEB, RPM and Flatpak builds are discontinued; new Mac builds are suspended.
+These retained source-level packaging experiments are available to experienced
+contributors, not supported current downloads or proof of Windows feature
+parity. In particular, the basic command below produces a read-only MCP GUI;
+full host integration requires additional reviewed work and native tests.
+
+Volunteer Linux and Mac maintainers should be comfortable with Rust/Tauri,
+native packaging, preservation of existing settings, MCP client routing and
+signed install/update/restart testing. Do not disable platform security or use
+new signing keys to make an unqualified build appear to be an official update.
+
+## Packaging API
+
 This is a CI/disposable-machine packaging API, not writable GUI, installation,
 migration, updater, native runtime or release acceptance. The default builder
 still refuses Unix. No release/readiness guard or Rust/client state is changed.

@@ -1,7 +1,59 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const profile = require('./windows-release-target.cjs');
+test.mock.method(profile, 'getTarget', () => require('./fixtures/windows-release-target-018.cjs'));
 const { publishDraft } = require('./publish-hub-draft.cjs');
 const { RELEASE_NOT_VISIBLE } = require('./check-release-feed.cjs');
+const { finishPublicRelease } = require('./publish-hub-draft.cjs');
+
+function publicFixture() {
+  const options = { platform: 'windows-x86_64', association: 'a'.repeat(40), sha256: 'b'.repeat(64), promoteLatest: true };
+  const qualification = { draft: { id: 401 } }, calls = [];
+  const verified = { releaseIsPublic: true, sourceCiVerified: true, nativeEvidenceVerified: true, signaturesVerified: true,
+    releaseAssociationVerified: true, associationBuilt: false, releaseAssociationCommit: options.association,
+    qualificationSha256: options.sha256, draftId: 401, version: '0.1.18', platform: options.platform };
+  const accepted = { publicAcceptance: true, version: '0.1.18', releaseId: 401, association: options.association, qualificationSha256: options.sha256 };
+  let latest = { id: 400, tag_name: 'v0.1.14', draft: false, prerelease: false };
+  const actions = { checkReadiness: () => qualification, verifyPublishedQualification: async () => verified,
+    verifyPublicAcceptance: async () => accepted, checkLive: async () => ({ previousStable: '0.1.14' }),
+    getLatest: async () => ({ ...latest }), promote: async () => { calls.push('promote'); latest = { ...latest, id: 401, tag_name: 'v0.1.18' }; } };
+  return { options, qualification, calls, verified, accepted, actions };
+}
+test('guarded latest promotion requires published qualification and actual public acceptance before its only write', async () => {
+  const f = publicFixture(); const r = await finishPublicRelease('0.1.18', f.actions, f.options);
+  assert.equal(r.latestVerified, true); assert.equal(r.ready, true); assert.deepEqual(f.calls, ['promote']);
+});
+test('missing or changed public evidence refuses latest before mutation', async () => {
+  for (const field of ['publicAcceptance', 'association', 'qualificationSha256', 'releaseId']) {
+    const f = publicFixture(); f.accepted[field] = false;
+    await assert.rejects(finishPublicRelease('0.1.18', f.actions, f.options)); assert.deepEqual(f.calls, []);
+  }
+  const f = publicFixture(); f.verified.releaseIsPublic = false;
+  await assert.rejects(finishPublicRelease('0.1.18', f.actions, f.options)); assert.deepEqual(f.calls, []);
+});
+test('public verification is read-only and never reports latest readiness', async () => {
+  const f = publicFixture(); f.options.promoteLatest = false;
+  const r = await finishPublicRelease('0.1.18', f.actions, f.options);
+  assert.equal(r.ready, false); assert.deepEqual(f.calls, []);
+});
+test('newer latest and failed promotion readback cannot be called ready', async () => {
+  const f = publicFixture(); f.actions.getLatest = async () => ({ id: 999, tag_name: 'v0.1.19', draft: false, prerelease: false });
+  await assert.rejects(finishPublicRelease('0.1.18', f.actions, f.options)); assert.deepEqual(f.calls, []);
+  const g = publicFixture(); g.actions.promote = async () => { g.calls.push('promote'); };
+  await assert.rejects(finishPublicRelease('0.1.18', g.actions, g.options), /readback/); assert.deepEqual(g.calls, ['promote']);
+});
+
+test('default promotion issues only the exact latest PATCH after every read-only gate', async () => {
+  const f = publicFixture(), commands = [];
+  delete f.actions.promote;
+  let promoted = false;
+  f.actions.getLatest = async () => promoted ? { id: 401, tag_name: 'v0.1.18', draft: false, prerelease: false }
+    : { id: 400, tag_name: 'v0.1.14', draft: false, prerelease: false };
+  f.actions.execute = (command, args) => { commands.push({ command, args }); promoted = true; return '{}'; };
+  assert.equal((await finishPublicRelease('0.1.18', f.actions, f.options)).ready, true);
+  assert.deepEqual(commands, [{ command: 'gh', args: ['api', '--method', 'PATCH',
+    'repos/BOBWORKS-XR/CREATOR-HUB/releases/401', '-f', 'make_latest=true'] }]);
+});
 
 test('canonical Linux016 dispatch uses only the finite Linux worker', async t => {
   const linux = require('./publish-linux-016-hub-draft.cjs'), calls = [];
@@ -12,7 +64,7 @@ test('canonical Linux016 dispatch uses only the finite Linux worker', async t =>
   });
   assert.equal((await publishDraft('0.1.16', actions, options)).ready, false);
   assert.deepEqual(calls, ['linux']);
-  await assert.rejects(publishDraft('0.1.17', actions, options), /Only Linux 0.1.16/);
+  await assert.rejects(publishDraft('0.1.18', actions, options), /Only Linux 0.1.16/);
   assert.deepEqual(calls, ['linux']);
 });
 
@@ -202,4 +254,47 @@ test('CLI refuses the current source phase independently of the working director
   assert.match(result.stderr, /Source consolidation is not a unified release/);
   assert.match(result.stderr, /Release readiness is blocked/);
   assert.equal(result.stdout, '');
+});
+
+test('017 default verifier is selected, and only verified narrow approval reaches the feed', async t => {
+  const q = require('./windows-016-release-qualification.cjs'), calls = [];
+  const options = { platform: 'windows-x86_64', receipt: 'TEST ONLY', sha256: 'a'.repeat(64), association: 'b'.repeat(40) };
+  const value = { draft: { id: 99 } };
+  const approval = { version: '0.1.18', platform: options.platform, draftId: 99, qualificationSha256: options.sha256,
+    releaseAssociationVerified: true, releaseAssociationCommit: options.association, associationBuilt: false,
+    productionApproval: true, sourceCiVerified: true, nativeEvidenceVerified: true, signaturesVerified: true, publicAcceptance: false, releaseReady: false };
+  t.mock.method(q, 'verifyRemote', async received => { assert.equal(received, value); calls.push('016-verify'); return approval; });
+  const result = await publishDraft('0.1.18', {
+    checkReadiness: () => value, checkDraft: async () => { calls.push('feed'); return { previousStable: '0.1.14' }; },
+    publish: async () => { calls.push('write'); }, checkLive: async () => { calls.push('public-feed'); return {}; },
+  }, options);
+  assert.deepEqual(calls, ['016-verify', 'feed', 'write', 'public-feed']); assert.equal(result.ready, false);
+});
+
+test('017 missing, nonauthorizing or mismatched verification never reaches feed or write', async () => {
+  const options = { platform: 'windows-x86_64', sha256: 'a'.repeat(64), association: 'b'.repeat(40) };
+  const approval = { version: '0.1.18', platform: options.platform, draftId: 99, qualificationSha256: options.sha256,
+    releaseAssociationVerified: true, releaseAssociationCommit: options.association, associationBuilt: false,
+    productionApproval: true, sourceCiVerified: true, nativeEvidenceVerified: true, signaturesVerified: true, publicAcceptance: false, releaseReady: false };
+  for (const result of [undefined, {}, ...Object.entries({ productionApproval: false, sourceCiVerified: false, nativeEvidenceVerified: false, signaturesVerified: false,
+    releaseAssociationVerified: false, releaseAssociationCommit: 'c'.repeat(40), associationBuilt: true,
+    publicAcceptance: true, releaseReady: true, draftId: 100, qualificationSha256: 'b'.repeat(64), version: '0.1.14', platform: 'linux-x86_64' })
+    .map(([key, value]) => ({ ...approval, [key]: value }))]) {
+    const calls = [];
+    await assert.rejects(publishDraft('0.1.18', { checkReadiness: () => ({ draft: { id: 99 } }), verifyQualification: async () => result,
+      checkDraft: async () => { calls.push('feed'); }, publish: async () => { calls.push('write'); } }, options), /did not authorize/);
+    assert.deepEqual(calls, []);
+  }
+});
+
+test('017 qualification cannot bypass the legacy feed-size check', async () => {
+  let writes = 0;
+  const sha256 = 'a'.repeat(64), association = 'b'.repeat(40);
+  await assert.rejects(publishDraft('0.1.18', { checkReadiness: () => ({ draft: { id: 99 } }),
+    verifyQualification: async () => ({ version: '0.1.18', platform: 'windows-x86_64', draftId: 99, qualificationSha256: sha256,
+      releaseAssociationVerified: true, releaseAssociationCommit: association, associationBuilt: false,
+      productionApproval: true, sourceCiVerified: true, nativeEvidenceVerified: true, signaturesVerified: true, publicAcceptance: false, releaseReady: false }),
+    checkDraft: async () => { throw Error('oversized proposed feed'); }, publish: async () => { writes++; },
+  }, { platform: 'windows-x86_64', sha256, association }), /oversized proposed feed/);
+  assert.equal(writes, 0);
 });
