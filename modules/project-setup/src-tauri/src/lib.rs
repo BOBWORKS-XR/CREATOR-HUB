@@ -16,6 +16,7 @@ mod logic;
 #[path = "../../../../native/plugins_retirement.rs"]
 mod plugins_retirement;
 mod repair;
+mod sdk_requirements;
 pub mod service;
 #[cfg(unix)]
 mod unix_editors;
@@ -24,9 +25,7 @@ use logic::{CreateRequest, CreationResult, EnvironmentReport, Recipe};
 use tauri::{Emitter, Manager};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
-fn setup_operation(
-    mutex: &std::sync::Mutex<()>,
-) -> Result<std::sync::MutexGuard<'_, ()>, String> {
+fn setup_operation(mutex: &std::sync::Mutex<()>) -> Result<std::sync::MutexGuard<'_, ()>, String> {
     mutex.try_lock().map_err(|error| match error {
         std::sync::TryLockError::WouldBlock =>
             "Another project setup operation is running. Wait for it to finish.".into(),
@@ -45,6 +44,17 @@ fn get_recipe() -> Result<Recipe, String> {
 fn probe_environment() -> Result<EnvironmentReport, String> {
     let _operation = lifecycle::LIFECYCLE.command()?;
     Ok(logic::probe_environment())
+}
+
+#[tauri::command]
+async fn latest_sdk_requirements() -> Result<sdk_requirements::Requirements, String> {
+    let operation = lifecycle::LIFECYCLE.command()?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let _operation = operation;
+        sdk_requirements::latest()
+    })
+    .await
+    .map_err(|_| "The SDK version check could not finish. Try checking again.".to_string())?
 }
 
 #[tauri::command]
@@ -198,7 +208,10 @@ mod operation_diagnostics_tests {
         .is_err());
         for _ in 0..2 {
             let error = setup_operation(&mutex).unwrap_err();
-            assert!(error.contains("state is unavailable after an earlier failure"), "{error}");
+            assert!(
+                error.contains("state is unavailable after an earlier failure"),
+                "{error}"
+            );
             assert!(!error.contains("operation is running"));
             assert!(mutex.is_poisoned());
         }
@@ -215,6 +228,7 @@ fn open_official_url(app: tauri::AppHandle, url: String) -> Result<(), String> {
         "https://openjdk.org/legal/gplv2+ce.html",
         "https://docs.unity.com/en-us/unity-cli/use-unity-cli",
         "https://greenfield-registry.sdq.st/-/web/detail/com.sidequest.creator-sdk",
+        "https://altvr.app/docs/",
         "https://github.com/BOBWORKS-XR/CREATOR-PROJECT-SETUP",
         "https://github.com/BOBWORKS-XR/CREATOR-WORKS-UNITY-MCP/releases",
         "https://github.com/BOBWORKS-XR/CREATOR-HUB/releases",
@@ -445,6 +459,7 @@ pub fn run() {
                 plugins_retirement::open_plugins_website,
                 get_recipe,
                 probe_environment,
+                latest_sdk_requirements,
                 pick_parent_folder,
                 create_project,
                 open_project,

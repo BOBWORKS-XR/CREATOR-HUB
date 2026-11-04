@@ -14,6 +14,7 @@ const MAX_REQUEST: usize = 64 * 1024;
 pub const COMMANDS: &[&str] = &[
     "get_recipe",
     "probe_environment",
+    "latest_sdk_requirements",
     "pick_parent_folder",
     "create_project",
     "open_project",
@@ -142,6 +143,12 @@ pub(crate) fn dispatch(
         "probe_environment" => {
             decode::<NoArgs>(args)?;
             value(crate::probe_environment()?)
+        }
+        "latest_sdk_requirements" => {
+            decode::<NoArgs>(args)?;
+            value(tauri::async_runtime::block_on(
+                crate::latest_sdk_requirements(),
+            )?)
         }
         "pick_parent_folder" => {
             decode::<NoArgs>(args)?;
@@ -368,8 +375,9 @@ mod tests {
         assert!(decode::<NoArgs>(json!({"path":"unexpected"})).is_err());
     }
     #[test]
-    fn only_existing_setup_commands_are_exposed() {
-        assert_eq!(COMMANDS.len(), 11);
+    fn only_reviewed_setup_commands_are_exposed() {
+        assert_eq!(COMMANDS.len(), 12);
+        assert!(COMMANDS.contains(&"latest_sdk_requirements"));
         for denied in [
             "install_app",
             "execute",

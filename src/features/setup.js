@@ -5,6 +5,8 @@ const licenceUrls = {
   android: 'https://developer.android.com/studio/terms',
   openjdk: 'https://openjdk.org/legal/gplv2+ce.html',
 };
+const sdkGuideUrl = 'https://altvr.app/docs/';
+const latestSdkTimeoutMs = 20000;
 
 export function mount(root, api) {
   root.innerHTML = `
@@ -30,19 +32,31 @@ export function mount(root, api) {
             <div class="feature-actions"><button data-field="register" class="text-button" type="button" hidden>Retry adding to Unity Hub</button><button data-field="restart" class="text-button" type="button" hidden>Restart Unity Hub</button></div>
           </section>
           <section id="feature-setup-existing" role="tabpanel" aria-label="Existing project" hidden>
+            <div class="feature-heading"><h3>Latest Creator SDK</h3><button data-field="latest-refresh" class="icon-button" type="button" title="Refresh latest SDK requirements" aria-label="Refresh latest SDK requirements"><span class="icon icon-refresh" aria-hidden="true"></span></button></div>
+            <p data-field="latest-status" class="feature-note" role="status">Latest SDK requirements have not been checked.</p>
+            <p data-field="latest-error" class="feature-note" role="status" hidden></p>
+            <p data-field="latest-dependencies" class="feature-note"></p>
+            <button data-field="sdk-guide" class="text-button" type="button">SDK install/update guide <span class="icon icon-external" aria-hidden="true"></span></button>
             <div class="feature-input-row"><label>Unity project folder<input data-field="existing-path" type="text" autocomplete="off" spellcheck="false"></label><button data-field="existing-browse" class="text-button" type="button"><span class="icon icon-folder" aria-hidden="true"></span> Browse</button></div>
             <button data-field="inspect" class="primary-button" type="button">Inspect project</button>
             <p data-field="inspection-summary" role="status"></p>
             <div data-field="findings"></div><ul data-field="changes"></ul>
+            <div data-field="skipped" hidden><strong>Checks and repairs not run</strong><ul data-field="skipped-checks"></ul></div>
+            <div data-field="diagnostics" hidden>
+              <label>Setup recovery details<textarea data-field="diagnostic-details" rows="5" readonly spellcheck="false"></textarea></label>
+              <button data-field="copy-diagnostics" class="text-button" type="button">Copy recovery details</button>
+              <p data-field="copy-status" class="feature-note" role="status"></p>
+            </div>
             <button data-field="review-hub" class="text-button" type="button" hidden>Open Unity Hub for manual review</button>
-            <label class="feature-check"><input data-field="approval" type="checkbox"><span>Back up settings and allow Unity to import and validate this project.</span></label>
+            <label class="feature-check"><input data-field="approval" type="checkbox"><span data-field="approval-label">Back up settings and allow Unity to import and validate this project.</span></label>
             <div class="feature-actions"><button data-field="repair" class="primary-button" type="button" disabled>Back up and apply repairs</button><button data-field="validate" class="text-button" type="button" disabled>Back up and validate</button><button data-field="open-existing" class="text-button" type="button" hidden>Open project in Unity</button></div>
+            <p data-field="import-guidance" class="feature-note" hidden>For SDK setup issues, use the SDK install/update guide above to update in Unity Package Manager. Open this project and let Unity finish importing and compiling, then Inspect again.</p>
             <div data-field="existing-result" class="feature-output" role="status"></div>
           </section>
           <div data-field="activity" class="feature-section" role="status" hidden><strong data-field="stage"></strong><p data-field="detail"></p><progress data-field="progress" max="100"></progress><p data-field="transfer" class="feature-note"></p></div>
         </div>
         <section class="feature-section" aria-label="Requirements">
-          <div class="feature-heading"><h3>Requirements</h3><button data-field="refresh" class="icon-button" type="button" title="Check requirements again" aria-label="Check requirements again"><span class="icon icon-refresh" aria-hidden="true"></span></button></div>
+          <div class="feature-heading"><h3 data-field="requirements-title">New-project requirements</h3><button data-field="refresh" class="icon-button" type="button" title="Check requirements again" aria-label="Check requirements again"><span class="icon icon-refresh" aria-hidden="true"></span></button></div>
           <p data-field="platform" class="feature-note"></p><div data-field="requirements"></div><div data-field="blockers" class="feature-note"></div>
           <button data-field="hub" class="text-button" type="button">Open Unity Hub</button>
         </section>
@@ -54,7 +68,12 @@ export function mount(root, api) {
   let created = null;
   let inspection = null;
   let inspectionRevision = 0;
-  let completed = null;
+  let inspectedProjectPath = null;
+  let latestSdk = null;
+  let latestPending = false;
+  let latestTimer;
+  let disposed = false;
+  let refreshLatestOnShow = false;
   let hub = null;
   let operation = null;
   let stage = 0;
@@ -64,20 +83,61 @@ export function mount(root, api) {
     controls(); return result;
   };
   function controls() {
+    const partial = inspection?.partialRepair === true;
     const canBootstrap = ['windows', 'linux'].includes(environment?.platform);
     $('create').disabled = Boolean(created) || !environment || (!environment.ready && !canBootstrap);
     $('name').disabled = $('parent').disabled = $('browse').disabled = Boolean(created);
     $('open').hidden = $('another').hidden = !created;
     $('inspect').disabled = !$('existing-path').value.trim();
     $('repair').disabled = !inspection?.canRepair || !$('approval').checked;
-    $('validate').disabled = !inspection?.canValidate || !$('approval').checked;
+    $('validate').disabled = partial || !inspection?.canValidate || !$('approval').checked;
     $('repair').hidden = !inspection?.canRepair;
-    $('validate').hidden = !inspection?.canValidate;
-    $('approval').parentElement.hidden = !inspection?.canRepair && !inspection?.canValidate;
+    $('validate').hidden = partial || !inspection?.canValidate;
+    $('approval').parentElement.hidden = !inspection?.canRepair && (partial || !inspection?.canValidate);
+    $('approval-label').textContent = partial ? 'Back up and apply supported repairs' : 'Back up settings and allow Unity to import and validate this project.';
+    $('repair').textContent = partial ? 'Back up and apply supported repairs' : 'Back up and apply repairs';
     $('review-hub').hidden = !inspection?.findings.some(finding => finding.status === 'blocked');
-    $('open-existing').hidden = !completed;
+    $('open-existing').hidden = !inspectedProjectPath;
+    $('import-guidance').hidden = !inspectedProjectPath;
+    $('latest-refresh').disabled = latestPending;
     $('register').hidden = !created || Boolean(hub?.registered);
     $('restart').hidden = !hub?.registered || !hub?.refreshPending || !['windows', 'linux'].includes(environment?.platform);
+  }
+  async function refreshLatestSdk() {
+    if (latestPending || disposed) return;
+    latestPending = true;
+    $('latest-status').textContent = 'Checking latest Creator SDK requirements...';
+    $('latest-error').hidden = true;
+    controls();
+    try {
+      const value = await Promise.race([
+        page.call('latest_sdk_requirements'),
+        new Promise((_, reject) => { latestTimer = setTimeout(() => reject(new Error('Latest SDK lookup timed out.')), latestSdkTimeoutMs); }),
+      ]);
+      if (disposed) return;
+      if (typeof value?.version !== 'string' || !value.version || value.version.length > 128
+        || (value.unityVersion != null && (typeof value.unityVersion !== 'string' || !value.unityVersion || value.unityVersion.length > 100))
+        || !value.dependencies || typeof value.dependencies !== 'object' || Array.isArray(value.dependencies)
+        || Object.entries(value.dependencies).length > 128
+        || Object.entries(value.dependencies).some(([name, version]) => name.length > 200 || typeof version !== 'string' || version.length > 200)) {
+        throw new Error('Latest SDK requirements were incomplete.');
+      }
+      latestSdk = value;
+      $('latest-status').textContent = `Latest Creator SDK: ${value.version}. ${value.unityVersion ? `Unity requirement: ${value.unityVersion}.` : 'No minimum Unity version declared.'}`;
+      $('latest-dependencies').textContent = [
+        ['com.unity.render-pipelines.universal', 'URP'],
+        ['com.unity.inputsystem', 'Input System'],
+        ['com.unity.visualscripting', 'Visual Scripting'],
+      ].filter(([name]) => value.dependencies[name]).map(([name, label]) => `${label}: ${value.dependencies[name]}`).join(' · ');
+    } catch (error) {
+      if (disposed) return;
+      $('latest-status').textContent = latestSdk ? `Last retrieved Creator SDK: ${latestSdk.version}. ${latestSdk.unityVersion ? `Unity requirement: ${latestSdk.unityVersion}.` : 'No minimum Unity version declared.'}` : 'Latest SDK requirements unavailable.';
+      $('latest-error').textContent = `${text(error)} You can still inspect this project or open the SDK guide.`;
+      $('latest-error').hidden = false;
+    } finally {
+      clearTimeout(latestTimer); latestPending = false;
+      if (!disposed) controls();
+    }
   }
   function renderEnvironment(value) {
     if (!value?.recipe || !Array.isArray(value.editors) || !Array.isArray(value.blockers)) throw new Error('Requirements response is incomplete. Check again.');
@@ -86,23 +146,38 @@ export function mount(root, api) {
     const recipe = value.recipe;
     $('platform').textContent = text(value.platform);
     $('recipe').textContent = `Approved recipe: Unity ${recipe.editorVersion} · Creator SDK ${recipe.creatorSdkVersion} · URP ${recipe.urpVersion} · Input ${recipe.inputSystemVersion}`;
-    const editor = value.editors.find(item => item.exactRecipe);
+    renderRequirements();
+    controls();
+  }
+  function renderRequirements() {
+    if (!environment) return;
+    const value = environment;
+    const existing = !root.querySelector('#feature-setup-existing').hidden;
+    $('requirements-title').textContent = existing ? 'Existing-project requirements' : 'New-project requirements';
+    const version = existing ? inspection?.editorVersion : value.recipe.editorVersion;
+    const editor = version ? value.editors.find(item => item.version === version || (!existing && item.exactRecipe)) : null;
     const rows = [
       ['Unity Hub or Unity CLI', value.hubInstalled ? `Hub ${value.hubVersion || 'detected'}` : value.unityCliInstalled ? 'CLI detected' : 'Missing', value.hubInstalled || value.unityCliInstalled],
-      [`Unity ${recipe.editorVersion}`, editor ? 'Installed' : 'Missing', Boolean(editor)],
+      [version ? `Unity ${version}` : 'Project Unity version', editor ? 'Installed' : version ? 'Missing' : 'Inspect project first', Boolean(editor)],
     ];
     if (editor) rows.push(['Android Build Support', editor.androidPlayer ? 'Installed' : 'Missing', editor.androidPlayer],
       ['Android SDK, NDK and OpenJDK', editor.androidSdk && editor.androidNdk && editor.openJdk ? 'Installed' : 'Incomplete', editor.androidSdk && editor.androidNdk && editor.openJdk],
-      ['Windows build support', editor.windowsStandalone ? 'Installed' : 'Missing', editor.windowsStandalone],
-      ['Official 3D URP template', editor.urpTemplate ? 'Available' : 'Missing', editor.urpTemplate]);
+      ['Windows build support', editor.windowsStandalone ? 'Installed' : 'Missing', editor.windowsStandalone]);
+    if (editor && !existing) rows.push(['Official 3D URP template', editor.urpTemplate ? 'Available' : 'Missing', editor.urpTemplate]);
     $('requirements').replaceChildren(...rows.map(([label, value, ready]) => {
       const row = node('div', null, 'feature-row'); row.append(node('span', label), node('span', value, ready ? 'feature-good' : 'feature-warn')); return row;
     }));
-    lines($('blockers'), [...(!editor ? ['Will install: Android tools, Windows support and the URP template.'] : []), ...value.blockers]);
-    controls();
+    lines($('blockers'), existing
+      ? (!version ? ['Inspect the project to check its own Editor version.'] : !editor ? [`Install Unity ${version} in Unity Hub, then check requirements again. The project version will not be changed.`] : [])
+      : [...(!editor ? ['Will install: Android tools, Windows support and the URP template.'] : []), ...value.blockers]);
   }
   function showHub(value) { hub = value; $('hub-result').textContent = value?.message || ''; controls(); }
-  function clearInspection() { inspectionRevision++; inspection = null; completed = null; $('approval').checked = false; $('inspection-summary').replaceChildren(); $('findings').replaceChildren(); $('changes').replaceChildren(); $('existing-result').replaceChildren(); controls(); }
+  function showSkippedChecks(checks) {
+    const skipped = Array.isArray(checks) ? checks : [];
+    $('skipped').hidden = skipped.length === 0;
+    $('skipped-checks').replaceChildren(...skipped.map(check => node('li', check)));
+  }
+  function clearInspection() { inspectionRevision++; inspection = null; inspectedProjectPath = null; $('approval').checked = false; $('inspection-summary').replaceChildren(); $('findings').replaceChildren(); $('changes').replaceChildren(); $('skipped').hidden = true; $('skipped-checks').replaceChildren(); $('existing-result').replaceChildren(); $('diagnostics').hidden = true; $('diagnostic-details').value = ''; $('copy-status').textContent = ''; renderRequirements(); controls(); }
   function startActivity(kind, label, detail) {
     operation = kind; stage = 0;
     $('stage').textContent = label; $('detail').textContent = detail;
@@ -111,10 +186,13 @@ export function mount(root, api) {
   }
   function setMode(mode) {
     if (page.busy()) return;
+    const enteringExisting = mode === 'existing' && root.querySelector('#feature-setup-existing').hidden;
     for (const name of ['new', 'existing']) {
       root.querySelector(`#feature-setup-${name}`).hidden = mode !== name;
       $(name + '-tab').setAttribute('aria-selected', String(mode === name));
     }
+    renderRequirements();
+    if (enteringExisting) void refreshLatestSdk();
   }
   page.on($('new-tab'), 'click', () => setMode('new'));
   page.on($('existing-tab'), 'click', () => setMode('existing'));
@@ -128,10 +206,26 @@ export function mount(root, api) {
     const folder = await page.call('pick_parent_folder');
     if (folder) { $(field).value = folder; if (field === 'existing-path') clearInspection(); }
   }, 'Choosing folder'));
-  page.on($('refresh'), 'click', () => run(async () => { renderEnvironment(await page.call('probe_environment')); }, 'Checking requirements'));
+  page.on($('refresh'), 'click', () => {
+    if (page.busy()) return;
+    if (!root.querySelector('#feature-setup-existing').hidden) void refreshLatestSdk();
+    return run(async () => { renderEnvironment(await page.call('probe_environment')); }, 'Checking requirements');
+  });
+  page.on($('latest-refresh'), 'click', () => { if (!page.busy()) void refreshLatestSdk(); });
+  page.on($('sdk-guide'), 'click', () => run(() => page.call('open_official_url', { url: sdkGuideUrl }), 'Opening SDK guide'));
   page.on($('retry'), 'click', () => { if (!page.busy()) void api.retry('setup'); });
   page.on($('hub'), 'click', () => run(() => page.call('launch_hub'), 'Opening Unity Hub'));
   page.on($('review-hub'), 'click', () => run(() => page.call('launch_hub'), 'Opening Unity Hub'));
+  page.on($('copy-diagnostics'), 'click', async () => {
+    if (page.busy() || $('diagnostics').hidden) return;
+    try {
+      await navigator.clipboard.writeText($('diagnostic-details').value);
+      $('copy-status').textContent = 'Recovery details copied. Share them with support; no project files were changed.';
+    } catch {
+      $('diagnostic-details').focus(); $('diagnostic-details').select();
+      $('copy-status').textContent = 'Automatic copy was unavailable. The details are selected for copying.';
+    }
+  });
   for (const [name, url] of Object.entries(licenceUrls)) page.on($(`licence-${name}`), 'click', () => run(() => page.call('open_official_url', { url }), 'Opening licence terms'));
   page.on($('create'), 'click', () => run(async () => {
     if (created || !environment || !$('name').value.trim() || !$('parent').value.trim()) throw new Error('Enter a project name and folder.');
@@ -165,40 +259,69 @@ export function mount(root, api) {
     const result = await page.call('inspect_project', { path });
     if (revision !== inspectionRevision || path !== $('existing-path').value) throw new Error('Project selection changed during inspection. Inspect the current folder again.');
     inspection = result; $('existing-path').value = result.projectPath;
+    inspectedProjectPath = result.projectPath;
     const blockers = result.findings.filter(finding => finding.status === 'blocked').length;
+    const unqualified = result.findings.some(finding => finding.qualificationRequired === true);
     $('inspection-summary').textContent = blockers
-      ? `${blockers} ${blockers === 1 ? 'blocker needs' : 'blockers need'} review. No project files were changed. Resolve each finding, then inspect again. For manual review, open this project from Unity Hub using its existing Editor version.`
+      ? `${blockers} ${blockers === 1 ? 'item needs' : 'items need'} review before automatic repair. No project files were changed.${unqualified ? ' Newer versions are kept; their version-specific checks are not a full validation.' : ''} For manual review, open this project in its existing Editor.`
+      : result.partialRepair === true
+        ? 'Inspection complete. Newer versions are kept. Only the supported repairs listed below can be applied; skipped checks are not a full project validation. No project files were changed.'
       : result.canRepair && !result.canValidate
         ? 'Inspection complete. No project files were changed. Review the proposed changes; repairs are required before validation is available.'
         : 'Inspection complete. No project files were changed. Review the findings before approving a repair or validation.';
     const labels = { pass: ['Ready', 'feature-good'], blocked: ['Blocked', 'feature-warn'], repair: ['Repair available', 'feature-warn'], check: ['Needs Unity check', 'feature-note'] };
     $('findings').replaceChildren(...result.findings.map(finding => {
-      const [label, style] = Object.hasOwn(labels, finding.status) ? labels[finding.status] : ['Review', 'feature-note'];
+      const [label, style] = finding.qualificationRequired === true ? ['Newer version kept', 'feature-note'] : Object.hasOwn(labels, finding.status) ? labels[finding.status] : ['Review', 'feature-note'];
       const block = node('div', null, 'feature-section'); block.append(node('strong', `${finding.title}: ${label}`, style), node('p', finding.detail)); return block;
     }));
     $('changes').replaceChildren(...result.proposedChanges.map(change => node('li', change)));
+    showSkippedChecks(result.skippedChecks);
+    const diagnostics = result.findings.filter(finding => Array.isArray(finding.diagnosticPaths) && finding.diagnosticPaths.length);
+    if (diagnostics.length) {
+      $('diagnostic-details').value = [`Project: ${result.projectPath}`, ...diagnostics.flatMap(finding => [finding.title, finding.detail, ...finding.diagnosticPaths])].join('\n');
+      $('diagnostics').hidden = false;
+    }
+    renderRequirements();
   }, 'Inspecting project; no files changed'));
   async function existing(repair) {
     return run(async () => {
-      if (!inspection || !$('approval').checked || !(repair ? inspection.canRepair : inspection.canValidate)) throw new Error('Inspect and approve the reviewed changes first.');
+      if (!inspection || !$('approval').checked || (!repair && inspection.partialRepair) || !(repair ? inspection.canRepair : inspection.canValidate)) throw new Error('Inspect and approve the reviewed changes first.');
       const reviewed = inspection;
+      let partial = reviewed.partialRepair === true;
       $('inspection-summary').textContent = 'Operation in progress. The findings below describe the pre-operation inspection.';
-      startActivity('existing', repair ? 'Repairing project' : 'Validating project', 'Preparing the settings backup.');
+      startActivity('existing', reviewed.partialRepair ? 'Applying supported repairs' : repair ? 'Repairing project' : 'Validating project', 'Preparing the settings backup.');
       try {
         const result = await page.call('run_existing_project', { request: { projectPath: reviewed.projectPath, fingerprint: reviewed.fingerprint, repair, approved: true } });
-        lines($('existing-result'), [result.message, result.backupPath ? `Backup: ${result.backupPath}` : null, result.reportPath ? `Report: ${result.reportPath}` : null]);
+        partial ||= result.partialRepair === true || result.validated === false;
+        if (partial) showSkippedChecks(result.skippedChecks ?? reviewed.skippedChecks);
+        lines($('existing-result'), [partial && result.success ? 'Supported repairs applied. Full project validation was not run.' : result.message, result.backupPath ? `Backup: ${result.backupPath}` : null, result.reportPath ? `Report: ${result.reportPath}` : null]);
         if (!result.success) throw new Error(result.message || 'Validation needs attention. Review the report.');
-        completed = result.projectPath;
       } finally {
         inspection = null; $('approval').checked = false; operation = null; $('activity').hidden = true;
-        $('inspection-summary').textContent = 'Inspect again before another repair or validation. The findings below describe the pre-operation inspection.';
+        $('inspection-summary').textContent = partial
+          ? 'Inspect again after Unity finishes importing and compiling. The findings below describe the pre-operation inspection.'
+          : 'Inspect again before another repair or validation. The findings below describe the pre-operation inspection.';
       }
     }, repair ? 'Backing up and repairing' : 'Backing up and validating');
   }
   page.on($('repair'), 'click', () => existing(true));
   page.on($('validate'), 'click', () => existing(false));
-  page.on($('open-existing'), 'click', () => run(() => page.call('open_project', { path: completed }), 'Opening project'));
+  page.on($('open-existing'), 'click', () => {
+    if (page.busy() || !inspectedProjectPath) return;
+    return run(() => page.call('open_project', { path: inspectedProjectPath }), 'Opening project');
+  });
+  const hide = page.hide.bind(page);
+  const dispose = page.dispose.bind(page);
+  const visibility = new MutationObserver(() => {
+    if (refreshLatestOnShow && !root.hidden) {
+      refreshLatestOnShow = false;
+      if (!root.querySelector('#feature-setup-existing').hidden) void refreshLatestSdk();
+    }
+  });
+  visibility.observe(root, { attributes: true, attributeFilter: ['hidden'] });
   return Object.assign(page, {
+    hide() { refreshLatestOnShow = true; hide(); },
+    dispose() { const result = dispose(); if (result) { disposed = true; clearTimeout(latestTimer); visibility.disconnect(); } return result; },
     initialize: () => run(async () => renderEnvironment(await page.call('probe_environment')), 'Checking requirements'),
     event(name, value) {
       if (!operation || !page.busy() || !value || typeof value !== 'object') return;

@@ -681,7 +681,7 @@ for (const width of [1100, 390]) test(`Setup reports each independent blocker an
   await expect(field(page, 'setup', 'findings')).toContainText('Unity version: Ready');
   await expect(field(page, 'setup', 'findings')).toContainText('Creator SDK: Blocked');
   await expect(field(page, 'setup', 'findings')).toContainText('Visual Scripting package: Blocked');
-  await expect(field(page, 'setup', 'inspection-summary')).toContainText('3 blockers');
+  await expect(field(page, 'setup', 'inspection-summary')).toContainText('3 items need review');
   await expect(field(page, 'setup', 'inspection-summary')).toContainText('No project files were changed');
   await expect(field(page, 'setup', 'review-hub')).toBeVisible();
   await expect(field(page, 'setup', 'approval').locator('..')).toBeHidden();
@@ -695,7 +695,7 @@ for (const width of [1100, 390]) test(`Setup reports each independent blocker an
   await expect(field(page, 'setup', 'status')).toHaveText('Review findings');
   await page.evaluate(() => { window.inspectionOverride.findings.pop(); });
   await field(page, 'setup', 'inspect').click();
-  await expect(field(page, 'setup', 'inspection-summary')).toContainText('2 blockers');
+  await expect(field(page, 'setup', 'inspection-summary')).toContainText('2 items need review');
   await expect(field(page, 'setup', 'findings')).not.toContainText('Project lock');
   await expect(field(page, 'setup', 'repair')).toBeDisabled();
   expect(await commands(page, 'run_existing_project')).toEqual([]);
@@ -1262,6 +1262,49 @@ async function layoutProblems(page, selector) {
     return problems.slice(0, 12);
   });
 }
+
+test('feature-load failure stays visible and reopening recovers without changing settings or duplicating pages', async ({ page }) => {
+  let requests = 0;
+  await page.route('**/features/setup.js', route => ++requests === 1 ? route.abort('failed') : route.continue());
+  await open(page);
+  const before = await page.evaluate(() => JSON.stringify(savedConfig));
+  expect(await show(page, 'setup')).toBe(false);
+  const failure = page.locator('#feature-setup');
+  await expect(failure.getByRole('alert')).toContainText('Project Setup could not open');
+  await expect(failure.getByRole('alert')).toContainText('Close and reopen Hub');
+  expect(await page.evaluate(() => CreatorFeaturePages.busy())).toBe(false);
+  // Ordinary shell renders must not repeatedly fetch a failed module.
+  expect(await show(page, 'setup')).toBe(false);
+  expect(requests).toBe(1);
+  expect(await show(page, 'mcp')).toBe(true);
+  await expect(failure).toBeHidden();
+  await expect(page.locator('#feature-mcp')).toBeVisible();
+  expect(await page.evaluate(() => JSON.stringify(savedConfig))).toBe(before);
+  expect(await commands(page, 'save_config')).toEqual([]);
+  await page.reload();
+  expect(await show(page, 'setup')).toBe(true);
+  await expect(field(page, 'setup', 'create')).toBeEnabled();
+  expect(requests).toBe(2);
+  expect(await page.locator('#feature-setup').count()).toBe(1);
+  expect((await commands(page, 'probe_environment')).length).toBe(1);
+  expect(await page.evaluate(() => JSON.stringify(savedConfig))).toBe(before);
+  expect(await commands(page, 'save_config')).toEqual([]);
+  expect(await page.locator('iframe').count()).toBe(0);
+});
+
+test('feature-load mount error cannot break other pages or survive disposal as a blank cached page', async ({ page }) => {
+  await page.route('**/features/setup.js', route => route.fulfill({ contentType: 'text/javascript',
+    body: 'export function mount() { throw new Error("Fixture mount failure"); }' }));
+  await open(page);
+  expect(await show(page, 'setup')).toBe(false);
+  await expect(page.locator('#feature-setup').getByRole('alert')).toContainText('Fixture mount failure');
+  expect(await show(page, 'mcp')).toBe(true);
+  await expect(page.locator('#feature-setup')).toBeHidden();
+  expect(await page.evaluate(() => CreatorFeaturePages.dispose())).toBe(true);
+  expect(await page.locator('#view-native-features > section').count()).toBe(0);
+  expect(await show(page, 'mcp')).toBe(true);
+  expect(await commands(page, 'save_config')).toEqual([]);
+});
 
 for (const width of [1280, 390, 320]) test(`actual Root feature layouts have no overlap and centered dialogs at ${width}px`, async ({ page }, testInfo) => {
   const height = 780;

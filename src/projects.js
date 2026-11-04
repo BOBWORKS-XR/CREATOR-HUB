@@ -2,6 +2,7 @@
   const byId = id => document.getElementById(id);
   let snapshot = null;
   let busy = false;
+  let retryProject = null;
   let revision = 0, loadedRevision = -1;
   let refreshQueued = false;
   const names = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
@@ -22,6 +23,11 @@
     const prepare = byId('prepare-project-registry');
     prepare.classList.toggle('hidden', snapshot?.registryHelperPreparationAvailable !== true);
     prepare.disabled = busy;
+    const failedProject = snapshot?.projects.find(project => project.id === retryProject);
+    byId('project-recovery').classList.toggle('hidden', !failedProject);
+    byId('retry-project-open').disabled = busy || Boolean(failedProject?.issue);
+    byId('retry-project-open').title = failedProject ? `Try opening ${failedProject.name} again` : '';
+    byId('refresh-project-recovery').disabled = busy;
     byId('view-projects').setAttribute('aria-busy', String(busy));
     const query = byId('project-search').value.trim().toLowerCase();
     const filter = byId('project-sdk').value;
@@ -52,7 +58,9 @@
       if (project.bridge || window.CreatorHubNative?.integratedFeatures === true) {
         const bridge = project.bridge || {};
         const checked = typeof bridge.installed === 'boolean' && typeof bridge.current === 'boolean' && (!bridge.current || bridge.installed);
-        tags.append(element('span', !checked ? 'MCP bridge not checked' : bridge.current ? 'MCP bridge current' : bridge.installed ? 'MCP bridge update available' : 'MCP bridge not installed', checked && bridge.current ? 'project-bridge-current' : 'project-bridge-warning'));
+        const bridgeStatus = element('span', !checked ? 'MCP bridge not checked' : bridge.current ? 'MCP bridge current' : bridge.installed ? 'MCP bridge update available' : 'MCP bridge not installed', checked && bridge.current ? 'project-bridge-current' : 'project-bridge-warning');
+        bridgeStatus.title = 'The MCP bridge connects AI tools. It is not required to open this project in Unity.';
+        tags.append(bridgeStatus);
       }
       const modified = modifiedDate(project);
       const date = element('span', modified === null ? 'Modified date unavailable' : `Modified ${dateFormat.format(modified)}`, 'project-modified');
@@ -84,6 +92,7 @@
   async function run(command, args = {}) {
     if (busy) return;
     const requestedRevision = revision;
+    if (command !== 'open_unity_project' || retryProject !== args.id) retryProject = null;
     busy = true; render();
     byId('project-status').textContent = command === 'project_inventory' ? 'Reading known project locations...' : command === 'prepare_project_registry' ? 'Preparing verified Unity registry discovery...' : command === 'open_unity_project' ? 'Checking Unity version and project lock...' : 'Updating saved list...';
     try {
@@ -94,7 +103,11 @@
         loadedRevision = requestedRevision;
         byId('project-status').textContent = `${result.projects.length} known projects. SDK labels reflect package declarations, not build validation.`;
       } else byId('project-status').textContent = result || 'No project added.';
-    } catch (reason) { byId('project-status').textContent = String(reason); }
+      retryProject = null;
+    } catch (reason) {
+      byId('project-status').textContent = String(reason);
+      if (command === 'open_unity_project') retryProject = args.id;
+    }
     finally {
       busy = false; render();
       const queued = refreshQueued; refreshQueued = false;
@@ -104,6 +117,10 @@
   }
   byId('refresh-projects').addEventListener('click', () => run('project_inventory'));
   byId('prepare-project-registry').addEventListener('click', () => run('prepare_project_registry'));
+  byId('retry-project-open').addEventListener('click', () => {
+    if (retryProject) void run('open_unity_project', { id: retryProject });
+  });
+  byId('refresh-project-recovery').addEventListener('click', () => run('project_inventory'));
   byId('add-project').addEventListener('click', () => run('add_project_folder'));
   byId('project-search').addEventListener('input', render);
   byId('project-sdk').addEventListener('change', render);

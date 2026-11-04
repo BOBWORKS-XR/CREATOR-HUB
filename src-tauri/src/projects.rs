@@ -330,6 +330,17 @@ fn project_helper_path() -> Result<PathBuf, String> {
         }))
 }
 
+#[cfg(any(test, all(windows, feature = "integrated-features")))]
+fn windows_helper_missing(path: &Path) -> Result<bool, String> {
+    crate::platform::reject_links(path)?;
+    match fs::symlink_metadata(path) {
+        Ok(info) if info.is_file() => Ok(false),
+        Ok(_) => Err("The Unity helper cache needs review; it was not replaced.".into()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Err(_) => Err("Cannot inspect the Unity helper cache.".into()),
+    }
+}
+
 #[cfg(feature = "integrated-features")]
 fn prepare_helper_for_open(handle: &tauri::AppHandle) -> Result<(), String> {
     if !cfg!(all(windows, target_arch = "x86_64")) {
@@ -342,7 +353,7 @@ fn prepare_helper_for_open(handle: &tauri::AppHandle) -> Result<(), String> {
         &project_helper_path()?,
         || {
             handle.dialog()
-            .message("Download Unity's verified registry helper to find installed Editors and projects?\n\nUnity CLI 1.0.0-beta.9, 20,835,248 bytes, from public-cdn.cloud.unity3d.com. Its fixed size and SHA-256 are checked before use. It is cached once and used here only for read-only Unity Hub registry lookups.\n\nThis does not enable the optional experimental AI Unity CLI integration, change AI-client configuration, install Unity Hub, an Editor or Unity Pipeline, or write project files. That AI integration remains a separate consent decision.\n\nDownload the helper and continue opening this project?")
+            .message("Download Unity's verified helper to find your installed Editors and projects?\n\nThis is a one-time 20.8 MB download from Unity. Hub checks its size and SHA-256 before using it. Your projects and AI-client settings are not changed.\n\nThe helper is Unity CLI 1.0.0-beta.9, 20,835,248 bytes, from public-cdn.cloud.unity3d.com. It is used here only to read Unity Hub's registry. This does not enable experimental AI Unity CLI integration, or install Unity Hub, an Editor or Unity Pipeline.\n\nDownload the helper?")
             .title("Download verified Unity registry helper")
             .kind(MessageDialogKind::Info)
             .buttons(MessageDialogButtons::OkCancelCustom("Download helper".into(), "Not now".into()))
@@ -364,7 +375,7 @@ fn pin_helper(path: &Path, expected_bytes: u64, expected_sha256: &str) -> Result
     }
     let mut pin = options.open(path).map_err(|_| {
         if cfg!(feature = "integrated-features") {
-            "The verified Unity registry helper is not cached. Open a listed project to review its one-time download. No project files were changed."
+            "Hub needs a one-time Unity helper download to find all projects and installed Editors. Choose Download verified Unity helper below. Your projects and AI settings will not change."
         } else {
             "The verified Unity registry helper is not cached. Prepare it in Project Setup, then refresh Projects. No project files were changed."
         }
@@ -1241,6 +1252,14 @@ fn refresh(handle: &tauri::AppHandle) -> Result<Snapshot, String> {
     let snapshot = discover(&config, &saved_file, current_hub);
     #[allow(unused_mut)]
     let mut result = snapshot;
+    #[cfg(all(windows, target_arch = "x86_64", feature = "integrated-features"))]
+    {
+        result.registry_helper_preparation_available = Some(
+            project_helper_path()
+                .and_then(|path| windows_helper_missing(&path))
+                .unwrap_or(false),
+        );
+    }
     #[cfg(all(
         target_os = "linux",
         target_arch = "x86_64",
@@ -1289,14 +1308,27 @@ pub async fn project_inventory(handle: tauri::AppHandle) -> Result<Snapshot, Str
 
 #[tauri::command]
 pub async fn prepare_project_registry(handle: tauri::AppHandle) -> Result<Snapshot, String> {
+    #[cfg(all(windows, target_arch = "x86_64", feature = "integrated-features"))]
+    return tauri::async_runtime::spawn_blocking(move || {
+        let manager = handle.state::<crate::manager::Manager>();
+        let _guard = manager.begin()?;
+        prepare_helper_for_open(&handle)?;
+        let _verified = pin_helper(&project_helper_path()?, HELPER_BYTES, HELPER_SHA256)?;
+        refresh(&handle)
+    })
+    .await
+    .map_err(|_| "Unity helper setup could not finish. Try the download again.".to_string())?;
     #[cfg(not(all(
-        target_os = "linux",
+        any(windows, target_os = "linux"),
         target_arch = "x86_64",
         feature = "integrated-features"
     )))]
     {
         let _ = handle;
-        Err("Unity registry helper preparation from Projects is available only in native Linux Hub.".into())
+        Err(
+            "Unity helper setup is unavailable in this build. Use Unity Hub to open your project."
+                .into(),
+        )
     }
     #[cfg(all(target_os = "linux", target_arch = "x86_64", feature = "integrated-features"))]
     tauri::async_runtime::spawn_blocking(move || {
@@ -1455,6 +1487,39 @@ fn linux_editor_from(value: &Value, version: &str) -> Option<PathBuf> {
         })
 }
 
+fn check_project_lock(root: &Path) -> Result<(), String> {
+    let path = root.join("Temp/UnityLockfile");
+    crate::platform::reject_links(&path).map_err(|_| {
+        "The project's lock path contains a link. Review the project folder before opening it. Nothing was changed."
+    })?;
+    const UNVERIFIED: &str = "Hub could not check whether this project is in use. Check that the project folder is accessible, then try opening again. Nothing was changed.";
+    match fs::symlink_metadata(&path) {
+        Ok(info) if info.is_file() => {}
+        Ok(_) => return Err("The project's lock marker is not a regular file. Review the project folder before opening it. Nothing was changed.".into()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(_) => return Err(UNVERIFIED.into()),
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Foundation::{ERROR_LOCK_VIOLATION, ERROR_SHARING_VIOLATION};
+        // Match Setup's read-only ownership probe; never delete a leftover marker.
+        match File::options().read(true).share_mode(0).open(&path) {
+            Ok(file) => match file.metadata() {
+                Ok(info) if info.is_file() => Ok(()),
+                _ => Err(UNVERIFIED.into()),
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) if matches!(error.raw_os_error(), Some(code)
+                if code == ERROR_SHARING_VIOLATION as i32 || code == ERROR_LOCK_VIOLATION as i32) =>
+                Err("This project is in use. Check its Unity window, or wait for Unity to finish closing, then choose Try opening again. Nothing was changed.".into()),
+            Err(_) => Err(UNVERIFIED.into()),
+        }
+    }
+    #[cfg(not(windows))]
+    Err("This project has a Unity lock marker. Use its existing Unity window, or close it normally in Unity and try opening again. The marker was not removed.".into())
+}
+
 fn check_open_project(project: &Project) -> Result<(), String> {
     let root = Path::new(&project.path);
     let fresh = inspect(root, &project.source, project.added);
@@ -1466,10 +1531,7 @@ fn check_open_project(project: &Project) -> Result<(), String> {
             "Project SDK or Unity version changed. Refresh Projects before opening.".into(),
         );
     }
-    if root.join("Temp/UnityLockfile").exists() {
-        return Err("Unity has a lock file for this project. Use the existing Editor or check it in Unity Hub; no lock was removed.".into());
-    }
-    Ok(())
+    check_project_lock(root)
 }
 
 fn open_command(project: &Project, editor: &Path) -> Result<std::process::Command, String> {
@@ -1792,15 +1854,16 @@ mod tests {
         assert!(compact.contains(
             "target_os=\"linux\",target_arch=\"x86_64\",feature=\"integrated-features\""
         ));
-        let worker = body.find("spawn_blocking(move ||").unwrap();
-        let lease = body.find("manager.begin()?").unwrap();
-        let missing = body.find("linux_registry_image::missing").unwrap();
-        let consent = body.find("prepare_missing_helper").unwrap();
-        let service = body
+        let linux = &body[body.rfind("spawn_blocking(move ||").unwrap()..];
+        let worker = 0;
+        let lease = linux.find("manager.begin()?").unwrap();
+        let missing = linux.find("linux_registry_image::missing").unwrap();
+        let consent = linux.find("prepare_missing_helper").unwrap();
+        let service = linux
             .find("creator_project_setup::service::prepare_project_helper")
             .unwrap();
-        let verify = body.find("Image::capture").unwrap();
-        let refresh = body.find("refresh(&handle)").unwrap();
+        let verify = linux.find("Image::capture").unwrap();
+        let refresh = linux.find("refresh(&handle)").unwrap();
         assert!(
             worker < lease
                 && lease < missing
@@ -1809,7 +1872,8 @@ mod tests {
                 && service < verify
                 && verify < refresh
         );
-        assert_eq!(body.matches("manager.begin()").count(), 1);
+        // Exactly one lease per platform branch, without a recursive inventory call.
+        assert_eq!(body.matches("manager.begin()").count(), 2);
         assert!(!body.contains("project_inventory("));
         assert!(!crate::native_support::command_allowed(
             true,
@@ -2922,7 +2986,7 @@ mod tests {
     }
 
     #[test]
-    fn opening_is_literal_and_refuses_stale_version_or_lock() {
+    fn opening_is_literal_and_refuses_a_changed_version() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("Space & name");
         fixture(&path, json!({CREATOR: "4.0.14"}));
@@ -2932,12 +2996,6 @@ mod tests {
             command.get_args().collect::<Vec<_>>(),
             vec![std::ffi::OsStr::new("-projectPath"), path.as_os_str()]
         );
-        fs::create_dir(path.join("Temp")).unwrap();
-        fs::write(path.join("Temp/UnityLockfile"), "").unwrap();
-        assert!(open_command(&project, Path::new("Unity.exe"))
-            .unwrap_err()
-            .contains("lock file"));
-        fs::remove_file(path.join("Temp/UnityLockfile")).unwrap();
         fs::write(
             path.join("ProjectSettings/ProjectVersion.txt"),
             "m_EditorVersion: 6000.3.10f1",
@@ -2946,6 +3004,101 @@ mod tests {
         assert!(open_command(&project, Path::new("Unity.exe"))
             .unwrap_err()
             .contains("changed"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn opening_preserves_an_unused_unity_lock_marker_but_refuses_a_held_marker() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let root = tempfile::tempdir().unwrap();
+        fixture(root.path(), json!({CREATOR: "4.0.14"}));
+        let project = inspect(root.path(), "fixture", false);
+        fs::create_dir(root.path().join("Temp")).unwrap();
+        let marker = root.path().join("Temp/UnityLockfile");
+        fs::write(&marker, "preserve marker bytes").unwrap();
+        assert!(check_open_project(&project).is_ok());
+        assert_eq!(fs::read(&marker).unwrap(), b"preserve marker bytes");
+
+        let held = File::options()
+            .read(true)
+            .share_mode(0)
+            .open(&marker)
+            .unwrap();
+        assert!(check_open_project(&project).is_err());
+        assert!(open_command(&project, Path::new("Unity.exe")).is_err());
+        drop(held);
+        assert!(open_command(&project, Path::new("Unity.exe")).is_ok());
+        assert_eq!(fs::read(&marker).unwrap(), b"preserve marker bytes");
+    }
+
+    #[test]
+    fn opening_refuses_a_non_file_lock_marker_without_removing_it() {
+        let root = tempfile::tempdir().unwrap();
+        fixture(root.path(), json!({}));
+        let project = inspect(root.path(), "fixture", false);
+        let marker = root.path().join("Temp/UnityLockfile");
+        fs::create_dir_all(&marker).unwrap();
+        assert!(check_open_project(&project)
+            .unwrap_err()
+            .contains("not a regular file"));
+        assert!(marker.is_dir());
+    }
+
+    #[test]
+    fn helper_preparation_is_available_only_for_an_absent_cache_file() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("unity.exe");
+        assert!(windows_helper_missing(&path).unwrap());
+        fs::write(&path, "unknown existing image").unwrap();
+        assert!(!windows_helper_missing(&path).unwrap());
+        assert_eq!(fs::read(&path).unwrap(), b"unknown existing image");
+        let folder = root.path().join("folder");
+        fs::create_dir(&folder).unwrap();
+        assert!(windows_helper_missing(&folder).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn opening_refuses_a_junction_in_the_lock_path_and_preserves_its_target() {
+        let root = tempfile::tempdir().unwrap();
+        fixture(root.path(), json!({}));
+        let project = inspect(root.path(), "fixture", false);
+        let target = root.path().join("retained");
+        fs::create_dir(&target).unwrap();
+        let marker = target.join("UnityLockfile");
+        fs::write(&marker, "retained").unwrap();
+        let junction = root.path().join("Temp");
+        let result = std::process::Command::new("cmd")
+            .args(["/c", "mklink", "/J"])
+            .arg(&junction)
+            .arg(&target)
+            .output()
+            .unwrap();
+        assert!(result.status.success());
+        assert!(check_open_project(&project).unwrap_err().contains("link"));
+        assert_eq!(fs::read(&marker).unwrap(), b"retained");
+        fs::remove_dir(&junction).unwrap();
+    }
+
+    #[test]
+    fn windows_preparation_verifies_before_refresh_and_never_opens_a_project() {
+        let source = include_str!("projects.rs");
+        let body = source
+            .split("pub async fn prepare_project_registry(")
+            .nth(1)
+            .unwrap()
+            .split("#[tauri::command]")
+            .next()
+            .unwrap();
+        let windows = body.split("#[cfg(not(all(").next().unwrap();
+        assert!(windows
+            .contains("all(windows, target_arch = \"x86_64\", feature = \"integrated-features\")"));
+        assert!(
+            windows.find("prepare_helper_for_open").unwrap() < windows.find("pin_helper").unwrap()
+        );
+        assert!(windows.find("pin_helper").unwrap() < windows.find("refresh(&handle)").unwrap());
+        assert!(!windows.contains("open_unity_project"));
+        assert!(!windows.contains(".spawn()"));
     }
 
     #[test]

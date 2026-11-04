@@ -163,7 +163,7 @@ fn reject_links(path: &Path) -> Result<(), String> {
     }
     Ok(())
 }
-fn read(path: &Path, limit: u64) -> Result<Vec<u8>, String> {
+pub(crate) fn read(path: &Path, limit: u64) -> Result<Vec<u8>, String> {
     reject_links(path)?;
     let mut bytes = Vec::new();
     fs::File::open(path)
@@ -289,12 +289,16 @@ fn editor_lock_open_result(opened: std::io::Result<fs::File>) -> EditorLockState
     match opened {
         Ok(file) => match file.metadata() {
             Ok(info) if info.is_file() => EditorLockState::NotHeld,
-            Ok(_) => EditorLockState::Unverified("Unity lock marker is not an ordinary file.".into()),
+            Ok(_) => {
+                EditorLockState::Unverified("Unity lock marker is not an ordinary file.".into())
+            }
             Err(error) => EditorLockState::Unverified(error.to_string()),
         },
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => EditorLockState::NotHeld,
         #[cfg(windows)]
-        Err(error) if matches!(error.raw_os_error(), Some(code) if code == ERROR_SHARING_VIOLATION as i32 || code == ERROR_LOCK_VIOLATION as i32) => EditorLockState::Held,
+        Err(error) if matches!(error.raw_os_error(), Some(code) if code == ERROR_SHARING_VIOLATION as i32 || code == ERROR_LOCK_VIOLATION as i32) => {
+            EditorLockState::Held
+        }
         Err(error) => EditorLockState::Unverified(error.to_string()),
     }
 }
@@ -303,7 +307,9 @@ fn editor_lock_open_result(opened: std::io::Result<fs::File>) -> EditorLockState
 pub(crate) fn editor_lock_state(path: &Path) -> Result<EditorLockState, String> {
     use std::os::windows::fs::OpenOptionsExt;
     reject_links(path)?;
-    Ok(editor_lock_open_result(fs::OpenOptions::new().read(true).share_mode(0).open(path)))
+    Ok(editor_lock_open_result(
+        fs::OpenOptions::new().read(true).share_mode(0).open(path),
+    ))
 }
 
 pub(crate) fn editor_open(root: &Path) -> Result<bool, String> {
@@ -1154,24 +1160,27 @@ mod tests {
             std::io::ErrorKind::PermissionDenied,
             std::io::ErrorKind::Other,
         ] {
-            assert!(editor_lock_open_result(Err(std::io::Error::new(
-                kind,
-                "fixture refusal"
-            )))
-            .blocks());
+            assert!(
+                editor_lock_open_result(Err(std::io::Error::new(kind, "fixture refusal"))).blocks()
+            );
         }
-        assert!(!editor_lock_open_result(Err(std::io::Error::from(
-            std::io::ErrorKind::NotFound,
-        )))
-        .blocks());
+        assert!(
+            !editor_lock_open_result(Err(std::io::Error::from(std::io::ErrorKind::NotFound,)))
+                .blocks()
+        );
     }
 
     #[test]
     fn diagnostic_editor_lock_errors_retain_uncertainty_and_stay_blocked() {
-        for kind in [std::io::ErrorKind::PermissionDenied, std::io::ErrorKind::Other] {
+        for kind in [
+            std::io::ErrorKind::PermissionDenied,
+            std::io::ErrorKind::Other,
+        ] {
             let state = editor_lock_open_result(Err(std::io::Error::new(kind, "fixture refusal")));
             assert!(state.blocks());
-            assert!(matches!(state, EditorLockState::Unverified(ref reason) if reason.contains("fixture refusal")));
+            assert!(
+                matches!(state, EditorLockState::Unverified(ref reason) if reason.contains("fixture refusal"))
+            );
         }
     }
 

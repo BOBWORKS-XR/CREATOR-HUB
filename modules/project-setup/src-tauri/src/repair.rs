@@ -50,12 +50,51 @@ pub struct Finding {
     pub status: String,
     pub title: String,
     pub detail: String,
+    #[serde(rename = "diagnosticPaths", skip_serializing_if = "Vec::is_empty")]
+    pub diagnostic_paths: Vec<String>,
+    #[serde(rename = "qualificationRequired", skip_serializing_if = "is_false")]
+    pub qualification_required: bool,
+}
+fn is_false(value: &bool) -> bool {
+    !value
 }
 fn finding(status: &str, title: &str, detail: impl Into<String>) -> Finding {
     Finding {
         status: status.into(),
         title: title.into(),
         detail: detail.into(),
+        diagnostic_paths: Vec::new(),
+        qualification_required: false,
+    }
+}
+
+fn unqualified_version(title: &str, detail: impl Into<String>) -> Finding {
+    Finding {
+        qualification_required: true,
+        ..finding("check", title, detail)
+    }
+}
+
+fn existing_editor<'a>(
+    environment: &'a logic::EnvironmentReport,
+    version: &str,
+) -> Result<&'a logic::EditorInstallation, String> {
+    let editor = environment.editors.iter().find(|editor| editor.version == version)
+        .ok_or_else(|| format!("Unity {version} is not installed. Install this project's exact Editor version in Unity Hub; no version change is required."))?;
+    let mut missing = Vec::new();
+    if !editor.android_player {
+        missing.push("Android Build Support");
+    }
+    if !editor.android_sdk || !editor.android_ndk || !editor.open_jdk {
+        missing.push("Android SDK, NDK and OpenJDK");
+    }
+    if !editor.windows_standalone {
+        missing.push("Windows build support");
+    }
+    if missing.is_empty() {
+        Ok(editor)
+    } else {
+        Err(format!("Unity {version} needs {} for validation. Add these modules to that Editor in Unity Hub.", missing.join(", ")))
     }
 }
 
@@ -65,11 +104,14 @@ pub struct Inspection {
     pub project_path: String,
     pub fingerprint: String,
     pub editor_version: String,
+    pub sdk_version: Option<String>,
     pub findings: Vec<Finding>,
     pub proposed_changes: Vec<String>,
     pub can_repair: bool,
     pub can_validate: bool,
+    pub partial_repair: bool,
     pub locked: bool,
+    pub skipped_checks: Vec<String>,
     #[serde(skip)]
     manifest: Value,
     #[serde(skip)]
@@ -93,6 +135,9 @@ pub struct ExistingRequest {
 #[serde(rename_all = "camelCase")]
 pub struct ExistingResult {
     pub success: bool,
+    pub validated: bool,
+    pub partial_repair: bool,
+    pub skipped_checks: Vec<String>,
     pub project_path: String,
     pub backup_path: String,
     pub report_path: String,
@@ -211,6 +256,45 @@ fn fingerprint(root: &Path) -> Result<String, String> {
     Ok(format!("{:x}", digest.finalize()))
 }
 
+fn numeric_version(value: &str) -> Option<semver::Version> {
+    let version = semver::Version::parse(value).ok()?;
+    (version.to_string() == value).then_some(version)
+}
+
+fn newer_package(actual: &str, tested: &str) -> bool {
+    numeric_version(actual)
+        .zip(numeric_version(tested))
+        .is_some_and(|(actual, tested)| actual.cmp_precedence(&tested).is_gt())
+}
+
+fn unity_version(value: &str) -> Option<(u64, u64, u64, u8, u64)> {
+    let mut parts = value.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    let last = parts.next()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    let channel_at = last.find(|c: char| !c.is_ascii_digit())?;
+    let patch = last[..channel_at].parse().ok()?;
+    let suffix = &last[channel_at..];
+    let channel = match suffix.as_bytes().first()? {
+        b'a' => 0,
+        b'b' => 1,
+        b'f' => 2,
+        b'p' => 3,
+        _ => return None,
+    };
+    let revision = suffix[1..].parse().ok()?;
+    Some((major, minor, patch, channel, revision))
+}
+
+fn newer_unity(version: &str) -> bool {
+    unity_version(version)
+        .zip(unity_version(logic::EDITOR_VERSION))
+        .is_some_and(|(actual, tested)| actual > tested)
+}
+
 fn package_plan(manifest: &Value) -> Result<(Value, Vec<String>, Vec<Finding>), String> {
     let (sdk_version, vs_version) = logic::existing_package_versions(manifest);
     let mut updated = manifest.clone();
@@ -259,7 +343,9 @@ fn package_plan(manifest: &Value) -> Result<(Value, Vec<String>, Vec<Finding>), 
                 changes.push(format!("Upgrade Input System 1.12.0 to {version} for the tested Unity version."));
                 findings.push(finding("repair", title, "1.12.0 failed compilation with the tested Unity recipe."));
             }
-            other => findings.push(finding("blocked", title, format!("Installed reference {} differs from tested {version}. No automatic version replacement.", other.unwrap_or("invalid")))),
+            Some(actual) if newer_package(actual, version) => findings.push(unqualified_version(title, format!("Installed reference {actual} is newer than tested {version}. This is not a detected incompatibility. The installed version is kept; only supported metadata repairs are offered, without Unity validation."))),
+            Some(actual) if numeric_version(actual).is_some() => findings.push(finding("blocked", title, format!("Installed reference {actual} differs from tested {version}. This older or mixed combination needs review; it was not replaced."))),
+            other => findings.push(finding("blocked", title, format!("Package reference {} is not a supported exact version. Review it in Unity Package Manager. It was not replaced.", other.unwrap_or("invalid")))),
         }
     }
     let mut missing_modules = Vec::new();
@@ -291,6 +377,15 @@ fn package_plan(manifest: &Value) -> Result<(Value, Vec<String>, Vec<Finding>), 
             ),
         ));
     }
+    repair_registries(&mut updated, &mut changes, &mut findings)?;
+    Ok((updated, changes, findings))
+}
+
+fn repair_registries(
+    updated: &mut Value,
+    changes: &mut Vec<String>,
+    findings: &mut Vec<Finding>,
+) -> Result<(), String> {
     let registries = updated
         .as_object_mut()
         .ok_or("Invalid manifest.")?
@@ -341,7 +436,192 @@ fn package_plan(manifest: &Value) -> Result<(Value, Vec<String>, Vec<Finding>), 
             "Required scopes are missing.",
         ));
     }
-    Ok((updated, changes, findings))
+    Ok(())
+}
+
+struct PartialPlan {
+    manifest: Value,
+    changes: Vec<String>,
+    findings: Vec<Finding>,
+    skipped_checks: Vec<String>,
+    metadata: Value,
+}
+
+fn installed_requirements(
+    root: &Path,
+    manifest: &Value,
+    held_manifest: Option<&[u8]>,
+) -> Result<Option<crate::sdk_requirements::Requirements>, String> {
+    match manifest["dependencies"]["com.sidequest.creator-sdk"].as_str() {
+        Some(version) if numeric_version(version).is_some() => {
+            if let Some(bytes) = held_manifest {
+                crate::sdk_requirements::installed_with_manifest(root, version, bytes)
+            } else {
+                crate::sdk_requirements::installed(root, version)
+            }
+        }
+        _ => Ok(None),
+    }
+}
+
+fn partial_package_plan(
+    manifest: &Value,
+    editor_version: &str,
+    metadata: Result<Option<crate::sdk_requirements::Requirements>, String>,
+) -> Result<PartialPlan, String> {
+    let mut plan = PartialPlan {
+        manifest: manifest.clone(),
+        changes: Vec::new(),
+        findings: Vec::new(),
+        skipped_checks: vec![
+            "Unity compilation and runtime validation".into(),
+            "Static Creator SDK and Visual Scripting validator injection".into(),
+            "Visual Scripting configuration and node database rebuild".into(),
+        ],
+        metadata: Value::Null,
+    };
+    let requirements = match metadata {
+        Ok(value) => value,
+        Err(error) => {
+            plan.findings.push(finding("check", "Installed SDK metadata", format!("Installed SDK requirements could not be safely read: {error} Version-dependent repairs are skipped; current package versions are kept.")));
+            None
+        }
+    };
+    plan.metadata = serde_json::to_value(&requirements).map_err(|e| e.to_string())?;
+    if let Some(required_editor) = requirements
+        .as_ref()
+        .and_then(|value| value.unity_version.as_ref())
+    {
+        plan.findings.push(finding("check", "SDK Unity requirement", format!("Installed SDK metadata names Unity {required_editor}. Keep project Editor {editor_version}; runtime compatibility is not validated by this metadata repair.")));
+    }
+    let (tested_sdk, _) = logic::existing_package_versions(manifest);
+    let dependencies = plan
+        .manifest
+        .get_mut("dependencies")
+        .and_then(Value::as_object_mut)
+        .ok_or("Manifest has no dependencies object.")?;
+    for name in dependencies.keys() {
+        if name.contains("banter") && name != "com.sidequest.creator-sdk" {
+            plan.findings.push(finding(
+                "blocked",
+                "Legacy Banter SDK",
+                "Banter-to-Creator migration requires manual review.",
+            ));
+        }
+    }
+    match dependencies
+        .get("com.sidequest.creator-sdk")
+        .and_then(Value::as_str)
+    {
+        Some(actual) if actual == tested_sdk || newer_package(actual, tested_sdk) => {
+            plan.findings.push(unqualified_version("Creator SDK", format!("Keep installed SDK {actual}. This combination has not been runtime validated; only supported metadata repairs are offered.")));
+        }
+        None if !dependencies.contains_key("com.sidequest.creator-sdk") => {
+            plan.skipped_checks
+                .push("Adding Creator SDK: no reviewed installed SDK version".into());
+            plan.findings.push(finding("check", "Creator SDK", "No SDK version is selected. Install the desired SDK in Unity Package Manager; this partial repair will not select a static version."));
+        }
+        _ => plan.findings.push(finding(
+            "blocked",
+            "Creator SDK",
+            "An older, custom or unreadable SDK reference needs review. It was not replaced.",
+        )),
+    }
+    for (name, title) in [
+        ("com.unity.render-pipelines.universal", "URP package"),
+        ("com.unity.inputsystem", "Input System"),
+        ("com.unity.visualscripting", "Visual Scripting package"),
+    ] {
+        let current = dependencies.get(name);
+        if current.is_some_and(|value| value.as_str().and_then(numeric_version).is_none()) {
+            plan.findings.push(finding(
+                "blocked",
+                title,
+                "A custom or unreadable package reference needs review. It was not replaced.",
+            ));
+            continue;
+        }
+        let required = requirements
+            .as_ref()
+            .and_then(|value| value.dependencies.get(name));
+        let Some((required, required_version)) =
+            required.and_then(|value| numeric_version(value).map(|version| (value, version)))
+        else {
+            plan.skipped_checks.push(format!(
+                "{name}: exact installed SDK requirement unavailable"
+            ));
+            plan.findings.push(finding("check", title, "Installed SDK metadata has no exact requirement for this package. Its existing reference is unchanged."));
+            continue;
+        };
+        match current.and_then(Value::as_str).and_then(numeric_version) {
+            None => {
+                dependencies.insert(name.into(), json!(required));
+                plan.changes.push(format!("Add {name} {required} from installed SDK metadata."));
+                plan.findings.push(finding("repair", title, "Missing dependency declared by the installed SDK."));
+            }
+            Some(actual) if actual.cmp_precedence(&required_version).is_lt() => {
+                dependencies.insert(name.into(), json!(required));
+                plan.changes.push(format!("Upgrade {name} {actual} to {required} from installed SDK metadata."));
+                plan.findings.push(finding("repair", title, "Upgrade to the installed SDK's exact dependency requirement."));
+            }
+            Some(actual) => plan.findings.push(finding("check", title, format!("Keep {actual}; installed SDK requirement is {required}. No downgrade or runtime-validation claim."))),
+        }
+    }
+    if editor_version == logic::EDITOR_VERSION {
+        let mut missing = Vec::new();
+        for name in logic::REQUIRED_BUILTIN_MODULES {
+            match dependencies.get(*name) {
+                None => {
+                    dependencies.insert((*name).into(), json!("1.0.0"));
+                    missing.push(*name);
+                }
+                Some(value) if value == "1.0.0" => {}
+                _ => plan.findings.push(finding(
+                    "blocked",
+                    "Built-in module",
+                    format!("Unexpected version for {name}."),
+                )),
+            }
+        }
+        if !missing.is_empty() {
+            plan.changes.push(format!(
+                "Add missing built-in modules for Unity {}: {}.",
+                logic::EDITOR_VERSION,
+                missing.join(", ")
+            ));
+        }
+    } else {
+        plan.skipped_checks.push(
+            "Built-in module changes: this Editor's fixed module contracts are not verified".into(),
+        );
+        for name in logic::REQUIRED_BUILTIN_MODULES {
+            if dependencies
+                .get(*name)
+                .is_some_and(|value| value.as_str().and_then(numeric_version).is_none())
+            {
+                plan.findings.push(finding(
+                    "blocked",
+                    "Built-in module",
+                    format!("Custom or unreadable reference for {name} requires review."),
+                ));
+            }
+        }
+    }
+    repair_registries(&mut plan.manifest, &mut plan.changes, &mut plan.findings)?;
+    Ok(plan)
+}
+
+fn partial_fingerprint(root: &Path, plan: &PartialPlan) -> Result<String, String> {
+    let mut digest = Sha256::new();
+    digest.update(fingerprint(root)?.as_bytes());
+    digest.update(
+        serde_json::to_vec(&json!({
+            "partialRepair": true, "metadata": plan.metadata,
+            "manifest": plan.manifest, "skippedChecks": plan.skipped_checks,
+        }))
+        .map_err(|e| e.to_string())?,
+    );
+    Ok(format!("{:x}", digest.finalize()))
 }
 
 fn known_visual_scripting_failure(previous: Option<&Value>, fingerprint: &str) -> bool {
@@ -379,30 +659,39 @@ pub fn inspect(path: &Path) -> Result<Inspection, String> {
         read(&root, "Packages/manifest.json")?.ok_or("Packages/manifest.json is missing.")?;
     let manifest: Value = serde_json::from_slice(&manifest_bytes)
         .map_err(|e| format!("Invalid package manifest: {e}"))?;
-    let (updated, mut changes, mut findings) = package_plan(&manifest)?;
+    let (mut updated, mut changes, mut findings) = package_plan(&manifest)?;
+    let partial_repair = newer_unity(&version)
+        || findings
+            .iter()
+            .any(|finding| finding.qualification_required);
+    let partial_plan = if partial_repair {
+        Some(partial_package_plan(
+            &manifest,
+            &version,
+            installed_requirements(&root, &manifest, None),
+        )?)
+    } else {
+        None
+    };
+    let skipped_checks = if let Some(plan) = &partial_plan {
+        updated = plan.manifest.clone();
+        changes = plan.changes.clone();
+        findings = plan.findings.clone();
+        plan.skipped_checks.clone()
+    } else {
+        Vec::new()
+    };
     let sdk_added = manifest["dependencies"]
         .get("com.sidequest.creator-sdk")
         .is_none();
     let manifest_changed = updated != manifest;
-    findings.insert(
-        0,
-        finding(
-            if version == logic::EDITOR_VERSION {
-                "pass"
-            } else {
-                "blocked"
-            },
-            "Unity version",
-            if version == logic::EDITOR_VERSION {
-                version.clone()
-            } else {
-                format!(
-                    "{version}; this preview only repairs {}. No Editor upgrade will be attempted.",
-                    logic::EDITOR_VERSION
-                )
-            },
-        ),
-    );
+    findings.insert(0, if version == logic::EDITOR_VERSION {
+        finding("pass", "Unity version", version.clone())
+    } else if newer_unity(&version) {
+        unqualified_version("Unity version", format!("Unity {version} is newer than tested {}. Keep this project's Editor; supported metadata repairs do not run a static Unity validator or change its version.", logic::EDITOR_VERSION))
+    } else {
+        finding("blocked", "Unity version", format!("Unity {version} is older than tested {} or cannot be identified safely. Its version was not changed.", logic::EDITOR_VERSION))
+    });
     let locked = editor_lock_state(&root)?.blocks();
     if locked {
         findings.push(finding(
@@ -415,27 +704,47 @@ pub fn inspect(path: &Path) -> Result<Inspection, String> {
             },
         ));
     }
-    if checked_path(&root, ".creator-project-setup/operation.lock")?.exists() {
-        findings.push(finding("blocked", "Existing operation", "A repair/validation operation is running or was interrupted. Review its logs before removing the operation lock."));
+    let operation_marker = checked_path(&root, ".creator-project-setup/operation.lock")?;
+    if operation_marker.exists() {
+        let mut issue = finding("blocked", "Existing operation", "A Setup operation is running or was interrupted. Wait for it to finish, then inspect again. If this persists, copy the recovery details for support. Do not delete the retained files.");
+        issue.diagnostic_paths = vec![
+            display_path(&operation_marker),
+            display_path(&checked_path(&root, ".creator-project-setup")?),
+        ];
+        findings.push(issue);
     }
-    if checked_path(&root, VALIDATOR)?.exists()
-        || checked_path(&root, VALIDATOR_META)?.exists()
-        || checked_path(&root, EXISTING_REQUEST)?.exists()
-    {
-        findings.push(finding(
+    let mut retained = Vec::new();
+    for relative in [VALIDATOR, VALIDATOR_META, EXISTING_REQUEST] {
+        let path = checked_path(&root, relative)?;
+        if path.exists() {
+            retained.push(display_path(&path));
+        }
+    }
+    if !retained.is_empty() {
+        let mut issue = finding(
             "blocked",
             "Temporary validator already present",
-            "An earlier setup validator needs review before another operation can run.",
-        ));
+            "An earlier Setup operation left validation files. Copy the recovery details for support before another repair. Do not delete these files or start another validator.",
+        );
+        retained.push(display_path(&checked_path(
+            &root,
+            ".creator-project-setup",
+        )?));
+        issue.diagnostic_paths = retained;
+        findings.push(issue);
     }
     let settings_missing = read(&root, VS_SETTINGS)?.is_none_or(|bytes| bytes.is_empty());
     let database_missing = !fs::metadata(checked_path(&root, VS_DATABASE)?)
         .is_ok_and(|meta| meta.is_file() && meta.len() > 0);
-    let current_fingerprint = fingerprint(&root)?;
+    let current_fingerprint = match &partial_plan {
+        Some(plan) => partial_fingerprint(&root, plan)?,
+        None => fingerprint(&root)?,
+    };
     let previous: Option<Value> = read(&root, ".creator-project-setup/last-validation.json")?
         .and_then(|bytes| serde_json::from_slice(&bytes).ok());
     let known_vs_failure = known_visual_scripting_failure(previous.as_ref(), &current_fingerprint);
-    let configure_vs = sdk_added || settings_missing || database_missing || known_vs_failure;
+    let configure_vs =
+        !partial_repair && (sdk_added || settings_missing || database_missing || known_vs_failure);
     if configure_vs {
         changes.push("Initialize Creator Visual Scripting and rebuild its node database; retain existing type selections.".into());
         findings.push(finding(
@@ -455,33 +764,40 @@ pub fn inspect(path: &Path) -> Result<Inspection, String> {
         findings.push(finding(
             "check",
             "Visual Scripting setup",
-            "Files are present; node validity requires Unity validation.",
+            if partial_repair {
+                "Static Visual Scripting configuration and validation are skipped. Open the project in its own Editor to resolve and inspect the installed SDK."
+            } else {
+                "Files are present; node validity requires Unity validation."
+            },
         ));
     }
     match read(&root, "ProjectSettings/GraphicsSettings.asset")? {
-        None => findings.push(finding("blocked", "Render pipeline", "GraphicsSettings.asset is missing. Automatic pipeline reconstruction is outside this preview.")),
+        None => findings.push(finding(if partial_repair { "check" } else { "blocked" }, "Render pipeline", "GraphicsSettings.asset is missing. Automatic pipeline reconstruction is outside this preview.")),
         Some(bytes) => {
             let text = String::from_utf8_lossy(&bytes);
             if text.lines().any(|line| line.trim() == "m_CustomRenderPipeline: {fileID: 0}") {
-                findings.push(finding("blocked", "Render pipeline", "No default render pipeline is assigned. Select a URP asset in Unity; this tool will not convert your materials."));
-            } else { findings.push(finding("check", "Render pipeline", "Unity validation will check that the assigned pipeline is URP.")); }
+                findings.push(finding(if partial_repair { "check" } else { "blocked" }, "Render pipeline", "No default render pipeline is assigned. Select a URP asset in Unity; this tool will not convert your materials."));
+            } else { findings.push(finding("check", "Render pipeline", if partial_repair { "Render pipeline validation is skipped; existing assets are preserved." } else { "Unity validation will check that the assigned pipeline is URP." })); }
         }
     }
-    let environment = logic::probe_environment();
-    if !environment.ready {
-        findings.push(finding(
-            "blocked",
-            "Computer requirements",
-            environment.blockers.join(" "),
-        ));
+    if !partial_repair {
+        let environment = logic::probe_environment();
+        if let Err(issue) = existing_editor(&environment, &version) {
+            findings.push(finding("blocked", "Computer requirements", issue));
+        }
     }
     let blocked = findings.iter().any(|f| f.status == "blocked");
     Ok(Inspection {
         project_path: display_path(&root),
         fingerprint: current_fingerprint,
+        sdk_version: manifest["dependencies"]["com.sidequest.creator-sdk"]
+            .as_str()
+            .map(str::to_owned),
         editor_version: version,
         can_repair: !blocked && !changes.is_empty(),
-        can_validate: !blocked && !manifest_changed,
+        can_validate: !partial_repair && !blocked && !manifest_changed,
+        partial_repair,
+        skipped_checks,
         proposed_changes: changes,
         findings,
         locked,
@@ -623,10 +939,36 @@ fn require_editor_lock_clear(state: EditorLockState) -> Result<(), String> {
 }
 
 fn review_unchanged(root: &Path, inspection: &Inspection) -> Result<(), String> {
+    review_unchanged_with_manifest(root, inspection, None)
+}
+
+fn review_unchanged_with_manifest(
+    root: &Path,
+    inspection: &Inspection,
+    held_manifest: Option<&[u8]>,
+) -> Result<(), String> {
     require_editor_lock_clear(editor_lock_state(root)?)?;
-    if fingerprint(root)? != inspection.fingerprint {
+    let current = if inspection.partial_repair {
+        let bytes = match held_manifest {
+            Some(bytes) => std::borrow::Cow::Borrowed(bytes),
+            None => std::borrow::Cow::Owned(
+                read(root, "Packages/manifest.json")?.ok_or("Package manifest disappeared.")?,
+            ),
+        };
+        let manifest: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+        let plan = partial_package_plan(
+            &manifest,
+            &inspection.editor_version,
+            installed_requirements(root, &manifest, held_manifest),
+        )?;
+        partial_fingerprint(root, &plan)?
+    } else {
+        fingerprint(root)?
+    };
+    if current != inspection.fingerprint {
         return Err(
-            "Project opened or changed after backup. Inspect again; later edits were kept.".into(),
+            "Project or SDK metadata changed after review. Inspect again; later edits were kept."
+                .into(),
         );
     }
     Ok(())
@@ -650,10 +992,11 @@ fn publish_manifest(root: &Path, inspection: &Inspection) -> Result<(), String> 
     let bytes = serde_json::to_vec_pretty(&inspection.manifest).map_err(|e| e.to_string())?;
     let path = checked_path(root, "Packages/manifest.json")?;
     let mut file = reserved_file(&path, false)?;
-    if held_bytes(&mut file)? != inspection.manifest_before {
+    let before = held_bytes(&mut file)?;
+    if before != inspection.manifest_before {
         return Err("Package manifest changed after review; later edits were kept.".into());
     }
-    review_unchanged(root, inspection)?;
+    review_unchanged_with_manifest(root, inspection, Some(&before))?;
     if file_identity(&file)? != file_identity(&File::open(&path).map_err(|e| e.to_string())?)? {
         return Err("Package manifest was replaced; inspect again.".into());
     }
@@ -836,6 +1179,41 @@ pub fn run(
         )
     })?;
     let report_path = backup.join("result.json");
+    if inspection.partial_repair {
+        let applied = (|| -> Result<(), String> {
+            review_unchanged(&root, &inspection)?;
+            temporary_paths_absent(&root)?;
+            if inspection.manifest_changed {
+                progress(SetupProgress::new(2, "Applying only reviewed package metadata and registry repairs; Unity validation is skipped."));
+                publish_manifest(&root, &inspection)?;
+            }
+            let expected =
+                serde_json::to_vec_pretty(&inspection.manifest).map_err(|e| e.to_string())?;
+            if read(&root, "Packages/manifest.json")?.as_deref() != Some(expected.as_slice()) {
+                return Err(
+                    "Manifest verification failed; retain the backup and inspect again.".into(),
+                );
+            }
+            require_editor_lock_clear(editor_lock_state(&root)?)?;
+            Ok(())
+        })();
+        let result = ExistingResult {
+            success: applied.is_ok(),
+            validated: false,
+            partial_repair: true,
+            skipped_checks: inspection.skipped_checks.clone(),
+            project_path: display_path(&root),
+            backup_path: display_path(&backup),
+            report_path: display_path(&report_path),
+            message: match applied {
+                Ok(()) => "Supported manifest repairs completed and verified. Open in Unity, let the installed SDK finish importing, then Inspect again. Unity, compilation and Visual Scripting were not validated; skipped checks are recorded with the backup.".into(),
+                Err(error) => format!("{error} Backup retained at {}. No automatic rollback or Unity validation was attempted.", display_path(&backup)),
+            },
+            validation: None,
+        };
+        write_json(&report_path, &result)?;
+        return Ok(result);
+    }
     let mut owned_temporary = Vec::new();
     let mut fresh_validation = false;
     let result = (|| -> Result<Value, String> {
@@ -875,11 +1253,8 @@ pub fn run(
         if progress_file.exists() {
             fs::remove_file(progress_file).map_err(|e| e.to_string())?;
         }
-        let editor = logic::probe_environment()
-            .editors
-            .into_iter()
-            .find(|e| e.ready)
-            .ok_or("Compatible Editor is unavailable.")?;
+        let environment = logic::probe_environment();
+        let editor = existing_editor(&environment, &inspection.editor_version)?;
         if request.repair && inspection.configure_vs {
             progress(SetupProgress::new(3, "Opening Unity to resolve packages and initialize the missing Visual Scripting setup."));
             logic::run_unity(
@@ -951,6 +1326,9 @@ pub fn run(
     }
     let result = ExistingResult {
         success,
+        validated: success,
+        partial_repair: false,
+        skipped_checks: Vec::new(),
         project_path: display_path(&root),
         backup_path: display_path(&backup),
         report_path: display_path(&report_path),
@@ -1101,8 +1479,6 @@ mod tests {
         for (sdk, vs) in [
             (json!("4.0.22"), json!("1.9.1")),
             (json!("4.0.14"), json!("1.9.12")),
-            (json!("4.0.23"), json!("1.9.12")),
-            (json!("4.0.22"), json!("1.9.13")),
             (json!("file:../sdk"), json!("1.9.12")),
             (json!("4.0.22"), json!("https://example.invalid/vs.git")),
             (Value::Null, json!("1.9.12")),
@@ -1202,7 +1578,67 @@ mod tests {
         assert!(findings.iter().any(|f| f.title == "Registry conflict"));
         assert!(findings
             .iter()
-            .any(|f| f.title == "Creator SDK" && f.status == "blocked"));
+            .any(|f| f.title == "Creator SDK" && f.status == "check"));
+        assert!(findings
+            .iter()
+            .any(|f| f.title == "Creator SDK" && f.qualification_required));
+    }
+
+    #[test]
+    fn existing_editor_does_not_require_creation_template_or_different_version() {
+        let mut environment = logic::EnvironmentReport {
+            platform: "windows".into(),
+            hub_installed: true,
+            hub_path: None,
+            hub_version: None,
+            hub_auto_registration: false,
+            unity_cli_installed: false,
+            unity_cli_path: None,
+            recipe: logic::recipe(),
+            ready: false,
+            editors: vec![logic::EditorInstallation {
+                version: logic::EDITOR_VERSION.into(),
+                root: "fixture".into(),
+                executable: "Unity.exe".into(),
+                exact_recipe: true,
+                android_player: true,
+                android_sdk: true,
+                android_ndk: true,
+                open_jdk: true,
+                windows_standalone: true,
+                urp_template: None,
+                ready: false,
+            }],
+            blockers: vec!["The Editor's official 3D URP template is missing.".into()],
+            suggested_project_parent: None,
+        };
+        assert!(existing_editor(&environment, logic::EDITOR_VERSION).is_ok());
+        assert!(existing_editor(&environment, "6000.3.27f1")
+            .unwrap_err()
+            .contains("not installed"));
+        environment.editors[0].android_ndk = false;
+        assert!(existing_editor(&environment, logic::EDITOR_VERSION)
+            .unwrap_err()
+            .contains("Android SDK, NDK and OpenJDK"));
+    }
+
+    #[test]
+    fn newer_packages_stay_unchanged_and_are_marked_unqualified_not_incompatible() {
+        let mut source = manifest();
+        source["dependencies"]["com.sidequest.creator-sdk"] = json!("4.0.25");
+        let (updated, _, findings) = package_plan(&source).unwrap();
+        assert_eq!(
+            updated["dependencies"]["com.sidequest.creator-sdk"],
+            "4.0.25"
+        );
+        let issue = findings.iter().find(|f| f.title == "Creator SDK").unwrap();
+        assert!(issue.qualification_required);
+        assert!(issue.detail.contains("not a detected incompatibility"));
+        source["dependencies"]["com.sidequest.creator-sdk"] = json!("file:../custom-sdk");
+        let (_, _, findings) = package_plan(&source).unwrap();
+        let issue = findings.iter().find(|f| f.title == "Creator SDK").unwrap();
+        assert!(!issue.qualification_required);
+        assert_eq!(issue.status, "blocked");
     }
     #[test]
     fn fingerprint_detects_changes_and_inspection_does_not_write() {
@@ -1256,6 +1692,348 @@ mod tests {
         )
         .unwrap();
         temp
+    }
+
+    fn future_fixture(version: &str, editor: &str) -> tempfile::TempDir {
+        let temp = fixture();
+        let mut source = manifest();
+        source["dependencies"]["com.sidequest.creator-sdk"] = json!(version);
+        source["scopedRegistries"] = json!([]);
+        write_json(&temp.path().join("Packages/manifest.json"), &source).unwrap();
+        fs::write(
+            temp.path().join("ProjectSettings/ProjectVersion.txt"),
+            format!("m_EditorVersion: {editor}\n"),
+        )
+        .unwrap();
+        temp
+    }
+
+    fn installed_metadata(root: &Path, version: &str, urp: &str) -> PathBuf {
+        let file = root.join("Packages/com.sidequest.creator-sdk/package.json");
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        write_json(
+            &file,
+            &json!({
+                "name": "com.sidequest.creator-sdk", "version": version,
+                "unity": "6000.3", "unityRelease": "21f1",
+                "dependencies": {
+                    "com.unity.render-pipelines.universal": urp,
+                "com.unity.inputsystem": "1.4.4",
+                "com.unity.visualscripting": "1.9.1"
+                }
+            }),
+        )
+        .unwrap();
+        file
+    }
+
+    #[test]
+    fn future_sdk_and_editor_are_advisory_without_static_validation() {
+        for sdk in ["4.0.25", "999.0.0"] {
+            let temp = future_fixture(sdk, "9999.0.1f1");
+            let before = fs::read(temp.path().join("Packages/manifest.json")).unwrap();
+            let inspected = inspect_unchanged(temp.path());
+            assert!(inspected.partial_repair && inspected.can_repair);
+            assert!(!inspected.can_validate && !inspected.configure_vs);
+            assert!(!inspected.findings.iter().any(|f| f.status == "blocked"));
+            for title in ["Creator SDK", "Unity version"] {
+                assert!(inspected
+                    .findings
+                    .iter()
+                    .any(|f| f.title == title && f.qualification_required && f.status == "check"));
+            }
+            assert_eq!(
+                inspected.manifest["dependencies"]["com.sidequest.creator-sdk"],
+                sdk
+            );
+            assert_eq!(
+                fs::read(temp.path().join("Packages/manifest.json")).unwrap(),
+                before
+            );
+        }
+    }
+
+    #[test]
+    fn newer_prerelease_and_build_metadata_sdks_are_preserved_and_advisory() {
+        for sdk in ["5.0.0-rc.1", "999.0.0+test"] {
+            assert!(newer_package(sdk, "4.0.22"));
+            let temp = future_fixture(sdk, logic::EDITOR_VERSION);
+            let before = fs::read(temp.path().join("Packages/manifest.json")).unwrap();
+            let inspected = inspect_unchanged(temp.path());
+            assert!(inspected.partial_repair && inspected.can_repair);
+            assert!(!inspected.can_validate && !inspected.configure_vs);
+            assert!(!inspected.findings.iter().any(|f| f.status == "blocked"));
+            assert!(inspected.findings.iter().any(|f| f.title == "Creator SDK"
+                && f.qualification_required
+                && f.status == "check"));
+            assert_eq!(inspected.sdk_version.as_deref(), Some(sdk));
+            assert_eq!(
+                inspected.manifest["dependencies"]["com.sidequest.creator-sdk"],
+                sdk
+            );
+            assert_eq!(
+                fs::read(temp.path().join("Packages/manifest.json")).unwrap(),
+                before
+            );
+        }
+        assert!(!newer_package("4.0.22+test", "4.0.22"));
+        assert!(!newer_package("4.0.22-rc.1", "4.0.22"));
+        assert!(numeric_version("^5.0.0").is_none());
+    }
+
+    #[test]
+    fn partial_plan_uses_installed_dependency_versions_without_downgrades() {
+        let temp = future_fixture("4.0.25", logic::EDITOR_VERSION);
+        let mut source: Value =
+            serde_json::from_slice(&fs::read(temp.path().join("Packages/manifest.json")).unwrap())
+                .unwrap();
+        source["dependencies"]
+            .as_object_mut()
+            .unwrap()
+            .remove("com.unity.visualscripting");
+        write_json(&temp.path().join("Packages/manifest.json"), &source).unwrap();
+        installed_metadata(temp.path(), "4.0.25", "17.4.0");
+        let first = inspect_unchanged(temp.path());
+        assert_eq!(
+            first.manifest["dependencies"]["com.unity.render-pipelines.universal"],
+            "17.4.0"
+        );
+        assert_eq!(
+            first.manifest["dependencies"]["com.unity.visualscripting"],
+            "1.9.1"
+        );
+        assert_eq!(
+            first.manifest["dependencies"]["com.unity.inputsystem"],
+            "1.20.0"
+        );
+        let result = run(
+            ExistingRequest {
+                project_path: first.project_path.clone(),
+                fingerprint: first.fingerprint.clone(),
+                repair: true,
+                approved: true,
+            },
+            |_| {},
+        )
+        .unwrap();
+        assert!(
+            result.success && !result.validated && result.validation.is_none(),
+            "{}",
+            result.message
+        );
+        let applied: Value =
+            serde_json::from_slice(&fs::read(temp.path().join("Packages/manifest.json")).unwrap())
+                .unwrap();
+        assert_eq!(applied, first.manifest);
+        let mut source: Value = serde_json::from_slice(&first.manifest_before).unwrap();
+        for (name, version) in [
+            ("com.unity.render-pipelines.universal", "18.0.0"),
+            ("com.unity.inputsystem", "2.0.0"),
+            ("com.unity.visualscripting", "2.0.0"),
+        ] {
+            source["dependencies"][name] = json!(version);
+        }
+        write_json(&temp.path().join("Packages/manifest.json"), &source).unwrap();
+        let second = inspect_unchanged(temp.path());
+        assert_eq!(second.manifest["dependencies"], source["dependencies"]);
+        assert!(second.can_repair && !second.can_validate);
+    }
+
+    #[test]
+    fn partial_without_metadata_repairs_only_known_scopes_and_preserves_validation() {
+        let temp = future_fixture("999.0.0", "6000.3.27f1");
+        let mut source: Value =
+            serde_json::from_slice(&fs::read(temp.path().join("Packages/manifest.json")).unwrap())
+                .unwrap();
+        source["dependencies"]
+            .as_object_mut()
+            .unwrap()
+            .remove("com.unity.modules.cloth");
+        write_json(&temp.path().join("Packages/manifest.json"), &source).unwrap();
+        fs::create_dir_all(temp.path().join(".creator-project-setup")).unwrap();
+        let previous = b"{\"keep\":\"previous validation\"}";
+        for name in [
+            "last-validation.json",
+            "unity-validation.json",
+            "unity-progress.json",
+        ] {
+            fs::write(
+                temp.path().join(".creator-project-setup").join(name),
+                previous,
+            )
+            .unwrap();
+        }
+        #[cfg(windows)]
+        {
+            fs::create_dir(temp.path().join("Temp")).unwrap();
+            fs::write(temp.path().join("Temp/UnityLockfile"), b"unheld marker").unwrap();
+        }
+        let inspected = inspect_unchanged(temp.path());
+        assert_eq!(inspected.manifest["dependencies"], source["dependencies"]);
+        let result = run(
+            ExistingRequest {
+                project_path: inspected.project_path,
+                fingerprint: inspected.fingerprint,
+                repair: true,
+                approved: true,
+            },
+            |_| {},
+        )
+        .unwrap();
+        assert!(result.success && result.partial_repair && !result.validated);
+        assert!(result.validation.is_none() && !result.skipped_checks.is_empty());
+        let after: Value =
+            serde_json::from_slice(&fs::read(temp.path().join("Packages/manifest.json")).unwrap())
+                .unwrap();
+        assert_eq!(after["dependencies"], source["dependencies"]);
+        assert_eq!(
+            fs::read(Path::new(&result.backup_path).join("Packages/manifest.json")).unwrap(),
+            serde_json::to_vec_pretty(&source).unwrap()
+        );
+        for name in [
+            "last-validation.json",
+            "unity-validation.json",
+            "unity-progress.json",
+        ] {
+            assert_eq!(
+                fs::read(temp.path().join(".creator-project-setup").join(name)).unwrap(),
+                previous
+            );
+        }
+        for name in [
+            VALIDATOR,
+            VALIDATOR_META,
+            EXISTING_REQUEST,
+            ".creator-project-setup/operation.lock",
+        ] {
+            assert!(!temp.path().join(name).exists(), "{name}");
+        }
+        #[cfg(windows)]
+        assert_eq!(
+            fs::read(temp.path().join("Temp/UnityLockfile")).unwrap(),
+            b"unheld marker"
+        );
+        let saved: Value = serde_json::from_slice(&fs::read(result.report_path).unwrap()).unwrap();
+        assert_eq!(saved["validated"], false);
+        assert_eq!(saved["partialRepair"], true);
+    }
+
+    #[test]
+    fn dynamic_metadata_changes_invalidate_review_before_any_repair() {
+        let temp = future_fixture("4.0.25", logic::EDITOR_VERSION);
+        installed_metadata(temp.path(), "4.0.25", "17.4.0");
+        let inspected = inspect_unchanged(temp.path());
+        installed_metadata(temp.path(), "4.0.25", "17.5.0");
+        let before = project_snapshot(temp.path());
+        assert!(run(
+            ExistingRequest {
+                project_path: inspected.project_path,
+                fingerprint: inspected.fingerprint,
+                repair: true,
+                approved: true
+            },
+            |_| {}
+        )
+        .unwrap_err()
+        .contains("changed since inspection"));
+        assert_eq!(before, project_snapshot(temp.path()));
+    }
+
+    #[test]
+    fn dynamic_metadata_changes_after_backup_are_rejected() {
+        let temp = future_fixture("4.0.25", logic::EDITOR_VERSION);
+        installed_metadata(temp.path(), "4.0.25", "17.4.0");
+        let inspected = inspect_unchanged(temp.path());
+        let before = inspected.manifest_before.clone();
+        let error = run(
+            ExistingRequest {
+                project_path: inspected.project_path,
+                fingerprint: inspected.fingerprint,
+                repair: true,
+                approved: true,
+            },
+            |event| {
+                let _ = event;
+                installed_metadata(temp.path(), "4.0.25", "17.5.0");
+            },
+        )
+        .unwrap_err();
+        assert!(error.contains("Nothing was repaired"));
+        assert_eq!(
+            fs::read(temp.path().join("Packages/manifest.json")).unwrap(),
+            before
+        );
+        assert!(temp.path().join(".creator-project-setup/backups").is_dir());
+        assert!(!temp.path().join(VALIDATOR).exists());
+    }
+
+    #[test]
+    fn unknown_sdk_metadata_uses_a_stable_nonblocking_plan() {
+        let temp = future_fixture("4.0.25", logic::EDITOR_VERSION);
+        let absent = inspect_unchanged(temp.path());
+        let metadata = installed_metadata(temp.path(), "4.0.24", "17.4.0");
+        let mismatched = inspect_unchanged(temp.path());
+        assert_eq!(absent.fingerprint, mismatched.fingerprint);
+        fs::write(&metadata, b"unreadable package metadata").unwrap();
+        let malformed = inspect_unchanged(temp.path());
+        assert_eq!(absent.fingerprint, malformed.fingerprint);
+        assert!(malformed.can_repair && malformed.partial_repair && !malformed.can_validate);
+        let original: Value = serde_json::from_slice(&malformed.manifest_before).unwrap();
+        assert_eq!(malformed.manifest["dependencies"], original["dependencies"]);
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            let held = File::options()
+                .read(true)
+                .share_mode(0)
+                .open(&metadata)
+                .unwrap();
+            let unreadable = inspect(temp.path()).unwrap();
+            assert_eq!(absent.fingerprint, unreadable.fingerprint);
+            assert!(unreadable.can_repair);
+            drop(held);
+        }
+    }
+
+    #[test]
+    fn partial_plan_blocks_older_custom_and_project_safety_issues_not_metadata_errors() {
+        for sdk in ["4.0.13", "file:../sdk"] {
+            let temp = future_fixture(sdk, "6000.3.27f1");
+            assert_refused(&inspect_unchanged(temp.path()), "Creator SDK");
+        }
+        let temp = future_fixture("4.0.25", logic::EDITOR_VERSION);
+        let absent = inspect_unchanged(temp.path());
+        let metadata = installed_metadata(temp.path(), "4.0.25", "17.4.0");
+        fs::remove_file(&metadata).unwrap();
+        fs::create_dir(&metadata).unwrap();
+        let unavailable = inspect_unchanged(temp.path());
+        assert!(unavailable.partial_repair && unavailable.can_repair && !unavailable.can_validate);
+        assert_eq!(unavailable.fingerprint, absent.fingerprint);
+        assert_eq!(
+            unavailable.manifest["dependencies"],
+            absent.manifest["dependencies"]
+        );
+        assert!(unavailable
+            .findings
+            .iter()
+            .any(|finding| finding.title == "Installed SDK metadata" && finding.status == "check"));
+        assert!(metadata.is_dir());
+        let temp = future_fixture("4.0.25", "2022.3.1f1");
+        assert_refused(&inspect_unchanged(temp.path()), "Unity version");
+        let temp = future_fixture("4.0.25", logic::EDITOR_VERSION);
+        let mut source: Value =
+            serde_json::from_slice(&fs::read(temp.path().join("Packages/manifest.json")).unwrap())
+                .unwrap();
+        source["scopedRegistries"] =
+            json!([{"name":"other", "url":"https://example.invalid", "scopes":["com.sidequest"]}]);
+        write_json(&temp.path().join("Packages/manifest.json"), &source).unwrap();
+        assert_refused(&inspect_unchanged(temp.path()), "Registry conflict");
+        let temp = future_fixture("4.0.25", logic::EDITOR_VERSION);
+        fs::create_dir_all(temp.path().join(".creator-project-setup")).unwrap();
+        let marker = temp.path().join(".creator-project-setup/operation.lock");
+        fs::write(&marker, b"foreign operation").unwrap();
+        assert_refused(&inspect_unchanged(temp.path()), "Existing operation");
+        assert_eq!(fs::read(marker).unwrap(), b"foreign operation");
     }
 
     fn existing_urp_without_sdk() -> tempfile::TempDir {
@@ -1327,7 +2105,6 @@ mod tests {
             before,
             "Inspection must not change any file or directory"
         );
-        assert!(!root.join(".creator-project-setup").exists());
         inspection
     }
 
@@ -1516,19 +2293,29 @@ mod tests {
 
     #[test]
     fn existing_urp_sdk_version_mismatch_refuses() {
-        inspect_package_mismatch("com.sidequest.creator-sdk", "4.0.99", "Creator SDK");
+        inspect_package_mismatch("com.sidequest.creator-sdk", "4.0.13", "Creator SDK");
     }
 
     #[test]
-    fn existing_urp_missing_sdk_input_version_mismatch_refuses() {
-        inspect_package_mismatch("com.unity.inputsystem", "99.0.0", "Input System");
+    fn existing_urp_missing_sdk_newer_input_is_preserved_without_static_repair() {
+        let temp = existing_urp_without_sdk();
+        let mut source: Value =
+            serde_json::from_slice(&fs::read(temp.path().join("Packages/manifest.json")).unwrap())
+                .unwrap();
+        source["dependencies"]["com.unity.inputsystem"] = json!("99.0.0");
+        write_json(&temp.path().join("Packages/manifest.json"), &source).unwrap();
+        let inspection = inspect_unchanged(temp.path());
+        assert!(inspection.partial_repair);
+        assert!(!inspection.can_validate && !inspection.configure_vs);
+        assert_eq!(inspection.manifest["dependencies"], source["dependencies"]);
+        assert!(!inspection.skipped_checks.is_empty());
     }
 
     #[test]
-    fn existing_urp_missing_sdk_urp_version_mismatch_refuses() {
+    fn existing_urp_missing_sdk_older_urp_version_mismatch_refuses() {
         inspect_package_mismatch(
             "com.unity.render-pipelines.universal",
-            "99.0.0",
+            "16.0.0",
             "URP package",
         );
     }
@@ -1572,6 +2359,36 @@ mod tests {
         fs::write(&meta, "guid: 22222222222222222222222222222222\n").unwrap();
         let inspection = inspect_unchanged(temp.path());
         assert_refused(&inspection, "Temporary validator already present");
+        let issue = inspection
+            .findings
+            .iter()
+            .find(|finding| finding.title == "Temporary validator already present")
+            .unwrap();
+        assert!(issue
+            .diagnostic_paths
+            .contains(&display_path(&fs::canonicalize(&meta).unwrap())));
+        assert!(meta.is_file());
+    }
+
+    #[test]
+    fn interrupted_operation_exposes_recovery_paths_without_removing_the_marker() {
+        let temp = fixture();
+        let marker = temp.path().join(".creator-project-setup/operation.lock");
+        fs::create_dir_all(marker.parent().unwrap()).unwrap();
+        fs::write(&marker, "retained operation").unwrap();
+        let before = fingerprint(temp.path()).unwrap();
+        let inspection = inspect(temp.path()).unwrap();
+        assert_eq!(fingerprint(temp.path()).unwrap(), before);
+        assert_refused(&inspection, "Existing operation");
+        let issue = inspection
+            .findings
+            .iter()
+            .find(|finding| finding.title == "Existing operation")
+            .unwrap();
+        assert!(issue
+            .diagnostic_paths
+            .contains(&display_path(&fs::canonicalize(&marker).unwrap())));
+        assert_eq!(fs::read(&marker).unwrap(), b"retained operation");
     }
 
     fn owned_temporary_fixture(root: &Path) -> Vec<OwnedTemporary> {
@@ -1725,7 +2542,7 @@ mod tests {
         assert!(
             run_source.find("temporary_paths_absent(&root)?").unwrap()
                 < run_source
-                    .find("let editor = logic::probe_environment()")
+                    .find("let environment = logic::probe_environment()")
                     .unwrap()
         );
         let result = run(
@@ -1897,7 +2714,7 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn editor_lock_release_keeps_unqualified_sdk_and_visual_scripting_mismatches_blocked() {
+    fn editor_lock_release_keeps_newer_versions_advisory_without_validation() {
         use std::os::windows::fs::OpenOptionsExt;
         let temp = fixture();
         let manifest_path = temp.path().join("Packages/manifest.json");
@@ -1913,15 +2730,21 @@ mod tests {
             let report = inspect(temp.path()).unwrap();
             assert_eq!(report.locked, locked);
             assert!(!report.can_repair && !report.can_validate);
-            for (title, actual, tested) in [
-                ("Creator SDK", "4.0.23", "4.0.14"),
-                ("Visual Scripting package", "1.9.13", "1.9.1"),
-            ] {
-                assert!(report.findings.iter().any(|finding| finding.title == title
-                    && finding.status == "blocked"
-                    && finding.detail.contains(actual)
-                    && finding.detail.contains(&format!("tested {tested}."))));
-            }
+            assert!(report.partial_repair);
+            assert!(!report.configure_vs);
+            assert!(report
+                .findings
+                .iter()
+                .any(|finding| finding.title == "Creator SDK"
+                    && finding.status == "check"
+                    && finding.detail.contains("4.0.23")));
+            assert!(
+                report
+                    .findings
+                    .iter()
+                    .any(|finding| finding.status == "blocked")
+                    == locked
+            );
             assert_eq!(fs::read(&manifest_path).unwrap(), before);
             assert!(!temp.path().join(".creator-project-setup").exists());
         };

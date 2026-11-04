@@ -21,6 +21,7 @@
 .feature-page .feature-section { border-top: 1px solid var(--border, #293238); padding: 18px 0; min-width: 0; }
 .feature-page label:not(.feature-check) { display: block; margin: 0 0 12px; }
 .feature-page input[type="text"], .feature-page select { display: block; width: 100%; max-width: 100%; height: 38px; margin-top: 6px; background: #111518; color: inherit; border: 1px solid #3b454d; border-radius: 4px; padding: 6px 10px; font: inherit; }
+.feature-page textarea[readonly] { display: block; width: 100%; max-width: 100%; margin-top: 6px; background: #111518; color: inherit; border: 1px solid #3b454d; border-radius: 4px; padding: 8px 10px; font: inherit; resize: vertical; }
 .feature-page .feature-input-row { display: flex; align-items: end; gap: 8px; }
 .feature-page .feature-input-row label { flex: 1; min-width: 0; }
 .feature-page .feature-input-row button { flex-shrink: 0; margin-bottom: 12px; min-height: 38px; }

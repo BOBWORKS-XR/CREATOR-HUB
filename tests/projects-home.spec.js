@@ -7,6 +7,7 @@ const projectNames = page => page.locator('#project-list .project-info > strong'
 async function load(page, options = {}) {
   const state = {
     calls: [], unexpected: [], errors: [], cancelAdd: false, failPreference: null,
+    failPreferencesRead: options.failPreferencesRead === true, holdPreferencesRead: false,
     preferences: { preview: false, autoDownload: false, restoreHostedViews: true, ...options.preferences },
     hubUpdate: { currentVersion: '0.1.14', availableVersion: null, downloaded: false },
     projects: { projects: [
@@ -31,7 +32,8 @@ async function load(page, options = {}) {
         };
         break;
       case 'hub_preferences_status':
-        if (options.failPreferencesRead) throw Error('Fixture preference read refused');
+        if (state.holdPreferencesRead) await new Promise(resolve => { state.releasePreferencesRead = resolve; });
+        if (state.failPreferencesRead) throw Error('Fixture preference read refused');
         return state.preferences;
       case 'set_hub_preference':
         if (!Object.hasOwn(preferenceFields, args.key) || typeof args.value !== 'boolean') break;
@@ -92,6 +94,64 @@ async function expectProjectsHome(page) {
   await expect(page.getByRole('button', { name: 'Apps', exact: true })).toHaveCount(0);
   await expect(page.locator('iframe')).toHaveCount(0);
 }
+
+for (const width of [320, 390, 940, 1440]) {
+  test(`named menu and text-only navigation fit ${width}px without loading remote assets`, async ({ page }, testInfo) => {
+    await page.setViewportSize({ width, height: 640 });
+    const requests = [];
+    page.on('request', request => requests.push(request.url()));
+    const state = await load(page);
+    const trigger = page.getByRole('button', { name: 'Open menu', exact: true });
+    await expect(trigger.locator('.suite-menu-label')).toHaveText('Menu');
+    await expect(trigger.locator('.icon-menu')).toBeVisible();
+    await expect(trigger.locator('.hub-mark')).toBeHidden();
+    await trigger.click();
+    const menu = page.getByRole('navigation', { name: 'Creator tools', exact: true });
+    await expect(page.getByRole('button', { name: 'Close menu', exact: true })).toBeVisible();
+    await expect(page.locator('.suite-brand')).toHaveText('CREATOR HUB');
+    await expect(page.getByRole('button', { name: 'Close menu', exact: true }).locator('.hub-mark')).toBeVisible();
+    await expect(menu.locator('.suite-item strong')).toHaveText(['Home', 'MCP', 'Setup / Repair', 'Creator Converter']);
+    await expect(menu.locator('.suite-item small')).toHaveText(['Projects and updates', 'AI bridge for Unity', 'Unity + Creator SDK project setup and repair', 'SideQuest / Coming soon']);
+    await expect(menu.locator('img, .suite-mark, .suite-letter')).toHaveCount(0);
+    await expect(menu.locator('.suite-item-status:visible')).toHaveCount(0);
+    await expect(menu.locator('.unavailable')).toHaveAttribute('aria-disabled', 'true');
+    await page.evaluate(() => document.fonts.ready);
+    expect(await page.evaluate(() => document.fonts.check('600 16px "Space Grotesk"'))).toBe(true);
+    await expect(page.locator('#suite-shell')).toHaveCSS('width', '304px');
+    expect(await page.locator('#suite-shell').evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
+    for (const text of await menu.locator('strong, small').all()) {
+      expect(await text.evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
+    }
+    expect(await menu.evaluate(el => el.scrollHeight <= el.clientHeight)).toBe(true);
+    expect(requests.filter(url => !url.startsWith('http://127.0.0.1:4188/'))).toEqual([]);
+    await page.screenshot({ path: testInfo.outputPath('menu.png') });
+    await page.keyboard.press('ArrowDown');
+    await expect(menu.locator('[data-view="mcp"]')).toBeFocused();
+    await page.keyboard.press('End');
+    await expect(menu.locator('[data-view="setup"]')).toBeFocused();
+    await page.keyboard.press('Enter');
+    await expect(menu).toBeHidden();
+    await expect(page.getByRole('button', { name: 'Open menu', exact: true }).locator('.suite-menu-label')).toBeVisible();
+    await selectSuiteView(page, 'hub');
+    await expectProjectsHome(page);
+    expect(state.errors).toEqual([]);
+    expect(state.unexpected).toEqual([]);
+  });
+}
+
+test('menu remains scrollable on short windows and Escape restores focus', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 260 });
+  await load(page);
+  await page.getByRole('button', { name: 'Open menu', exact: true }).click();
+  const menu = page.locator('#suite-menu');
+  expect(await menu.evaluate(el => el.scrollHeight > el.clientHeight)).toBe(true);
+  await page.keyboard.press('End');
+  await expect(menu.locator('[data-view="setup"]')).toBeFocused();
+  await expect(menu.locator('[data-view="setup"]')).toBeInViewport();
+  await page.keyboard.press('Escape');
+  await expect(menu).toHaveJSProperty('inert', true);
+  await expect(page.getByRole('button', { name: 'Open menu', exact: true })).toBeFocused();
+});
 
 test('direct mode defaults to Projects even without a launch request', async ({ page }) => {
   const state = await load(page, { noLaunchRequest: true });
@@ -243,6 +303,58 @@ test('failed native preference reads remain actionable without expanding setting
   await expect(page.locator('#preferences-status')).toContainText('Automatic downloads are off');
   await expect(page.locator('#update-settings')).not.toHaveAttribute('open', '');
   expect(state.calls.some(call => call.command === 'set_hub_preference')).toBe(false);
+});
+
+for (const failedRetries of [0, 2]) test(`preference-reload recovers after ${failedRetries} failed retries without writes or downloads`, async ({ page }) => {
+  const saved = { preview: true, autoDownload: true, restoreHostedViews: true };
+  const state = await load(page, { nativePreferences: true, failPreferencesRead: true, preferences: saved });
+  const retry = page.getByRole('button', { name: 'Retry loading preferences', exact: true });
+  await expect(retry).toBeVisible();
+  await expect(page.locator('#update-settings')).not.toHaveAttribute('open', '');
+  const before = state.calls.length;
+  for (let attempt = 0; attempt < failedRetries; attempt++) {
+    await retry.click();
+    await expect.poll(() => state.calls.slice(before).length).toBe(attempt + 1);
+    await expect(retry).toBeEnabled();
+    await expect(page.locator('#preferences-status')).toContainText('could not be verified');
+  }
+  state.failPreferencesRead = false;
+  state.holdPreferencesRead = true;
+  state.hubUpdate.availableVersion = '0.1.19';
+  await retry.click();
+  await expect.poll(() => typeof state.releasePreferencesRead).toBe('function');
+  await expect(retry).toBeDisabled();
+  for (const id of Object.values(preferenceIds)) {
+    await expect(page.locator(`#${id}`)).toBeDisabled();
+    await expect(page.locator(`#${id}`)).not.toBeChecked();
+  }
+  state.releasePreferencesRead();
+  await expect(retry).toBeHidden();
+  await expect(page.locator('#preferences-status')).toBeHidden();
+  for (const id of Object.values(preferenceIds)) {
+    await expect(page.locator(`#${id}`)).toBeEnabled();
+    await expect(page.locator(`#${id}`)).toBeChecked();
+  }
+  expect(state.calls.slice(before)).toEqual(Array.from({ length: failedRetries + 1 }, () => ({ command: 'hub_preferences_status', args: {} })));
+  expect(state.preferences).toEqual(saved);
+  expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
+});
+
+test('preference-reload keeps missing fields off without migrating or writing preferences', async ({ page }) => {
+  const state = await load(page, { nativePreferences: true, failPreferencesRead: true });
+  state.failPreferencesRead = false;
+  state.preferences = { preview: true };
+  const before = state.calls.length;
+  await page.getByRole('button', { name: 'Retry loading preferences', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Retry loading preferences', exact: true })).toBeHidden();
+  await expect(page.locator('#preview-channel')).toBeChecked();
+  for (const id of ['auto-download', 'restore-hosted-views']) {
+    await expect(page.locator(`#${id}`)).toBeEnabled();
+    await expect(page.locator(`#${id}`)).not.toBeChecked();
+  }
+  expect(state.calls.slice(before)).toEqual([{ command: 'hub_preferences_status', args: {} }]);
+  expect(state.preferences).toEqual({ preview: true });
+  expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
 });
 
 for (const autoDownload of [false, true]) test(`direct update checks never query or download module releases with automatic downloads ${autoDownload ? 'on' : 'off'}`, async ({ page }) => {

@@ -1027,17 +1027,57 @@ pub fn create_project(
     setup
 }
 
+fn project_editor_version(project: &Path) -> Result<String, String> {
+    if !project.is_absolute()
+        || project
+            .components()
+            .any(|part| matches!(part, Component::ParentDir))
+    {
+        return Err("Choose an absolute Unity project folder.".into());
+    }
+    let bytes = crate::community_project::read(
+        &project.join("ProjectSettings/ProjectVersion.txt"),
+        16 * 1024,
+    )?;
+    let text =
+        String::from_utf8(bytes).map_err(|_| "The project version file is not valid text.")?;
+    let versions: Vec<_> = text
+        .lines()
+        .filter_map(|line| line.strip_prefix("m_EditorVersion:"))
+        .map(str::trim)
+        .collect();
+    if versions.len() != 1
+        || versions[0].is_empty()
+        || versions[0].len() > 64
+        || !versions[0]
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'.')
+    {
+        return Err(
+            "The project's Unity version could not be read safely. Inspect the project again."
+                .into(),
+        );
+    }
+    Ok(versions[0].into())
+}
+
+fn project_editor<'a>(
+    environment: &'a EnvironmentReport,
+    version: &str,
+) -> Result<&'a EditorInstallation, String> {
+    environment.editors.iter().find(|editor| editor.version == version)
+        .ok_or_else(|| format!("Unity {version} is not installed. Install that version in Unity Hub; the project version was not changed."))
+}
+
 pub fn open_project(path: &str) -> Result<(), String> {
     let project = PathBuf::from(path);
-    if !project.join("ProjectSettings/ProjectVersion.txt").is_file() {
-        return Err("The selected path is not a validated Unity project.".into());
+    let version = project_editor_version(&project)?;
+    if crate::community_project::editor_open(&project)? {
+        return Err("This project is in use. Use its open Unity window, or wait for it to close and try again.".into());
     }
-    let editor = probe_environment()
-        .editors
-        .into_iter()
-        .find(|editor| editor.exact_recipe)
-        .ok_or("The compatible Unity Editor is not installed.")?;
-    Command::new(editor.executable)
+    let environment = probe_environment();
+    let editor = project_editor(&environment, &version)?;
+    Command::new(&editor.executable)
         .arg("-projectPath")
         .arg(project)
         .stdin(Stdio::null())
@@ -1144,6 +1184,76 @@ mod tests {
             !report.ready,
             "Other requirements must still pass independently"
         );
+    }
+
+    #[test]
+    fn opening_an_existing_project_selects_its_exact_editor_without_a_template() {
+        let pinned = EditorInstallation {
+            version: EDITOR_VERSION.into(),
+            root: "pinned".into(),
+            executable: "pinned/Unity.exe".into(),
+            exact_recipe: true,
+            android_player: false,
+            android_sdk: false,
+            android_ndk: false,
+            open_jdk: false,
+            windows_standalone: false,
+            urp_template: None,
+            ready: false,
+        };
+        let newer = EditorInstallation {
+            version: "6000.3.27f1".into(),
+            executable: "newer/Unity.exe".into(),
+            ..pinned.clone()
+        };
+        let environment = EnvironmentReport {
+            platform: "windows".into(),
+            hub_installed: false,
+            hub_path: None,
+            hub_version: None,
+            hub_auto_registration: false,
+            unity_cli_installed: false,
+            unity_cli_path: None,
+            recipe: recipe(),
+            ready: false,
+            editors: vec![pinned, newer],
+            blockers: vec![],
+            suggested_project_parent: None,
+        };
+        assert_eq!(
+            project_editor(&environment, "6000.3.27f1")
+                .unwrap()
+                .executable,
+            "newer/Unity.exe"
+        );
+        assert_eq!(
+            project_editor(&environment, EDITOR_VERSION)
+                .unwrap()
+                .executable,
+            "pinned/Unity.exe"
+        );
+        assert!(project_editor(&environment, "6000.3.26f1").is_err());
+    }
+
+    #[test]
+    fn existing_project_version_is_read_without_replacing_or_guessing_it() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("ProjectSettings")).unwrap();
+        let file = root.path().join("ProjectSettings/ProjectVersion.txt");
+        let original =
+            "m_EditorVersion: 6000.3.27f1\nm_EditorVersionWithRevision: 6000.3.27f1 (fixture)\n";
+        fs::write(&file, original).unwrap();
+        assert_eq!(project_editor_version(root.path()).unwrap(), "6000.3.27f1");
+        assert_eq!(fs::read_to_string(&file).unwrap(), original);
+        for invalid in [
+            "m_EditorVersion: \n",
+            "m_EditorVersion: 6000.3.27f1\nm_EditorVersion: 6000.3.21f1",
+            "m_EditorVersion: ../Unity.exe",
+        ] {
+            fs::write(&file, invalid).unwrap();
+            assert!(project_editor_version(root.path()).is_err());
+        }
+        assert!(project_editor_version(Path::new("relative")).is_err());
     }
 
     #[test]

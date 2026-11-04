@@ -140,6 +140,51 @@ test('a project-opening warning already in the inventory is shown once and keeps
   await expect(projectNames(page)).toHaveText(['Creator Forest', 'Banter Playground']);
 });
 
+test('a refused project open offers an explicit retry without replaying it automatically', async ({ page }) => {
+  await load(page);
+  await page.evaluate(() => { window.failure = 'This project is in use. Wait for Unity to finish closing, then try opening again.'; });
+  await page.getByRole('button', { name: 'Open Creator Forest', exact: true }).click();
+  const retry = page.getByRole('button', { name: 'Try opening again', exact: true });
+  await expect(retry).toBeVisible();
+  expect(await page.evaluate(() => calls.filter(c => c.command === 'open_unity_project').length)).toBe(1);
+  await page.evaluate(() => { window.failure = null; window.hold = true; });
+  await retry.click();
+  await expect(retry).toBeDisabled();
+  await page.evaluate(() => document.getElementById('retry-project-open').click());
+  expect(await page.evaluate(() => calls.filter(c => c.command === 'open_unity_project'))).toEqual([
+    { command: 'open_unity_project', args: { id: 'creator' } },
+    { command: 'open_unity_project', args: { id: 'creator' } },
+  ]);
+  await page.evaluate(() => window.finishOpen('Unity launch requested.'));
+  await expect(page.locator('#project-status')).toHaveText('Unity launch requested.');
+  await expect(retry).toBeHidden();
+});
+
+test('project recovery refreshes the list without reopening a project', async ({ page }) => {
+  await load(page);
+  await page.evaluate(() => { window.failure = 'Project SDK or Unity version changed. Refresh Projects before opening.'; });
+  await page.getByRole('button', { name: 'Open Creator Forest', exact: true }).click();
+  await expect(page.locator('#project-recovery')).toBeVisible();
+  await page.evaluate(() => { window.failure = null; });
+  await page.locator('#refresh-project-recovery').click();
+  await expect(page.locator('#project-recovery')).toBeHidden();
+  expect(await page.evaluate(() => calls.filter(c => c.command === 'open_unity_project').length)).toBe(1);
+  await expect(projectNames(page)).toHaveText(['Creator Forest', 'Banter Playground']);
+});
+
+for (const width of [320, 940]) test(`project recovery stays usable at ${width}px`, async ({ page }, testInfo) => {
+  await page.setViewportSize({ width, height: 640 });
+  await load(page);
+  await page.evaluate(() => { window.failure = 'Hub could not check whether this project is in use. Check that the project folder is accessible, then try opening again. Nothing was changed.'; });
+  await page.getByRole('button', { name: 'Open Creator Forest', exact: true }).click();
+  await expect(page.locator('#project-recovery')).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
+  for (const button of await page.locator('#project-recovery button').all()) {
+    expect(await button.evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
+  }
+  await page.screenshot({ path: testInfo.outputPath('project-recovery.png'), fullPage: true });
+});
+
 test('project rows identify the selected MCP project and independently checked bridges', async ({ page }) => {
   await load(page);
   await page.evaluate(() => {

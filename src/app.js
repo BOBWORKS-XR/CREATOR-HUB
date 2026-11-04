@@ -36,6 +36,7 @@
   const nativePreferences = window.CreatorHubNative.preferencesPersistence === true;
   let preferencesReady = !nativePreferences;
   let preferencesSaving = 0;
+  let preferencesLoading = false;
   const legacyPreferences = {};
   const preferenceFailures = new Map();
   const byId = id => document.getElementById(id);
@@ -66,6 +67,11 @@
     byId('hub-tab-projects').classList.add('hidden');
     document.querySelector('#hub-pages .project-actions').classList.remove('hidden');
   }
+  const retryPreferences = document.createElement('button');
+  retryPreferences.id = 'retry-preferences'; retryPreferences.type = 'button';
+  retryPreferences.className = 'text-button hidden'; retryPreferences.hidden = true;
+  retryPreferences.innerHTML = '<span class="icon icon-refresh" aria-hidden="true"></span>Retry loading preferences';
+  byId('preferences-status').after(retryPreferences);
   const platformLabel = () => {
     const platform = navigator.userAgentData?.platform || navigator.platform || navigator.userAgent;
     if (/mac/i.test(platform)) return 'macOS';
@@ -91,16 +97,17 @@
     byId('preferences-status').textContent = [...preferenceFailures.values()].join(' ');
     byId('preferences-status').hidden = !preferenceFailures.size;
   }
-  async function loadPreferences() {
-    if (!nativePreferences) return;
+  async function loadPreferences({ readOnly = false } = {}) {
+    if (!nativePreferences || preferencesLoading) return;
+    preferencesReady = false; preferencesLoading = true; renderState();
     try {
       const saved = await invoke('hub_preferences_status');
       if (saved !== null && (!saved || typeof saved !== 'object' || Array.isArray(saved)
         || Object.keys(saved).some(key => !preferenceControls.some(([, , field]) => field === key))
         || preferenceControls.some(([, , field]) => saved[field] !== undefined && saved[field] !== null && typeof saved[field] !== 'boolean'))) throw Error('Invalid saved Hub preferences.');
       for (const [id, key, field] of preferenceControls) {
-        const value = typeof saved?.[field] === 'boolean' ? saved[field] : legacyPreferences[field];
-        if (typeof saved?.[field] !== 'boolean') await invoke('set_hub_preference', { key, value });
+        const value = typeof saved?.[field] === 'boolean' ? saved[field] : readOnly ? false : legacyPreferences[field];
+        if (!readOnly && typeof saved?.[field] !== 'boolean') await invoke('set_hub_preference', { key, value });
         byId(id).checked = value;
       }
       preferencesReady = true;
@@ -108,9 +115,13 @@
     } catch (reason) {
       for (const [id] of preferenceControls) byId(id).checked = false;
       preferenceError(`Saved preferences could not be verified: ${String(reason)}. Automatic downloads are off. Existing records were kept.`);
+    } finally {
+      preferencesLoading = false; renderState();
     }
-    renderState();
   }
+  retryPreferences.addEventListener('click', () => {
+    if (!retryPreferences.disabled) void loadPreferences({ readOnly: true });
+  });
   function close(restore = false) {
     if (restore || menu.contains(document.activeElement)) trigger.focus({ preventScroll: true });
     shell.classList.remove('suite-expanded');
@@ -325,6 +336,10 @@
     }
     byId('preview-channel-option').classList.toggle('hidden', previewSupported !== true);
     byId('preview-channel-stable').classList.toggle('hidden', previewSupported !== false);
+    retryPreferences.hidden = !nativePreferences || preferencesReady || !preferenceFailures.has('load');
+    retryPreferences.classList.toggle('hidden', retryPreferences.hidden);
+    retryPreferences.disabled = preferencesLoading || preferencesSaving || busy || featureBusy || startupRunning;
+    retryPreferences.setAttribute('aria-busy', String(preferencesLoading));
     for (const [id] of preferenceControls) byId(id).disabled = !preferencesReady || preferencesSaving || (id === 'preview-channel' && (busy || previewSupported !== true));
     byId('hub-update-button').disabled = busy || featureBusy || preferencesSaving || !hubUpdate?.availableVersion || Boolean(hubUpdate?.installBlocked);
     byId('hub-update-status').textContent = !hubUpdate ? 'Hub update check is unavailable. Try Check for updates.'

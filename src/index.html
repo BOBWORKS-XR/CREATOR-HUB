@@ -89,6 +89,10 @@
     <section id="view-projects" class="hidden" aria-labelledby="hub-tab-projects">
       <div class="project-filters"><input id="project-search" type="search" aria-label="Search projects" placeholder="Search projects"><select id="project-sdk" aria-label="Filter by SDK"><option value="sdk">Creator SDK + Banter</option><option value="creator">Creator SDK / Altspace</option><option value="banter">Banter SDK</option><option value="all">All known projects</option></select><select id="project-sort" aria-label="Sort projects"><option value="modified">Recently modified</option><option value="name">Name A-Z</option></select></div>
       <p id="project-status" class="catalog-status" role="status"></p>
+      <div id="project-recovery" class="tool-actions hidden" aria-label="Project recovery">
+        <button id="retry-project-open" class="primary-button" type="button"><span class="icon icon-refresh" aria-hidden="true"></span>Try opening again</button>
+        <button id="refresh-project-recovery" class="text-button" type="button"><span class="icon icon-refresh" aria-hidden="true"></span>Refresh projects</button>
+      </div>
       <p id="project-warnings" class="catalog-status"></p>
       <button id="prepare-project-registry" class="text-button hidden" type="button"><span class="icon icon-download" aria-hidden="true"></span>Download verified Unity helper</button>
       <div id="project-list" class="project-list"></div>

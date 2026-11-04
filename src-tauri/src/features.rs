@@ -89,6 +89,11 @@ fn validate(args: &Value) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(any(test, feature = "integrated-features"))]
+fn setup_metadata_read(command: &str) -> bool {
+    command == "latest_sdk_requirements"
+}
+
 #[tauri::command]
 pub fn feature_status() -> Value {
     json!({
@@ -117,8 +122,13 @@ pub async fn feature_call(
     #[cfg(feature = "integrated-features")]
     tauri::async_runtime::spawn_blocking(move || match feature {
         Feature::Setup => {
-            // This guard belongs to the actual worker, not the renderer future.
-            let _operation = handle.state::<crate::manager::Manager>().begin()?;
+            // Optional remote metadata has no project/settings writes. It must not
+            // occupy the exclusive mutation slot while an offline request times out.
+            let _operation = if setup_metadata_read(&command) {
+                None
+            } else {
+                Some(handle.state::<crate::manager::Manager>().begin()?)
+            };
             creator_project_setup::service::call(&handle, &command, args)
         }
         Feature::Mcp => call_mcp(&handle, &command, args),
@@ -260,6 +270,19 @@ pub fn review_close(handle: &tauri::AppHandle) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_fixed_sdk_metadata_lookup_skips_exclusive_mutation_admission() {
+        assert!(setup_metadata_read("latest_sdk_requirements"));
+        for command in ["inspect_project", "run_existing_project", "create_project", "open_project",
+            "register_project", "restart_hub", "probe_environment", "latest_sdk_requirements ", "unknown"] {
+            assert!(!setup_metadata_read(command), "{command}");
+        }
+        let setup = include_str!("../../modules/project-setup/src-tauri/src/hosted.rs");
+        let lookup = setup.split("\"latest_sdk_requirements\" => {").nth(1).unwrap().split('}').next().unwrap();
+        assert!(lookup.contains("decode::<NoArgs>(args)?"));
+        assert!(lookup.contains("crate::latest_sdk_requirements()"));
+    }
 
     #[test]
     fn feature_selection_is_finite_and_case_sensitive() {
