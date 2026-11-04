@@ -1,0 +1,51 @@
+name: Exact 019 R2 MCP tests (Windows, no native build)
+on:
+  push:
+    branches: [validation/windows-019-source-tests]
+    paths: [.github/workflows/windows-final-mcp-tests.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  mcp-npm-tests:
+    if: github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.ref == 'refs/heads/validation/windows-019-source-tests' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: windows-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ed3e7dabc2e83fea8b7cadce63bbeb502fed2306
+          persist-credentials: false
+      - name: Verify exact 019 R2 product checkout before repository code
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $commit = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0 -or $commit -cne 'ed3e7dabc2e83fea8b7cadce63bbeb502fed2306') { throw 'R2 commit differs.' }
+          $tree = git rev-parse 'HEAD^{tree}'
+          if ($LASTEXITCODE -ne 0 -or $tree -cne 'bd6328c41871465fe64e65e3f9d53c6f2ba0ed8d') { throw 'R2 tree differs.' }
+          Write-Output "productCommit=$commit productTree=$tree workflowCommit=$env:GITHUB_SHA"
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: modules/mcp/package-lock.json
+      - name: Install locked MCP test dependencies
+        run: npm --prefix modules/mcp ci
+      - name: Full unchanged MCP npm test command
+        run: |
+          $ErrorActionPreference = 'Stop'
+          node --version
+          npm --version
+          npm --prefix modules/mcp test 2>&1 | Tee-Object -FilePath mcp-npm-tests.log
+          $code = $LASTEXITCODE
+          if ($code -ne 0) { throw "Full MCP npm tests failed with exit $code." }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-019-r2-mcp-npm-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: error
+          path: mcp-npm-tests.log
