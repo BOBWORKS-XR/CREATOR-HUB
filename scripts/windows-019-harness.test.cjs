@@ -43,7 +43,9 @@ test('strict synthetic raw and production contracts admit only complete exact pi
 });
 test('raw R2 build provenance must prove successful unchanged exact source', () => {
   assert.equal(c.validateBuildProvenance(sample.binding), sample.binding.build.provenance);
-  assert.throws(() => c.validateBuildProvenance());
+  const pending = clone(sample.binding);
+  pending.build.provenance = null;
+  assert.throws(() => c.validateBuildProvenance(pending), /pending/);
   const changes = [p => { delete p.sourceUnchanged; }, p => { p.sourceUnchanged = false; },
     p => { p.sourceUnchanged = 'true'; }, p => { delete p.status; }, p => { p.status = 1; }, p => { p.status = '0'; },
     p => { delete p.sourceCommit; }, p => { p.sourceCommit = 'a'.repeat(40); },
