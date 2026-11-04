@@ -1,7 +1,7 @@
 name: Windows exact19 to private20 restore and changed-generation acceptance
 on:
   push:
-    branches: [validation/windows-menu-merge-20261027]
+    branches: [validation/windows-outgoing-019]
     paths:
       - .github/workflows/windows-outgoing-019.yml
       - scripts/windows-outgoing-019-*.cjs
@@ -25,7 +25,7 @@ permissions:
   contents: read
 jobs:
   preflight:
-    if: github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.ref == 'refs/heads/validation/windows-menu-merge-20261027'
+    if: github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.ref == 'refs/heads/validation/windows-outgoing-019'
     runs-on: windows-latest
     timeout-minutes: 5
     steps:
