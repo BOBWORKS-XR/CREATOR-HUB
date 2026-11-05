@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "kind": "windows-020-staged-qualification",
+  "version": "0.1.20",
+  "platform": "windows-x86_64",
+  "candidate": {
+    "sourceCommit": "9b65dd7aedc2eb224755db3d733a7fb19e8e8f62",
+    "sourceTree": "3048c4b2c8e5004024191dbb29f5651e5d6bb7e8",
+    "installerSha256": "2915ffac9b1c39f5facbd4030eb6addf837e0d414b96835e0f0be1564577666b",
+    "executableSha256": "06908120c81f471e9774edbe5a2d09fa3c985357eea373e29e75404d1f133cf5"
+  },
+  "evidenceSha256": "945ae76fcf8efa68bb0bcca37d77a366d0121346bc7e65615838393f64212f02",
+  "authorization": "staged-public-019-to-020-before-latest;claude-code-deferred",
+  "publicAcceptance": false,
+  "releaseReady": false,
+  "publicNotes": "MCP safety fixes, refreshed Creator SDK node catalogue and docs, and advisory graph-performance checks.",
+  "draft": {
+    "id": 435215396,
+    "assets": {
+      "creator-hub-windows-x86_64.json": {
+        "id": 713452112,
+        "size": 505,
+        "sha256": "e7e27ca43a1cfb39bd2ae774b56e7b3ccb994dcbf30d9881d489d63d01f8cbec"
+      },
+      "creator-hub-windows-x86_64.json.minisig": {
+        "id": 713452111,
+        "size": 305,
+        "sha256": "47e095c2d78edf28d5ef7ab56a0d15d6935548c112687bd347c9ea6e9aa1d770"
+      },
+      "Creator.Hub_0.1.20_x64-setup.exe": {
+        "id": 713452102,
+        "size": 38461485,
+        "sha256": "2915ffac9b1c39f5facbd4030eb6addf837e0d414b96835e0f0be1564577666b"
+      },
+      "Creator.Hub_0.1.20_x64-setup.exe.sig": {
+        "id": 713452101,
+        "size": 409,
+        "sha256": "b67bdb99e332d9d48bf5164a449605ea21d09a9b7009f377ab86c16f433d253d"
+      },
+      "latest.json": {
+        "id": 713452113,
+        "size": 744,
+        "sha256": "0cd43ab6e5851b6170ea529ff3ac16ce92472db0c431c8896103b189318df805"
+      },
+      "SHA256SUMS.txt": {
+        "id": 713452141,
+        "size": 484,
+        "sha256": "6fcd0af20a4e464faabb4949307acae169aeafdd3018f2b91d992e53b7aa226d"
+      }
+    }
+  }
+}
