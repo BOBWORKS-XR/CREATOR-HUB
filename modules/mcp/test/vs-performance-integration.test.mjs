@@ -1,5 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { createConfigForProject } from '../dist/lib/config.js';
+import { writeVSGraph } from '../dist/tools/write-vs-graph.js';
 import { generateVSGraph } from '../dist/tools/generate-vs-graph.js';
 import { validateVSGraph } from '../dist/tools/validate-vs-graph.js';
 import { getMCPReference } from '../dist/tools/get-mcp-reference.js';
@@ -41,4 +46,17 @@ test('optimization guidance is available as bounded reference excerpts', () => {
     assert.ok(result.entries.length, query);
     assert.ok(Buffer.byteLength(JSON.stringify(result)) < 16 * 1024);
   }
+});
+
+test('whole-graph writer reports the supplied name without rewriting the graph JSON', async t => {
+  const folder = fs.mkdtempSync(path.join(os.tmpdir(), 'creator-performance-writer-'));
+  t.after(() => fs.rmSync(folder, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(folder, 'Assets'));
+  const created = generateVSGraph({ graphName: 'Lift', nodes: [{ id: 'tick', type: 'Update' }] });
+  const before = created.graphJson;
+  const result = await writeVSGraph(before, 'Lift', 'Scripts', createConfigForProject(folder));
+  assert.equal(result.success, true);
+  assert.ok(result.warnings.some(text => text.includes('"Lift"') && text.includes('Unity.VisualScripting.Update')));
+  assert.ok(result.warnings.every(text => !text.includes('(unnamed graph)')));
+  assert.equal(created.graphJson, before);
 });

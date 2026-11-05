@@ -48,6 +48,7 @@ export async function writeVSGraph(
   try {
     const validation = validateVSGraph(graphJson, {
       sdkProfile: detectSidequestSDKProfile(config),
+      graphName,
     });
     if (!validation.valid) {
       return {
