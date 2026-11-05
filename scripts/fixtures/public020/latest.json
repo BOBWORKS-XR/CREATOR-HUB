@@ -1,0 +1,10 @@
+{
+  "version": "0.1.20",
+  "notes": "MCP safety fixes, refreshed Creator SDK node catalogue and docs, and advisory graph-performance checks.",
+  "platforms": {
+    "windows-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUK2F5K1IyZ2ZXTWZ6TThvb0ZsME1vanZocm5jMSt0eTByMUNLcjFpMFExQURqUEs3RmpiaUF3QmIrZlkrbzB1QldHY2w5YU1rdk5XRGZ2RjNHbnBGeTJtSlpQMlhncVFNPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzODgwOTMzCWZpbGU6c2lnbmluZy1pbnB1dC0xLmV4ZQpZNm5xN3pUczJGL25DcUlWdUlHNlZBZ0p0WjkrWWJZMmxXVHRSQU1lSWZwcFl0eU9kS05na2JNQm5qU3FkSFZIeUZrSEcyNkNBd2Rjakw4bVBxOElEUT09Cg==",
+      "url": "https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/download/v0.1.20/Creator.Hub_0.1.20_x64-setup.exe"
+    }
+  }
+}
