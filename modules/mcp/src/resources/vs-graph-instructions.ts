@@ -13,6 +13,11 @@ This guide explains how to programmatically create Unity Visual Scripting \`.ass
 
 ## Critical Rules
 
+### Graph Performance Review
+- Search \`get_mcp_reference\` source \`graph-performance\` before building or editing tick-driven behaviour.
+- Run \`validate_vs_graph\` with the graph name. Review each named performance warning, record why any tick is needed, and profile on the target device.
+- These warnings never authorize automatic graph rewrites. Preserve references, lifecycle, layout and gameplay behaviour; graph validation is not proof of performance or multiplayer correctness.
+
 ### 0. Inspect the Selected SideQuest SDK
 - Run \`get_banter_sdk_info\` before using SideQuest custom nodes. The legacy tool name covers both SDK families.
 - Follow its \`sdkProfile\`, \`namespaces\`, and \`compatibility.authoringPolicy\` fields.

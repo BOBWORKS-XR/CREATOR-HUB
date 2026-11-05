@@ -22,6 +22,9 @@ import {
 import { writeWebRootJS, WriteWebRootResult } from "./write-webroot-js.js";
 import { getBridgeStatus } from "./get-bridge-status.js";
 import { encodeSerializedPropertyValue } from "./serialize-property-value.js";
+import { redactToolDiagnostics } from "../lib/diagnostic-redaction.js";
+import { readVSGraphValidationResult } from "./vs-validation-result.js";
+import { readVSGraphSource, type VSGraphSourceInventory } from "./vs-source-inventory.js";
 import { getUnityPackages } from "./get-unity-packages.js";
 import {
   detectSidequestSDKProfile,
@@ -38,19 +41,20 @@ import {
 } from "./shader-graph.js";
 import {
   dispatchUnityBridgeCommand,
+  BridgeTransportError,
+  readBridgeInstanceDescriptor,
+  validateBridgeCommandResult,
   type BridgeCommandResult,
 } from "../lib/unity-bridge-transport.js";
 import type { UnityProjectRouter } from "../lib/project-router.js";
-import { getUnityCommandStatus, pendingCommandTimeout, readUnitySceneResult } from "./get-unity-command-status.js";
+import { getUnityCommandStatus, pendingCommandTimeout, readUnitySceneResult, readUnityEditorMenuResult } from "./get-unity-command-status.js";
 import {
   describeToolGroupSelection,
   isToolEnabled,
   type ToolGroupSelection,
 } from "./tool-groups.js";
-import {
-  BANTER_CUSTOM_VS_NODES,
-  type BanterCustomVSNode,
-} from "../resources/banter-custom-vs-nodes.js";
+import { SEARCH_SIDEQUEST_VS_NODES_DESCRIPTION, SEARCH_SIDEQUEST_VS_NODES_SCHEMA,
+  searchSourceAwareSidequestVSNodes, searchLegacySidequestVSNodes } from "./search-sidequest-vs-nodes.js";
 
 export {
   ALWAYS_AVAILABLE_TOOLS,
@@ -116,7 +120,7 @@ export function registerTools(selection: ToolGroupSelection = "all"): Tool[] {
       inputSchema: {
         type: "object",
         properties: {
-          source: { type: "string", enum: ["manual", "components", "javascript", "workflows", "creator-docs"] },
+          source: { type: "string", enum: ["manual", "components", "javascript", "workflows", "creator-docs", "graph-performance"] },
           query: { type: "string", minLength: 1, maxLength: 128, description: "Keyword search; mutually exclusive with entryId" },
           entryId: { type: "string", minLength: 1, maxLength: 128, description: "Exact entry ID from an earlier result" },
           startOffset: { type: "integer", minimum: 0, default: 0, description: "Use nextOffset from the same entry to continue" },
@@ -155,6 +159,7 @@ Checks:
 - GUIDs are properly formatted
 - Required properties are set
 - No common mistakes (wrong namespaces, missing coroutine flags, etc.)
+- Advisory performance warnings with graph/unit identity; never automatic rewrites
 
 Use this BEFORE write_vs_graph to catch errors early.`,
       inputSchema: {
@@ -164,6 +169,7 @@ Use this BEFORE write_vs_graph to catch errors early.`,
             type: "string",
             description: "The VS graph JSON to validate",
           },
+          graphName: { type: "string", minLength: 1, maxLength: 256, description: "Graph name or asset path for actionable warning labels" },
         },
         required: ["graphJson"],
       },
@@ -555,7 +561,7 @@ In-flight calls retain their original project snapshot. This does not rewrite la
 Reports the configured project, bridge installation, state and command directories,
 state freshness, and the next setup step when the bridge is not ready.
 
-Use this first after configuring a new Unity project or when Unity tools appear unavailable.`,
+Check this after setup or when Unity tools are unavailable.`,
       inputSchema: {
         type: "object",
         properties: {},
@@ -617,33 +623,8 @@ The legacy tool name is retained for client compatibility. Detects com.sidequest
 
     {
       name: "search_sidequest_vs_nodes",
-      description: `Search the embedded source-observed SideQuest custom Visual Scripting node catalog without loading the complete catalog resource.
-Returns only bounded matching definitions, including the observed type, category, serialized fields, and default value inputs. The embedded entries came from a legacy Banter catalog; run get_banter_sdk_info before authoring so the selected project's actual package profile and namespace remain authoritative.`,
-      inputSchema: {
-        type: "object",
-        properties: {
-          query: {
-            type: "string",
-            minLength: 1,
-            maxLength: 128,
-            description: "Case-insensitive node name, full type, category, field, input name, or input type search",
-          },
-          category: {
-            type: "string",
-            minLength: 1,
-            maxLength: 128,
-            description: "Optional exact case-insensitive category filter",
-          },
-          limit: {
-            type: "integer",
-            minimum: 1,
-            maximum: 25,
-            default: 10,
-            description: "Maximum matching node definitions to return",
-          },
-        },
-        required: ["query"],
-      },
+      description: SEARCH_SIDEQUEST_VS_NODES_DESCRIPTION,
+      inputSchema: { ...SEARCH_SIDEQUEST_VS_NODES_SCHEMA, type: "object" },
     },
 
     {
@@ -1753,6 +1734,9 @@ Returns:
     },
   ];
   for (const tool of tools) {
+    if (["query_project_state", "get_bridge_status", "set_object_reference"].includes(tool.name)) {
+      tool.inputSchema.additionalProperties = false;
+    }
     if (hasReadResponseBudget(tool.name)) {
       tool.inputSchema.properties = { ...tool.inputSchema.properties, maxResponseBytes: READ_RESPONSE_BUDGET_SCHEMA };
     }
@@ -1769,12 +1753,24 @@ export async function handleToolCall(
   config: BanterMCPConfig,
   projectRouter?: UnityProjectRouter,
   selection: ToolGroupSelection = "all"
-): Promise<{ content: Array<ToolTextContent | ToolImageContent> }> {
+): Promise<{ content: Array<ToolTextContent | ToolImageContent>; isError?: boolean }> {
   if (!isToolEnabled(name, selection)) {
     throw new Error(
       `Tool '${name}' is disabled by CREATOR_WORKS_TOOL_GROUPS ` +
       `(enabled selection: ${describeToolGroupSelection(selection)}).`
     );
+  }
+
+  if (!args || typeof args !== "object" || Array.isArray(args)) {
+    return { isError: true, content: [{ type: "text", text: JSON.stringify({ success: false, error: "Tool arguments must be an object. No command was sent." }) }] };
+  }
+  if (["query_project_state", "get_bridge_status", "set_object_reference"].includes(name)) {
+    const schema = registerTools().find((tool) => tool.name === name)!.inputSchema;
+    const unknown = Object.keys(args).filter((key) => !Object.hasOwn(schema.properties, key));
+    if (unknown.length) {
+      return { isError: true, content: [{ type: "text", text: JSON.stringify({ success: false,
+        error: `Unsupported arguments: ${unknown.slice(0, 20).join(", ")}. No command was sent. Use select_unity_project to choose a project before calling this tool.` }) }] };
+    }
   }
 
   const responseBudget = hasReadResponseBudget(name) ? readResponseBudget(args.maxResponseBytes) : undefined;
@@ -1793,6 +1789,7 @@ export async function handleToolCall(
     case "validate_vs_graph":
       result = validateVSGraph(args.graphJson as string, {
         sdkProfile: detectSidequestSDKProfile(config),
+        graphName: typeof args.graphName === "string" ? args.graphName : undefined,
       });
       break;
 
@@ -1955,11 +1952,7 @@ export async function handleToolCall(
       break;
 
     case "search_sidequest_vs_nodes":
-      result = searchSidequestVSNodes(
-        args.query as string,
-        args.category as string | undefined,
-        args.limit as number | undefined
-      );
+      result = searchSourceAwareSidequestVSNodes(args);
       break;
 
     case "search_unity_assets":
@@ -2260,6 +2253,13 @@ export async function handleToolCall(
       throw new Error(`Unknown tool: ${name}`);
   }
 
+  result = redactToolDiagnostics(name, result);
+  const graphOrMutation = ["validate_vs_graph", "generate_vs_graph", "write_vs_graph", "validate_vs_graph_in_unity",
+    "validate_banter_visual_scripting", "set_object_reference", "execute_editor_menu_item"].includes(name);
+  const failure = typeof result === "object" && result !== null &&
+    (graphOrMutation || (name === "get_unity_command_status" && (result as Record<string, unknown>).status === "completed")) &&
+    ((result as Record<string, unknown>).valid === false ||
+      ((result as Record<string, unknown>).success === false && (result as Record<string, unknown>).pending !== true));
   if (isImageToolResult(result)) {
     const { imageData, mimeType, ...metadata } = result;
     return {
@@ -2271,11 +2271,12 @@ export async function handleToolCall(
   }
 
   return {
+    ...(failure ? { isError: true } : {}),
     content: [
       {
         type: "text",
         text: responseBudget !== undefined ? boundedReadText(name, result, responseBudget, config.mcpStatePath)
-          : typeof result === "string" ? result : JSON.stringify(result, null, ["query_project_state", "get_mcp_reference", "lookup_creator_docs"].includes(name) ? undefined : 2),
+          : typeof result === "string" ? result : JSON.stringify(result, null, ["query_project_state", "get_mcp_reference", "lookup_creator_docs", "search_sidequest_vs_nodes"].includes(name) ? undefined : 2),
       },
     ],
   };
@@ -2288,72 +2289,7 @@ export function searchSidequestVSNodes(
   category?: string,
   limit?: number
 ): unknown {
-  const normalizedQuery = typeof query === "string" ? query.trim().toLowerCase() : "";
-  if (normalizedQuery.length === 0 || normalizedQuery.length > 128) {
-    return { success: false, error: "query must contain between 1 and 128 characters.", nodes: [] };
-  }
-
-  if (category !== undefined && typeof category !== "string") {
-    return { success: false, error: "category must be a string.", nodes: [] };
-  }
-  const normalizedCategory = category === undefined ? undefined : category.trim().toLowerCase();
-  if (normalizedCategory !== undefined && (normalizedCategory.length === 0 || normalizedCategory.length > 128)) {
-    return { success: false, error: "category must contain between 1 and 128 characters.", nodes: [] };
-  }
-
-  const maxResults = limit ?? 10;
-  if (!Number.isInteger(maxResults) || maxResults < 1 || maxResults > 25) {
-    return { success: false, error: "limit must be a whole number between 1 and 25.", nodes: [] };
-  }
-
-  const terms = normalizedQuery.split(/\s+/).filter(Boolean);
-  const catalog = Object.values(
-    BANTER_CUSTOM_VS_NODES as Record<string, BanterCustomVSNode>
-  );
-  const matches = catalog.filter((node) => {
-    if (normalizedCategory !== undefined && node.category.toLowerCase() !== normalizedCategory) {
-      return false;
-    }
-    const searchable = [
-      node.name,
-      node.fullType,
-      node.category,
-      ...node.defaultValues.flatMap((value) => [value.name, value.type || ""]),
-      ...Object.keys(node.serializedFields),
-    ].join(" ").toLowerCase();
-    return terms.every((term) => searchable.includes(term));
-  });
-
-  const rank = (node: BanterCustomVSNode): number => {
-    const name = node.name.toLowerCase();
-    const fullType = node.fullType.toLowerCase();
-    if (name === normalizedQuery) return 0;
-    if (fullType === normalizedQuery) return 1;
-    if (name.startsWith(normalizedQuery)) return 2;
-    if (fullType.endsWith(`.${normalizedQuery}`)) return 3;
-    return 4;
-  };
-  matches.sort((left, right) => rank(left) - rank(right) || left.name.localeCompare(right.name));
-
-  return {
-    success: true,
-    query: query.trim(),
-    category: category?.trim(),
-    count: Math.min(matches.length, maxResults),
-    totalMatches: matches.length,
-    truncated: matches.length > maxResults,
-    catalogSize: catalog.length,
-    catalogScope: "Source-observed legacy Banter custom nodes; confirm the selected package profile with get_banter_sdk_info before authoring.",
-    nodes: matches.slice(0, maxResults).map((node) => ({
-      name: node.name,
-      fullType: node.fullType,
-      category: node.category,
-      version: node.version,
-      isEvent: node.isEvent,
-      defaultValues: node.defaultValues,
-      serializedFields: node.serializedFields,
-    })),
-  };
+  return searchLegacySidequestVSNodes(query, category, limit);
 }
 
 async function getConsoleLogs(
@@ -2783,28 +2719,31 @@ async function validateVSGraphInUnity(
     return { success: false, error: "assetPath must be an Assets/... path ending in .asset." };
   }
 
+  let source: VSGraphSourceInventory;
+  try { source = readVSGraphSource(config.assetsPath, normalizedPath); }
+  catch (error) {
+    return { success: false, assetPath: normalizedPath,
+      error: `${error instanceof Error ? error.message : "Could not inspect graph source."} No import command was sent.` };
+  }
   const result = await sendUnityCommand({
     type: "validate_vs_graph_asset",
     assetPath: normalizedPath,
     allowUnboundValueInputs: allowUnboundValueInputs === true,
+    expectedContentHash: source.contentHash,
   }, config);
   if (!result.success || !result.commandId) {
     return result;
   }
 
-  const resultPath = path.join(config.mcpStatePath, "vs-validation-results", `${result.commandId}.json`);
   const startedAt = Date.now();
   while (Date.now() - startedAt < 30000) {
-    if (fs.existsSync(resultPath)) {
-      try {
-        const validation = JSON.parse(fs.readFileSync(resultPath, "utf-8")) as Record<string, unknown>;
-        if (validation.commandId === result.commandId) {
-          fs.unlinkSync(resultPath);
-          return validation;
-        }
-      } catch {
-        // The bridge may still be atomically publishing the result.
-      }
+    try {
+      const validation = readVSGraphValidationResult(config.mcpStatePath, result.commandId, normalizedPath, allowUnboundValueInputs === true, source);
+      if (validation) return validation;
+    } catch (error) {
+      return { ...pendingCommandTimeout(result.commandId, config,
+        error instanceof Error ? error.message : "Invalid Visual Scripting validation receipt."),
+        assetPath: normalizedPath, receiptInvalid: true };
     }
 
     if (!result.completed) {
@@ -2820,12 +2759,8 @@ async function validateVSGraphInUnity(
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
 
-  return {
-    success: false,
-    commandId: result.commandId,
-    assetPath: normalizedPath,
-    error: "Timed out waiting for Unity's Visual Scripting graph validation result.",
-  };
+  return { ...pendingCommandTimeout(result.commandId, config,
+    "Timed out waiting for Unity's Visual Scripting graph validation result."), assetPath: normalizedPath };
 }
 
 export function normalizeUnityVisualScriptingAssetPath(value: unknown): string | undefined {
@@ -3119,19 +3054,19 @@ function consumeLateBridgeAcknowledgement(commandId: string, config: BanterMCPCo
   }
 
   try {
-    const result = JSON.parse(fs.readFileSync(resultPath, "utf-8")) as BridgeCommandResult;
-    if (result.commandId === commandId) {
-      fs.unlinkSync(resultPath);
-      if (result.success === false) {
-        return {
-          success: false,
-          commandId,
-          error: result.error || "Unity rejected the bridge command.",
-        };
-      }
+    const result: unknown = JSON.parse(fs.readFileSync(resultPath, "utf-8"));
+    validateBridgeCommandResult(result, commandId, config, readBridgeInstanceDescriptor(config)?.editorInstanceId);
+    if (result.status === "dispatched") return undefined;
+    fs.unlinkSync(resultPath);
+    if (result.success === false) {
+      return {
+        success: false, commandId, projectId: config.projectId, projectPath: config.unityProjectPath,
+        error: result.error || "Unity rejected the bridge command.",
+      };
     }
-  } catch {
-    // The bridge may still be atomically publishing the result.
+  } catch (error) {
+    return { ...pendingCommandTimeout(commandId, config,
+      error instanceof Error ? error.message : "Invalid Unity acknowledgement. The receipt was kept."), receiptInvalid: true };
   }
 
   return undefined;
@@ -3330,17 +3265,16 @@ async function executeEditorMenuItem(
     return command;
   }
 
-  const resultPath = path.join(
-    config.mcpStatePath,
-    "editor-menu-results",
-    `${command.commandId}.json`
-  );
   while (Date.now() - startedAt < timeoutMs) {
-    if (fs.existsSync(resultPath)) {
+      let menuResult: Record<string, unknown> | undefined;
       try {
-        const menuResult = JSON.parse(fs.readFileSync(resultPath, "utf-8")) as Record<string, unknown>;
-        if (menuResult.commandId === command.commandId) {
-          fs.unlinkSync(resultPath);
+        menuResult = readUnityEditorMenuResult(command.commandId, config);
+        if (menuResult && menuResult.menuPath !== normalizedMenuPath) throw new Error("Unity menu result path does not match the requested menu. The receipt was kept.");
+      } catch (error) {
+        return { ...pendingCommandTimeout(command.commandId, config,
+          error instanceof Error ? error.message : "Invalid Unity menu receipt. The receipt was kept."), receiptInvalid: true };
+      }
+      if (menuResult) {
           if (menuResult.success !== true || waitForSettled === false) {
             return menuResult;
           }
@@ -3362,11 +3296,7 @@ async function executeEditorMenuItem(
             { waitForFreshHeartbeat: true }
           );
           return combineEditorMenuSettleResult(menuResult, compileStatus);
-        }
-      } catch {
-        // Unity may still be atomically replacing the correlated result.
       }
-    }
 
     if (!command.completed) {
       const bridgeFailure = consumeLateBridgeAcknowledgement(command.commandId, config);
@@ -3433,7 +3363,11 @@ interface UnityCommandResult {
   pending?: boolean;
   commandId?: string;
   completed?: boolean;
-  status?: "completed" | "pending";
+  status?: "completed" | "pending" | "unknown";
+  completion?: "not_started" | "unknown";
+  deliveryPhase?: "not_sent" | "possibly_sent" | "sent";
+  receiptPath?: string;
+  nextAction?: { tool: string; arguments: Record<string, unknown> };
   message?: string;
   error?: string;
   projectId?: string;
@@ -3477,6 +3411,28 @@ async function sendUnityCommand(
       observed: dispatch.acknowledgement.observed,
     };
   } catch (error) {
+    if (error instanceof BridgeTransportError) {
+      const pending = error.completion === "unknown";
+      return {
+        success: false,
+        accepted: error.deliveryPhase === "sent",
+        pending,
+        completed: false,
+        status: "unknown",
+        commandId: error.commandId,
+        completion: error.completion,
+        deliveryPhase: error.deliveryPhase,
+        receiptPath: error.receiptPath,
+        error: error.message,
+        message: pending
+          ? "Delivery may have occurred; completion is unknown. Do not resubmit. Select the original project and poll this command ID."
+          : "The command was not sent. Correct the reported problem before retrying.",
+        projectId: error.projectId,
+        projectPath: error.projectPath,
+        editorInstanceId: error.editorInstanceId,
+        ...(pending && error.projectId ? { nextAction: { tool: "get_unity_command_status", arguments: { commandId: error.commandId, projectId: error.projectId } } } : {}),
+      };
+    }
     return {
       success: false,
       error: error instanceof Error ? error.message : "Unknown error",
@@ -4045,6 +4001,13 @@ async function setObjectReference(
 ): Promise<unknown> {
   if (![objectId, objectPath].some(value => typeof value === "string" && value.trim().length > 0)) {
     return { success: false, error: "set_object_reference requires the owning GameObject's objectId or objectPath; componentId alone is not an owner selector. No command was sent." };
+  }
+  if ([targetId, targetPath].some(value => value !== undefined && typeof value !== "string") ||
+      ![targetId, targetPath].some(value => typeof value === "string" && value.trim().length > 0)) {
+    return { success: false, error: "set_object_reference requires targetId or targetPath. To clear a reference, explicitly pass targetPath: 'null'. No command was sent." };
+  }
+  if (targetPath?.toLowerCase() === "null" && targetId?.trim()) {
+    return { success: false, error: "Cannot combine a targetId with targetPath: 'null'. Choose a target or an explicit clear. No command was sent." };
   }
   const command = {
     type: "set_object_reference",

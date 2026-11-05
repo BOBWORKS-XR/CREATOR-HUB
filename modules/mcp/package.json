@@ -1,12 +1,12 @@
 {
   "name": "creator-works-mcp",
-  "version": "2.7.7",
+  "version": "2.7.8",
   "description": "Codex, Claude Code, Antigravity, OpenCode, and MCP-compatible Unity integration with first-class Creator SDK and Banter knowledge",
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc",
-    "bundle:server": "npm run build && esbuild dist/index.js --bundle --platform=node --format=esm --target=node20 --outfile=release/creator-works-mcp.mjs",
+    "bundle:server": "npm run build && node scripts/build-server.mjs",
     "stage:runtime": "node scripts/stage-node-runtime.mjs",
     "check:version": "node scripts/check-version-sync.mjs",
     "test:bundle": "node scripts/smoke-release-bundle.mjs",
@@ -38,7 +38,8 @@
     "node": ">=20"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "1.32.0"
+    "@modelcontextprotocol/sdk": "1.32.0",
+    "yaml": "2.9.1"
   },
   "devDependencies": {
     "@types/node": "^20.10.0",

@@ -6,6 +6,8 @@ import { UNITY_VS_JSON_MANUAL } from "../resources/unity-vs-json-manual.js";
 import { UNITY_VS_JSON_ERRATA } from "../resources/unity-vs-json-errata.js";
 import { CREATOR_DOCS_SNAPSHOT } from "../resources/creator-docs-snapshot.js";
 import { CREATOR_DOCS_GUIDANCE } from "../resources/creator-docs.js";
+import { matchesCreatorDocsSection, scoreCreatorDocsSection, creatorDocsPageGuidance } from "../resources/creator-docs-search.js";
+import { VS_PERFORMANCE_GUIDANCE } from "./vs-performance-advice.js";
 
 interface ReferenceEntry {
   id: string;
@@ -58,6 +60,7 @@ function objectEntries(source: Record<string, unknown>): ReferenceEntry[] {
 }
 
 const SOURCES: Record<string, { entries: ReferenceEntry[]; guidance: string }> = {
+  "graph-performance": { entries: splitReferenceMarkdown(VS_PERFORMANCE_GUIDANCE), guidance: "Advisory graph optimization guidance, not measured performance or permission to rewrite. Profile on the target device and preserve behaviour." },
   manual: { entries: splitReferenceMarkdown(UNITY_VS_JSON_MANUAL), guidance: UNITY_VS_JSON_ERRATA },
   components: { entries: objectEntries(BANTER_COMPONENTS), guidance: "Legacy catalog keys must be resolved against get_banter_sdk_info before authoring Creator SDK or Banter components." },
   javascript: { entries: objectEntries(BANTER_JS_API), guidance: "This is the bundled Banter JavaScript reference. Confirm the selected SDK and hosted runtime contract before applying it to another backend." },
@@ -91,7 +94,7 @@ export function excerptLength(text: string): number {
 
 export function getMCPReference(args: Record<string, unknown>): Record<string, unknown> {
   const sourceName = typeof args.source === "string" ? args.source : "";
-  if (!Object.hasOwn(SOURCES, sourceName)) return { success: false, error: "source must be manual, components, javascript, workflows, or creator-docs." };
+  if (!Object.hasOwn(SOURCES, sourceName)) return { success: false, error: "source must be manual, components, javascript, workflows, creator-docs, or graph-performance." };
   const source = SOURCES[sourceName];
   if (args.revision !== undefined && args.revision !== REVISIONS[sourceName]) {
     return { success: false, error: "Reference revision changed. Search again before continuing an older excerpt." };
@@ -114,7 +117,9 @@ export function getMCPReference(args: Record<string, unknown>): Record<string, u
   const terms = query.toLowerCase().split(/\s+/);
   const matches = entryId
     ? source.entries.filter((entry) => entry.id === entryId)
-    : source.entries.filter((entry) => terms.every((term) => `${entry.title}\n${entry.text}`.toLowerCase().includes(term)));
+    : source.entries.filter((entry) => sourceName === "creator-docs"
+      ? matchesCreatorDocsSection(entry.id.split("#")[0], entry.title, entry.text, query)
+      : terms.every((term) => `${entry.title}\n${entry.text}`.toLowerCase().includes(term)));
   if (entryId && !matches.length) return { success: false, error: "Unknown entryId. Search this source for a current entry ID." };
   if (matches.length && (offset as number) >= matches[0].text.length) {
     return { success: false, error: "startOffset is outside this entry. Use a returned nextOffset or start at zero." };
@@ -122,7 +127,9 @@ export function getMCPReference(args: Record<string, unknown>): Record<string, u
   if (!entryId) {
     const rank = (entry: ReferenceEntry) => entry.id.toLowerCase() === query.toLowerCase() ? 0
       : terms.every((term) => entry.title.toLowerCase().includes(term)) ? 1 : 2;
-    matches.sort((left, right) => rank(left) - rank(right) || left.id.localeCompare(right.id, "en"));
+    matches.sort((left, right) => (sourceName === "creator-docs"
+      ? scoreCreatorDocsSection(right.id.split("#")[0], right.title, right.text, query) - scoreCreatorDocsSection(left.id.split("#")[0], left.title, left.text, query)
+      : rank(left) - rank(right)) || left.id.localeCompare(right.id, "en"));
   }
   const entries = matches.slice(0, limit as number).map((entry) => {
     const startOffset = offset as number;
@@ -131,6 +138,7 @@ export function getMCPReference(args: Record<string, unknown>): Record<string, u
       entryId: entry.id, title: entry.title, text: entry.text.slice(startOffset, end),
       startOffset, nextOffset: end < entry.text.length ? end : null, complete: end === entry.text.length,
       ...(entry.url ? { url: entry.url, sourceUrl: entry.sourceUrl } : {}),
+      ...(sourceName === "creator-docs" ? { guidance: creatorDocsPageGuidance(entry.id.split("#")[0]) } : {}),
     };
   });
   const result: Record<string, unknown> = {

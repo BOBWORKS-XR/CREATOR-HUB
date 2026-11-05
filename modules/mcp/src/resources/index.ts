@@ -5,6 +5,7 @@
 import * as fs from "fs";
 import * as path from "path";
 import type { BanterMCPConfig } from "../lib/config.js";
+import { redactToolDiagnostics } from "../lib/diagnostic-redaction.js";
 import { BANTER_COMPONENTS, BANTER_COMPONENT_CATALOG_METADATA } from "./banter-components.js";
 import { BANTER_VS_NODES } from "./banter-vs-nodes.js";
 import { BANTER_CUSTOM_VS_NODES, BANTER_CUSTOM_VS_NODE_LOG } from "./banter-custom-vs-nodes.js";
@@ -62,6 +63,8 @@ invent an equivalent write path.
 - Then tell the user what you did
 
 ## Your Workflow
+
+For graph authoring or editing, search \`get_mcp_reference\` source \`graph-performance\` for relevant optimization guidance. Prefer events to polling, justify every per-frame/physics event, and profile on the target device. Validation performance warnings are advisory, not measured costs or permission to rewrite an existing graph. Keep safety, lifecycle and multiplayer behaviour intact.
 
 When the user asks for something in their scene:
 
@@ -400,6 +403,10 @@ export function handleResourceRead(
       throw new Error(`Unknown resource: ${uri}`);
   }
 
+  if (["project://console", "project://import-status", "project://compilation-status"].includes(uri)) {
+    try { content = JSON.stringify(redactToolDiagnostics("get_console_logs", JSON.parse(content)), null, 2); }
+    catch { content = JSON.stringify({ success: false, error: "Diagnostic snapshot is invalid JSON; raw content was not returned." }); }
+  }
   return {
     contents: [{ uri, mimeType, text: content }],
   };

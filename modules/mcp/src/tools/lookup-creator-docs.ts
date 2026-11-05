@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { CREATOR_DOCS_SNAPSHOT } from "../resources/creator-docs-snapshot.js";
+import { scoreCreatorDocsPage, scoreCreatorDocsSection, creatorDocsPageGuidance } from "../resources/creator-docs-search.js";
 import { excerptLength, getMCPReference, REFERENCE_RESPONSE_MAX_BYTES, splitReferenceMarkdown } from "./get-mcp-reference.js";
 
 const SITE = "https://altvr.app/docs/";
@@ -151,7 +152,7 @@ export function createCreatorDocsLookup(options: Options = {}) {
         // the pinned live revision, never silently from the bundled snapshot.
         selected = index.pages.map(page => {
           const bundled = CREATOR_DOCS_SNAPSHOT.pages.find(item => item.path === page.path);
-          return { page, rank: score(`${page.path} ${page.title}`, terms) * 4 + score(bundled?.text || "", terms) };
+          return { page, rank: scoreCreatorDocsPage(page.path, page.title, bundled?.text || "", query) };
         }).filter(item => item.rank > 0).sort((a, b) => b.rank - a.rank || a.page.path.localeCompare(b.page.path, "en"))
           .slice(0, limit as number).map(item => item.page);
       }
@@ -177,7 +178,7 @@ export function createCreatorDocsLookup(options: Options = {}) {
             const sectionOffset = document.text.indexOf(section.text, cursor);
             if (sectionOffset < 0) throw new Refusal("Documentation section could not be located. Read the exact page path instead.");
             cursor = sectionOffset + section.text.length;
-            return { startOffset: sectionOffset, text: section.text, rank: score(section.title, terms) * 4 + score(section.text, terms) };
+            return { startOffset: sectionOffset, text: section.text, rank: scoreCreatorDocsSection(page.path, section.title, section.text, query) };
           })
             .sort((a, b) => b.rank - a.rank)[0];
           startOffset = best?.startOffset ?? 0;
@@ -197,6 +198,7 @@ export function createCreatorDocsLookup(options: Options = {}) {
         }
         const end = startOffset + excerptLength(document.text.slice(startOffset, excerptLimit));
         entries.push({ ...page, url: pageUrl(page.path), sourceUrl: `${RAW}${index.revision}/Docs/${page.path}`,
+          guidance: creatorDocsPageGuidance(page.path),
           contentHash: document.hash, fetchedAt: new Date(document.fetchedAt).toISOString(), cached,
           text: document.text.slice(startOffset, end), startOffset, nextOffset: end < document.text.length ? end : null,
           completePage: startOffset === 0 && end === document.text.length });
@@ -205,7 +207,7 @@ export function createCreatorDocsLookup(options: Options = {}) {
         checkedAt: new Date(index.checkedAt).toISOString(), indexCached, cacheTtlSeconds: LIVE_DOCS_TTL_MS / 1000,
         bundledRevision: CREATOR_DOCS_SNAPSHOT.revision, networkRequests, indexedPages: index.pages.length,
         searchedPages: selected.map(page => page.path), entries, guidance: GUIDANCE,
-        searchScope: "Current page titles/paths plus bundled text rank at most three pages. Only those pages are fetched; this does not search every live page body. No results do not prove the topic is absent.",
+        searchScope: "Current page titles/paths, bundled text and local topic aliases rank at most three pages. Only those pages are fetched; this does not search every live page body. Alias matches do not establish an API or authentication capability. No results do not prove the topic is absent.",
         continuation: "Read an exact indexed path with revision, contentHash and nextOffset as startOffset. Offsets count UTF-16 characters after LF normalization. refresh=true rechecks the upstream revision now; otherwise checks are cached for five minutes. Reuse unchanged excerpts during a task." });
     } catch (error) {
       const message = controller.signal.aborted ? "Documentation request timed out." : String(error instanceof Error ? error.message : error).slice(0, 300);
