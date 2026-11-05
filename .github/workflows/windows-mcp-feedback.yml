@@ -1,0 +1,46 @@
+name: Private Windows MCP feedback checks
+on:
+  push:
+    branches: [validation/mcp-feedback-020-20261105]
+permissions:
+  contents: read
+jobs:
+  mcp-tests:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: modules/mcp
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: modules/mcp/package-lock.json
+      - name: Locked dependencies without lifecycle hooks
+        run: npm ci --ignore-scripts
+      - name: Version consistency
+        run: npm run check:version
+      - name: Full MCP suite including native Windows installer preflight
+        shell: pwsh
+        run: |
+          npm test 2>&1 | Tee-Object -FilePath mcp-tests.log
+          exit $LASTEXITCODE
+      - name: Emitted server protocol and shutdown
+        if: success()
+        shell: pwsh
+        run: |
+          npm run bundle:server 2>&1 | Tee-Object -FilePath mcp-bundle.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run test:bundle 2>&1 | Tee-Object -FilePath mcp-bundle-tests.log
+          exit $LASTEXITCODE
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-mcp-feedback-evidence
+          path: modules/mcp/*.log
+          if-no-files-found: error
+          retention-days: 14
