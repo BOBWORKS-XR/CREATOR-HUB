@@ -19,8 +19,8 @@ function env(caseName = 'mcp-restore') {
   const [last, restore] = target.CASES[caseName];
   return { GITHUB_ACTIONS: 'true', RUNNER_ENVIRONMENT: 'github-hosted', RUNNER_OS: 'Windows', RUNNER_ARCH: 'X64',
     GITHUB_REPOSITORY: 'BOBWORKS-XR/CREATOR-HUB', GITHUB_REPOSITORY_ID: '1364807512', GITHUB_EVENT_NAME: 'workflow_dispatch', GITHUB_JOB: 'acceptance',
-    GITHUB_REF: 'refs/heads/validation/windows-outgoing-019',
-    GITHUB_WORKFLOW_REF: 'BOBWORKS-XR/CREATOR-HUB/.github/workflows/windows-outgoing-019.yml@refs/heads/validation/windows-outgoing-019',
+    GITHUB_REF: 'refs/heads/validation/windows-mcp-update-020-20261105',
+    GITHUB_WORKFLOW_REF: 'BOBWORKS-XR/CREATOR-HUB/.github/workflows/windows-outgoing-019.yml@refs/heads/validation/windows-mcp-update-020-20261105',
     GITHUB_SHA: 'a'.repeat(40), EXPECTED_HARNESS_COMMIT: 'a'.repeat(40), CREATOR_OUTGOING_CASE: caseName,
     CREATOR_OUTGOING_LAST_TOOL: last, CREATOR_OUTGOING_RESTORE: restore, CREATOR_OUTGOING_REVIEW_SHA256: reviewSha };
 }
@@ -267,7 +267,7 @@ test('resource completion phase and verified automatic Root identity are mandato
 });
 test('workflow is finite Windows-only and binds SDK source before private acquisition', () => {
   const workflow = fs.readFileSync(path.join(__dirname, '../.github/workflows/windows-outgoing-019.yml'), 'utf8');
-  assert.ok(workflow.includes('branches: [validation/windows-outgoing-019]'));
+  assert.ok(workflow.includes('branches: [validation/windows-mcp-update-020-20261105]'));
   assert.ok(workflow.includes('scripts/windows-outgoing-019-input.cjs source'));
   assert.ok(workflow.includes('ref: '+ '\u0024{{ steps.binding.outputs.source_commit }}'));
   assert.ok(workflow.includes("git -C product rev-parse 'HEAD^{tree}'"));
@@ -319,7 +319,7 @@ test('exact outgoing binding survives core.autocrlf=true checkout without relaxi
   const original = fs.readFileSync(bindingFile);
   assert.equal(original.includes(13), false, 'Frozen binding must retain its original LF bytes');
   const expectedHash = target.hash(original);
-  if (checkedInBinding.enabled) assert.equal(expectedHash, 'bd056b98953187a057c9287147bb387317283f7d0914cf5dbe47f47056db1c86');
+  if (checkedInBinding.enabled) assert.equal(expectedHash, '7937433b77e04035e18aebd02c4cf6d7e5ec4a9a6dafe5c936e0e3605a87075d');
   const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'creator-outgoing-checkout-'));
   t.diagnostic(`Disposable no-ref checkout: ${temporary}`);
   t.after(() => {
@@ -360,7 +360,7 @@ test('exact outgoing binding survives core.autocrlf=true checkout without relaxi
     const unprotected = checkout(`unprotected-${label}`, formLines.filter(line => line !== rule).join(eol));
     assert.notEqual(target.hash(unprotected), expectedHash, 'Control must reproduce the missing-rule failure');
     assert.equal(unprotected.toString(), original.toString().replace(/\n/g, '\r\n'));
-    if (checkedInBinding.enabled) assert.equal(target.hash(unprotected), '5bf9c580a1028e758a0eba22c106d6c816fe91552cf13d6c47ca46437e409501');
+    if (checkedInBinding.enabled) assert.equal(target.hash(unprotected), '51fa6e4e919413180e4b5e5798e517517b51b6bafd779a92898d31dc2baf1c30');
     t.diagnostic(`${label.toUpperCase()} attributes: exact binding preserved; missing-rule CRLF control rejected`);
   }
   assert.equal(refs(), '', 'Disposable checkout must not create refs');

@@ -171,7 +171,7 @@ function createDirectOutgoing019Contract(input) {
   assert.notEqual(input.baseline.installer, input.pins.installer, 'Same installer cannot be a higher-version target');
   assert.notEqual(input.baseline.exe, input.pins.executable, 'Same executable cannot be a higher-version target');
   return validatedContract(input, Object.freeze({ ...input.baseline }), {
-    descriptor: { assetName: 'Creator_Hub_0.1.20_x64-acceptance-only-setup.exe', minHubVersion: '0.1.19' },
+    descriptor: { assetName: 'Creator.Hub_0.1.20_x64-setup.exe', minHubVersion: '0.1.19' },
     actualScope: { kind: 'direct-outgoing-019-020', acceptanceOnly: true, labDiscovery: true,
       publicDiscovery: false, liveAiAcceptance: false, productAcceptance: false, releaseReady: false },
   });

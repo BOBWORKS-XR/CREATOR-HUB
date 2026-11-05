@@ -7,7 +7,9 @@ const { binding, hash } = target;
 const FILES = [target.BASELINE_ASSET, target.ASSET, 'creator-hub-windows-x86_64.json', 'creator-hub-windows-x86_64.json.minisig', 'latest.json'];
 function verifyRelease(release, expected) {
   assert.equal(release.id, expected.id); assert.equal(release.tag_name, expected.tag);
-  assert.equal(release.draft, true); assert.equal(release.target_commitish, expected.source);
+  const publicBaseline = expected.id === binding.baseline.releaseId;
+  assert.equal(release.draft, !publicBaseline);
+  assert.equal(release.target_commitish, publicBaseline ? 'a23ab742d649e1c8572f3072c767b92479073b49' : expected.source);
   for (const [name, pin] of Object.entries(expected.assets)) {
     const matches = release.assets.filter(asset => asset.id === pin.id); assert.equal(matches.length, 1);
     const asset = matches[0]; assert.equal(asset.name, name); assert.equal(asset.state, 'uploaded');
@@ -74,7 +76,7 @@ function checkReceipt(report, rows, config, env = process.env) {
 module.exports = { FILES, verifyRelease, acquire, checkReceipt };
 if (require.main === module) (async () => {
   if (process.argv[2] === 'source') {
-    target.assertHost(); console.log(JSON.stringify(binding.baseline.source));
+    target.assertHost(); console.log(JSON.stringify(binding.target.source));
   } else if (process.argv[2] === 'acquire') console.log(JSON.stringify(await acquire()));
   else {
     target.assertHost(); assert.equal(process.argv[2], 'receipt'); assert.equal(process.argv.length, 5);

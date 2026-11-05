@@ -6,7 +6,7 @@ const crypto = require('node:crypto');
 const feed = require('./self-update-outgoing-019-feed.cjs');
 const binding = require('./fixtures/windows-outgoing-019-binding.json');
 const KIND = 'direct-outgoing-019-020';
-const ASSET = 'Creator_Hub_0.1.20_x64-acceptance-only-setup.exe';
+const ASSET = 'Creator.Hub_0.1.20_x64-setup.exe';
 const BASELINE_ASSET = 'Creator.Hub_0.1.19_x64-setup.exe';
 const CASES = Object.freeze({ 'mcp-restore': ['mcp', 'true'], 'setup-restore': ['setup', 'true'], 'setup-no-restore': ['setup', 'false'] });
 const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
@@ -70,14 +70,15 @@ function validateBindingShape(value) {
   assert.notEqual(value.baseline.executable.sha256, value.target.executable.sha256);
   assert.notEqual(value.baseline.generation, value.target.generation);
   assert.notEqual(value.baseline.manifest.modules.mcp.version, value.target.manifest.modules.mcp.version);
-  assert.match(value.target.manifest.modules.mcp.version, /^[0-9]+\.[0-9]+\.[0-9]+-fixture\.20$/);
+  assert.equal(value.target.manifest.modules.mcp.version, '2.7.8');
+  assert.equal(value.baseline.manifest.modules.mcp.version, '2.7.7');
   for (const key of ['releaseId', 'assetId']) assert.ok(Number.isSafeInteger(value.baseline[key]) && value.baseline[key] > 0);
   for (const key of ['descriptor', 'descriptorSignature', 'latest']) pin(value.target[key], key, key === 'descriptorSignature' ? 4096 : 32768);
   const release = value.target.privateRelease;
   assert.ok(release && Number.isSafeInteger(release.id) && release.id > 0);
   assert.notEqual(value.baseline.releaseId, release.id);
   assert.equal(release.source, value.target.source.commit);
-  assert.match(release.tag, /^lab-windows-outgoing-020-[0-9]+$/);
+  assert.match(release.tag, /^lab-windows-mcp-020-[a-z0-9-]+$/);
   const assetPins = { [ASSET]: value.target.installer, 'creator-hub-windows-x86_64.json': value.target.descriptor,
     'creator-hub-windows-x86_64.json.minisig': value.target.descriptorSignature, 'latest.json': value.target.latest };
   assert.deepEqual(Object.keys(release.assets).sort(), Object.keys(assetPins).sort());
@@ -88,7 +89,7 @@ function validateBindingShape(value) {
   }
   assert.equal(new Set(ids).size, ids.length);
   const q = value.fixtureQualification;
-  assert.equal(q.kind, 'outgoing20-fixture-only-verified'); assert.deepEqual(q.source, value.target.source);
+  assert.equal(q.kind, 'outgoing20-candidate-only-verified'); assert.deepEqual(q.source, value.target.source);
   assert.equal(q.sha256, value.target.verificationReceiptSha256);
   assert.equal(q.sourceUnchanged, true); assert.equal(q.buildExitCode, 0);
   assert.ok(Number.isSafeInteger(q.inputCount) && q.inputCount > 0); assert.equal(q.payloadFiles, 15);
@@ -103,8 +104,8 @@ function assertHost(env = process.env, platform = process.platform) {
   assert.equal(platform, 'win32');
   for (const [key, expected] of Object.entries({ GITHUB_ACTIONS: 'true', RUNNER_ENVIRONMENT: 'github-hosted', RUNNER_OS: 'Windows', RUNNER_ARCH: 'X64',
     GITHUB_REPOSITORY: 'BOBWORKS-XR/CREATOR-HUB', GITHUB_REPOSITORY_ID: '1364807512', GITHUB_EVENT_NAME: 'workflow_dispatch',
-    GITHUB_JOB: 'acceptance', GITHUB_REF: 'refs/heads/validation/windows-outgoing-019',
-    GITHUB_WORKFLOW_REF: 'BOBWORKS-XR/CREATOR-HUB/.github/workflows/windows-outgoing-019.yml@refs/heads/validation/windows-outgoing-019' })) assert.equal(env[key], expected, key);
+    GITHUB_JOB: 'acceptance', GITHUB_REF: 'refs/heads/validation/windows-mcp-update-020-20261105',
+    GITHUB_WORKFLOW_REF: 'BOBWORKS-XR/CREATOR-HUB/.github/workflows/windows-outgoing-019.yml@refs/heads/validation/windows-mcp-update-020-20261105' })) assert.equal(env[key], expected, key);
   assert.match(env.GITHUB_SHA || '', /^[a-f0-9]{40}$/); assert.equal(env.EXPECTED_HARNESS_COMMIT, env.GITHUB_SHA);
   assert.ok(Object.hasOwn(CASES, env.CREATOR_OUTGOING_CASE));
   assert.deepEqual([env.CREATOR_OUTGOING_LAST_TOOL, env.CREATOR_OUTGOING_RESTORE], CASES[env.CREATOR_OUTGOING_CASE]);

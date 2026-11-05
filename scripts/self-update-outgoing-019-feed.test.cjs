@@ -57,7 +57,7 @@ function outgoingInput() {
 
 function directOutgoingInput() {
   const f = fixture('0.1.20');
-  f.release.assetName = 'Creator_Hub_0.1.20_x64-acceptance-only-setup.exe';
+  f.release.assetName = 'Creator.Hub_0.1.20_x64-setup.exe';
   f.release.minHubVersion = '0.1.19';
   f.update = updaterManifest(applications.hub, f.targetVersion, f.release.assetName, f.encodedSignature);
   return { ...input(f), baseline: { version: '0.1.19', installer: 'b'.repeat(64), exe: 'c'.repeat(64) } };
