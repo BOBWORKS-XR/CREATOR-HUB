@@ -24,7 +24,7 @@ function Invoke-RawPowerShell([string]$arguments) {
     try {
         $output = $process.StandardOutput.ReadToEndAsync()
         $errors = $process.StandardError.ReadToEndAsync()
-        Require ($process.WaitForExit(20000)) 'Owned preflight helper exceeded its 20-second test deadline.'
+        Require ($process.WaitForExit(60000)) 'Owned preflight helper exceeded its 60-second test deadline.'
         [pscustomobject]@{ code = $process.ExitCode; pid = $process.Id; output = $output.Result.Trim(); error = $errors.Result.Trim() }
     } finally { $process.Dispose() }
 }

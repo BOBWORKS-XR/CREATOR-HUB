@@ -9,9 +9,9 @@ import { registerTools } from '../dist/tools/index.js';
 import { collectCreatorDocs, blobHash, sha256 } from '../scripts/sync-creator-docs.mjs';
 
 test('all pinned SDK pages and licence retain their exact source hashes', () => {
-  assert.equal(CREATOR_DOCS_SNAPSHOT.revision, '410de076ffc022d8f61832b968a133f46e9ec15d');
-  assert.equal(CREATOR_DOCS_SNAPSHOT.pages.length, 47);
-  assert.equal(new Set(CREATOR_DOCS_SNAPSHOT.pages.map(page => page.path)).size, 47);
+  assert.equal(CREATOR_DOCS_SNAPSHOT.revision, 'bf638cb228f4bd5633c0ecb403d8aecfbab703f7');
+  assert.equal(CREATOR_DOCS_SNAPSHOT.pages.length, 49);
+  assert.equal(new Set(CREATOR_DOCS_SNAPSHOT.pages.map(page => page.path)).size, 49);
   for (const input of [CREATOR_DOCS_SNAPSHOT.license, CREATOR_DOCS_SNAPSHOT.sidebar, ...CREATOR_DOCS_SNAPSHOT.pages]) {
     const bytes = Buffer.from(input.text);
     assert.equal(sha256(bytes), input.sha256);
@@ -79,7 +79,7 @@ test('resource index includes provenance and licence, not a full documentation d
   const response = handleResourceRead('creator://docs-index', config);
   const index = JSON.parse(response.contents[0].text);
   assert.deepEqual(index, CREATOR_DOCS_INDEX);
-  assert.equal(index.pages.length, 47);
+  assert.equal(index.pages.length, 49);
   assert.ok(index.pages.every(page => !Object.hasOwn(page, 'text')));
 });
 

@@ -4,7 +4,25 @@
 
 No Unity-owned MCP code or relay binaries are copied, vendored, or linked into this repository. The hybrid bridge changes were independently authored against Creator Works MCP's existing command contracts and public platform APIs.
 
-The Node dependency graph is tracked in `package-lock.json`; its direct runtime MCP dependency is `@modelcontextprotocol/sdk`. The release bundle is produced with [esbuild](https://github.com/evanw/esbuild), which is MIT-licensed. Review locked package metadata and licenses when redistributing a bundled build.
+The Node dependency graph is tracked in `package-lock.json`; its direct runtime dependencies are `@modelcontextprotocol/sdk` and `yaml`. The release bundle is produced with [esbuild](https://github.com/evanw/esbuild), which is MIT-licensed. Review locked package metadata and licenses when redistributing a bundled build.
+
+`yaml` 2.9.1 is used only to read graph asset inventories; it does not rewrite Unity assets. Its ISC notice follows:
+
+```text
+Copyright Eemeli Aro <eemeli@gmail.com>
+
+Permission to use, copy, modify, and/or distribute this software for any purpose
+with or without fee is hereby granted, provided that the above copyright notice
+and this permission notice appear in all copies.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH
+REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND
+FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT,
+INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS
+OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER
+TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF
+THIS SOFTWARE.
+```
 
 The Windows launcher bundles the unmodified official Node.js 24.17.0 Windows x64 executable so MCP clients do not require a separate Node.js installation. Node.js is distributed under the MIT license and includes third-party software under the terms recorded in the `LICENSE` file packaged beside the runtime. The release build verifies both the official archive and extracted executable with pinned SHA-256 checksums before packaging.
 
@@ -14,11 +32,12 @@ The Windows launcher uses [Tauri](https://github.com/tauri-apps/tauri), distribu
 
 The bundled `src/resources/creator-docs-snapshot.ts` reproduces the Markdown
 documentation served by [AltVR](https://altvr.app/docs/) from
-[SideQuestVR/BanterSDK](https://github.com/SideQuestVR/BanterSDK/tree/410de076ffc022d8f61832b968a133f46e9ec15d/Docs),
-`feature/greenfield` commit `410de076ffc022d8f61832b968a133f46e9ec15d`.
+[SideQuestVR/BanterSDK](https://github.com/SideQuestVR/BanterSDK/tree/bf638cb228f4bd5633c0ecb403d8aecfbab703f7/Docs),
+`feature/greenfield` commit `bf638cb228f4bd5633c0ecb403d8aecfbab703f7`.
 Page hashes, immutable source URLs and the full upstream licence are retained
 in the snapshot; `creator://docs-index` exposes provenance and that licence.
-This documentation import does not incorporate SDK implementation code or
+The source-declared Unit catalogue is derived from the same revision, with
+individual source paths and hashes retained. Neither import incorporates SDK implementation code or
 establish compatibility with any installed package or hosted application.
 
 Upstream licence, reproduced unchanged:

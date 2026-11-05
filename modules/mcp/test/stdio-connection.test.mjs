@@ -9,10 +9,17 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 const command = process.env.MCP_PROTOCOL_NODE || process.execPath;
 const entry = path.resolve(process.env.MCP_PROTOCOL_ENTRY || 'dist/index.js');
 const timeout = { timeout: 10_000 };
+const fixtureClients = new WeakMap();
 
 async function fixture(t) {
   const root = await mkdtemp(path.join(os.tmpdir(), 'creator protocol spaces '));
-  t.after(() => rm(root, { recursive: true, force: true, maxRetries: 3 }));
+  const clients = [];
+  fixtureClients.set(t, clients);
+  t.after(async () => {
+    // A failed assertion must close every child before deleting its Windows cwd.
+    for (const client of clients.reverse()) await client.close();
+    await rm(root, { recursive: true, force: true, maxRetries: 3 });
+  });
   return root;
 }
 
@@ -38,7 +45,9 @@ async function connect(t, root, overrides = {}) {
       CREATOR_WORKS_LAUNCHER_CONFIG: path.join(root, 'launcher-config.json'), ...overrides } });
   let stderr = '';
   transport.stderr.on('data', chunk => { stderr = (stderr + chunk).slice(-4096); });
-  t.after(() => client.close());
+  const clients = fixtureClients.get(t);
+  if (!clients) throw new Error('Protocol clients require an owned temporary fixture');
+  clients.push(client);
   try { await client.connect(transport, timeout); }
   catch (error) { throw new Error(`Stdio connection failed: ${stderr}`, { cause: error }); }
   assert.equal(client.getServerVersion().name, 'creator-works-mcp');

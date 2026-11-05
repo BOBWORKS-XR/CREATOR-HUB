@@ -8,6 +8,7 @@ using System.IO.Pipes;
 using System.Linq;
 using System.Reflection;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using UnityEditor;
 using UnityEditor.Compilation;
@@ -49,7 +50,7 @@ namespace BantworksMCP
         private static readonly string EditorMenuResultsFolder = Path.Combine(StateFolder, "editor-menu-results");
         private static readonly string HierarchyQueryResultsFolder = Path.Combine(StateFolder, "hierarchy-query-results");
         private static readonly Dictionary<string, UnityEngine.Object> ActiveTestDiscoveryApis = new Dictionary<string, UnityEngine.Object>();
-        private const string BridgeVersion = "2.7.7";
+        private const string BridgeVersion = "2.7.8";
         private const int BridgeProtocolVersion = 1;
         private const int MinimumBridgeProtocolVersion = 1;
         private const int MaximumPipeCommandCharacters = 4 * 1024 * 1024;
@@ -435,7 +436,7 @@ namespace BantworksMCP
                 {
                     assemblyPath = assemblyPath,
                     type = message.type.ToString(),
-                    message = message.message,
+                    message = RedactDiagnosticText(message.message),
                     file = message.file,
                     line = message.line,
                     column = message.column
@@ -458,8 +459,8 @@ namespace BantworksMCP
                 var entry = new ConsoleLogEntry
                 {
                     level = type.ToString(),
-                    message = condition,
-                    stackTrace = stackTrace,
+                    message = RedactDiagnosticText(condition),
+                    stackTrace = RedactDiagnosticText(stackTrace),
                     timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
                 };
 
@@ -473,6 +474,39 @@ namespace BantworksMCP
 
                 consoleExportPending = true;
             }
+        }
+
+        private static string RedactDiagnosticText(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return text;
+            try
+            {
+                string redacted = Regex.Replace(text, @"https?://[^\s""'<>]+", match =>
+                {
+                    string candidate = match.Value;
+                    string decoded = candidate;
+                    for (int i = 0; i < 2; i++)
+                    {
+                        try { decoded = Uri.UnescapeDataString(decoded); }
+                        catch (UriFormatException) { break; }
+                    }
+                    bool sensitive = Regex.IsMatch(decoded.Replace("&amp;", "&"),
+                        @"(?:^|[?&#;])(?:x-amz-[^=&#;]*|x-goog-[^=&#;]*|sig|signature|token|access_token|refresh_token|id_token|api[_-]?key|key|credential|authorization|password|secret)=",
+                        RegexOptions.IgnoreCase, TimeSpan.FromMilliseconds(100));
+                    Uri uri;
+                    if (!Uri.TryCreate(candidate, UriKind.Absolute, out uri))
+                        return sensitive ? "[REDACTED URL]" : candidate;
+                    if (!sensitive && string.IsNullOrEmpty(uri.UserInfo)) return candidate;
+                    var safe = new UriBuilder(uri) { UserName = "", Password = "" };
+                    if (sensitive) { safe.Query = ""; safe.Fragment = ""; }
+                    return safe.Uri.AbsoluteUri + (sensitive ? "?[REDACTED]" : "");
+                }, RegexOptions.IgnoreCase, TimeSpan.FromMilliseconds(100));
+                return Regex.Replace(redacted,
+                    @"\b((?:proxy-)?authorization\s*[:=]\s*)(?:bearer|basic)\s+[^\s""'<>]+",
+                    "$1[REDACTED]", RegexOptions.IgnoreCase, TimeSpan.FromMilliseconds(100));
+            }
+            catch (ArgumentException) { return "[Diagnostic redaction failed]"; }
+            catch (RegexMatchTimeoutException) { return "[Diagnostic redaction timed out]"; }
         }
 
         #region Menu Items
@@ -858,13 +892,16 @@ namespace BantworksMCP
                 CommandsProcessed++;
                 LastActivity = DateTime.Now.ToString("HH:mm:ss") + " - Command processed";
                 var result = CreateCommandResult(command != null ? command.id : null, true, message, null);
+                result.commandType = command?.type;
                 result.observed = observed;
                 return result;
             }
             catch (Exception e)
             {
                 Debug.LogError("[Creator Works MCP] Command failed: " + e.Message);
-                return CreateCommandResult(command != null ? command.id : ExtractCommandId(json), false, null, e.Message);
+                var failed = CreateCommandResult(command != null ? command.id : ExtractCommandId(json), false, null, e.Message);
+                failed.commandType = command?.type;
+                return failed;
             }
         }
 
@@ -884,6 +921,7 @@ namespace BantworksMCP
             Directory.CreateDirectory(CommandStatusFolder);
             var dispatch = CreateCommandResult(baseCommand.id, false, "Dispatched; completion is not yet known. Do not resubmit.", null);
             dispatch.status = "dispatched";
+            dispatch.commandType = baseCommand.type;
             WriteAtomicText(Path.Combine(CommandStatusFolder, baseCommand.id + ".json"), JsonUtility.ToJson(dispatch));
 
             switch (baseCommand.type)
@@ -1477,6 +1515,7 @@ namespace BantworksMCP
                 assetPath = cmd.assetPath,
                 timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
                 elementTypes = new List<string>(),
+                elementIdentities = new List<string>(),
                 warnings = new List<string>(),
                 allowUnboundValueInputs = cmd.allowUnboundValueInputs,
                 unboundValueInputs = new List<VSValueInputDiagnostic>()
@@ -1491,6 +1530,15 @@ namespace BantworksMCP
                 string fullPath = Path.GetFullPath(Path.Combine(ProjectRoot, assetPath));
                 if (!File.Exists(fullPath))
                     throw new FileNotFoundException("Visual Scripting graph asset does not exist", assetPath);
+                if (new FileInfo(fullPath).Length > 8 * 1024 * 1024)
+                    throw new InvalidOperationException("Graph source exceeds the 8 MiB validation limit.");
+                result.sourceContentHash = VisualScriptingSourceHash(fullPath);
+                if (!string.IsNullOrEmpty(cmd.expectedContentHash) &&
+                    !string.Equals(result.sourceContentHash, cmd.expectedContentHash, StringComparison.Ordinal))
+                    throw new InvalidOperationException("The graph changed after inspection. Inspect it again before validation.");
+                UnityEngine.Object beforeImport = AssetDatabase.LoadMainAssetAtPath(assetPath);
+                if (beforeImport != null && EditorUtility.IsDirty(beforeImport))
+                    throw new InvalidOperationException("This graph has unsaved edits. Save or discard them in Unity before validation.");
 
                 AssetDatabase.ImportAsset(
                     assetPath,
@@ -1534,6 +1582,8 @@ namespace BantworksMCP
                 foreach (object element in elements)
                 {
                     result.elementCount++;
+                    if (result.elementCount > 20000)
+                        throw new InvalidOperationException("Graph exceeds the 20000 element validation limit.");
                     if (element == null)
                     {
                         result.missingElementCount++;
@@ -1542,6 +1592,13 @@ namespace BantworksMCP
 
                     string typeName = element.GetType().FullName ?? element.GetType().Name;
                     elementTypes.Add(typeName);
+                    object guidValue = element.GetType().GetProperty("guid", flags)?.GetValue(element) ??
+                        element.GetType().GetField("guid", flags)?.GetValue(element);
+                    Guid elementGuid;
+                    if (guidValue == null || !Guid.TryParse(guidValue.ToString(), out elementGuid))
+                        result.missingElementCount++;
+                    else
+                        result.elementIdentities.Add(elementGuid.ToString("D") + "\t" + typeName);
                     if (typeName == "Unity.VisualScripting.ControlConnection")
                         result.controlConnectionCount++;
                     else if (typeName == "Unity.VisualScripting.ValueConnection")
@@ -1565,6 +1622,9 @@ namespace BantworksMCP
                 }
 
                 result.elementTypes = elementTypes.OrderBy(name => name, StringComparer.Ordinal).Take(200).ToList();
+                result.elementIdentities.Sort(StringComparer.Ordinal);
+                if (!string.Equals(VisualScriptingSourceHash(fullPath), result.sourceContentHash, StringComparison.Ordinal))
+                    throw new InvalidOperationException("Graph source changed during import. Inspect it again; validation is incomplete.");
                 if (result.missingElementCount > 0)
                     result.warnings.Add($"Unity exposed {result.missingElementCount} missing or unknown graph elements");
                 if (result.invalidConnectionCount > 0)
@@ -1608,6 +1668,12 @@ namespace BantworksMCP
                 Path.Combine(VisualScriptingValidationResultsFolder, cmd.id + ".json"),
                 JsonUtility.ToJson(result, true));
             DeleteOldFiles(VisualScriptingValidationResultsFolder, "*.json", 50);
+        }
+
+        private static string VisualScriptingSourceHash(string fullPath)
+        {
+            using (var sha = System.Security.Cryptography.SHA256.Create())
+                return BitConverter.ToString(sha.ComputeHash(File.ReadAllBytes(fullPath))).Replace("-", "").ToLowerInvariant();
         }
 
         private static void InspectValueInputs(object element, VSGraphAssetValidationResult result)
@@ -1966,8 +2032,8 @@ namespace BantworksMCP
                     result.diagnostics.Add(new ConsoleLogEntry
                     {
                         level = logType.ToString(),
-                        message = condition,
-                        stackTrace = stackTrace,
+                        message = RedactDiagnosticText(condition),
+                        stackTrace = RedactDiagnosticText(stackTrace),
                         timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
                     });
                 };
@@ -2157,13 +2223,14 @@ namespace BantworksMCP
                     if (result.diagnostics.Count >= maxDiagnostics)
                         return;
 
+                    string safeStackTrace = RedactDiagnosticText(stackTrace);
                     result.diagnostics.Add(new ConsoleLogEntry
                     {
                         level = logType.ToString(),
-                        message = condition,
-                        stackTrace = string.IsNullOrEmpty(stackTrace)
+                        message = RedactDiagnosticText(condition),
+                        stackTrace = string.IsNullOrEmpty(safeStackTrace)
                             ? ""
-                            : stackTrace.Substring(0, Math.Min(stackTrace.Length, maxDiagnosticStackTraceLength)),
+                            : safeStackTrace.Substring(0, Math.Min(safeStackTrace.Length, maxDiagnosticStackTraceLength)),
                         timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
                     });
                 };
@@ -2800,9 +2867,9 @@ namespace BantworksMCP
                                     resultState = ReadReflectedValue(argument, "ResultState", ""),
                                     status = ReadReflectedObject(argument, "TestStatus")?.ToString(),
                                     duration = ReadReflectedValue(argument, "Duration", 0d),
-                                    message = ReadReflectedValue(argument, "Message", ""),
-                                    stackTrace = ReadReflectedValue(argument, "StackTrace", ""),
-                                    output = ReadReflectedValue(argument, "Output", "")
+                                    message = RedactDiagnosticText(ReadReflectedValue(argument, "Message", "")),
+                                    stackTrace = RedactDiagnosticText(ReadReflectedValue(argument, "StackTrace", "")),
+                                    output = RedactDiagnosticText(ReadReflectedValue(argument, "Output", ""))
                                 });
                             }
                             else
@@ -3274,6 +3341,12 @@ namespace BantworksMCP
 
         private static void SetObjectReference(SetObjectReferenceCommand cmd)
         {
+            if (EditorApplication.isPlayingOrWillChangePlaymode)
+                throw new InvalidOperationException("Reference assignment requires Edit Mode. Stop Play Mode before changing saved references.");
+            if (cmd == null || (string.IsNullOrWhiteSpace(cmd.targetId) && string.IsNullOrWhiteSpace(cmd.targetPath)))
+                throw new InvalidOperationException("A reference target is required. To clear it, explicitly use targetPath: 'null'.");
+            if (!string.IsNullOrWhiteSpace(cmd.targetId) && string.Equals(cmd.targetPath, "null", StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("Cannot combine a target ID and an explicit reference clear.");
             var obj = ResolveGameObject(cmd?.objectId, cmd?.objectPath);
             var component = ResolveComponent(obj, cmd.componentId, cmd.componentType);
 
@@ -3291,8 +3364,7 @@ namespace BantworksMCP
 
             UnityEngine.Object targetObject = null;
             bool clearReference = string.IsNullOrWhiteSpace(cmd.targetId) &&
-                                  (string.IsNullOrWhiteSpace(cmd.targetPath) ||
-                                   string.Equals(cmd.targetPath, "null", StringComparison.OrdinalIgnoreCase));
+                                  string.Equals(cmd.targetPath, "null", StringComparison.OrdinalIgnoreCase);
 
             if (!clearReference)
             {
@@ -3305,9 +3377,7 @@ namespace BantworksMCP
                 }
             }
 
-            Undo.RecordObject(component, "MCP Set Object Reference");
-            prop.objectReferenceValue = targetObject;
-            so.ApplyModifiedProperties();
+            SetSerializedAssetReference(component, so, prop, cmd.propertyName, targetObject, cmd.componentType);
 
             EditorSceneManager.MarkSceneDirty(UnityEngine.SceneManagement.SceneManager.GetActiveScene());
             Debug.Log($"[Creator Works MCP] Set reference {cmd.propertyName} on {cmd.componentType}");
@@ -3316,6 +3386,8 @@ namespace BantworksMCP
 
         private static string SetAssetReference(SetAssetReferenceCommand cmd)
         {
+            if (EditorApplication.isPlayingOrWillChangePlaymode)
+                throw new InvalidOperationException("Reference assignment requires Edit Mode. Stop Play Mode before changing saved references.");
             if (cmd == null)
                 throw new InvalidOperationException("Asset reference command is missing");
 
@@ -3407,12 +3479,12 @@ namespace BantworksMCP
                 serializedObject.Update();
                 string actualType = targetAsset == null ? "null" : targetAsset.GetType().FullName;
                 throw new InvalidOperationException(
-                    $"Asset {actualType} is not compatible with {componentType}.{propertyPath}");
+                    $"Reference {actualType} is not compatible with {componentType}.{propertyPath}");
             }
 
             serializedObject.Update();
             property = serializedObject.FindProperty(propertyPath);
-            Undo.RecordObject(component, "MCP Set Asset Reference");
+            Undo.RecordObject(component, "MCP Set Reference");
             try
             {
                 property.objectReferenceValue = targetAsset;
@@ -6251,7 +6323,7 @@ namespace BantworksMCP
                 {
                     completed = true,
                     hasErrors = !success,
-                    errorMessage = error,
+                    errorMessage = RedactDiagnosticText(error),
                     timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
                 };
 
@@ -6970,6 +7042,7 @@ namespace BantworksMCP
             public string type;
             public string assetPath;
             public bool allowUnboundValueInputs;
+            public string expectedContentHash;
         }
 
         [Serializable]
@@ -6982,6 +7055,8 @@ namespace BantworksMCP
             public string assetType;
             public string graphType;
             public string dependencyHash;
+            public string sourceContentHash;
+            public List<string> elementIdentities;
             public int elementCount;
             public int nodeCount;
             public int controlConnectionCount;
@@ -7604,6 +7679,7 @@ namespace BantworksMCP
         [Serializable]
         private class CommandResult
         {
+            public string commandType;
             public string status;
             public ObjectTransformReceipt observed;
             public string commandId;

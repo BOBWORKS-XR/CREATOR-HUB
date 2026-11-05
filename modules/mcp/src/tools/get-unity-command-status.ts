@@ -5,6 +5,7 @@ import type { BanterMCPConfig } from "../lib/config.js";
 import { projectIdForPath } from "../lib/project-router.js";
 import {
   readBridgeInstanceDescriptor,
+  validateBridgeCommandResult,
   type BridgeCommandResult,
 } from "../lib/unity-bridge-transport.js";
 
@@ -59,24 +60,7 @@ export function getUnityCommandStatus(
   if (fs.existsSync(resultPath)) {
     try {
       const result = JSON.parse(fs.readFileSync(resultPath, "utf-8")) as BridgeCommandResult;
-      if (result.commandId !== commandId) {
-        return failure(commandId, config, "Unity command result correlation ID did not match the request.");
-      }
-      if (result.projectPath && !pathsReferToSameProject(result.projectPath, config.unityProjectPath)) {
-        return failure(
-          commandId,
-          config,
-          `Unity command result came from '${result.projectPath}', not selected project '${config.unityProjectPath}'.`
-        );
-      }
-      if (descriptor?.editorInstanceId && result.editorInstanceId &&
-          descriptor.editorInstanceId !== result.editorInstanceId) {
-        return failure(
-          commandId,
-          config,
-          `Unity command result came from Editor '${result.editorInstanceId}', not active Editor '${descriptor.editorInstanceId}'.`
-        );
-      }
+      validateBridgeCommandResult(result, commandId, config, descriptor?.editorInstanceId, "Unity command result");
       if (result.status === "dispatched") {
         return {
           success: false, accepted: true, pending: true, status: "dispatched", commandId,
@@ -86,9 +70,24 @@ export function getUnityCommandStatus(
         };
       }
       const sceneResult = result.success === true ? readUnitySceneResult(commandId, config) : undefined;
-      if (resultPath === completionPath) fs.unlinkSync(resultPath);
+      const menuResult = result.success === true ? readUnityEditorMenuResult(commandId, config) : undefined;
+      // Older bridges have no commandType; their exact completion message identifies menu dispatch.
+      const expectsMenuResult = result.commandType === "execute_editor_menu_item" ||
+        result.message?.startsWith("Executed Unity Editor menu item:");
+      if (result.success === true && expectsMenuResult && !menuResult) {
+        return {
+          ...failure(commandId, config, "The correlated Unity Editor menu result is missing. The command receipt was kept for inspection."),
+          accepted: true,
+          completion: "unknown",
+          message: "Menu completion is unknown. Do not resubmit; poll the original command. A menu return does not prove an asynchronous build completed.",
+          nextAction: { tool: "get_unity_command_status", arguments: { commandId, projectId } },
+        };
+      }
+      if (resultPath === completionPath) {
+        try { fs.unlinkSync(resultPath); } catch { /* Cleanup failure must not erase a validated completion. */ }
+      }
       return {
-        success: result.success === true && sceneResult?.success !== false,
+        success: result.success === true && sceneResult?.success !== false && menuResult?.success !== false,
         accepted: true,
         pending: false,
         status: "completed",
@@ -97,9 +96,18 @@ export function getUnityCommandStatus(
         projectPath: result.projectPath || config.unityProjectPath,
         editorInstanceId: result.editorInstanceId,
         message: result.message,
-        error: sceneResult?.success === false ? String(sceneResult.error || "Unity scene command failed.") : result.error,
+        error: sceneResult?.success === false ? String(sceneResult.error || "Unity scene command failed.") :
+          menuResult?.success === false ? String(menuResult.error || "Unity Editor menu command failed.") : result.error,
         observed: result.observed ?? undefined,
         sceneResult,
+        menuResult,
+        ...(menuResult ? {
+          executionSucceeded: menuResult.success === true,
+          settleVerified: false,
+          message: menuResult.success === true
+            ? "The menu callback succeeded. Post-command settling and any asynchronous build completion are not verified by status polling."
+            : result.message,
+        } : {}),
         lastObservedAt: result.timestamp,
       };
     } catch (error) {
@@ -157,6 +165,28 @@ export function readUnitySceneResult(commandId: string, config: BanterMCPConfig)
   return result;
 }
 
+export function readUnityEditorMenuResult(commandId: string, config: BanterMCPConfig): Record<string, unknown> | undefined {
+  if (!isSafeCommandId(commandId)) throw new Error("Invalid menu result command ID.");
+  const file = path.join(config.mcpStatePath, "editor-menu-results", `${commandId}.json`);
+  if (!fs.existsSync(file)) return undefined;
+  let result: Record<string, unknown>;
+  try {
+    result = JSON.parse(fs.readFileSync(file, "utf-8"));
+  } catch {
+    throw new Error("Could not read the correlated Unity Editor menu result. It was kept for inspection.");
+  }
+  if (!result || typeof result !== "object" || Array.isArray(result) || result.commandId !== commandId ||
+      typeof result.success !== "boolean" ||
+      ["executionSucceeded", "executionReturnedTrue"].some(key =>
+        result[key] !== undefined && (typeof result[key] !== "boolean" || (result.success && result[key] !== true))) ||
+      (result.diagnostics !== undefined && !Array.isArray(result.diagnostics)) ||
+      (result.success && (typeof result.menuPath !== "string" || !result.menuPath.trim() ||
+        result.executionSucceeded !== true || result.executionReturnedTrue !== true))) {
+    throw new Error("Unity Editor menu result has an invalid shape or correlation ID. It was kept for inspection.");
+  }
+  return result;
+}
+
 function failure(commandId: string, config: BanterMCPConfig, error: string): UnityCommandStatusResult {
   return {
     success: false,
@@ -173,12 +203,4 @@ function failure(commandId: string, config: BanterMCPConfig, error: string): Uni
 function isSafeCommandId(value: string): boolean {
   return typeof value === "string" &&
     /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
-}
-
-function pathsReferToSameProject(left: string, right: string): boolean {
-  const normalize = (value: string) => {
-    const resolved = path.resolve(value.trim()).replace(/[\\/]+$/, "");
-    return process.platform === "win32" ? resolved.toLowerCase() : resolved;
-  };
-  return Boolean(left?.trim() && right?.trim()) && normalize(left) === normalize(right);
 }

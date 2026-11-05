@@ -4,6 +4,10 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
 
+// Cold PowerShell startup can exceed 20 seconds on a busy Windows desktop.
+// This is a harness/process deadline, not an installer safety-policy timeout.
+const powershellTimeout = 60_000;
+
 test('native NSIS fixture uses the exact production command line', () => {
   const command = file => readFileSync(file, 'utf8').split(/\r?\n/)
     .find(line => line.trimStart().startsWith('nsExec::ExecToStack'))?.trim();
@@ -69,7 +73,7 @@ test('reviewed stable hotfixes promote accepted Windows bytes without a tag rebu
 
 test('native installer prompt helper refuses local execution before inspecting windows', { skip: process.platform !== 'win32' }, () => {
   const result = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-File', 'test/fixtures/installer-native-prompts.ps1'], {
-    encoding: 'utf8', windowsHide: true, timeout: 10000,
+    encoding: 'utf8', windowsHide: true, timeout: powershellTimeout,
     env: { ...process.env, GITHUB_ACTIONS: 'false', RUNNER_ENVIRONMENT: 'self-hosted' },
   });
   assert.ifError(result.error);
@@ -82,7 +86,7 @@ test('installed-upgrade CI harness refuses a local machine before resolving inst
 }, () => {
   const result = spawnSync('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
     '-File', path.resolve('scripts/test-installed-upgrade-ci.ps1'), '-Installer', 'must-not-be-opened.exe'], {
-    encoding: 'utf8', windowsHide: true, timeout: 10_000,
+    encoding: 'utf8', windowsHide: true, timeout: powershellTimeout,
     env: { ...process.env, GITHUB_ACTIONS: 'false', RUNNER_ENVIRONMENT: 'self-hosted' },
   });
   assert.ifError(result.error);
@@ -95,7 +99,7 @@ test('native lifecycle driver and window helper refuse local execution before ac
 }, () => {
   const env = { ...process.env, GITHUB_ACTIONS: 'false', RUNNER_ENVIRONMENT: 'self-hosted' };
   const driver = spawnSync(process.execPath, ['scripts/smoke-native-lifecycle-ci.mjs'], {
-    encoding: 'utf8', windowsHide: true, timeout: 10_000, env,
+    encoding: 'utf8', windowsHide: true, timeout: powershellTimeout, env,
   });
   assert.ifError(driver.error);
   assert.notEqual(driver.status, 0);
@@ -103,7 +107,7 @@ test('native lifecycle driver and window helper refuse local execution before ac
   const helper = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-File',
     path.resolve('test/fixtures/native-lifecycle-window.ps1'), '-TargetPid', '1',
     '-Executable', 'must-not-be-opened.exe', '-ExpectedSha256', '0'.repeat(64)], {
-    encoding: 'utf8', windowsHide: true, timeout: 10_000, env,
+    encoding: 'utf8', windowsHide: true, timeout: powershellTimeout, env,
   });
   assert.ifError(helper.error);
   assert.notEqual(helper.status, 0);
@@ -111,14 +115,14 @@ test('native lifecycle driver and window helper refuse local execution before ac
 });
 
 test('Windows PowerShell preserves installer paths and refuses locked/running targets without changes', {
-  skip: process.platform !== 'win32', timeout: 310_000,
+  skip: process.platform !== 'win32', timeout: 610_000,
 }, () => {
   const powershell = path.join(process.env.SystemRoot, 'System32/WindowsPowerShell/v1.0/powershell.exe');
   const result = spawnSync(powershell, ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
     '-File', path.resolve('test/fixtures/installer-preflight-windows.ps1'),
     '-Guard', path.resolve('launcher/src-tauri/windows/installer-preflight.ps1'),
     '-Stopper', path.resolve('launcher/src-tauri/windows/installer-runtime-stop.ps1')], {
-    encoding: 'utf8', windowsHide: true, timeout: 300_000, maxBuffer: 128 * 1024,
+    encoding: 'utf8', windowsHide: true, timeout: 600_000, maxBuffer: 128 * 1024,
   });
   assert.ifError(result.error);
   assert.equal(result.status, 0, result.stdout + result.stderr);

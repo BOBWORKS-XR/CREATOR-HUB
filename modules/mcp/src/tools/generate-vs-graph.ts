@@ -13,7 +13,9 @@ import {
   layoutDirectedGraph,
 } from "../lib/graph-layout.js";
 import { BANTER_CUSTOM_VS_NODES } from "../resources/banter-custom-vs-nodes.js";
+import { CREATOR_VS_NODES, CREATOR_VS_NODE_INDEX } from "../resources/creator-vs-nodes.js";
 import type { SidequestSDKProfile } from "./get-banter-sdk-info.js";
+import { getVSPerformanceAdvice, type VSPerformanceAdvice } from "./vs-performance-advice.js";
 
 export interface NodeSpec {
   type: string;
@@ -58,6 +60,10 @@ export interface GenerateVSGraphResult {
   layout?: Omit<GraphLayoutResult, "positions">;
   sdkProfile?: SidequestSDKProfile;
   customNodeNamespace?: "BS.VisualScripting" | "Banter.VisualScripting";
+  catalogRevision?: string;
+  runtimeVerified?: boolean;
+  validationScope?: string;
+  performanceWarnings?: VSPerformanceAdvice[];
 }
 
 // Type mappings for variables
@@ -100,6 +106,7 @@ const BANTER_CUSTOM_NODE_TYPE_MAP: Record<string, string> = Object.fromEntries(
 const BANTER_CUSTOM_NODES_BY_FULL_TYPE = new Map(
   Object.values(BANTER_CUSTOM_VS_NODES).map((node) => [node.fullType, node])
 );
+const CREATOR_NODES_BY_FULL_TYPE = new Map(CREATOR_VS_NODES.map(node => [node.fullType, node]));
 
 const NODE_TYPE_MAP: Record<string, string> = {
   ...BANTER_CUSTOM_NODE_TYPE_MAP,
@@ -312,6 +319,11 @@ export function generateVSGraph(params: GenerateVSGraphParams): GenerateVSGraphR
       nodeCount: nodes.length,
       connectionCount: connections.length,
       sdkProfile,
+      runtimeVerified: false,
+      validationScope: "unvalidated-creation; run static, Unity import and SDK validation before use",
+      performanceWarnings: getVSPerformanceAdvice(params.graphName, nodeObjects as Array<Record<string, unknown>>,
+        connectionObjects.map((conn, index) => ({ conn: conn as Record<string, unknown>, type: connections[index].type }))),
+      ...(sdkProfile === "creator" || sdkProfile === "hybrid" ? { catalogRevision: CREATOR_VS_NODE_INDEX.revision } : {}),
       ...(sdkProfile === "creator" || sdkProfile === "hybrid"
         ? { customNodeNamespace: "BS.VisualScripting" as const }
         : sdkProfile === "banter"
@@ -418,6 +430,20 @@ function createNodeObject(
     node.defaultValues = properties?.defaultValues || { target: null };
   } else if (type === "Unity.VisualScripting.This" || type === "Unity.VisualScripting.Self") {
     node.defaultValues = {};
+  } else if (!customNode && CREATOR_NODES_BY_FULL_TYPE.has(type)) {
+    const defaults: Record<string, unknown> = {};
+    for (const port of CREATOR_NODES_BY_FULL_TYPE.get(type)!.ports) {
+      const value = port.default;
+      if (port.kind !== "ValueInput" || !value || !["constant", "literal"].includes(value.status) || !("value" in value)) continue;
+      if (typeof value.value === "string") defaults[port.key] = { $type: "System.String", $content: value.value };
+      else if (typeof value.value === "boolean") defaults[port.key] = { $type: "System.Boolean", $content: value.value };
+      else if (value.value === null) defaults[port.key] = null;
+    }
+    node.defaultValues = { ...defaults, ...(properties?.defaultValues as Record<string, unknown> | undefined) };
+    if (properties) {
+      const { defaultValues: _defaultValues, ...rest } = properties;
+      Object.assign(node, rest);
+    }
   } else if (customNode) {
     node.defaultValues = {
       ...customDefaultValuesToSerializedDefaults(
@@ -599,7 +625,12 @@ function toCreatorSerializedType(type: string | null): string | null {
 }
 
 function resolveNodeType(type: string, sdkProfile: SidequestSDKProfile): string {
-  const mappedType = NODE_TYPE_MAP[type] || type;
+  const creatorMatches = CREATOR_VS_NODES.filter(node => node.name === type);
+  const newCreatorAlias = !NODE_TYPE_MAP[type] && creatorMatches.length === 1 ? creatorMatches[0].fullType : undefined;
+  if (newCreatorAlias && sdkProfile !== "creator" && sdkProfile !== "hybrid") {
+    throw new Error(`Creator node '${type}' needs a Creator SDK project; confirm get_banter_sdk_info before authoring.`);
+  }
+  const mappedType = newCreatorAlias || NODE_TYPE_MAP[type] || type;
   const isLegacyCustom = mappedType.startsWith("Banter.VisualScripting.");
   const isCreatorCustom = mappedType.startsWith("BS.VisualScripting.");
   const isSidequestCustom = isLegacyCustom || isCreatorCustom;
@@ -632,7 +663,7 @@ function toLegacyCatalogType(type: string): string {
 }
 
 function isEventNodeType(type: string): boolean {
-  return EVENT_NODES.has(toLegacyCatalogType(type));
+  return EVENT_NODES.has(toLegacyCatalogType(type)) || CREATOR_NODES_BY_FULL_TYPE.get(type)?.isEvent === true;
 }
 
 function isCoroutineUnitType(type: string): boolean {

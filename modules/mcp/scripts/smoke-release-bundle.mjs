@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
-import { copyFileSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
+import { CREATOR_DOCS_SNAPSHOT } from "../dist/resources/creator-docs-snapshot.js";
 
 const sourceBundle = path.resolve("release", "creator-works-mcp.mjs");
 const packageVersion = JSON.parse(readFileSync("package.json", "utf8")).version;
@@ -34,9 +35,18 @@ try {
   assert.equal(protocol.status, 0, protocol.error?.message || protocol.stderr || protocol.stdout);
   console.log(protocol.stdout.trim());
 
+  const project = path.join(temporaryDirectory, "project");
+  const state = path.join(project, ".bantworks-mcp", "state");
+  mkdirSync(path.join(project, "Assets"), { recursive: true });
+  mkdirSync(state, { recursive: true });
+  writeFileSync(path.join(state, "console-log.json"), JSON.stringify({ logs: [{ level: "Error", message: "https://fixture.invalid/upload?sig=PRIVATE", stackTrace: "Authorization: Bearer PRIVATE", timestamp: Date.now() }] }));
   serverProcess = spawn(process.execPath, [isolatedBundle], {
     cwd: temporaryDirectory,
     stdio: ["pipe", "pipe", "pipe"],
+    env: { ...process.env, HOME: temporaryDirectory, USERPROFILE: temporaryDirectory,
+      APPDATA: temporaryDirectory, LOCALAPPDATA: temporaryDirectory,
+      CREATOR_WORKS_LAUNCHER_CONFIG: path.join(temporaryDirectory, "missing-config.json"),
+      UNITY_PROJECT_PATH: project, BANTER_PROJECT_PATH: "", CREATOR_WORKS_TOOL_GROUPS: "all" },
   });
   let stderr = "";
   let stdoutBuffer = "";
@@ -126,7 +136,7 @@ try {
   const creatorExcerpt = JSON.parse(creatorText);
   assert.equal(creatorExcerpt.success, true);
   assert.equal(creatorExcerpt.returned, 1);
-  assert.match(creatorExcerpt.entries[0].sourceUrl, /410de076ffc022d8f61832b968a133f46e9ec15d\/Docs\//);
+  assert.ok(creatorExcerpt.entries[0].sourceUrl.includes(`${CREATOR_DOCS_SNAPSHOT.revision}/Docs/`));
   assert.ok(Buffer.byteLength(creatorText) <= 16384);
   const rejectedLookup = await request({ jsonrpc: "2.0", id: 6, method: "tools/call", params: {
     name: "lookup_creator_docs", arguments: { path: "https://example.invalid/docs" },
@@ -137,6 +147,23 @@ try {
   assert.equal(rejected.success, false);
   assert.match(rejected.error, /indexed relative \.md path/);
   assert.equal(rejected.networkRequests, undefined, "Invalid source refused before networking");
+  const call = (id, name, args) => request({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } });
+  const omitted = await call(7, "set_object_reference", { objectPath: "Owner", componentType: "FixedJoint", propertyName: "m_ConnectedBody" });
+  assert.equal(omitted.result.isError, true);
+  assert.equal(JSON.parse(omitted.result.content[0].text).success, false);
+  const malformed = await call(8, "validate_vs_graph", { graphJson: '{"graph":{"$version":"A","elements":{}}}' });
+  assert.equal(malformed.result.isError, true);
+  assert.equal(JSON.parse(malformed.result.content[0].text).valid, false);
+  const catalog = await call(9, "search_sidequest_vs_nodes", { query: "PersistFileSet", source: "creator", limit: 1 });
+  assert.equal(JSON.parse(catalog.result.content[0].text).nodes[0].fullType, "BS.VisualScripting.PersistFileSet");
+  assert.ok(Buffer.byteLength(catalog.result.content[0].text) <= 32768);
+  const foreign = await call(10, "get_bridge_status", { projectId: "foreign" });
+  assert.equal(foreign.result.isError, true);
+  const logs = await call(11, "get_console_logs", {});
+  assert.ok(!JSON.stringify(logs).includes("PRIVATE"));
+  const commands = path.join(project, ".bantworks-mcp", "commands");
+  assert.ok(!readdirSync(path.dirname(commands)).includes("commands") || readdirSync(commands).length === 0,
+    "Rejected bundled requests must not dispatch a Unity command");
   const prompt = await request({ jsonrpc: "2.0", id: 4, method: "prompts/get", params: { name: "create_vs_graph", arguments: {} } });
   assert.match(JSON.stringify(prompt.result), /get_mcp_reference/);
 

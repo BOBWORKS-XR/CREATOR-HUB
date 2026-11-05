@@ -7,7 +7,9 @@
 
 import { BANTER_VS_NODES, VS_CRITICAL_NOTES } from "../resources/banter-vs-nodes.js";
 import { BANTER_CUSTOM_VS_NODES } from "../resources/banter-custom-vs-nodes.js";
+import { CREATOR_VS_NODES, CREATOR_VS_NODE_INDEX, hasVerifiedCompletePortContract } from "../resources/creator-vs-nodes.js";
 import type { SidequestSDKProfile } from "./get-banter-sdk-info.js";
+import { getVSPerformanceAdvice, type VSPerformanceAdvice } from "./vs-performance-advice.js";
 
 export interface VSValidationResult {
   valid: boolean;
@@ -15,10 +17,15 @@ export interface VSValidationResult {
   warnings: string[];
   nodeCount: number;
   connectionCount: number;
+  validationScope?: string;
+  runtimeVerified?: boolean;
+  catalogRevision?: string;
+  performanceWarnings?: VSPerformanceAdvice[];
 }
 
 export interface VSValidationOptions {
   sdkProfile?: SidequestSDKProfile;
+  graphName?: string;
 }
 
 // Known SideQuest node types are stored in their captured legacy catalogue
@@ -90,12 +97,13 @@ export function validateVSGraph(graphJson: string, options: VSValidationOptions 
   const warnings: string[] = [];
   let nodeCount = 0;
   let connectionCount = 0;
+  let performanceWarnings: VSPerformanceAdvice[] = [];
 
   try {
     const graph = JSON.parse(graphJson);
 
     // Check for graph structure
-    if (!graph.graph) {
+    if (!isRecord(graph) || !isRecord(graph.graph)) {
       errors.push("Missing 'graph' root object");
       return { valid: false, errors, warnings, nodeCount, connectionCount };
     }
@@ -104,6 +112,8 @@ export function validateVSGraph(graphJson: string, options: VSValidationOptions 
     if (graphData.$version !== "A") {
       errors.push(`Graph root missing required "$version": "A"`);
     }
+    validateElementContainers(graphData, errors);
+    if (errors.length) return { valid: false, errors, warnings, nodeCount, connectionCount };
 
     const connections = collectConnections(graphData);
     connectionCount = connections.length;
@@ -135,17 +145,20 @@ export function validateVSGraph(graphJson: string, options: VSValidationOptions 
       validateConnection(conn, type, nodeIds, errors, warnings);
     }
     validateCoroutinePaths(nodes, connections, errors);
+    const graphName = options.graphName || (typeof graphData.title === "string" ? graphData.title : "(unnamed graph)");
+    performanceWarnings = getVSPerformanceAdvice(graphName, nodes, connections);
+    warnings.push(...performanceWarnings.map(advice =>
+      `[${advice.code}] Graph ${JSON.stringify(advice.graph)}, unit ${advice.unitId} (${advice.unitType}): ${advice.message} ${advice.suggestion}`));
 
     // Validate variables
-    if (graphData.variables && graphData.variables.collection) {
+    if (isRecord(graphData.variables) && graphData.variables.collection) {
       validateVariables(graphData.variables, errors, warnings, options.sdkProfile);
     }
 
     // Check graph definitions (should be empty for Script Graphs)
-    if (graphData.controlInputDefinitions?.length > 0 ||
-        graphData.controlOutputDefinitions?.length > 0 ||
-        graphData.valueInputDefinitions?.length > 0 ||
-        graphData.valueOutputDefinitions?.length > 0) {
+    if ([graphData.controlInputDefinitions, graphData.controlOutputDefinitions,
+        graphData.valueInputDefinitions, graphData.valueOutputDefinitions]
+        .some(value => Array.isArray(value) && value.length > 0)) {
       warnings.push("Graph has input/output definitions - is this a Subgraph? Script Graphs should have empty definition arrays.");
     }
 
@@ -159,7 +172,35 @@ export function validateVSGraph(graphJson: string, options: VSValidationOptions 
     warnings,
     nodeCount,
     connectionCount,
+    validationScope: "static-structure-and-source-declarations",
+    runtimeVerified: false,
+    performanceWarnings,
+    catalogRevision: options.sdkProfile === "creator" || options.sdkProfile === "hybrid" ? CREATOR_VS_NODE_INDEX.revision : undefined,
   };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function validateElementContainers(graph: Record<string, unknown>, errors: string[]): void {
+  const hasElements = Object.hasOwn(graph, "elements");
+  const hasUnits = Object.hasOwn(graph, "units");
+  if (!hasElements && !hasUnits) errors.push("Graph must contain an elements array or legacy units.$content array");
+  if (hasElements && hasUnits) errors.push("Graph cannot mix elements and legacy units containers");
+  if (hasElements && !Array.isArray(graph.elements)) errors.push("graph.elements must be an array, including for an empty graph");
+  for (const key of ["units", "controlConnections", "valueConnections"]) {
+    if (Object.hasOwn(graph, key) && (!isRecord(graph[key]) || !Array.isArray(graph[key].$content))) {
+      errors.push(`graph.${key} must contain a $content array`);
+    }
+  }
+  const containers = hasElements ? [graph.elements] :
+    ["units", "controlConnections", "valueConnections"].map((key) => isRecord(graph[key]) ? graph[key].$content : undefined);
+  for (const items of containers) {
+    if (Array.isArray(items) && items.some((item) => !isRecord(item) || typeof item.$type !== "string" || !item.$type)) {
+      errors.push("Every graph element must be an object with a nonempty $type");
+    }
+  }
 }
 
 function collectNodes(graphData: Record<string, unknown>): Array<Record<string, unknown>> {
@@ -266,7 +307,7 @@ function validateNode(
         `Use the selected SDK's flat namespace, such as 'BS.VisualScripting.OnGrab' or ` +
         `'Banter.VisualScripting.OnGrab', rather than a source-folder namespace.`
       );
-    } else if (!BANTER_NODE_TYPES.has(catalogType)) {
+    } else if (!BANTER_NODE_TYPES.has(catalogType) && !CREATOR_VS_NODES.some(node => node.fullType === nodeType)) {
       warnings.push(`Node ${nodeId} has unknown SideQuest SDK type: ${nodeType}`);
     }
   } else if (nodeType.startsWith("Unity.VisualScripting.")) {
@@ -372,6 +413,27 @@ function validateConnection(
     ? nodeIds.get(destinationRef) as Record<string, unknown> | undefined
     : undefined;
   const localUserStateType = "Banter.VisualScripting.GetLocalUserState";
+
+  for (const [unit, key, direction] of [[sourceNode, conn.sourceKey, "Output"], [destinationNode, conn.destinationKey, "Input"]] as const) {
+    const definition = CREATOR_VS_NODES.find(node => node.fullType === unit?.$type);
+    if (!definition || typeof key !== "string") continue;
+    const kind = `${type === "control" ? "Control" : "Value"}${direction}`;
+    if (definition.ports.some(port => port.kind === kind && port.key === key)) continue;
+    if (hasVerifiedCompletePortContract(definition)) {
+      const keys = definition.ports.filter(port => port.kind === kind).map(port => JSON.stringify(port.key)).join(", ");
+      errors.push(`${definition.fullType} has no ${kind} '${key}' in the hash-verified source. Known keys: ${keys || "none"}`);
+    } else {
+      warnings.push(`${definition.fullType} ${kind} '${key}' is not verified by the partial source catalogue; inspect the actual Unity ports before using this connection`);
+    }
+  }
+
+  // Start inherits EventUnit.trigger; it has no input or value ports (VS 1.9).
+  if (sourceNode?.$type === "Unity.VisualScripting.Start" && (type !== "control" || sourceKey !== "trigger")) {
+    errors.push(`Start output '${sourceKey}' is invalid; use the control output 'trigger'`);
+  }
+  if (destinationNode?.$type === "Unity.VisualScripting.Start") {
+    errors.push("Start has no input ports");
+  }
 
   if (
     type === "control" &&
@@ -498,7 +560,7 @@ function toLegacyCatalogType(type: string): string {
 }
 
 function isEventNodeType(type: string): boolean {
-  return EVENT_NODES.has(toLegacyCatalogType(type));
+  return EVENT_NODES.has(toLegacyCatalogType(type)) || CREATOR_VS_NODES.some(node => node.fullType === type && node.isEvent);
 }
 
 function isCoroutineUnitType(type: string): boolean {

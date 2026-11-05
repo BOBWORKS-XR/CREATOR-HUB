@@ -11,6 +11,7 @@ const BRIDGE_HEARTBEAT_MAX_AGE_MS = 10_000;
 const PIPE_RESPONSE_LIMIT_BYTES = 64 * 1024;
 
 export interface BridgeCommandResult {
+  commandType?: string;
   status?: "dispatched" | "completed";
   observed?: Record<string, unknown>;
   commandId?: string;
@@ -29,6 +30,41 @@ export interface BridgeTransportDispatch {
   transport: "named_pipe" | "file";
   queued: boolean;
   fallbackReason?: string;
+}
+
+export interface BridgeTransportErrorContext {
+  commandId: string;
+  projectId?: string;
+  projectPath: string;
+  editorInstanceId?: string;
+  transport?: "named_pipe" | "file";
+  deliveryPhase: "not_sent" | "possibly_sent" | "sent";
+  receiptPath?: string;
+}
+
+/** A transport failure is not proof that Unity did not execute the command. */
+export class BridgeTransportError extends Error implements BridgeTransportErrorContext {
+  readonly commandId: string;
+  readonly projectId?: string;
+  readonly projectPath: string;
+  readonly editorInstanceId?: string;
+  readonly transport?: "named_pipe" | "file";
+  readonly deliveryPhase: BridgeTransportErrorContext["deliveryPhase"];
+  readonly receiptPath?: string;
+  readonly completion: "not_started" | "unknown";
+
+  constructor(cause: unknown, context: BridgeTransportErrorContext) {
+    super(cause instanceof Error ? cause.message : "Unknown Unity transport error", { cause });
+    this.name = "BridgeTransportError";
+    this.commandId = context.commandId;
+    this.projectId = context.projectId;
+    this.projectPath = context.projectPath;
+    this.editorInstanceId = context.editorInstanceId;
+    this.transport = context.transport;
+    this.deliveryPhase = context.deliveryPhase;
+    this.receiptPath = context.receiptPath;
+    this.completion = context.deliveryPhase === "not_sent" ? "not_started" : "unknown";
+  }
 }
 
 export interface BridgeInstanceDescriptor {
@@ -57,62 +93,78 @@ export async function dispatchUnityBridgeCommand(
   timeoutMs = 3000
 ): Promise<BridgeTransportDispatch> {
   const commandId = randomUUID();
-  const descriptor = readBridgeInstanceDescriptor(config);
-  if (descriptor?.projectPath && !pathsReferToSameProject(descriptor.projectPath, config.unityProjectPath)) {
-    throw new Error(
-      `Unity bridge project mismatch: selected '${config.unityProjectPath}', descriptor reports '${descriptor.projectPath}'.`
-    );
-  }
-  const payload = {
-    ...command,
-    id: commandId,
-    timestamp: Date.now(),
-    protocolVersion: BRIDGE_PROTOCOL_VERSION,
-    expectedProjectId: config.projectId,
-    expectedProjectPath: config.unityProjectPath,
-    expectedEditorInstanceId: descriptor?.editorInstanceId,
+  // Freeze the recovery target even if the caller changes selection during an await.
+  config = { ...config };
+  const context: BridgeTransportErrorContext = {
+    commandId, projectId: config.projectId, projectPath: config.unityProjectPath,
+    deliveryPhase: "not_sent",
   };
+  try {
+    const descriptor = readBridgeInstanceDescriptor(config);
+    context.editorInstanceId = descriptor?.editorInstanceId;
+    if (descriptor?.projectPath && !pathsReferToSameProject(descriptor.projectPath, config.unityProjectPath)) {
+      throw new Error(
+        `Unity bridge project mismatch: selected '${config.unityProjectPath}', descriptor reports '${descriptor.projectPath}'.`
+      );
+    }
+    const payload = {
+      ...command,
+      id: commandId,
+      timestamp: Date.now(),
+      protocolVersion: BRIDGE_PROTOCOL_VERSION,
+      expectedProjectId: config.projectId,
+      expectedProjectPath: config.unityProjectPath,
+      expectedEditorInstanceId: descriptor?.editorInstanceId,
+    };
 
-  const pipeEligibility = namedPipeEligibility(descriptor);
-  if (pipeEligibility.eligible && descriptor?.pipeName) {
-    const pipeAttempt = await sendOverNamedPipe(payload, descriptor.pipeName, timeoutMs);
-    if (pipeAttempt.status === "acknowledged") {
-      assertAcknowledgementTarget(pipeAttempt.acknowledgement, config, descriptor.editorInstanceId);
-      return {
+    const pipeEligibility = namedPipeEligibility(descriptor);
+    if (pipeEligibility.eligible && descriptor?.pipeName) {
+      context.transport = "named_pipe";
+      const pipeAttempt = await sendOverNamedPipe(payload, descriptor.pipeName, timeoutMs);
+      if (pipeAttempt.status === "acknowledged") {
+        context.deliveryPhase = "sent";
+        validateBridgeCommandResult(pipeAttempt.acknowledgement, commandId, config, descriptor.editorInstanceId);
+        return {
+          commandId,
+          acknowledgement: pipeAttempt.acknowledgement,
+          transport: "named_pipe",
+          queued: false,
+        };
+      }
+
+      if (pipeAttempt.status === "sent_without_acknowledgement") {
+        context.deliveryPhase = "possibly_sent";
+        return {
+          commandId,
+          transport: "named_pipe",
+          queued: true,
+          fallbackReason: pipeAttempt.reason,
+        };
+      }
+
+      return await dispatchOverFiles(
+        payload,
         commandId,
-        acknowledgement: pipeAttempt.acknowledgement,
-        transport: "named_pipe",
-        queued: false,
-      };
+        config,
+        timeoutMs,
+        descriptor?.editorInstanceId,
+        pipeAttempt.reason,
+        context
+      );
     }
 
-    if (pipeAttempt.status === "sent_without_acknowledgement") {
-      return {
-        commandId,
-        transport: "named_pipe",
-        queued: true,
-        fallbackReason: pipeAttempt.reason,
-      };
-    }
-
-    return dispatchOverFiles(
+    return await dispatchOverFiles(
       payload,
       commandId,
       config,
       timeoutMs,
       descriptor?.editorInstanceId,
-      pipeAttempt.reason
+      pipeEligibility.reason,
+      context
     );
+  } catch (error) {
+    throw new BridgeTransportError(error, context);
   }
-
-  return dispatchOverFiles(
-    payload,
-    commandId,
-    config,
-    timeoutMs,
-    descriptor?.editorInstanceId,
-    pipeEligibility.reason
-  );
 }
 
 export function readBridgeInstanceDescriptor(
@@ -168,13 +220,18 @@ async function dispatchOverFiles(
   commandId: string,
   config: BanterMCPConfig,
   timeoutMs: number,
-  expectedEditorInstanceId?: string,
-  fallbackReason?: string
+  expectedEditorInstanceId: string | undefined,
+  fallbackReason: string | undefined,
+  context: BridgeTransportErrorContext
 ): Promise<BridgeTransportDispatch> {
   const commandFile = path.join(config.mcpCommandsPath, `${commandId}.json`);
-  atomicWriteFileSync(commandFile, JSON.stringify(payload, null, 2));
-  const acknowledgement = await waitForFileAcknowledgement(commandId, config, timeoutMs);
-  assertAcknowledgementTarget(acknowledgement, config, expectedEditorInstanceId);
+  const serialized = JSON.stringify(payload, null, 2);
+  context.transport = "file";
+  // A write can fail after publishing the file; never infer non-delivery from IO failure.
+  context.deliveryPhase = "possibly_sent";
+  atomicWriteFileSync(commandFile, serialized);
+  context.deliveryPhase = "sent";
+  const acknowledgement = await waitForFileAcknowledgement(commandId, config, timeoutMs, expectedEditorInstanceId, context);
 
   return {
     commandId,
@@ -188,22 +245,26 @@ async function dispatchOverFiles(
 async function waitForFileAcknowledgement(
   commandId: string,
   config: BanterMCPConfig,
-  timeoutMs: number
+  timeoutMs: number,
+  expectedEditorInstanceId?: string,
+  context?: BridgeTransportErrorContext
 ): Promise<BridgeCommandResult | undefined> {
   const resultPath = path.join(config.mcpStatePath, "command-results", `${commandId}.json`);
   const startedAt = Date.now();
 
   while (Date.now() - startedAt < timeoutMs) {
     if (fs.existsSync(resultPath)) {
+      if (context) context.receiptPath = resultPath;
+      let result: unknown;
       try {
-        const result = JSON.parse(fs.readFileSync(resultPath, "utf-8")) as BridgeCommandResult;
-        if (result.commandId === commandId) {
-          fs.unlinkSync(resultPath);
-          return result;
-        }
+        result = JSON.parse(fs.readFileSync(resultPath, "utf-8"));
       } catch {
-        // The bridge may still be atomically publishing the result.
+        throw new Error("Could not read the Unity acknowledgement. It was kept for inspection.");
       }
+      validateBridgeCommandResult(result, commandId, config, expectedEditorInstanceId);
+      // Validate before consuming evidence, including its project and Editor identity.
+      try { fs.unlinkSync(resultPath); } catch { /* A valid receipt still proves completion if cleanup fails. */ }
+      return result;
     }
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
@@ -211,22 +272,39 @@ async function waitForFileAcknowledgement(
   return undefined;
 }
 
-function assertAcknowledgementTarget(
-  acknowledgement: BridgeCommandResult | undefined,
+export function validateBridgeCommandResult(
+  value: unknown,
+  commandId: string,
   config: BanterMCPConfig,
-  expectedEditorInstanceId?: string
-): void {
-  if (!acknowledgement) return;
+  expectedEditorInstanceId?: string,
+  label = "Unity acknowledgement"
+): asserts value is BridgeCommandResult {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`${label} has an invalid shape. It was not accepted.`);
+  }
+  const acknowledgement = value as BridgeCommandResult;
+  if (acknowledgement.commandId !== commandId) {
+    throw new Error(`${label} correlation ID did not match the request. It was not accepted.`);
+  }
+  if (typeof acknowledgement.success !== "boolean" ||
+      (acknowledgement.status != null && acknowledgement.status !== "dispatched" && acknowledgement.status !== "completed") ||
+      ["projectId", "projectPath", "editorInstanceId", "message", "error", "commandType"].some(
+        (key) => (value as Record<string, unknown>)[key] != null && typeof (value as Record<string, unknown>)[key] !== "string")) {
+    throw new Error(`${label} has an invalid shape. It was not accepted.`);
+  }
+  if (acknowledgement.projectId && acknowledgement.projectId !== config.projectId) {
+    throw new Error(`${label} project ID mismatch. It was not accepted.`);
+  }
   if (acknowledgement.projectPath &&
       !pathsReferToSameProject(acknowledgement.projectPath, config.unityProjectPath)) {
     throw new Error(
-      `Unity acknowledgement project mismatch: selected '${config.unityProjectPath}', result reports '${acknowledgement.projectPath}'.`
+      `${label} project mismatch: selected '${config.unityProjectPath}', result reports '${acknowledgement.projectPath}'. It was not accepted.`
     );
   }
   if (expectedEditorInstanceId && acknowledgement.editorInstanceId &&
       acknowledgement.editorInstanceId !== expectedEditorInstanceId) {
     throw new Error(
-      `Unity acknowledgement Editor mismatch: expected '${expectedEditorInstanceId}', result reports '${acknowledgement.editorInstanceId}'.`
+      `${label} Editor mismatch: expected '${expectedEditorInstanceId}', result reports '${acknowledgement.editorInstanceId}'. It was not accepted.`
     );
   }
 }
@@ -236,6 +314,7 @@ function sendOverNamedPipe(
   pipeName: string,
   timeoutMs: number
 ): Promise<PipeAttempt> {
+  const serialized = `${JSON.stringify(payload)}\n`;
   return new Promise((resolve) => {
     const pipePath = `\\\\.\\pipe\\${pipeName}`;
     const socket = net.createConnection(pipePath);
@@ -266,7 +345,11 @@ function sendOverNamedPipe(
 
     socket.once("connect", () => {
       commandMayHaveBeenDelivered = true;
-      socket.write(`${JSON.stringify(payload)}\n`);
+      try {
+        socket.write(serialized);
+      } catch {
+        finish({ status: "sent_without_acknowledgement", reason: "The named-pipe write failed; delivery and completion are unknown." });
+      }
     });
 
     socket.on("data", (chunk: Buffer) => {
