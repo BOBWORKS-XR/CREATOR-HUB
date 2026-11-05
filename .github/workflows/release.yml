@@ -20,9 +20,26 @@ jobs:
       actions: read
     steps:
       - uses: actions/checkout@v6
+        env:
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: core.autocrlf
+          GIT_CONFIG_VALUE_0: 'false'
         with:
           fetch-depth: 2
           persist-credentials: false
+      - name: Verify validation-only child of unchanged Windows 020 association
+        if: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/validation/windows-020-release-recheck' }}
+        shell: pwsh
+        run: |
+          $parent = (git show -s --format=%P HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $parent -cne 'c287b4168bdbf34d1dfae5f424fab033213a237f') { throw 'Unexpected validation-only parent.' }
+          $changed = @(git diff --name-only $parent HEAD)
+          if ($LASTEXITCODE -ne 0 -or $changed.Count -ne 1 -or $changed[0] -cne '.github/workflows/release.yml') { throw 'Validation-only change must be the workflow.' }
+      - name: Verify pinned evidence survived checkout byte-for-byte
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash scripts/windows-020-evidence.json -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($hash -cne '945ae76fcf8efa68bb0bcca37d77a366d0121346bc7e65615838393f64212f02') { throw 'Git checkout changed the reviewed evidence bytes.' }
       - name: Verify finite validation-only child of the immutable release
         if: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/validation/windows-018-release-recheck' }}
         env:
@@ -71,7 +88,9 @@ jobs:
             $receipt = "packaging/windows/$version-qualification.json"
             $digest = (Get-Content -LiteralPath "$receipt.sha256" -Raw).Trim()
             if ($digest -cnotmatch '^[a-f0-9]{64}$') { throw 'Reviewed receipt digest is missing or invalid.' }
-            node scripts/check-unified-sources.cjs --release --version "$version" --platform windows-x86_64 --receipt "$receipt" --sha256 "$digest" --association "$env:GITHUB_SHA" --verify-draft
+            $association = $env:GITHUB_SHA
+            if ($env:GITHUB_REF -ceq 'refs/heads/validation/windows-020-release-recheck') { $association = 'c287b4168bdbf34d1dfae5f424fab033213a237f' }
+            node scripts/check-unified-sources.cjs --release --version "$version" --platform windows-x86_64 --receipt "$receipt" --sha256 "$digest" --association "$association" --verify-draft
           } elseif ($version -ceq $targetVersion) {
             $receipt = "packaging/windows/$version-qualification.json"
             $digest = (Get-Content -LiteralPath "$receipt.sha256" -Raw).Trim()
