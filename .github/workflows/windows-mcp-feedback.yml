@@ -23,7 +23,12 @@ jobs:
       - name: Locked dependencies without lifecycle hooks
         run: npm ci --ignore-scripts
       - name: Version consistency
-        run: npm run check:version
+        shell: pwsh
+        run: |
+          # This is a branch validation, not an MCP release tag.
+          Remove-Item Env:GITHUB_REF_NAME
+          npm run check:version 2>&1 | Tee-Object -FilePath mcp-version.log
+          exit $LASTEXITCODE
       - name: Full MCP suite including native Windows installer preflight
         shell: pwsh
         run: |
