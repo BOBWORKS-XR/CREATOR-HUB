@@ -19,6 +19,8 @@ jobs:
       contents: write
       actions: read
     steps:
+      - name: Preserve exact source bytes
+        run: git config --global core.autocrlf false
       - uses: actions/checkout@v6
         with:
           fetch-depth: 2
@@ -43,7 +45,7 @@ jobs:
         with:
           node-version: 24
           cache: npm
-      - run: npm ci
+      - run: npm ci --ignore-scripts
       - name: Acquire exact staged installer for signature regression tests
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -53,10 +55,15 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Cannot verify the exact staged installer.' }
           $digest = (Get-FileHash artifacts/qualification-assets/Creator.Hub_0.1.20_x64-setup.exe -Algorithm SHA256).Hash.ToLowerInvariant()
           if ($digest -cne '2915ffac9b1c39f5facbd4030eb6addf837e0d414b96835e0f0be1564577666b') { throw 'Staged installer hash differs.' }
+          gh release download v0.1.21 --repo BOBWORKS-XR/CREATOR-HUB --pattern Creator.Hub_0.1.21_x64-setup.exe --dir artifacts/qualification-assets
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot verify the exact staged 0.1.21 installer.' }
+          $digest = (Get-FileHash artifacts/qualification-assets/Creator.Hub_0.1.21_x64-setup.exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($digest -cne '09dd6563e5e93a533f7ddedc600c785f56d123f55d1e29a8eada6ab3941cf2b3') { throw 'Staged 0.1.21 installer hash differs.' }
       - name: Test qualification, refusal, Windows scope and legacy feed controls
         env:
           QUALIFICATION_020_ASSETS: ${{ github.workspace }}/artifacts/qualification-assets
-        run: node --test scripts/windows-release-qualification.test.cjs scripts/windows-release-target.test.cjs scripts/windows-016-release-qualification.test.cjs scripts/windows-017-draft-stage.test.cjs scripts/windows-018-public-acceptance.test.cjs scripts/windows-019-public-acceptance.test.cjs scripts/windows-019-reader-alignment.test.cjs scripts/check-unified-sources.test.cjs scripts/publish-hub-draft.test.cjs scripts/release-checksums.test.mjs scripts/check-release-feed.test.cjs scripts/release-workflow.test.cjs scripts/release-platform-scope.test.cjs scripts/release-ref.test.cjs scripts/self-update-baselines.test.cjs scripts/windows-020-release-qualification.test.cjs scripts/windows-020-public-acceptance.test.cjs scripts/windows-020-publisher.test.cjs
+          QUALIFICATION_021_ASSETS: ${{ github.workspace }}/artifacts/qualification-assets
+        run: node --test scripts/windows-release-qualification.test.cjs scripts/windows-release-target.test.cjs scripts/windows-016-release-qualification.test.cjs scripts/windows-017-draft-stage.test.cjs scripts/windows-018-public-acceptance.test.cjs scripts/windows-019-public-acceptance.test.cjs scripts/windows-019-reader-alignment.test.cjs scripts/check-unified-sources.test.cjs scripts/publish-hub-draft.test.cjs scripts/release-checksums.test.mjs scripts/check-release-feed.test.cjs scripts/release-workflow.test.cjs scripts/release-platform-scope.test.cjs scripts/release-ref.test.cjs scripts/self-update-baselines.test.cjs scripts/windows-020-release-qualification.test.cjs scripts/windows-020-public-acceptance.test.cjs scripts/windows-020-publisher.test.cjs scripts/windows-021-release-qualification.test.cjs scripts/windows-021-public-acceptance.test.cjs scripts/windows-021-publisher.test.cjs
       - name: Validate immutable qualified draft without building or publishing
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -67,7 +74,7 @@ jobs:
           # Create the final tag while the qualified release is still a clean draft.
           $targetVersion = node -p "require('./scripts/windows-release-target.cjs').getTarget().version"
           if ($LASTEXITCODE -ne 0) { throw 'Release target metadata is unavailable.' }
-          if ($version -ceq '0.1.20') {
+          if ($version -in @('0.1.20', '0.1.21')) {
             $receipt = "packaging/windows/$version-qualification.json"
             $digest = (Get-Content -LiteralPath "$receipt.sha256" -Raw).Trim()
             if ($digest -cnotmatch '^[a-f0-9]{64}$') { throw 'Reviewed receipt digest is missing or invalid.' }

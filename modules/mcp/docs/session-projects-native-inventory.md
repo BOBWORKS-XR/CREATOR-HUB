@@ -20,9 +20,13 @@ are not a sandbox against another process racing to replace filesystem paths.
 Only register trusted local projects. Settings are read, not rewritten.
 
 `list_unity_projects` supports projectIds, fields, limit, cursor and
-maxResponseBytes. IDs are always included; pages keep whole rows and reject a
-changed route list. Project metadata is capped and allow-listed. Byte budgets
-describe response text, not exact model tokens or account savings.
+maxResponseBytes. IDs are always included and pages keep whole rows. Cursors
+reject changes to project identity, name, enabled/selected state, route source,
+session registration, active project or requested IDs/fields. Other metadata,
+such as channel names or Editor state, can change between pages; start again
+without a cursor for a fresh overview. Project metadata is capped and
+allow-listed. Byte budgets describe response text, not exact model tokens or
+account savings.
 
 ## Native helper contract
 

@@ -11,3 +11,12 @@ native/flatpak-host-launch/src/linux/identity.rs text eol=lf
 src-tauri/src/main.rs text eol=lf
 .github/workflows/linux-deb-helper-fixtures-014.yml text eol=lf
 packaging/windows/*-qualification.json -text
+
+# Release qualification verifies these exact source bytes on Windows CI.
+scripts/windows-021-* text eol=lf
+scripts/fixtures/windows-021-* text eol=lf
+scripts/publish-hub-draft.cjs text eol=lf
+scripts/check-unified-sources.cjs text eol=lf
+scripts/self-update-baselines.cjs text eol=lf
+scripts/self-update-baselines.test.cjs text eol=lf
+.github/workflows/release.yml text eol=lf

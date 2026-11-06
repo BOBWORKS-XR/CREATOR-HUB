@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const { spawnSync } = require('node:child_process');
 const { baselines, selectBaseline, assertPreviousStable } = require('./self-update-baselines.cjs');
 
-test('registry retains exact public 0.1.11 through 0.1.19 artifact pins', () => {
+test('registry retains exact public 0.1.11 through 0.1.20 artifact pins', () => {
   assert.deepEqual(baselines, [
     {
       version: '0.1.11', asset: 'Creator.Hub_0.1.11_x64-setup.exe',
@@ -30,13 +30,18 @@ test('registry retains exact public 0.1.11 through 0.1.19 artifact pins', () => 
       installer: '1a0d85127827b854dcdd3ae89f4c5e2aca3824b81623f1b9b05e022871ee6419',
       exe: '5bd277950ac6409b6820005e28767bbd3dd1281ea84e5f87f9b1990ffcda5d12',
     },
+    {
+      version: '0.1.20', asset: 'Creator.Hub_0.1.20_x64-setup.exe',
+      installer: '2915ffac9b1c39f5facbd4030eb6addf837e0d414b96835e0f0be1564577666b',
+      exe: '06908120c81f471e9774edbe5a2d09fa3c985357eea373e29e75404d1f133cf5',
+    },
   ]);
   assert.ok(Object.isFrozen(baselines));
   assert.ok(baselines.every(Object.isFrozen));
 });
 
 test('stable targets select the highest pinned version strictly below the target', () => {
-  for (const [target, expected] of [['0.1.12', '0.1.11'], ['0.1.13', '0.1.12'], ['0.1.14', '0.1.12'], ['0.1.15', '0.1.14'], ['0.1.16', '0.1.14'], ['0.1.18', '0.1.14'], ['0.1.19', '0.1.18'], ['0.1.20', '0.1.19'], ['1.0.0', '0.1.19']]) {
+  for (const [target, expected] of [['0.1.12', '0.1.11'], ['0.1.13', '0.1.12'], ['0.1.14', '0.1.12'], ['0.1.15', '0.1.14'], ['0.1.16', '0.1.14'], ['0.1.18', '0.1.14'], ['0.1.19', '0.1.18'], ['0.1.20', '0.1.19'], ['0.1.21', '0.1.20'], ['1.0.0', '0.1.20']]) {
     assert.equal(selectBaseline(target).version, expected, target);
   }
 });
@@ -74,6 +79,7 @@ test('actual public previous stable must exactly match the selected pins', () =>
   assertPreviousStable('0.1.14', selectBaseline('0.1.16'));
   assertPreviousStable('0.1.18', selectBaseline('0.1.19'));
   assertPreviousStable('0.1.19', selectBaseline('0.1.20'));
+  assertPreviousStable('0.1.20', selectBaseline('0.1.21'));
   assert.throws(() => assertPreviousStable('0.1.14', selectBaseline('0.1.19')), /previous public stable Hub/);
   assert.throws(() => assertPreviousStable('0.1.12', selectBaseline('0.1.16')), /previous public stable Hub/);
   for (const previous of ['0.1.11', '0.1.13', '0.1.12-rc.1', null, undefined]) {

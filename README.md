@@ -14,7 +14,14 @@ not a claim of Windows feature parity, working host integration or qualified
 installation/update support. We welcome Linux and Mac maintainers familiar with
 Rust/Tauri, native packaging, settings migration, MCP and signed update testing.
 
-## Creator Hub 0.1.20 for Windows
+## Creator Hub 0.1.21 for Windows
+
+MCP 2.7.9 adds explicit session-only project registration, bounded project
+listing and read-only native inventory consumption from an approved compatible
+host. Settings are retained; no helper is automatically installed into projects.
+See [release notes and test scope](docs/RELEASE-0.1.21.md).
+
+## Included 0.1.20 Changes
 
 MCP 2.7.8 adds safer reference changes and command recovery, a refreshed Creator
 SDK node catalogue and documentation, and advisory graph-performance checks.
@@ -34,7 +41,7 @@ downgrading packages. Untested runtime validation is reported separately.
 
 See [draft release notes](packaging/windows/0.1.19-release-notes-DRAFT.md) and
 [qualification scope](packaging/windows/0.1.19-qualification-DRAFT.md).
-These project-opening and Setup fixes are retained in 0.1.20.
+These project-opening and Setup fixes are retained in 0.1.21.
 
 ## Creator Hub 0.1.18
 
@@ -43,7 +50,7 @@ Their source histories are retained under `modules/project-setup` and
 `modules/mcp`. Future development lives in this repository.
 
 [Latest Windows installer and release](https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/latest)
-and [0.1.20 package qualification](packaging/windows/0.1.20-qualification.json).
+and [0.1.21 package qualification](packaging/windows/0.1.21-qualification.json).
 Existing Hub users can check for updates. Standalone users install Hub and follow
 the first-launch migration review. Recognized MCP 2.7.7 / Setup 0.3.7 installations
 get verified backups, reviewed AI-client routing and separately approved removal
