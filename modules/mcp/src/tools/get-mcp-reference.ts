@@ -8,6 +8,7 @@ import { CREATOR_DOCS_SNAPSHOT } from "../resources/creator-docs-snapshot.js";
 import { CREATOR_DOCS_GUIDANCE } from "../resources/creator-docs.js";
 import { matchesCreatorDocsSection, scoreCreatorDocsSection, creatorDocsPageGuidance } from "../resources/creator-docs-search.js";
 import { VS_PERFORMANCE_GUIDANCE } from "./vs-performance-advice.js";
+import { NATIVE_DIAGNOSTICS_GUIDANCE } from "../resources/native-diagnostics.js";
 
 interface ReferenceEntry {
   id: string;
@@ -60,6 +61,7 @@ function objectEntries(source: Record<string, unknown>): ReferenceEntry[] {
 }
 
 const SOURCES: Record<string, { entries: ReferenceEntry[]; guidance: string }> = {
+  "native-diagnostics": { entries: splitReferenceMarkdown(NATIVE_DIAGNOSTICS_GUIDANCE), guidance: "Opt-in diagnostic workflow and evidence boundaries. Not proof of native client integration, live connection, gameplay or measured performance." },
   "graph-performance": { entries: splitReferenceMarkdown(VS_PERFORMANCE_GUIDANCE), guidance: "Advisory graph optimization guidance, not measured performance or permission to rewrite. Profile on the target device and preserve behaviour." },
   manual: { entries: splitReferenceMarkdown(UNITY_VS_JSON_MANUAL), guidance: UNITY_VS_JSON_ERRATA },
   components: { entries: objectEntries(BANTER_COMPONENTS), guidance: "Legacy catalog keys must be resolved against get_banter_sdk_info before authoring Creator SDK or Banter components." },
@@ -94,7 +96,7 @@ export function excerptLength(text: string): number {
 
 export function getMCPReference(args: Record<string, unknown>): Record<string, unknown> {
   const sourceName = typeof args.source === "string" ? args.source : "";
-  if (!Object.hasOwn(SOURCES, sourceName)) return { success: false, error: "source must be manual, components, javascript, workflows, creator-docs, or graph-performance." };
+  if (!Object.hasOwn(SOURCES, sourceName)) return { success: false, error: "source must be manual, components, javascript, workflows, creator-docs, graph-performance, or native-diagnostics." };
   const source = SOURCES[sourceName];
   if (args.revision !== undefined && args.revision !== REVISIONS[sourceName]) {
     return { success: false, error: "Reference revision changed. Search again before continuing an older excerpt." };

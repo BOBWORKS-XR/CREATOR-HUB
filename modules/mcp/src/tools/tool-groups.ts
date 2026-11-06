@@ -6,6 +6,8 @@ export type ToolGroupSelection = "all" | ReadonlySet<ToolGroupName>;
 export const ALWAYS_AVAILABLE_TOOLS = new Set([
   "list_unity_projects",
   "select_unity_project",
+  "register_unity_project",
+  "unregister_unity_project",
   "get_bridge_status",
   "get_unity_command_status",
 ]);
@@ -37,6 +39,7 @@ export const TOOL_GROUP_MEMBERSHIP: Readonly<Record<ToolGroupName, ReadonlySet<s
     "get_object_bounds",
   ]),
   read: new Set([
+    "get_native_inventory",
     "get_mcp_reference",
     "lookup_creator_docs",
     "validate_vs_graph",
