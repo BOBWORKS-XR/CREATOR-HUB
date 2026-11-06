@@ -265,7 +265,7 @@ async function main() {
   if (process.argv[3] === 'validate') {
     console.log(JSON.stringify({ kind: 'lab-contract-validated', targetVersion: contract.targetVersion,
       installerSha256: contract.pins.installer, executableSha256: contract.pins.executable,
-      ...(contract.actualScope?.kind === 'direct-outgoing-019-020' ? { baselineVersion: contract.baseline.version,
+      ...(contract.actualScope?.kind === 'direct-outgoing-020-021' ? { baselineVersion: contract.baseline.version,
         baselineInstallerSha256: contract.baseline.installer, baselineExecutableSha256: contract.baseline.exe } : {}) }));
     return;
   }
@@ -357,11 +357,11 @@ $successorCleanupVerified = $false; $hubCleanupState = 'not-started'; $hubCleanu
 $driverExitCode = $null; $feedResult = $null; $rootThumbprint = $null; $leafThumbprint = $null
 $phase = 'timeout'; $failureDetails = $null
 $script:processIdentityFailure = $null
-$actualScope = if ($Outgoing019) { 'exact-direct19-to-changed20-acceptance-fixture-lab-only' }
+$actualScope = if ($Outgoing019) { 'exact-direct20-to-changed21-acceptance-fixture-lab-only' }
     elseif ($Incoming016) { 'exact-public14-to-direct16-lab-only' }
     elseif ($Scenario -ceq 'public-stable') { 'unmodified-public-0.1.12-lab-only' }
     else { 'accepted-unmodified-B05-0.1.14-to-outer-only-0.1.15-fixture-lab-only' }
-$reportedScenario = if ($Outgoing019) { 'direct-outgoing-019-020' } else { $Scenario }
+$reportedScenario = if ($Outgoing019) { 'direct-outgoing-020-021' } else { $Scenario }
 try {
     Set-LabPhase 'timeout'
     if (-not $Outgoing019 -or $Incoming016 -or $Scenario -cne 'public-stable' -or $env:EXPECTED_HARNESS_COMMIT -cne $env:GITHUB_SHA) { throw 'Only the exact reviewed outgoing19 mode is admitted.' }
@@ -427,7 +427,7 @@ try {
     $validated = Read-LabLine $validator.StandardOutput | ConvertFrom-Json
     if ($validated.kind -cne 'lab-contract-validated' -or -not $validator.WaitForExit(10000) -or $validator.ExitCode -ne 0) { throw 'Reviewed contract refused.' }
     if ($Outgoing019) {
-        if ($validated.baselineVersion -cne '0.1.19' -or $validated.targetVersion -cne '0.1.20' -or
+        if ($validated.baselineVersion -cne '0.1.20' -or $validated.targetVersion -cne '0.1.21' -or
             $validated.baselineInstallerSha256 -cnotmatch '^[a-f0-9]{64}$' -or
             $validated.baselineExecutableSha256 -cnotmatch '^[a-f0-9]{64}$') { throw 'Outgoing version/baseline binding refused.' }
         if ((Get-FileHash -LiteralPath $BaselineInstallerPath -Algorithm SHA256).Hash.ToLowerInvariant() -cne $validated.baselineInstallerSha256) {

@@ -56,35 +56,35 @@ function outgoingInput() {
 }
 
 function directOutgoingInput() {
-  const f = fixture('0.1.20');
-  f.release.assetName = 'Creator.Hub_0.1.20_x64-setup.exe';
+  const f = fixture('0.1.21');
+  f.release.assetName = 'Creator.Hub_0.1.21_x64-setup.exe';
   f.release.minHubVersion = '0.1.19';
   f.update = updaterManifest(applications.hub, f.targetVersion, f.release.assetName, f.encodedSignature);
-  return { ...input(f), baseline: { version: '0.1.19', installer: 'b'.repeat(64), exe: 'c'.repeat(64) } };
+  return { ...input(f), baseline: { version: '0.1.20', installer: 'b'.repeat(64), exe: 'c'.repeat(64) } };
 }
 
 test('direct outgoing20 uses explicit reviewed19 pins without changing historical factories', () => {
   const data = directOutgoingInput(), contract = lab.createDirectOutgoing019Contract(data);
   assert.deepEqual(contract.baseline, data.baseline);
   assert.equal(contract.routes.length, 5);
-  assert.equal(contract.actualScope.kind, 'direct-outgoing-019-020');
+  assert.equal(contract.actualScope.kind, 'direct-outgoing-020-021');
   assert.equal(contract.actualScope.acceptanceOnly, true);
   assert.equal(lab.createContract(input()).baseline.version, '0.1.12');
   assert.equal(lab.createUnifiedOutgoingContract(outgoingInput()).baseline.version, '0.1.14');
   data.baseline.version = '0.1.14';
-  assert.equal(contract.baseline.version, '0.1.19', 'Caller cannot mutate admitted baseline');
+  assert.equal(contract.baseline.version, '0.1.20', 'Caller cannot mutate admitted baseline');
   assert.throws(() => lab.createDirectOutgoing019Contract(data));
 });
 
 test('direct outgoing20 refuses version masquerade, drift and same target bytes', () => {
-  for (const change of [d => { d.targetVersion = '0.1.21'; }, d => { d.baseline.exe = d.pins.executable; },
+  for (const change of [d => { d.targetVersion = '0.1.22'; }, d => { d.baseline.exe = d.pins.executable; },
     d => { d.baseline.installer = d.pins.installer; }, d => { d.baseline.fixture = true; },
     d => { d.baseline.installer = null; }, d => { d.installer = Buffer.from('tampered'); }]) {
     const data = directOutgoingInput(); change(data);
     assert.throws(() => lab.createDirectOutgoing019Contract(data));
   }
   for (const change of [r => { r.minHubVersion = '0.1.14'; }, r => { r.assetName = 'generic.exe'; },
-    r => { r.version = '0.1.19'; }, r => { r.installerProtocol = 0; }]) {
+    r => { r.version = '0.1.20'; }, r => { r.installerProtocol = 0; }]) {
     const data = directOutgoingInput(), release = JSON.parse(data.descriptor); change(release);
     data.descriptor = Buffer.from(JSON.stringify(release)); data.pins.descriptor = hash(data.descriptor);
     assert.throws(() => lab.createDirectOutgoing019Contract(data));
