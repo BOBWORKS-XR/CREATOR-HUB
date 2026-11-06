@@ -47,6 +47,8 @@ import {
   type BridgeCommandResult,
 } from "../lib/unity-bridge-transport.js";
 import type { UnityProjectRouter } from "../lib/project-router.js";
+import { PROJECT_LIST_FIELDS } from "../lib/project-list.js";
+import { getNativeInventory, NATIVE_INVENTORY_SCHEMA } from "./native-inventory.js";
 import { getUnityCommandStatus, pendingCommandTimeout, readUnitySceneResult, readUnityEditorMenuResult } from "./get-unity-command-status.js";
 import {
   describeToolGroupSelection,
@@ -120,7 +122,7 @@ export function registerTools(selection: ToolGroupSelection = "all"): Tool[] {
       inputSchema: {
         type: "object",
         properties: {
-          source: { type: "string", enum: ["manual", "components", "javascript", "workflows", "creator-docs", "graph-performance"] },
+          source: { type: "string", enum: ["manual", "components", "javascript", "workflows", "creator-docs", "graph-performance", "native-diagnostics"] },
           query: { type: "string", minLength: 1, maxLength: 128, description: "Keyword search; mutually exclusive with entryId" },
           entryId: { type: "string", minLength: 1, maxLength: 128, description: "Exact entry ID from an earlier result" },
           startOffset: { type: "integer", minimum: 0, default: 0, description: "Use nextOffset from the same entry to continue" },
@@ -326,13 +328,39 @@ Use BS.* API for all Banter functionality.`,
 
     // Project State Tools
     {
+      name: "get_native_inventory",
+      description: "Read a bounded, validated local snapshot from an explicitly approved Unity 6 native helper. Not a live query. Requires the host's session/build IDs. No installation, port scan or Editor fallback. Camera submission remains unknown. Page with the same filters and nextCursor.",
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      inputSchema: NATIVE_INVENTORY_SCHEMA,
+    },
+    {
       name: "list_unity_projects",
-      description: `List Unity projects available to this MCP session from UNITY_PROJECT_PATH and Creator Works launcher channels.
-Returns stable path-derived project IDs, bridge installation, live/stale Editor state, and editor process identity. This tool does not change the active project.`,
+      description: "List configured and session-registered projects without selecting one. Bounded pages; projectId is always included. Use nextCursor with the same filters/fields. A changed list rejects the cursor.",
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
       inputSchema: {
-        type: "object",
-        properties: {},
+        type: "object", additionalProperties: false,
+        properties: {
+          projectIds: { type: "array", maxItems: 100, items: { type: "string", pattern: "^unity-[a-f0-9]{20}$" } },
+          fields: { type: "array", minItems: 1, maxItems: PROJECT_LIST_FIELDS.length, items: { type: "string", enum: PROJECT_LIST_FIELDS } },
+          limit: { type: "integer", minimum: 1, maximum: 100, default: 50 },
+          cursor: { type: "string", maxLength: 40 },
+          maxResponseBytes: { type: "integer", minimum: 4096, maximum: 65536, default: 32768 },
+        },
       },
+    },
+    {
+      name: "register_unity_project",
+      description: "Register an explicit existing Unity root for this MCP session only. Does not select it, write settings, install a bridge or launch Unity. Linked directories are refused. Select the returned projectId separately.",
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      inputSchema: { type: "object", additionalProperties: false,
+        properties: { projectPath: { type: "string", minLength: 1, maxLength: 4096 } }, required: ["projectPath"] },
+    },
+    {
+      name: "unregister_unity_project",
+      description: "Remove only a session registration. Refuses the selected project; select another first. Saved launcher projects and settings are not removed.",
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      inputSchema: { type: "object", additionalProperties: false,
+        properties: { projectId: { type: "string", pattern: "^unity-[a-f0-9]{20}$" } }, required: ["projectId"] },
     },
 
     {
@@ -1764,7 +1792,8 @@ export async function handleToolCall(
   if (!args || typeof args !== "object" || Array.isArray(args)) {
     return { isError: true, content: [{ type: "text", text: JSON.stringify({ success: false, error: "Tool arguments must be an object. No command was sent." }) }] };
   }
-  if (["query_project_state", "get_bridge_status", "set_object_reference"].includes(name)) {
+  if (["query_project_state", "get_bridge_status", "set_object_reference", "list_unity_projects",
+    "register_unity_project", "unregister_unity_project", "select_unity_project", "get_native_inventory"].includes(name)) {
     const schema = registerTools().find((tool) => tool.name === name)!.inputSchema;
     const unknown = Object.keys(args).filter((key) => !Object.hasOwn(schema.properties, key));
     if (unknown.length) {
@@ -1916,8 +1945,25 @@ export async function handleToolCall(
       break;
 
     case "list_unity_projects":
-      result = projectRouter
-        ? projectRouter.listProjects()
+      try {
+        result = projectRouter ? projectRouter.listProjects(args)
+          : { success: false, error: "Project routing is not available in this server context." };
+      } catch (error) {
+        result = { success: false, error: error instanceof Error ? error.message : "Could not list projects." };
+      }
+      break;
+
+    case "get_native_inventory":
+      result = getNativeInventory(args, config);
+      break;
+
+    case "register_unity_project":
+      result = projectRouter ? projectRouter.registerProject(args.projectPath)
+        : { success: false, error: "Project routing is not available in this server context." };
+      break;
+
+    case "unregister_unity_project":
+      result = projectRouter ? projectRouter.unregisterProject(args.projectId)
         : { success: false, error: "Project routing is not available in this server context." };
       break;
 
@@ -2255,7 +2301,8 @@ export async function handleToolCall(
 
   result = redactToolDiagnostics(name, result);
   const graphOrMutation = ["validate_vs_graph", "generate_vs_graph", "write_vs_graph", "validate_vs_graph_in_unity",
-    "validate_banter_visual_scripting", "set_object_reference", "execute_editor_menu_item"].includes(name);
+    "validate_banter_visual_scripting", "set_object_reference", "execute_editor_menu_item", "list_unity_projects",
+    "register_unity_project", "unregister_unity_project", "select_unity_project", "get_native_inventory"].includes(name);
   const failure = typeof result === "object" && result !== null &&
     (graphOrMutation || (name === "get_unity_command_status" && (result as Record<string, unknown>).status === "completed")) &&
     ((result as Record<string, unknown>).valid === false ||

@@ -29,7 +29,7 @@ import {
 } from "./tools/index.js";
 import { registerResources, handleResourceRead } from "./resources/index.js";
 import { registerPrompts, handlePromptGet } from "./prompts/index.js";
-import { getConfig } from "./lib/config.js";
+import { getConfig, createConfigForProject } from "./lib/config.js";
 import { UnityProjectRouter } from "./lib/project-router.js";
 import { MCP_VERSION } from "./lib/version.js";
 
@@ -58,7 +58,15 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
 
 // Handle tool calls
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  const requestConfig = projectRouter.getActiveConfig();
+  let requestConfig;
+  try {
+    requestConfig = ["list_unity_projects", "select_unity_project", "register_unity_project", "unregister_unity_project"].includes(request.params.name)
+      ? createConfigForProject("") : projectRouter.getActiveConfig();
+  } catch (error) {
+    return { isError: true, content: [{ type: "text", text: JSON.stringify({ success: false,
+      error: error instanceof Error ? error.message : "Selected project is no longer valid.",
+      recovery: "Use register_unity_project or select_unity_project; no command was sent." }) }] };
+  }
   return handleToolCall(
     request.params.name,
     request.params.arguments ?? {},

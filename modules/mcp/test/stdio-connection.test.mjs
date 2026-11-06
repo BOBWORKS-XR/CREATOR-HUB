@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, readdir, realpath, rename, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -12,7 +12,7 @@ const timeout = { timeout: 10_000 };
 const fixtureClients = new WeakMap();
 
 async function fixture(t) {
-  const root = await mkdtemp(path.join(os.tmpdir(), 'creator protocol spaces '));
+  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), 'creator protocol spaces ')));
   const clients = [];
   fixtureClients.set(t, clients);
   t.after(async () => {
@@ -72,7 +72,7 @@ test('SDK stdio: a fresh user can connect and receives actionable missing-projec
   const before = await snapshot(root);
   const client = await connect(t, root);
   assert.deepEqual((await client.listTools({}, timeout)).tools.map(tool => tool.name).sort(),
-    ['get_bridge_status', 'get_unity_command_status', 'list_unity_projects', 'select_unity_project']);
+    ['get_bridge_status', 'get_unity_command_status', 'list_unity_projects', 'register_unity_project', 'select_unity_project', 'unregister_unity_project']);
   const status = await call(client, 'get_bridge_status');
   assert.equal(status.success, false);
   assert.match(status.error, /UNITY_PROJECT_PATH/);
@@ -98,11 +98,43 @@ test('SDK stdio: project selection is session-local and reconnect uses saved set
   const status = await call(client, 'get_bridge_status');
   assert.equal(status.project.path, second);
   assert.equal(status.ready, false, 'A protocol connection is not a live Unity bridge');
-  assert.equal((await call(client, 'select_unity_project', { projectId: '../outside' })).success, false);
+  const invalid = await client.callTool({ name: 'select_unity_project', arguments: { projectId: '../outside' } }, undefined, timeout);
+  assert.equal(invalid.isError, true);
+  assert.equal(JSON.parse(invalid.content[0].text).success, false);
   await client.close();
   const reopened = await connect(t, root);
   assert.equal((await call(reopened, 'get_bridge_status')).project.path, first);
   await reopened.close();
+  assert.deepEqual(await snapshot(root), before);
+});
+
+test('SDK stdio: explicit registration never persists, selects or prevents recovery from a replaced directory', async t => {
+  const root = await fixture(t);
+  const first = await project(root, 'Saved');
+  const second = await project(root, 'Isolated');
+  await writeFile(path.join(second, 'ProjectSettings', 'ProjectVersion.txt'), 'm_EditorVersion: 6000.3.21f1\n');
+  await writeFile(path.join(root, 'launcher-config.json'), JSON.stringify({ channels: [{ id: 'saved', unity_project_path: first }], untouched: 42 }));
+  const before = await snapshot(root);
+  const client = await connect(t, root);
+  const registered = await call(client, 'register_unity_project', { projectPath: second });
+  assert.equal(registered.settingsChanged, false);
+  assert.equal((await call(client, 'get_bridge_status')).project.path, first);
+  await call(client, 'select_unity_project', { projectId: registered.projectId });
+  assert.equal((await call(client, 'get_bridge_status')).project.path, second);
+  await rename(second, second + '-moved');
+  const refused = await client.callTool({ name: 'get_bridge_status', arguments: {} }, undefined, timeout);
+  assert.equal(refused.isError, true);
+  assert.match(refused.content[0].text, /select another project|register.*again/i);
+  const listing = await call(client, 'list_unity_projects', { fields: ['projectId', 'projectPath'] });
+  const saved = listing.projects.find(p => p.projectPath === first);
+  await call(client, 'select_unity_project', { projectId: saved.projectId });
+  assert.equal((await call(client, 'get_bridge_status')).project.path, first);
+  await call(client, 'unregister_unity_project', { projectId: registered.projectId });
+  await client.close();
+  await rename(second + '-moved', second);
+  const restarted = await connect(t, root);
+  assert.equal((await call(restarted, 'list_unity_projects')).total, 1);
+  await restarted.close();
   assert.deepEqual(await snapshot(root), before);
 });
 

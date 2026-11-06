@@ -325,6 +325,7 @@ These project screenshots show scene hierarchy construction, configured Banter c
 - [Bridge protocol](docs/bridge-protocol.md)
 - [Compatibility matrix](docs/compatibility.md)
 - [Tool groups](docs/tool-groups.md)
+- [Session project registration and opt-in native inventory (next-update work)](docs/session-projects-native-inventory.md)
 - [2.6.0 changes and upgrade guidance](docs/releases/2.6.0.md)
 - [Token optimization evidence and next phase](docs/token-optimization-next-phase.md)
 - [Banter custom Visual Scripting nodes](docs/banter-custom-visual-scripting-nodes.md)

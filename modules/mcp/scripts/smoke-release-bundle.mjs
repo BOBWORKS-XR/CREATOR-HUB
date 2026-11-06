@@ -5,7 +5,7 @@ import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { CREATOR_DOCS_SNAPSHOT } from "../dist/resources/creator-docs-snapshot.js";
 
-const sourceBundle = path.resolve("release", "creator-works-mcp.mjs");
+const sourceBundle = path.resolve(process.env.MCP_BUNDLE_PATH || path.join("release", "creator-works-mcp.mjs"));
 const packageVersion = JSON.parse(readFileSync("package.json", "utf8")).version;
 assert.ok(statSync(sourceBundle).size > 100_000, "Release bundle is unexpectedly small");
 
@@ -108,7 +108,7 @@ try {
     method: "notifications/initialized",
   })}\n`);
   const tools = await request({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} });
-  assert.equal(tools.result?.tools?.length, 54);
+  assert.equal(tools.result?.tools?.length, 57);
   const liveDocsTool = tools.result.tools.find((tool) => tool.name === "lookup_creator_docs");
   assert.ok(liveDocsTool);
   assert.equal(liveDocsTool.annotations?.readOnlyHint, true);
