@@ -1,0 +1,31 @@
+name: Windows installer preflight regression checks
+on:
+  push:
+    branches: [validation/mcp-installer-020-20261106]
+permissions:
+  contents: read
+jobs:
+  installer-checks:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - name: Native Windows installer preflight and preservation
+        timeout-minutes: 12
+        working-directory: modules/mcp
+        shell: pwsh
+        run: |
+          node --test test/installer-preflight.test.mjs 2>&1 | Tee-Object -FilePath installer-checks.log
+          exit $LASTEXITCODE
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-installer-preflight-20261106
+          path: modules/mcp/installer-checks.log
+          if-no-files-found: error
+          retention-days: 14

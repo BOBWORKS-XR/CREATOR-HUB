@@ -12,7 +12,7 @@ function File-Hash([string]$path) {
     $hash = [Security.Cryptography.SHA256]::Create()
     try { [Convert]::ToBase64String($hash.ComputeHash([IO.File]::ReadAllBytes($path))) } finally { $hash.Dispose() }
 }
-function Invoke-RawPowerShell([string]$arguments) {
+function Invoke-RawPowerShell([string]$arguments, [int]$timeoutMs = 60000) {
     $psi = [Diagnostics.ProcessStartInfo]::new()
     $psi.FileName = $powershell
     $psi.Arguments = '-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass ' + $arguments
@@ -24,9 +24,13 @@ function Invoke-RawPowerShell([string]$arguments) {
     try {
         $output = $process.StandardOutput.ReadToEndAsync()
         $errors = $process.StandardError.ReadToEndAsync()
-        Require ($process.WaitForExit(60000)) 'Owned preflight helper exceeded its 60-second test deadline.'
+        Require ($process.WaitForExit($timeoutMs)) "Owned preflight helper PID $($process.Id) exceeded its test deadline."
         [pscustomobject]@{ code = $process.ExitCode; pid = $process.Id; output = $output.Result.Trim(); error = $errors.Result.Trim() }
-    } finally { $process.Dispose() }
+    } finally {
+        # Dispose alone leaves a timed-out child running. This handle owns only our spawned test helper.
+        if (-not $process.HasExited) { $process.Kill(); Require ($process.WaitForExit(5000)) 'Timed-out test helper did not stop.' }
+        $process.Dispose()
+    }
 }
 function Invoke-Guard([string]$directory) {
     # This is the same raw native argument layout emitted by nsExec, not a PS argument array.
@@ -40,6 +44,16 @@ function Check-Code([string]$name, $result, [int]$code) {
 
 try {
     [IO.Directory]::CreateDirectory($fixture) | Out-Null
+    $timedOutPid = 0
+    try { Invoke-RawPowerShell '-Command "Start-Sleep -Seconds 30"' 200 | Out-Null }
+    catch {
+        Require ($_.Exception.Message -match 'Owned preflight helper PID ([0-9]+) exceeded its test deadline') 'Timeout control failed for an unexpected reason.'
+        $timedOutPid = [int]$Matches[1]
+    }
+    Require ($timedOutPid -gt 0) 'The timeout control unexpectedly completed.'
+    $leftover = Get-Process -Id $timedOutPid -ErrorAction SilentlyContinue
+    Require ($null -eq $leftover) 'A timed-out owned PowerShell helper was left running.'
+    $results.Add([pscustomobject]@{ test = 'Timed-out owned helper exits before cleanup'; passed = $true })
     $oldScript = '& { param([string]$installDir); [pscustomobject]@{ received=$installDir; extra=@($args) } | ConvertTo-Json -Compress }'
     $old = Invoke-RawPowerShell ('-Command "' + $oldScript + '" "C:\Users\Andy\AppData\Local\Creator Works MCP"')
     $parsed = $old.output | ConvertFrom-Json
