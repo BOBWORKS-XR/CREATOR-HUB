@@ -1,0 +1,61 @@
+name: Windows native MCP source and installer checks
+on:
+  push:
+    branches: [validation/mcp-native-021-20261106]
+permissions:
+  contents: read
+jobs:
+  windows-tests:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: modules/mcp
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Preserve source evidence bytes
+        shell: pwsh
+        run: git config --local core.autocrlf false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: modules/mcp/package-lock.json
+      - name: Locked dependencies without lifecycle hooks
+        run: npm ci --ignore-scripts
+      - name: Toolchain and startup evidence
+        timeout-minutes: 1
+        shell: pwsh
+        run: |
+          $PSVersionTable | ConvertTo-Json | Set-Content toolchain.log
+          dotnet --list-sdks | Add-Content toolchain.log
+          & "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -Command "[Console]::WriteLine('Windows PowerShell ready')" | Add-Content toolchain.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Version consistency
+        shell: pwsh
+        run: |
+          Remove-Item Env:GITHUB_REF_NAME
+          npm run check:version 2>&1 | Tee-Object -FilePath version.log
+          exit $LASTEXITCODE
+      - name: Full source suite including real Windows installer preflight
+        shell: pwsh
+        run: |
+          npm test 2>&1 | Tee-Object -FilePath source-tests.log
+          exit $LASTEXITCODE
+      - name: Bundled MCP protocol and recovery
+        shell: pwsh
+        run: |
+          npm run bundle:server 2>&1 | Tee-Object -FilePath bundle-build.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run test:bundle 2>&1 | Tee-Object -FilePath bundle-tests.log
+          exit $LASTEXITCODE
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-native-mcp-021-checks
+          path: modules/mcp/*.log
+          if-no-files-found: error
+          retention-days: 14
