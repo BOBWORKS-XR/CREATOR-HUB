@@ -1,0 +1,5 @@
+09dd6563e5e93a533f7ddedc600c785f56d123f55d1e29a8eada6ab3941cf2b3  Creator.Hub_0.1.21_x64-setup.exe
+9a9e1bb9d401cdf6226be4e37e6103ca97f0900ac6ed5b58e72022d0732d24d1  Creator.Hub_0.1.21_x64-setup.exe.sig
+2a5ef416550d19f711f103e861b00bf55ed22a86cfd3e65080b18e2e7bced724  creator-hub-windows-x86_64.json
+2089048100a505c6479bf1f3d4d5d1892e7956aabd74c616416a4c2fcb8437a9  creator-hub-windows-x86_64.json.minisig
+ec7af64224e61ca94b3caf69a1178ebeb976d39473199a42d6d7df668fe18056  latest.json
