@@ -27,6 +27,11 @@ const baselines = Object.freeze([
     installer: '1a0d85127827b854dcdd3ae89f4c5e2aca3824b81623f1b9b05e022871ee6419',
     exe: '5bd277950ac6409b6820005e28767bbd3dd1281ea84e5f87f9b1990ffcda5d12',
   }),
+  Object.freeze({
+    version: '0.1.20', asset: 'Creator.Hub_0.1.20_x64-setup.exe',
+    installer: '2915ffac9b1c39f5facbd4030eb6addf837e0d414b96835e0f0be1564577666b',
+    exe: '06908120c81f471e9774edbe5a2d09fa3c985357eea373e29e75404d1f133cf5',
+  }),
 ]);
 
 function selectBaseline(targetVersion) {

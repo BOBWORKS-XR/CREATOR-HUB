@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "kind": "windows-021-staged-qualification",
+  "version": "0.1.21",
+  "platform": "windows-x86_64",
+  "candidate": {
+    "sourceCommit": "35411a704707cba5915f77d51bf156e4ec8ce251",
+    "sourceTree": "4f80b815406aedf577a3f9cb78c1f7fd6caf968b",
+    "installerSha256": "09dd6563e5e93a533f7ddedc600c785f56d123f55d1e29a8eada6ab3941cf2b3",
+    "executableSha256": "b29fe05699196383bbd376f23af934fe9f603761c3de285f16e6c4a3095222f5"
+  },
+  "evidenceSha256": "16e8440c5dc069be6d00784170fe8b809381580fbc16cd25f9eb25cdb32fd630",
+  "authorization": "staged-public-020-to-021-before-latest;client-protocol-inherited-020;no-new-live-ai",
+  "publicAcceptance": false,
+  "releaseReady": false,
+  "publicNotes": "Safer session-only project registration, bounded project listings, and opt-in native inventory reading. Existing settings are retained.",
+  "draft": {
+    "id": 437086314,
+    "assets": {
+      "creator-hub-windows-x86_64.json": {
+        "id": 718652893,
+        "size": 505,
+        "sha256": "2a5ef416550d19f711f103e861b00bf55ed22a86cfd3e65080b18e2e7bced724"
+      },
+      "creator-hub-windows-x86_64.json.minisig": {
+        "id": 718652897,
+        "size": 305,
+        "sha256": "2089048100a505c6479bf1f3d4d5d1892e7956aabd74c616416a4c2fcb8437a9"
+      },
+      "Creator.Hub_0.1.21_x64-setup.exe": {
+        "id": 718652892,
+        "size": 38469639,
+        "sha256": "09dd6563e5e93a533f7ddedc600c785f56d123f55d1e29a8eada6ab3941cf2b3"
+      },
+      "Creator.Hub_0.1.21_x64-setup.exe.sig": {
+        "id": 718652895,
+        "size": 409,
+        "sha256": "9a9e1bb9d401cdf6226be4e37e6103ca97f0900ac6ed5b58e72022d0732d24d1"
+      },
+      "latest.json": {
+        "id": 718652890,
+        "size": 776,
+        "sha256": "ec7af64224e61ca94b3caf69a1178ebeb976d39473199a42d6d7df668fe18056"
+      },
+      "SHA256SUMS.txt": {
+        "id": 718652928,
+        "size": 484,
+        "sha256": "26ba8de99dd971023c6eb6c8146d258ce510d2e9d398a098663596a12386f6a5"
+      }
+    }
+  }
+}
