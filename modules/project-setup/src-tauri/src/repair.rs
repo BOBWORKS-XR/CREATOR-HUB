@@ -267,7 +267,7 @@ fn newer_package(actual: &str, tested: &str) -> bool {
         .is_some_and(|(actual, tested)| actual.cmp_precedence(&tested).is_gt())
 }
 
-fn unity_version(value: &str) -> Option<(u64, u64, u64, u8, u64)> {
+pub(crate) fn unity_version(value: &str) -> Option<(u64, u64, u64, u8, u64)> {
     let mut parts = value.split('.');
     let major = parts.next()?.parse().ok()?;
     let minor = parts.next()?.parse().ok()?;

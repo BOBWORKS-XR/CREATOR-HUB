@@ -105,6 +105,10 @@ pub struct EnvironmentReport {
 pub struct CreateRequest {
     pub project_name: String,
     pub parent_directory: String,
+    #[serde(default)]
+    pub sdk_version: Option<String>,
+    #[serde(default)]
+    pub use_tested_sdk: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -522,7 +526,12 @@ fn extract_project_template(template: &Path, target: &Path) -> Result<(), String
     Ok(())
 }
 
+#[cfg(test)]
 fn update_manifest(project: &Path) -> Result<(), String> {
+    update_manifest_sdk(project, CREATOR_SDK_VERSION, "1.9.1")
+}
+
+fn update_manifest_sdk(project: &Path, sdk: &str, visual_scripting: &str) -> Result<(), String> {
     let path = project.join("Packages/manifest.json");
     let text =
         fs::read_to_string(&path).map_err(|error| format!("Cannot read manifest: {error}"))?;
@@ -541,8 +550,9 @@ fn update_manifest(project: &Path) -> Result<(), String> {
     dependencies.insert("com.unity.inputsystem".into(), json!(INPUT_SYSTEM_VERSION));
     dependencies.insert(
         "com.sidequest.creator-sdk".into(),
-        json!(CREATOR_SDK_VERSION),
+        json!(sdk),
     );
+    dependencies.insert("com.unity.visualscripting".into(), json!(visual_scripting));
     dependencies.insert(
         "com.unity.render-pipelines.universal".into(),
         json!(URP_VERSION),
@@ -595,6 +605,7 @@ fn update_project_name(project: &Path, project_name: &str) -> Result<(), String>
         .map_err(|error| format!("Cannot write project settings: {error}"))
 }
 
+#[cfg(test)]
 pub(crate) fn validation_script() -> String {
     render_validation_script(ValidationPair::Recipe)
 }
@@ -858,8 +869,19 @@ pub(crate) fn creation_target(request: &CreateRequest) -> Result<PathBuf, String
     Ok(target)
 }
 
+#[cfg(test)]
 pub fn create_project(
     request: CreateRequest,
+    progress: impl Fn(SetupProgress),
+) -> Result<CreationResult, String> {
+    creation_target(&request)?;
+    let sdk = crate::creation_sdk::resolve(&request)?;
+    create_project_with_sdk(request, sdk, progress)
+}
+
+pub(crate) fn create_project_with_sdk(
+    request: CreateRequest,
+    sdk: crate::creation_sdk::Selection,
     progress: impl Fn(SetupProgress),
 ) -> Result<CreationResult, String> {
     let target = creation_target(&request)?;
@@ -890,7 +912,7 @@ pub fn create_project(
     let setup = (|| -> Result<CreationResult, String> {
         progress(SetupProgress::new(
             2,
-            "Extracting the official URP template and adding the pinned Creator SDK.",
+            format!("Extracting the official URP template and adding Creator SDK {}.", sdk.version),
         ));
         extract_project_template(&template, &target)?;
         fs::write(
@@ -900,14 +922,14 @@ pub fn create_project(
             ),
         )
         .map_err(|error| format!("Cannot write ProjectVersion.txt: {error}"))?;
-        update_manifest(&target)?;
+        update_manifest_sdk(&target, &sdk.version, &sdk.visual_scripting_version)?;
         update_project_name(&target, project_name)?;
 
         let validator_dir = target.join("Assets/Editor");
         fs::create_dir_all(&validator_dir)
             .map_err(|error| format!("Cannot create temporary validator folder: {error}"))?;
         let validator = validator_dir.join("CreatorProjectSetupValidator.cs");
-        fs::write(&validator, validation_script())
+        fs::write(&validator, sdk.validation_script())
             .map_err(|error| format!("Cannot write temporary validator: {error}"))?;
 
         let status_folder = target.join(".creator-project-setup");
@@ -920,7 +942,8 @@ pub fn create_project(
                 "success": false,
                 "stage": "launching_unity",
                 "projectPath": target,
-                "recipe": recipe(),
+                "recipe": sdk.recipe(),
+                "sdkSelection": sdk,
                 "activeBuildTarget": "android",
                 "requiredBuildTargets": ["android", "windows"],
                 "note": "Unity setup has started. This is not a completion receipt."
@@ -965,7 +988,7 @@ pub fn create_project(
             .map_err(|error| format!("Cannot read Unity validation: {error}"))?;
         let validation: Value = serde_json::from_str(&validation_text)
             .map_err(|error| format!("Invalid Unity validation result: {error}"))?;
-        if validation.get("success") != Some(&Value::Bool(true)) {
+        if !sdk.accepts(&validation) {
             return Err(format!(
                 "Unity completed but the compatibility checks failed. Review {}.",
                 validation_path.display()
@@ -986,7 +1009,8 @@ pub fn create_project(
                 "success": true,
                 "stage": "validated",
                 "projectPath": target,
-                "recipe": recipe(),
+                "recipe": sdk.recipe(),
+                "sdkSelection": sdk,
                 "activeBuildTarget": "android",
                 "requiredBuildTargets": ["android", "windows"],
                 "validation": validation,
@@ -1018,7 +1042,8 @@ pub fn create_project(
                 "success": false,
                 "stage": "failed",
                 "projectPath": target,
-                "recipe": recipe(),
+                "recipe": sdk.recipe(),
+                "sdkSelection": sdk,
                 "error": error,
                 "note": "The project was preserved for diagnosis and was not deleted automatically."
             }),
@@ -2019,6 +2044,9 @@ mod tests {
     #[test]
     #[ignore = "launches a real installed Unity Editor and creates a disposable project"]
     fn unity_creation_smoke() {
+        assert_eq!(env::var("CREATOR_SETUP_CREATION_PREFS_GUARDED").as_deref(), Ok("yes"),
+            "Run through the exact-preferences backup/restore harness");
+        let selected = crate::sdk_requirements::latest().expect("latest stable registry metadata");
         let parent = env::var("CREATOR_SETUP_SMOKE_PARENT")
             .expect("set CREATOR_SETUP_SMOKE_PARENT to an existing disposable test directory");
         let name =
@@ -2026,6 +2054,8 @@ mod tests {
         let request = CreateRequest {
             project_name: name,
             parent_directory: parent,
+            sdk_version: Some(selected.version.clone()),
+            use_tested_sdk: false,
         };
         assert!(
             probe_environment().ready,
@@ -2048,6 +2078,15 @@ mod tests {
         assert!(result.success);
         assert!(result.hub.registered, "{}", result.hub.message);
         assert!(Path::new(&result.receipt_path).is_file());
+        let receipt: Value = serde_json::from_slice(&fs::read(&result.receipt_path).unwrap()).unwrap();
+        let manifest: Value = serde_json::from_slice(&fs::read(
+            Path::new(&result.project_path).join("Packages/manifest.json")).unwrap()).unwrap();
+        assert_eq!(receipt["recipe"]["creatorSdkVersion"], selected.version);
+        assert_eq!(receipt["sdkSelection"]["version"], selected.version);
+        assert_eq!(receipt["sdkSelection"]["source"], "official-registry");
+        assert_eq!(manifest["dependencies"]["com.sidequest.creator-sdk"], selected.version);
+        assert_eq!(receipt["validation"]["creatorSdkVersion"], selected.version);
+        assert!(!Path::new(&result.project_path).join("Assets/Editor/CreatorProjectSetupValidator.cs").exists());
         println!("{}", serde_json::to_string(&result).unwrap());
     }
 }

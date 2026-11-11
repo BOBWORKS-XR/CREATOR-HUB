@@ -32,7 +32,16 @@ See [verified upgrade checks and limits](docs/RELEASE-0.3.1.md).
 - Update a recognized old plugin helper with a backup. Unknown or edited files
   remain protected; Unity must be closed for the helper update.
 
-## Pinned Recipe
+## New-project SDK Selection
+
+The next build checks the official registry's latest stable Creator SDK before
+creating a project. That exact SDK version and its declared Visual Scripting
+version are pinned in the project manifest and verified after Unity reopens.
+If the lookup fails, Retry and an explicit tested-version fallback are offered;
+an older SDK is never selected silently. Existing projects are not upgraded by
+this new-project flow.
+
+## Tested Fallback Recipe
 
 | Requirement | Version / scope |
 | --- | --- |
@@ -44,7 +53,8 @@ See [verified upgrade checks and limits](docs/RELEASE-0.3.1.md).
 | Windows | Standalone build support, required |
 
 Creator SDK 4.0.14 declares URP 17.4.0; the pinned Editor resolves URP 17.3.0.
-The app records both values. Recipe updates require a separate validation pass.
+The fallback is explicit. New-project receipts record the actual selected SDK;
+Unity and platform-tool versions remain the tested versions above.
 
 Unity licence activation, permission prompts and installation licence approval
 can still require user interaction. Optional automatic Unity Hub registration

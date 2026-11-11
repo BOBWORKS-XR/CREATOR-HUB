@@ -1,5 +1,9 @@
 const { test, expect } = require('@playwright/test');
 
+const latestSdk = { version: '4.0.25', unityVersion: '6000.3.21f1', dependencies: {
+  'com.unity.visualscripting': '1.9.1', 'com.unity.render-pipelines.universal': '17.4.0', 'com.unity.inputsystem': '1.4.4',
+} };
+
 // Exercise the real direct page and its retained lifecycle, without the shared
 // shell or any native project, installation, preferences or package operations.
 async function openSetup(page, options = {}) {
@@ -8,10 +12,11 @@ async function openSetup(page, options = {}) {
     localStorage.setItem('creator-usage-terms.hub', JSON.stringify({ policyVersion: '2026-09-28-v1', acceptedAt: '2026-09-28T00:00:00Z' }));
     window.__CREATOR_HUB_FEATURE_PROTOCOL__ = 1;
     const fixture = window.setupFixture = {
-      calls: [], pending: {}, hold: null, failNext: options.failNext,
+      calls: [], pending: {}, hold: options.hold || null, failNext: options.failNext,
       outcome: options.outcome || 'success', canonicalPath: options.canonicalPath,
+      creationOutcome: options.creationOutcome || 'success',
       resultSkippedChecks: options.resultSkippedChecks,
-      latest: options.latest || { version: '4.0.25', unityVersion: '6000.3.27f1', dependencies: { 'com.unity.visualscripting': '1.9.13' } },
+      latest: options.latest,
       environment: {
         platform: 'windows', ready: true, hubInstalled: true,
         recipe: { editorVersion: '6000.3.21f1', creatorSdkVersion: '4.0.14', urpVersion: '17.3.0', inputSystemVersion: '1.20.0' },
@@ -33,11 +38,17 @@ async function openSetup(page, options = {}) {
         const name = args.command;
         const fields = args.args;
         const inspection = structuredClone(fixture.inspection);
+        const latest = structuredClone(fixture.latest);
         if (fixture.hold === name) await new Promise((resolve, reject) => { fixture.pending[name] = { resolve, reject }; });
         if (fixture.failNext === name) { fixture.failNext = null; throw new Error('Fixture refusal: ' + name); }
         switch (name) {
           case 'probe_environment': return structuredClone(fixture.environment);
-          case 'latest_sdk_requirements': return structuredClone(fixture.latest);
+          case 'latest_sdk_requirements': return latest;
+          case 'create_project':
+            if (fixture.creationOutcome === 'throw') throw new Error('Selected SDK metadata could not be fetched. No project files were created.');
+            return { success: fixture.creationOutcome === 'success', projectPath: fields.request.parentDirectory + '/' + fields.request.projectName,
+              message: fixture.creationOutcome === 'success' ? 'Validated project' : 'Selected SDK requirements could not be resolved. No project files were created.',
+              hub: { registered: true, refreshPending: false, message: 'Registered in Unity Hub' } };
           case 'open_official_url': return true;
           case 'open_project': return 'Open requested for ' + fields.path;
           case 'inspect_project': return { projectPath: fixture.canonicalPath || fields.path, fingerprint: 'reviewed-fingerprint', ...inspection };
@@ -52,7 +63,7 @@ async function openSetup(page, options = {}) {
         }
       } },
     };
-  }, options);
+  }, { ...options, latest: Object.hasOwn(options, 'latest') ? options.latest : latestSdk });
   await page.goto('http://127.0.0.1:4188/');
   await page.evaluate(async () => {
     await CreatorUsageTerms.requireAcceptance();
@@ -86,6 +97,219 @@ async function navigateBack(page) {
   await page.evaluate(() => CreatorFeaturePages.hide());
   await show(page);
 }
+
+test('new project waits for latest stable metadata, sends the exact selection and excludes duplicate creation', async ({ page }) => {
+  await openSetup(page, { hold: 'latest_sdk_requirements', latest: { ...latestSdk, version: '4.0.25+build.7', unityVersion: null } });
+  await waitPending(page, 'latest_sdk_requirements');
+  await field(page, 'name').fill('Selected SDK'); await field(page, 'parent').fill('/keep/parent');
+  await expect(field(page, 'sdk-selection')).toContainText('Checking latest stable');
+  await expect(field(page, 'create')).toBeDisabled(); await expect(field(page, 'sdk-tested')).toBeHidden();
+  await field(page, 'create').dispatchEvent('click'); await field(page, 'sdk-tested').dispatchEvent('click');
+  expect(await calls(page, 'create_project')).toEqual([]);
+  await settle(page, 'latest_sdk_requirements');
+  await expect(field(page, 'sdk-selection')).toHaveText('Selected: Creator SDK 4.0.25+build.7 (latest stable).');
+  await expect(field(page, 'create')).toBeEnabled();
+  await hold(page, 'create_project'); await field(page, 'create').click(); await waitPending(page, 'create_project');
+  for (const name of ['create', 'sdk-retry', 'sdk-tested']) await field(page, name).dispatchEvent('click');
+  await navigateBack(page);
+  expect(await calls(page, 'create_project')).toHaveLength(1);
+  expect((await calls(page, 'create_project'))[0].args.args).toEqual({ request: {
+    projectName: 'Selected SDK', parentDirectory: '/keep/parent', sdkVersion: '4.0.25+build.7',
+  } });
+  expect(await calls(page, 'latest_sdk_requirements')).toHaveLength(1);
+  await settle(page, 'create_project');
+  await expect(field(page, 'created')).toContainText('Validated project');
+  await expect(field(page, 'create')).toBeDisabled(); await expect(field(page, 'sdk-retry')).toBeDisabled();
+  await field(page, 'create').dispatchEvent('click');
+  expect(await calls(page, 'create_project')).toHaveLength(1);
+  expect((await calls(page, 'probe_environment')).length).toBe(2);
+  await page.evaluate(() => { setupFixture.latest.version = '4.0.26'; });
+  await hold(page, 'latest_sdk_requirements'); await field(page, 'another').click(); await waitPending(page, 'latest_sdk_requirements');
+  await expect(field(page, 'create')).toBeDisabled(); await expect(field(page, 'sdk-selection')).toContainText('No SDK selected');
+  await settle(page, 'latest_sdk_requirements');
+  await expect(field(page, 'sdk-selection')).toContainText('4.0.26 (latest stable)');
+  expect(await calls(page, 'create_project')).toHaveLength(1);
+});
+
+test('failed latest lookup requires explicit tested SDK choice and sends only useTestedSdk', async ({ page }) => {
+  await openSetup(page, { failNext: 'latest_sdk_requirements' });
+  await field(page, 'name').fill('Fallback project'); await field(page, 'parent').fill('/keep/fallback');
+  await expect(field(page, 'sdk-error')).toContainText('Latest SDK unavailable');
+  await expect(field(page, 'sdk-tested')).toHaveText('Use tested SDK 4.0.14');
+  await expect(field(page, 'sdk-selection')).toHaveText('No SDK selected.');
+  await expect(field(page, 'create')).toBeDisabled();
+  await field(page, 'create').dispatchEvent('click');
+  expect(await calls(page, 'create_project')).toEqual([]);
+  await field(page, 'sdk-tested').click();
+  await expect(field(page, 'sdk-selection')).toHaveText('Selected: Creator SDK 4.0.14 (tested fallback, not latest).');
+  await expect(field(page, 'create')).toBeEnabled();
+  await navigateBack(page);
+  await expect(field(page, 'sdk-selection')).toContainText('4.0.14 (tested fallback');
+  await field(page, 'create').click();
+  await expect(field(page, 'created')).toContainText('Validated project');
+  expect((await calls(page, 'create_project')).map(call => call.args.args)).toEqual([{ request: {
+    projectName: 'Fallback project', parentDirectory: '/keep/fallback', useTestedSdk: true,
+  } }]);
+  expect(await calls(page, 'latest_sdk_requirements')).toHaveLength(1);
+});
+
+for (const failure of ['refused', 'malformed']) test(`retry invalidates a previous latest SDK selection when ${failure}`, async ({ page }) => {
+  await openSetup(page);
+  await expect(field(page, 'sdk-selection')).toContainText('4.0.25 (latest stable)');
+  await field(page, 'name').fill('Retained draft'); await field(page, 'parent').fill('/keep/draft');
+  await hold(page, 'latest_sdk_requirements');
+  if (failure === 'malformed') await page.evaluate(() => { setupFixture.latest = { version: '4.0.26' }; });
+  await field(page, 'sdk-retry').click(); await waitPending(page, 'latest_sdk_requirements');
+  await expect(field(page, 'sdk-selection')).toContainText('No SDK selected');
+  await expect(field(page, 'create')).toBeDisabled(); await expect(field(page, 'sdk-retry')).toBeDisabled();
+  await field(page, 'create').dispatchEvent('click'); await field(page, 'sdk-retry').dispatchEvent('click');
+  await settle(page, 'latest_sdk_requirements', failure === 'refused');
+  await expect(field(page, 'sdk-error')).toContainText(failure === 'refused' ? 'Fixture refusal' : 'incomplete');
+  await expect(field(page, 'sdk-selection')).toHaveText('No SDK selected.');
+  await expect(field(page, 'create')).toBeDisabled(); await expect(field(page, 'sdk-tested')).toBeVisible();
+  await expect(field(page, 'name')).toHaveValue('Retained draft'); await expect(field(page, 'parent')).toHaveValue('/keep/draft');
+  await field(page, 'create').dispatchEvent('click');
+  expect(await calls(page, 'create_project')).toEqual([]);
+  expect(await calls(page, 'latest_sdk_requirements')).toHaveLength(2);
+});
+
+test('timed-out metadata cannot restore a choice during retry, and fresh latest selection clears fallback', async ({ page }) => {
+  await page.clock.install();
+  await openSetup(page, { hold: 'latest_sdk_requirements' }); await waitPending(page, 'latest_sdk_requirements');
+  await field(page, 'name').fill('Keep through retry'); await field(page, 'parent').fill('/keep/retry');
+  await page.clock.fastForward(20001);
+  await expect(field(page, 'sdk-error')).toContainText('timed out'); await expect(field(page, 'create')).toBeDisabled();
+  await field(page, 'sdk-tested').click(); await expect(field(page, 'create')).toBeEnabled();
+  await page.evaluate(() => {
+    setupFixture.oldLatest = setupFixture.pending.latest_sdk_requirements;
+    delete setupFixture.pending.latest_sdk_requirements;
+    setupFixture.latest.version = '4.0.26';
+  });
+  await field(page, 'sdk-retry').click(); await waitPending(page, 'latest_sdk_requirements');
+  await expect(field(page, 'sdk-selection')).toContainText('No SDK selected');
+  await expect(field(page, 'sdk-tested')).toBeHidden(); await expect(field(page, 'create')).toBeDisabled();
+  await page.evaluate(() => { setupFixture.oldLatest.resolve(); });
+  await field(page, 'sdk-tested').dispatchEvent('click'); await field(page, 'create').dispatchEvent('click');
+  await expect(field(page, 'sdk-selection')).toContainText('Checking latest stable');
+  expect(await calls(page, 'create_project')).toEqual([]);
+  await settle(page, 'latest_sdk_requirements');
+  await expect(field(page, 'sdk-selection')).toHaveText('Selected: Creator SDK 4.0.26 (latest stable).');
+  await expect(field(page, 'sdk-error')).toBeHidden(); await expect(field(page, 'sdk-tested')).toBeHidden();
+  await expect(field(page, 'name')).toHaveValue('Keep through retry'); await expect(field(page, 'parent')).toHaveValue('/keep/retry');
+  await field(page, 'create').click(); await expect(field(page, 'created')).toContainText('Validated project');
+  expect((await calls(page, 'create_project'))[0].args.args.request).toEqual({
+    projectName: 'Keep through retry', parentDirectory: '/keep/retry', sdkVersion: '4.0.26',
+  });
+  expect(await calls(page, 'create_project')).toHaveLength(1);
+});
+
+test('retrying a tested choice must be explicitly chosen again if the next lookup fails', async ({ page }) => {
+  await openSetup(page, { failNext: 'latest_sdk_requirements' });
+  await field(page, 'sdk-tested').click(); await expect(field(page, 'create')).toBeEnabled();
+  await page.evaluate(() => { setupFixture.failNext = 'latest_sdk_requirements'; });
+  await field(page, 'sdk-retry').click();
+  await expect(field(page, 'sdk-error')).toBeVisible(); await expect(field(page, 'sdk-selection')).toHaveText('No SDK selected.');
+  await expect(field(page, 'create')).toBeDisabled();
+  await field(page, 'create').dispatchEvent('click'); expect(await calls(page, 'create_project')).toEqual([]);
+  await field(page, 'sdk-tested').click(); await expect(field(page, 'create')).toBeEnabled();
+});
+
+test('licence opener failure preserves the selected SDK and retries only on an explicit click', async ({ page }) => {
+  await openSetup(page, { failNext: 'open_official_url' });
+  await field(page, 'name').fill('Keep licence draft'); await field(page, 'parent').fill('/keep/licence');
+  await field(page, 'licence-android').click();
+  await expect(field(page, 'error')).toContainText('open_official_url');
+  await expect(field(page, 'sdk-selection')).toContainText('4.0.25 (latest stable)');
+  await expect(field(page, 'create')).toBeEnabled();
+  await navigateBack(page);
+  expect(await calls(page, 'open_official_url')).toHaveLength(1);
+  await field(page, 'licence-android').click(); await expect(field(page, 'error')).toBeHidden();
+  expect((await calls(page, 'open_official_url')).map(call => call.args.args)).toEqual(Array(2).fill({ url: 'https://developer.android.com/studio/terms' }));
+  await expect(field(page, 'name')).toHaveValue('Keep licence draft'); await expect(field(page, 'parent')).toHaveValue('/keep/licence');
+  expect(await calls(page, 'create_project')).toEqual([]);
+  expect(await calls(page, 'latest_sdk_requirements')).toHaveLength(1);
+});
+
+for (const [label, latest] of [
+  ['null response', null],
+  ['missing version', { dependencies: latestSdk.dependencies }],
+  ['blank version', { ...latestSdk, version: '   ' }],
+  ['range version', { ...latestSdk, version: '^4.0.25' }],
+  ['padded version', { ...latestSdk, version: ' 4.0.25' }],
+  ['prerelease', { ...latestSdk, version: '4.0.26-beta.1' }],
+  ['prerelease with build metadata', { ...latestSdk, version: '4.0.26-rc.1+build.7' }],
+  ['oversized version', { ...latestSdk, version: '4.0.' + '1'.repeat(129) }],
+  ['missing dependencies', { version: '4.0.25' }],
+  ['empty dependencies', { ...latestSdk, dependencies: {} }],
+  ['dependency array', { version: '4.0.25', dependencies: [] }],
+  ['invalid dependency', { ...latestSdk, dependencies: { ...latestSdk.dependencies, 'com.example.package': null } }],
+  ['blank dependency', { ...latestSdk, dependencies: { ...latestSdk.dependencies, 'com.example.package': ' ' } }],
+  ['excess dependencies', { ...latestSdk, dependencies: { ...latestSdk.dependencies, ...Object.fromEntries(Array.from({ length: 126 }, (_, i) => [`com.example.p${i}`, '1.0.0'])) } }],
+  ['invalid Unity minimum', { ...latestSdk, unityVersion: {} }],
+]) test(`malformed latest metadata (${label}) never authorizes creation`, async ({ page }) => {
+  await openSetup(page, { latest });
+  await expect(field(page, 'sdk-error')).toContainText('incomplete');
+  await expect(field(page, 'sdk-selection')).toHaveText('No SDK selected.'); await expect(field(page, 'create')).toBeDisabled();
+  await expect(field(page, 'sdk-tested')).toHaveText('Use tested SDK 4.0.14'); await expect(field(page, 'sdk-retry')).toBeEnabled();
+  await field(page, 'create').dispatchEvent('click'); expect(await calls(page, 'create_project')).toEqual([]);
+});
+
+for (const name of Object.keys(latestSdk.dependencies)) for (const [issue, version] of [
+  ['missing', undefined], ['ranged', '^1.0.0'], ['prerelease', '1.0.0-beta.1'],
+]) test(`latest ${name} ${issue} invalidates selection and immediately offers explicit fallback`, async ({ page }) => {
+  await openSetup(page);
+  await expect(field(page, 'sdk-selection')).toContainText('4.0.25 (latest stable)');
+  await page.evaluate(({ name, version }) => {
+    if (version === undefined) delete setupFixture.latest.dependencies[name];
+    else setupFixture.latest.dependencies[name] = version;
+  }, { name, version });
+  await field(page, 'sdk-retry').click();
+  await expect(field(page, 'sdk-error')).toContainText('incomplete');
+  await expect(field(page, 'sdk-selection')).toHaveText('No SDK selected.');
+  await expect(field(page, 'sdk-package-plan')).toBeHidden();
+  await expect(field(page, 'create')).toBeDisabled(); await expect(field(page, 'sdk-tested')).toBeVisible();
+  await expect(field(page, 'error')).toBeHidden();
+  expect(await calls(page, 'create_project')).toEqual([]);
+  await field(page, 'sdk-tested').click(); await field(page, 'create').click();
+  await expect(field(page, 'created')).toContainText('Validated project');
+  expect((await calls(page, 'create_project')).map(call => call.args.args.request)).toEqual([{
+    projectName: 'My Creator Space', parentDirectory: '/projects', useTestedSdk: true,
+  }]);
+});
+
+for (const creationOutcome of ['throw', 'failure']) test(`backend metadata ${creationOutcome} keeps fields and explicit SDK retry available`, async ({ page }) => {
+  await openSetup(page, { creationOutcome });
+  await field(page, 'name').fill('Keep on backend refusal'); await field(page, 'parent').fill('/keep/refusal');
+  await field(page, 'create').click();
+  await expect(field(page, 'error')).toContainText('No project files were created');
+  await expect(field(page, 'activity')).toBeHidden(); await expect(field(page, 'sdk-retry')).toBeEnabled();
+  await expect(field(page, 'sdk-selection')).toHaveText('Selected: Creator SDK 4.0.25 (latest stable).');
+  await expect(field(page, 'sdk-tested')).toBeHidden();
+  await expect(field(page, 'name')).toBeEnabled(); await expect(field(page, 'parent')).toBeEnabled();
+  await expect(field(page, 'name')).toHaveValue('Keep on backend refusal'); await expect(field(page, 'parent')).toHaveValue('/keep/refusal');
+  await expect(field(page, 'open')).toBeHidden(); expect(await calls(page, 'create_project')).toHaveLength(1);
+  await page.evaluate(() => { setupFixture.latest.version = '4.0.26'; setupFixture.creationOutcome = 'success'; });
+  await field(page, 'sdk-retry').click(); await expect(field(page, 'sdk-selection')).toContainText('4.0.26 (latest stable)');
+  expect(await calls(page, 'create_project')).toHaveLength(1);
+  await field(page, 'create').click(); await expect(field(page, 'created')).toContainText('Validated project');
+  expect((await calls(page, 'create_project'))[1].args.args.request).toEqual({
+    projectName: 'Keep on backend refusal', parentDirectory: '/keep/refusal', sdkVersion: '4.0.26',
+  });
+});
+
+for (const width of [940, 390]) test(`new project SDK selection and fallback fit at ${width}px`, async ({ page }, testInfo) => {
+  await page.setViewportSize({ width, height: 800 }); await openSetup(page);
+  await expect(field(page, 'sdk-selection')).toContainText('latest stable');
+  await page.screenshot({ path: testInfo.outputPath('new-project-sdk.png'), fullPage: true });
+  await page.evaluate(() => { setupFixture.failNext = 'latest_sdk_requirements'; });
+  await field(page, 'sdk-retry').click(); await field(page, 'sdk-tested').click();
+  await expect(field(page, 'sdk-selection')).toContainText('tested fallback, not latest');
+  await page.screenshot({ path: testInfo.outputPath('new-project-fallback.png'), fullPage: true });
+  for (const name of ['sdk-selection', 'sdk-retry', 'sdk-tested', 'create']) {
+    expect(await field(page, name).evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
+  }
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+});
 
 test('blocked Setup exposes copyable recovery locations without enabling repairs', async ({ page }) => {
   await openSetup(page, { inspection: {
@@ -301,7 +525,8 @@ test('direct Setup shows supported SDK 4.0.22 / VS 1.9.12 findings and uses ordi
     ],
     proposedChanges: ['Initialize Creator Visual Scripting and rebuild its node database; retain existing type selections.'],
   } });
-  await expect(field(page, 'recipe')).toContainText('Creator SDK 4.0.14');
+  await expect(field(page, 'recipe')).toContainText('Unity and build tools');
+  await expect(field(page, 'recipe')).not.toContainText('Creator SDK');
   await existing(page, '/projects/Qualified pair');
   await expect(field(page, 'findings').locator('strong')).toHaveText([
     'Creator SDK: Ready', 'Visual Scripting package: Ready', 'Visual Scripting setup: Repair available',
@@ -361,35 +586,64 @@ test('newer-version advice preserves independent safety blockers and explicit in
   expect(await calls(page, 'run_existing_project')).toEqual([]);
 });
 
-test('latest SDK is fetched on Existing entry and explicit refresh without changing the creation recipe', async ({ page }) => {
+test('latest SDK is fetched for creation and remains read-only on Existing entry and refresh', async ({ page }) => {
   await openSetup(page);
-  expect(await calls(page, 'latest_sdk_requirements')).toHaveLength(0);
+  await expect(field(page, 'sdk-selection')).toContainText('4.0.25 (latest stable)');
+  expect(await calls(page, 'latest_sdk_requirements')).toHaveLength(1);
   await field(page, 'existing-tab').click();
   await expect(field(page, 'latest-status')).toContainText('4.0.25');
-  await expect(field(page, 'latest-status')).toContainText('6000.3.27f1');
-  await expect(field(page, 'latest-dependencies')).toContainText('Visual Scripting: 1.9.13');
-  await page.evaluate(() => { setupFixture.latest = { version: '4.0.26', unityVersion: '6000.3.28f1', dependencies: {} }; });
+  await expect(field(page, 'latest-status')).toContainText('6000.3.21f1');
+  await expect(field(page, 'latest-dependencies')).toContainText('Visual Scripting: 1.9.1');
+  await page.evaluate(() => { setupFixture.latest = { ...setupFixture.latest, version: '4.0.26', unityVersion: '6000.3.28f1' }; });
   await field(page, 'latest-refresh').click();
   await expect(field(page, 'latest-status')).toContainText('4.0.26');
-  expect(await calls(page, 'latest_sdk_requirements')).toHaveLength(2);
+  expect(await calls(page, 'latest_sdk_requirements')).toHaveLength(3);
   await field(page, 'new-tab').click();
-  await expect(field(page, 'recipe')).toContainText('Creator SDK 4.0.14');
+  await expect(field(page, 'recipe')).toContainText('Unity and build tools');
+  await expect(field(page, 'recipe')).not.toContainText('Creator SDK');
   await expect(field(page, 'recipe')).toContainText('Unity 6000.3.21f1');
+  await expect(field(page, 'sdk-selection')).toContainText('4.0.26 (latest stable)');
   await field(page, 'existing-tab').click();
   await expect(field(page, 'latest-status')).toContainText('4.0.26');
-  expect(await calls(page, 'latest_sdk_requirements')).toHaveLength(3);
+  expect(await calls(page, 'latest_sdk_requirements')).toHaveLength(4);
   await page.evaluate(() => { setupFixture.latest.version = '4.0.27'; });
   await navigateBack(page);
   await expect(field(page, 'latest-status')).toContainText('4.0.27');
-  expect(await calls(page, 'latest_sdk_requirements')).toHaveLength(4);
+  expect(await calls(page, 'latest_sdk_requirements')).toHaveLength(5);
   expect(await calls(page, 'run_existing_project')).toEqual([]);
   expect(await calls(page, 'create_project')).toEqual([]);
   expect(await calls(page, 'open_project')).toEqual([]);
   expect(await calls(page, 'open_official_url')).toEqual([]);
 });
 
+test('latest tag selection does not replace existing-project newer or prerelease advisories', async ({ page }) => {
+  await openSetup(page, { inspection: {
+    partialRepair: true, canRepair: true, canValidate: false,
+    findings: [
+      { title: 'Creator SDK', status: 'check', qualificationRequired: true, detail: 'Installed reference 4.0.99-beta.1 is kept. No automatic version replacement.' },
+      { title: 'Visual Scripting package', status: 'check', qualificationRequired: true, detail: 'Installed reference 1.9.13 is kept. Version-specific validation skipped.' },
+    ],
+    proposedChanges: ['Add a missing supported registry scope.'],
+  } });
+  await existing(page, '/projects/Newer installed SDK');
+  await expect(field(page, 'latest-status')).toContainText('4.0.25');
+  await expect(field(page, 'latest-dependencies')).toHaveText('URP: 17.4.0 · Input System: 1.4.4 · Visual Scripting: 1.9.1');
+  await expect(field(page, 'findings')).toContainText('4.0.99-beta.1 is kept');
+  await expect(field(page, 'findings')).toContainText('1.9.13 is kept');
+  await expect(field(page, 'findings')).toContainText('Newer version kept');
+  await expect(field(page, 'validate')).toBeHidden(); await expect(field(page, 'repair')).toBeDisabled();
+  expect(await calls(page, 'run_existing_project')).toEqual([]);
+  await field(page, 'new-tab').click();
+  await expect(field(page, 'sdk-selection')).toHaveText('Selected: Creator SDK 4.0.25 (latest stable).');
+  await field(page, 'create').click(); await expect(field(page, 'created')).toContainText('Validated project');
+  expect((await calls(page, 'create_project'))[0].args.args.request).toEqual({
+    projectName: 'My Creator Space', parentDirectory: '/projects', sdkVersion: '4.0.25',
+  });
+});
+
 test('offline latest lookup stays local and does not block inspection or supported controls', async ({ page }) => {
-  await openSetup(page, { failNext: 'latest_sdk_requirements' });
+  await openSetup(page);
+  await page.evaluate(() => { setupFixture.failNext = 'latest_sdk_requirements'; });
   await field(page, 'existing-tab').click();
   await expect(field(page, 'latest-error')).toContainText('latest_sdk_requirements');
   await expect(field(page, 'error')).toBeHidden();
@@ -406,7 +660,7 @@ test('offline latest lookup stays local and does not block inspection or support
 });
 
 test('SDK metadata without a Unity minimum remains usable and matches the native dependency bound', async ({ page }) => {
-  const dependencies = Object.fromEntries(Array.from({ length: 100 }, (_, i) => [`com.example.package${i}`, '1.0.0']));
+  const dependencies = { ...latestSdk.dependencies, ...Object.fromEntries(Array.from({ length: 125 }, (_, i) => [`com.example.package${i}`, '1.0.0'])) };
   await openSetup(page, { latest: { version: '5.0.0', unityVersion: null, dependencies } });
   await field(page, 'existing-tab').click();
   await expect(field(page, 'latest-status')).toContainText('5.0.0');
@@ -429,7 +683,7 @@ test('latest lookup is time bounded and a late response does not silently replac
   await settle(page, 'latest_sdk_requirements');
   await expect(field(page, 'latest-error')).toContainText('timed out');
   await page.clock.fastForward(60000);
-  expect(await calls(page, 'latest_sdk_requirements')).toHaveLength(1);
+  expect(await calls(page, 'latest_sdk_requirements')).toHaveLength(2);
 });
 
 test('partial repair keeps newer versions, lists skipped checks and never claims full validation', async ({ page }, testInfo) => {

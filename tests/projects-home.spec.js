@@ -24,6 +24,10 @@ async function load(page, options = {}) {
       case 'feature_select': return null;
       case 'feature_status': return { integrated: true, features: ['setup', 'mcp'] };
       case 'feature_call':
+        if (args.feature === 'setup' && args.command === 'latest_sdk_requirements') return {
+          version: '4.0.25', unityVersion: '6000.3.21f1',
+          dependencies: { 'com.unity.visualscripting': '1.9.1', 'com.unity.render-pipelines.universal': '17.4.0', 'com.unity.inputsystem': '1.4.4' },
+        };
         if (args.feature === 'setup' && args.command === 'probe_environment') return {
           platform: 'windows', ready: true, hubInstalled: true, hubVersion: '3.21.1', hubAutoRegistration: true,
           recipe: { editorVersion: '6000.3.21f1', creatorSdkVersion: '4.0.14', urpVersion: '17.3.0', inputSystemVersion: '1.20.0' },
@@ -101,6 +105,7 @@ for (const width of [320, 390, 940, 1440]) {
     const requests = [];
     page.on('request', request => requests.push(request.url()));
     const state = await load(page);
+    expect(state.calls.filter(call => call.command === 'feature_call' && call.args.command === 'latest_sdk_requirements')).toEqual([]);
     const trigger = page.getByRole('button', { name: 'Open menu', exact: true });
     await expect(trigger.locator('.suite-menu-label')).toHaveText('Menu');
     await expect(trigger.locator('.icon-menu')).toBeVisible();
@@ -131,6 +136,7 @@ for (const width of [320, 390, 940, 1440]) {
     await expect(menu.locator('[data-view="setup"]')).toBeFocused();
     await page.keyboard.press('Enter');
     await expect(menu).toBeHidden();
+    await expect.poll(() => state.calls.filter(call => call.command === 'feature_call' && call.args.command === 'latest_sdk_requirements').length).toBe(1);
     await expect(page.getByRole('button', { name: 'Open menu', exact: true }).locator('.suite-menu-label')).toBeVisible();
     await selectSuiteView(page, 'hub');
     await expectProjectsHome(page);
@@ -199,7 +205,7 @@ test('suite Home returns to Projects and preserves project filters and Setup dra
   await page.locator('#suite-menu [data-view="setup"]').click();
   await expect(name).toHaveValue('Retained draft');
   expect(state.calls.filter(call => call.command === 'project_inventory')).toHaveLength(1);
-  expect(state.calls.filter(call => call.command === 'feature_call').map(call => call.args.command)).toEqual(['probe_environment']);
+  expect(state.calls.filter(call => call.command === 'feature_call').map(call => call.args.command)).toEqual(['probe_environment', 'latest_sdk_requirements']);
 });
 
 for (const width of [1280, 940, 390, 320]) test(`direct home has one updater above project controls and list at ${width}px`, async ({ page }, testInfo) => {
@@ -406,7 +412,7 @@ test('project refresh, add, cancel and New project still work from direct home',
     { command: 'add_project_folder', args: {} }, { command: 'add_project_folder', args: {} },
   ]);
   expect(state.calls.filter(call => call.command === 'project_inventory')).toHaveLength(2);
-  expect(state.calls.filter(call => call.command === 'feature_call').map(call => call.args.command)).toEqual(['probe_environment']);
+  expect(state.calls.filter(call => call.command === 'feature_call').map(call => call.args.command)).toEqual(['probe_environment', 'latest_sdk_requirements']);
   expect(state.unexpected).toEqual([]);
   expect(state.errors).toEqual([]);
 });
