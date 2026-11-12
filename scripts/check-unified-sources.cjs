@@ -47,7 +47,9 @@ function assertReleaseReady(manifest, intent = {}) {
     if (lines.length !== 2 || !lines[0].startsWith('untrusted comment: ') || lines[1] !== linux.PUBLIC_KEY) throw Error('Production descriptor key differs from the qualification.');
     return reviewed;
   }
-  const reviewed = intent.platform === 'windows-x86_64' && intent.version === '0.1.21'
+  const reviewed = intent.platform === 'windows-x86_64' && intent.version === '0.1.22'
+    ? require('./windows-022-release-qualification.cjs').loadQualification(path.resolve(directory, intent.receiptPath), intent.sha256, intent.association)
+    : intent.platform === 'windows-x86_64' && intent.version === '0.1.21'
     ? require('./windows-021-release-qualification.cjs').loadQualification(path.resolve(directory, intent.receiptPath), intent.sha256, intent.association)
     : intent.platform === 'windows-x86_64' && intent.version === '0.1.20'
     ? require('./windows-020-release-qualification.cjs').loadQualification(path.resolve(directory, intent.receiptPath), intent.sha256, intent.association)
@@ -59,7 +61,9 @@ function assertReleaseReady(manifest, intent = {}) {
   }
   // B05's reviewed Windows key bytes use CRLF; Git's LF checkout is the same key.
   const key = fs.readFileSync(path.join(directory, 'src-tauri/src/catalog-key.pub'), 'utf8').replace(/\r?\n/g, '\r\n');
-  const keySha256 = intent.platform === 'windows-x86_64' && intent.version === '0.1.21'
+  const keySha256 = intent.platform === 'windows-x86_64' && intent.version === '0.1.22'
+    ? require('./windows-022-release-qualification.cjs').PRODUCTION_KEY_SHA256
+    : intent.platform === 'windows-x86_64' && intent.version === '0.1.21'
     ? require('./windows-021-release-qualification.cjs').PRODUCTION_KEY_SHA256
     : intent.platform === 'windows-x86_64' && intent.version === '0.1.20'
     ? require('./windows-020-release-qualification.cjs').PRODUCTION_KEY_SHA256 : reviewed.productionKeySha256;
@@ -114,14 +118,15 @@ if (require.main === module) {
     const { values: flags } = parseArgs({ options: { 'verify-imports': { type: 'boolean' }, release: { type: 'boolean' },
       receipt: { type: 'string' }, version: { type: 'string' }, platform: { type: 'string' }, sha256: { type: 'string' }, association: { type: 'string' }, 'verify-draft': { type: 'boolean' } } });
     if (!flags.release && ['receipt', 'version', 'platform', 'sha256', 'association', 'verify-draft'].some(key => flags[key] !== undefined)) throw Error('Qualification options require --release.');
-    if (flags.association !== undefined && !(flags.platform === 'windows-x86_64' && [WINDOWS_VERSION, '0.1.20', '0.1.21'].includes(flags.version))) throw Error(`Association applies only to qualified Windows releases.`);
-    if (flags.sha256 !== undefined && flags.platform !== 'linux-x86_64' && !(flags.platform === 'windows-x86_64' && [WINDOWS_VERSION, '0.1.20', '0.1.21'].includes(flags.version))) throw Error('Linux qualification digest requires linux-x86_64.');
+    if (flags.association !== undefined && !(flags.platform === 'windows-x86_64' && [WINDOWS_VERSION, '0.1.20', '0.1.21', '0.1.22'].includes(flags.version))) throw Error(`Association applies only to qualified Windows releases.`);
+    if (flags.sha256 !== undefined && flags.platform !== 'linux-x86_64' && !(flags.platform === 'windows-x86_64' && [WINDOWS_VERSION, '0.1.20', '0.1.21', '0.1.22'].includes(flags.version))) throw Error('Linux qualification digest requires linux-x86_64.');
     const manifest = JSON.parse(fs.readFileSync(path.join(root, 'modules/suite.json'), 'utf8'));
     const result = checkSources(root, manifest);
     if (flags['verify-imports']) verifyImports(root, manifest);
     if (flags.release) {
       const reviewed = assertReleaseReady(manifest, { receiptPath: flags.receipt, version: flags.version, platform: flags.platform, sha256: flags.sha256, association: flags.association });
       const verifier = flags.platform === 'linux-x86_64' ? require('./linux-016-release-qualification.cjs')
+        : flags.platform === 'windows-x86_64' && flags.version === '0.1.22' ? require('./windows-022-release-qualification.cjs')
         : flags.platform === 'windows-x86_64' && flags.version === '0.1.21' ? require('./windows-021-release-qualification.cjs')
         : flags.platform === 'windows-x86_64' && flags.version === '0.1.20' ? require('./windows-020-release-qualification.cjs')
         : flags.version === WINDOWS_VERSION ? require('./windows-016-release-qualification.cjs') : qualification;

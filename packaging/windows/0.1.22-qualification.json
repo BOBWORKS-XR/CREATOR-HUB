@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "kind": "windows-022-staged-qualification",
+  "version": "0.1.22",
+  "platform": "windows-x86_64",
+  "candidate": {
+    "sourceCommit": "8f7916161e993d8cfc3c200e98895dda865819c4",
+    "sourceTree": "78f73b22cbccf28c9ec8b6907de733e6343390e2",
+    "installerSha256": "2bd535e7f3ea90821bb97878e5d97bfa06a90ff0127bef28f8d8a64f2eb7deea",
+    "executableSha256": "73a2afa5cb2ff4fbfbb1d6458efa6d179441cb9336803228ffbc910ee3f94245"
+  },
+  "evidenceSha256": "a1fb6bb3c940deb73cf934dcf297edec72dbd757b3d74ed7d4dbcdb7672eb063",
+  "authorization": "staged-public-021-to-022-before-latest;client-protocol-inherited-021;no-new-live-ai",
+  "publicAcceptance": false,
+  "releaseReady": false,
+  "publicNotes": "New projects select the latest stable Creator SDK from verified registry metadata, with explicit retry or a tested fallback if lookup fails. Clearer updater installation messages, project-lock diagnostics and MCP connection status. Existing projects and preferences are preserved. New official builds are Windows only; older Mac/Linux releases and source remain available.",
+  "draft": {
+    "id": 442967050,
+    "assets": {
+      "Creator.Hub_0.1.22_x64-setup.exe": {
+        "id": 739544096,
+        "size": 38495864,
+        "sha256": "2bd535e7f3ea90821bb97878e5d97bfa06a90ff0127bef28f8d8a64f2eb7deea"
+      },
+      "Creator.Hub_0.1.22_x64-setup.exe.sig": {
+        "id": 739544102,
+        "size": 409,
+        "sha256": "2f818b677580ce2da6eb7f84dd06b2a7affa7f2c62bd273731e32b3362e6225b"
+      },
+      "creator-hub-windows-x86_64.json": {
+        "id": 739544100,
+        "size": 505,
+        "sha256": "45e2afdf21b49bf8da492f1f39da144eee1570d49dbc86a666114e8faf81bdea"
+      },
+      "creator-hub-windows-x86_64.json.minisig": {
+        "id": 739544105,
+        "size": 305,
+        "sha256": "a7bf55751fd3295f0fa37cbf59ca8492a08436c9ce5e4c2b19755081c2427869"
+      },
+      "latest.json": {
+        "id": 739544092,
+        "size": 1013,
+        "sha256": "0deb98984f136cf530e3d87df17f2d23f004b521329ab78b63f825fff59b99b3"
+      },
+      "SHA256SUMS.txt": {
+        "id": 739544140,
+        "size": 484,
+        "sha256": "70613887b04404570380062bfff9348a3b3cbc51621bcd527dc7041ecfc103d6"
+      }
+    }
+  }
+}

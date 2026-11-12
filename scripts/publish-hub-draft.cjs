@@ -8,8 +8,9 @@ const { verifyRemote } = require('./windows-release-qualification.cjs');
 const { parseArgs } = require('node:util');
 const { selectBaseline } = require('./self-update-baselines.cjs');
 const WINDOWS_VERSION = require('./windows-release-target.cjs').getTarget().version;
-const isFinalWindows = (version, platform) => platform === 'windows-x86_64' && [WINDOWS_VERSION, '0.1.20', '0.1.21'].includes(version);
-const finalVerifier = version => version === '0.1.21' ? require('./windows-021-release-qualification.cjs')
+const isFinalWindows = (version, platform) => platform === 'windows-x86_64' && [WINDOWS_VERSION, '0.1.20', '0.1.21', '0.1.22'].includes(version);
+const finalVerifier = version => version === '0.1.22' ? require('./windows-022-release-qualification.cjs')
+  : version === '0.1.21' ? require('./windows-021-release-qualification.cjs')
   : version === '0.1.20' ? require('./windows-020-release-qualification.cjs') : require('./windows-016-release-qualification.cjs');
 
 async function finishPublicRelease(version, actions = {}, options = {}) {
@@ -22,7 +23,8 @@ async function finishPublicRelease(version, actions = {}, options = {}) {
     || verified.draftId !== qualification.draft.id || verified.version !== version || verified.platform !== options.platform) {
     throw Error('Exact published qualification is required before public acceptance or promotion.');
   }
-  const publicReader = version === '0.1.21' ? './windows-021-public-acceptance.cjs'
+  const publicReader = version === '0.1.22' ? './windows-022-public-acceptance.cjs'
+    : version === '0.1.21' ? './windows-021-public-acceptance.cjs'
     : version === '0.1.20' ? './windows-020-public-acceptance.cjs'
     : version === '0.1.19' ? './windows-019-public-acceptance.cjs' : './windows-018-public-acceptance.cjs';
   const accepted = await (actions.verifyPublicAcceptance || require(publicReader).verify)(qualification, options);
