@@ -245,3 +245,23 @@ test('no local native command or PowerShell is needed by this test suite', () =>
   assert.ok(text.includes('target.assertFreshConnection(sdkRecords, [router, nodes[0]])'));
   assert.ok(text.includes('assert.equal(report.afterRoute.generation, target.binding.target.generation)'));
 });
+test('collector preserves exact 022 signature in all three cases without copying installers', () => {
+  const { spawnSync } = require('node:child_process');
+  const directory = fs.mkdtempSync(path.join(process.env.TEMP || __dirname, 'public-collector-regression-'));
+  const input = path.join(directory, 'artifacts/public-update-022-input');
+  fs.mkdirSync(input, { recursive: true });
+  const signature = Buffer.from('exact original signature bytes\r\n');
+  fs.writeFileSync(path.join(input, 'Creator.Hub_0.1.22_x64-setup.exe.sig'), signature);
+  fs.writeFileSync(path.join(input, 'Creator.Hub_0.1.21_x64-setup.exe.sig'), 'wrong version');
+  fs.writeFileSync(path.join(input, 'Creator.Hub_0.1.22_x64-setup.exe'), 'not collected');
+  for (const name of ['mcp-restore', 'setup-restore', 'setup-no-restore']) {
+    const result = spawnSync(process.execPath, [path.join(__dirname, 'collect-public-update-022.cjs')], {
+      cwd: directory, env: { ...process.env, CREATOR_OUTGOING_CASE: name }, timeout: 15000, windowsHide: true, encoding: 'utf8',
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const output = path.join(directory, 'artifacts/public-case', name);
+    assert.deepEqual(fs.readFileSync(path.join(output, 'Creator.Hub_0.1.22_x64-setup.exe.sig')), signature);
+    assert.equal(fs.existsSync(path.join(output, 'Creator.Hub_0.1.21_x64-setup.exe.sig')), false);
+    assert.equal(fs.existsSync(path.join(output, 'Creator.Hub_0.1.22_x64-setup.exe')), false);
+  }
+});

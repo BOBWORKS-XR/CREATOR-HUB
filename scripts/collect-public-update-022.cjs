@@ -12,7 +12,7 @@ const input = path.resolve('artifacts/public-update-022-input');
 for (const dir of [input, ...native.map(n => path.resolve('artifacts', n))]) {
   if (!fs.existsSync(dir)) continue;
   for (const file of fs.readdirSync(dir)) {
-    if (!/^(?:outgoing-report\.json|public-feed\.json|public-input-binding\.json|latest\.json|SHA256SUMS\.txt|creator-hub-windows-x86_64\.json(?:\.minisig)?|Creator\.Hub_0\.1\.21_x64-setup\.exe\.sig|[a-z-]+\.png|webview-policy\.json)$/.test(file)) continue;
+    if (!/^(?:outgoing-report\.json|public-feed\.json|public-input-binding\.json|latest\.json|SHA256SUMS\.txt|creator-hub-windows-x86_64\.json(?:\.minisig)?|Creator\.Hub_0\.1\.22_x64-setup\.exe\.sig|[a-z-]+\.png|webview-policy\.json)$/.test(file)) continue;
     const source = path.join(dir, file), st = fs.lstatSync(source);
     assert.ok(st.isFile() && !st.isSymbolicLink() && st.size <= 8 * 1024 * 1024);
     fs.copyFileSync(source, path.join(out, file), fs.constants.COPYFILE_EXCL);
