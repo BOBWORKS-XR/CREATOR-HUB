@@ -29,7 +29,7 @@ jobs:
       - name: Parse native helpers without running their bodies
         shell: pwsh
         run: |
-          ./scripts/windows-outgoing-019-binding-probe.ps1
+          & (Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe') -NoProfile -NonInteractive -File ./scripts/windows-outgoing-019-binding-probe.ps1
           if ($LASTEXITCODE -ne 0) { throw 'Inherited binding probe failed.' }
           $files=@('native-window.ps1','native-webview-policy.ps1','native-startup-diagnostics.ps1','native-outgoing-process-019.ps1')
           foreach($name in $files) {
