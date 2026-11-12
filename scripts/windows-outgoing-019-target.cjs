@@ -5,9 +5,9 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const feed = require('./self-update-outgoing-019-feed.cjs');
 const binding = require('./fixtures/windows-outgoing-019-binding.json');
-const KIND = 'direct-outgoing-020-021';
-const ASSET = 'Creator.Hub_0.1.21_x64-setup.exe';
-const BASELINE_ASSET = 'Creator.Hub_0.1.20_x64-setup.exe';
+const KIND = 'direct-outgoing-021-022';
+const ASSET = 'Creator.Hub_0.1.22_x64-setup.exe';
+const BASELINE_ASSET = 'Creator.Hub_0.1.21_x64-setup.exe';
 const CASES = Object.freeze({ 'mcp-restore': ['mcp', 'true'], 'setup-restore': ['setup', 'true'], 'setup-no-restore': ['setup', 'false'] });
 const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 const generation = module => hash(JSON.stringify({ executable: module.executable, version: module.version,
@@ -40,9 +40,9 @@ function source(value) {
   assert.ok(!SUPERSEDED_SOURCES.includes(value.commit), 'Published18, old lab19 and withdrawn19 source cannot qualify');
 }
 function validateBindingShape(value) {
-  assert.equal(value.schemaVersion, 1); assert.equal(value.enabled, true, 'Pending R2 base19/private20 pins: native admission refused');
+  assert.equal(value.schemaVersion, 1); assert.equal(value.enabled, true, 'Pending exact21/private22 pins: native admission refused');
   assert.equal(value.privateOnly, true); assert.equal(value.kind, KIND);
-  assert.equal(value.baseline.version, '0.1.20'); assert.equal(value.target.version, '0.1.21');
+  assert.equal(value.baseline.version, '0.1.21'); assert.equal(value.target.version, '0.1.22');
   assert.equal(value.baseline.asset, BASELINE_ASSET); assert.equal(value.target.asset, ASSET);
   for (const item of [value.baseline, value.target]) {
     source(item.source); pin(item.installer, 'installer'); pin(item.executable, 'executable');
@@ -68,17 +68,18 @@ function validateBindingShape(value) {
   assert.notEqual(value.baseline.source.tree, value.target.source.tree);
   assert.notEqual(value.baseline.installer.sha256, value.target.installer.sha256);
   assert.notEqual(value.baseline.executable.sha256, value.target.executable.sha256);
-  assert.notEqual(value.baseline.generation, value.target.generation);
-  assert.notEqual(value.baseline.manifest.modules.mcp.version, value.target.manifest.modules.mcp.version);
+  assert.equal(value.target.generation, generation(value.target.manifest.modules.mcp));
+  assert.equal(value.baseline.manifest.modules.mcp.version, value.target.manifest.modules.mcp.version);
+  for (const item of [value.baseline, value.target]) assert.equal(item.manifest.modules.setup.version, '0.3.7');
   assert.equal(value.target.manifest.modules.mcp.version, '2.7.9');
-  assert.equal(value.baseline.manifest.modules.mcp.version, '2.7.8');
+  assert.equal(value.baseline.manifest.modules.mcp.version, '2.7.9');
   for (const key of ['releaseId', 'assetId']) assert.ok(Number.isSafeInteger(value.baseline[key]) && value.baseline[key] > 0);
   for (const key of ['descriptor', 'descriptorSignature', 'latest']) pin(value.target[key], key, key === 'descriptorSignature' ? 4096 : 32768);
   const release = value.target.privateRelease;
   assert.ok(release && Number.isSafeInteger(release.id) && release.id > 0);
   assert.notEqual(value.baseline.releaseId, release.id);
   assert.equal(release.source, value.target.source.commit);
-  assert.match(release.tag, /^lab-windows-mcp-021-[a-z0-9-]+$/);
+  assert.match(release.tag, /^lab-windows-sdk-022-[a-z0-9-]+$/);
   const assetPins = { [ASSET]: value.target.installer, 'creator-hub-windows-x86_64.json': value.target.descriptor,
     'creator-hub-windows-x86_64.json.minisig': value.target.descriptorSignature, 'latest.json': value.target.latest };
   assert.deepEqual(Object.keys(release.assets).sort(), Object.keys(assetPins).sort());
@@ -89,7 +90,7 @@ function validateBindingShape(value) {
   }
   assert.equal(new Set(ids).size, ids.length);
   const q = value.fixtureQualification;
-  assert.equal(q.kind, 'outgoing21-candidate-only-verified'); assert.deepEqual(q.source, value.target.source);
+  assert.equal(q.kind, 'outgoing22-candidate-only-verified'); assert.deepEqual(q.source, value.target.source);
   assert.equal(q.sha256, value.target.verificationReceiptSha256);
   assert.equal(q.sourceUnchanged, true); assert.equal(q.buildExitCode, 0);
   assert.ok(Number.isSafeInteger(q.inputCount) && q.inputCount > 0); assert.equal(q.payloadFiles, 15);
@@ -104,8 +105,8 @@ function assertHost(env = process.env, platform = process.platform) {
   assert.equal(platform, 'win32');
   for (const [key, expected] of Object.entries({ GITHUB_ACTIONS: 'true', RUNNER_ENVIRONMENT: 'github-hosted', RUNNER_OS: 'Windows', RUNNER_ARCH: 'X64',
     GITHUB_REPOSITORY: 'BOBWORKS-XR/CREATOR-HUB', GITHUB_REPOSITORY_ID: '1364807512', GITHUB_EVENT_NAME: 'workflow_dispatch',
-    GITHUB_JOB: 'acceptance', GITHUB_REF: 'refs/heads/validation/windows-mcp-update-021-20261106',
-    GITHUB_WORKFLOW_REF: 'BOBWORKS-XR/CREATOR-HUB/.github/workflows/windows-outgoing-019.yml@refs/heads/validation/windows-mcp-update-021-20261106' })) assert.equal(env[key], expected, key);
+    GITHUB_JOB: 'acceptance', GITHUB_REF: 'refs/heads/validation/windows-sdk-update-022-20261111',
+    GITHUB_WORKFLOW_REF: 'BOBWORKS-XR/CREATOR-HUB/.github/workflows/windows-outgoing-019.yml@refs/heads/validation/windows-sdk-update-022-20261111' })) assert.equal(env[key], expected, key);
   assert.match(env.GITHUB_SHA || '', /^[a-f0-9]{40}$/); assert.equal(env.EXPECTED_HARNESS_COMMIT, env.GITHUB_SHA);
   assert.ok(Object.hasOwn(CASES, env.CREATOR_OUTGOING_CASE));
   assert.deepEqual([env.CREATOR_OUTGOING_LAST_TOOL, env.CREATOR_OUTGOING_RESTORE], CASES[env.CREATOR_OUTGOING_CASE]);
@@ -125,8 +126,8 @@ function assertAdmission(env = process.env, platform = process.platform) {
 function configFor(directory) {
   validateBinding(); assert.ok(path.isAbsolute(directory));
   return { schemaVersion: 1, kind: KIND, sourceCommit: binding.target.source.commit,
-    baseline: { version: '0.1.20', installer: binding.baseline.installer.sha256, exe: binding.baseline.executable.sha256 },
-    targetVersion: '0.1.21', directory, pins: { descriptor: binding.target.descriptor.sha256,
+    baseline: { version: '0.1.21', installer: binding.baseline.installer.sha256, exe: binding.baseline.executable.sha256 },
+    targetVersion: '0.1.22', directory, pins: { descriptor: binding.target.descriptor.sha256,
       descriptorSignature: binding.target.descriptorSignature.sha256, installer: binding.target.installer.sha256,
       executable: binding.target.executable.sha256, manifest: binding.target.latest.sha256 },
     runtime: { baselineDescriptor: binding.baseline.manifest.managedRouting.files['routing/runtime.json'],
@@ -162,7 +163,7 @@ function readHash(file, expected, relativePath = path.basename(file)) {
     throw error;
   }
 }
-function itemFor(version) { assert.ok(['0.1.20', '0.1.21'].includes(version)); return version === '0.1.20' ? binding.baseline : binding.target; }
+function itemFor(version) { assert.ok(['0.1.21', '0.1.22'].includes(version)); return version === '0.1.21' ? binding.baseline : binding.target; }
 function assertInstalledResources(directory, version) {
   const item = itemFor(version); readHash(path.join(directory, 'creator-hub.exe'), item.executable.sha256, 'creator-hub.exe');
   const files = { ...item.manifest.modules.mcp.files, ...item.manifest.modules.setup.files, ...item.manifest.managedRouting.files };
@@ -184,6 +185,27 @@ function assertActiveResources(local, version, value, current = true) {
   for (const [name, sha] of Object.entries(item.manifest.modules.mcp.files)) readHash(path.join(payloadRoot(local, version), name), sha);
   if (current) assert.deepEqual(JSON.parse(feed.readBounded(path.join(root, 'active.json'), 4096)), value);
 }
-module.exports = { KIND, ASSET, BASELINE_ASSET, CASES, binding, hash, generation, RESOURCE_PATHS, validateBindingShape, validateBinding, assertHost, assertAdmission,
+function assertFreshConnection(held, fresh) {
+  assert.equal(held.length, 2); assert.equal(fresh.length, 2);
+  for (const row of [...held, ...fresh]) {
+    assert.ok(Number.isSafeInteger(row.pid) && row.pid > 0);
+    assert.match(row.startTicks, /^[0-9]+$/); assert.ok(BigInt(row.startTicks) > 0n);
+    assert.equal(row.kernelIdentityVerified, true);
+  }
+  assert.equal(new Set([...held, ...fresh].map(row => row.pid)).size, 4, 'Genuinely new router and runtime required');
+  for (const rows of [held, fresh]) assert.equal(rows[1].parentPid, rows[0].pid);
+  const normalize = image => path.win32.normalize(image).toLowerCase();
+  assert.equal(normalize(fresh[0].image), normalize(held[0].image), 'Retained owned router required');
+  let root;
+  for (const [rows, item] of [[held, binding.baseline], [fresh, binding.target]]) {
+    const image = normalize(rows[1].image);
+    const suffix = normalize(path.win32.join('creator-hub/runtime-generations/windows-x86_64', item.generation, 'mcp/server/runtime/node.exe'));
+    assert.ok(path.win32.isAbsolute(image) && image.endsWith('\\' + suffix), 'Exact qualified generation runtime required');
+    const parent = image.slice(0, -suffix.length);
+    if (root === undefined) root = parent;
+    else assert.equal(parent, root, 'Same owned runtime root required');
+  }
+}
+module.exports = { assertFreshConnection, KIND, ASSET, BASELINE_ASSET, CASES, binding, hash, generation, RESOURCE_PATHS, validateBindingShape, validateBinding, assertHost, assertAdmission,
   configFor, assertBound, readConfig, loadContract, assertInstalledResources, assertGenerationProcess, assertActiveResources,
   readHash, readBounded: feed.readBounded, LIMITS: feed.LIMITS, assertRunner: assertHost, startLabProxy: feed.startLabProxy };
