@@ -1,7 +1,7 @@
-name: Windows exact20 to private21 restore and changed-generation acceptance
+name: Windows exact21 to private22 restore and qualified-MCP acceptance
 on:
   push:
-    branches: [validation/windows-mcp-update-021-20261106]
+    branches: [validation/windows-sdk-update-022-20261112-r4]
     paths:
       - .github/workflows/windows-outgoing-019.yml
       - scripts/windows-outgoing-019-*.cjs
@@ -25,7 +25,7 @@ permissions:
   contents: read
 jobs:
   preflight:
-    if: github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.ref == 'refs/heads/validation/windows-mcp-update-021-20261106'
+    if: github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.ref == 'refs/heads/validation/windows-sdk-update-022-20261112-r4'
     runs-on: windows-latest
     timeout-minutes: 5
     steps:
@@ -111,7 +111,7 @@ jobs:
       - name: Native update restore and held-router generation checks
         shell: pwsh
         run: |
-          $parameters=@{Outgoing019=$true;ContractPath=(Join-Path $PWD artifacts/outgoing-019/runner-config.json);BaselineInstallerPath=(Join-Path $PWD artifacts/outgoing-019/data/Creator.Hub_0.1.20_x64-setup.exe);TimeoutSeconds=480}
+          $parameters=@{Outgoing019=$true;ContractPath=(Join-Path $PWD artifacts/outgoing-019/runner-config.json);BaselineInstallerPath=(Join-Path $PWD artifacts/outgoing-019/data/Creator.Hub_0.1.21_x64-setup.exe);TimeoutSeconds=480}
           & ./scripts/native-self-update-outgoing-019.ps1 @parameters | Tee-Object -FilePath artifacts/outgoing-019/lifecycle.jsonl
           if ($LASTEXITCODE -ne 0) { throw 'Outgoing native lifecycle failed.' }
           $reports=@(Get-ChildItem -LiteralPath artifacts -Directory -Filter 'native-suite-*' | ForEach-Object { Get-ChildItem -LiteralPath $_.FullName -File -Filter outgoing-report.json })
