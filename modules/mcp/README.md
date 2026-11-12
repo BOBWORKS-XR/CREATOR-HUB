@@ -52,7 +52,7 @@ controls. Keep a backup and verify your own SDK/project workflow after upgrading
 - **Native Visual Scripting:** generates, validates, writes, imports, and checks Unity Visual Scripting graphs using a source-observed custom-node catalogue and SDK validator
 - **Experimental Shader Graph tooling:** inspects real nodes, slots, and targets, uses content hashes for concurrency, protects occupied inputs, and verifies rollback after failed writes
 - **Testing and diagnostics:** exposes compiler status, filtered Console logs, Unity Test Framework runs, screenshots, import status, package metadata, and bounded hierarchy queries
-- **Token-aware setup:** new installations expose a compact 25-tool core profile, with specialist capabilities available as opt-in profiles
+- **SDK-aware capabilities:** new Hub setups use Auto to select Altspace / Creator SDK, Banter, both, or Unity core from the chosen project. Existing manual profiles are kept; no SDK packages are changed. See [tool groups](docs/tool-groups.md).
 - **Optional feedback:** private project Markdown notes and consent-based usage check-ins; no automatic uploads or account access
 - **Release notifications:** manual checks, plus opt-in automatic stable-release checks; installation stays manual
 - **Low-overhead local bridge:** keeps command polling responsive without repeatedly serializing an unchanged scene hierarchy
@@ -61,7 +61,7 @@ controls. Keep a backup and verify your own SDK/project workflow after upgrading
 
 - **Less context spent on setup:** new configurations default to 25 core tools instead of all 53. This reduces measured tool-schema bytes by about 52%, not your total token bill. Existing Full selections stay Full.
 - **Smaller documentation and scene replies:** focused reference lookup includes corrections, and bounded inspection replies report omitted or missing data. Full references and larger explicit reads remain available.
-- **Keep specialist capabilities:** select **Full Unity + Banter** for every tool, or a focused Banter, Unity authoring, Testing, or Shader Graph profile, then reconnect the client. Full also benefits from bounded replies and focused references.
+- **Keep specialist capabilities:** select **All tools (high context)** for every tool, or a focused SDK, Unity authoring, Testing, or Shader Graph profile, then reconnect the client. All tools also benefits from bounded replies and focused references.
 - **More dependable Editor feedback:** identity-only component queries avoid serialized property dumps, missing properties are explicit, and compile waits account for domain reload. A pending command reports how to resume polling instead of encouraging duplicate edits.
 - **Complete-depth snapshots and clearer receipts:** full active-scene snapshots no longer drop children below depth 10. Query limits appear before the data, and create/modify results distinguish requested transforms from observed values.
 - **Long-command visibility:** dispatch records survive a blocked pipe reply or heartbeat. A dispatched status does not claim that an asynchronous build finished, or that a stalled process is still running.

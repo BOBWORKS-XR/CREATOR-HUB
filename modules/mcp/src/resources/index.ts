@@ -314,7 +314,16 @@ export function handleResourceRead(
         legacyEnvironmentVariable: "BANTWORKS_TOOL_GROUPS",
         default: "all",
         serverDefaultWhenUnset: "all",
-        launcherDefault: "core",
+        launcherDefault: "auto",
+        legacyLauncherDefaultWhenUnset: "core",
+        automaticSelection: {
+          scope: "Launcher preference only. Resolved from the selected project when applying client settings; never sent to the server as auto.",
+          creator: "core,creator",
+          banter: "core,banter",
+          hybrid: "core,banter,creator",
+          unityOnly: "core",
+          unknown: "No client change. Recheck the project or choose a manual profile.",
+        },
         specialValues: {
           all: "Expose all tools",
           none: "Expose only project routing and bridge health tools",
@@ -324,10 +333,13 @@ export function handleResourceRead(
           TOOL_GROUP_NAMES.map((group) => [group, [...TOOL_GROUP_MEMBERSHIP[group]]])
         ),
         launcherProfiles: {
+          automatic: "auto",
           tokenSaver: "core",
           full: "all",
           inspection: "read",
           banterWorkflow: "core,banter",
+          altspaceCreatorSdk: "core,creator",
+          altspaceAndBanter: "core,banter,creator",
           shaderGraphPreview: "core,shadergraph",
           unityAuthoring: "core,author",
           testing: "core,test",

@@ -10,10 +10,15 @@ async function open(page, options = {}) {
     const channels = ['Creator', 'Other'].map((name, index) => ({ id: String(index), name, unity_project_path: `/projects/${name}`, enabled: true }));
     window.savedConfig = { channels, active_channel_id: '0', mcp_server_path: '/private/server.mjs', tool_groups: 'core',
       auto_start: true, enable_custom_scripts: false, allow_all_tests: true, connection_guide_version: 1,
-      unrelated: { retain: ['exact', 'values'] } };
+      unrelated: { retain: ['exact', 'values'] }, ...options.config };
     window.bridgeStatuses = { '/projects/Creator': { installed: true, current: true }, '/projects/Other': { installed: true, current: false } };
     window.recoveryRecords = options.recovery || [];
-    const profile = { profile: 'creator', label: 'Creator SDK', packages: [] };
+    const profile = { profile: 'creator', label: 'Creator SDK', packages: [], recommendedToolGroups: 'core,creator' };
+    window.profiles = {
+      '/projects/Creator': profile,
+      '/projects/Other': { profile: 'banter', label: 'Banter SDK', packages: [], recommendedToolGroups: 'core,banter' },
+      ...options.profiles,
+    };
     const report = { status: 'current', backups: [], recovery: options.productRecovery || [] };
     window.__TAURI__ = {
       event: { listen: async () => () => {} },
@@ -37,12 +42,12 @@ async function open(page, options = {}) {
           case 'discover_unity_projects': return channels.map(channel => ({ name: channel.name, path: channel.unity_project_path }));
           case 'get_onboarding_status': return window.invalidStatus ? { runtime: { ready: true }, clients: [] } : {
             managedRouting: true, runtime: { ready: true },
-            project: fields.unityProjectPath ? { valid: true, bridgeInstalled: true, bridgeCurrent: true, stateStatus: 'fresh', sdkProfile: profile } : null,
+            project: fields.unityProjectPath ? { valid: true, bridgeInstalled: true, bridgeCurrent: true, stateStatus: 'fresh', sdkProfile: window.profiles[fields.unityProjectPath] } : null,
             clients: ['codex', 'claude', 'claudeDesktop', 'antigravity', 'opencode'].map(id => ({ id, detected: true, configured: true, supported: true })),
             unityCli: { canEnable: true, enabled: false, message: 'Optional Unity CLI' },
           };
           case 'get_unity_extension_status': return window.bridgeStatuses[fields.unityProjectPath];
-          case 'get_project_sdk_profile': return profile;
+          case 'get_project_sdk_profile': return window.profiles[fields.unityProjectPath];
           case 'get_project_feedback_settings': return { enabled: false, usageCheckIns: false, file: `${fields.unityProjectPath}/feedback.md` };
           case 'pending_client_recovery': return structuredClone(window.recoveryRecords);
           case 'recover_client_connection': {
@@ -79,6 +84,129 @@ const mutationCalls = page => page.evaluate(() => calls.filter(call => call.comm
   && /^(?:save_|one_click_setup$|add_project$|install_|update_|set_|remove_|review_|recover_)/.test(call.args.command)));
 const row = (page, name) => field(page, 'projects').locator(`[data-project-path="/projects/${name}"]`);
 const idle = page => expect(page.locator('#feature-mcp')).toHaveAttribute('aria-busy', 'false');
+
+test('Auto labels follow the checked SDK without changing stored preferences', async ({ page }) => {
+  await open(page, { config: { tool_groups: 'auto' } });
+  await page.getByText('Advanced settings', { exact: true }).click();
+  await expect(field(page, 'groups')).toHaveValue('auto');
+  await expect(field(page, 'capability-status')).toHaveText('Detected: Altspace / Creator SDK');
+  await expect(field(page, 'groups').locator('option[value="all"]')).toHaveText('All tools (high context)');
+  await field(page, 'discovered').selectOption('/projects/Other'); await idle(page);
+  await expect(field(page, 'capability-status')).toHaveText('Detected: Banter');
+  await expect(field(page, 'groups').locator('option[value="auto"]')).toHaveText('Auto: Banter');
+  expect(await mutationCalls(page)).toEqual([]);
+  expect(await page.evaluate(() => savedConfig.tool_groups)).toBe('auto');
+});
+
+for (const [profile, groups, label] of [
+  ['hybrid', 'core,banter,creator', 'Altspace + Banter'],
+  ['none', 'core', 'Unity core'],
+]) test(`Auto describes ${profile} accurately`, async ({ page }) => {
+  await open(page, { config: { tool_groups: 'auto' }, profiles: {
+    '/projects/Creator': { profile, recommendedToolGroups: groups, label },
+  } });
+  await expect(field(page, 'capability-status')).toHaveText(`Detected: ${label}`);
+  await expect(field(page, 'setup')).toBeEnabled();
+  expect(await mutationCalls(page)).toEqual([]);
+});
+
+test('unverified Auto blocks client changes and offers manual recovery without other preference writes', async ({ page }) => {
+  await open(page, { config: { tool_groups: 'auto', auto_start: false }, profiles: {
+    '/projects/Creator': { profile: 'unknown', error: 'Invalid metadata', recommendedToolGroups: null },
+  } });
+  await page.getByText('Advanced settings', { exact: true }).click();
+  await expect(field(page, 'capability-status')).toContainText('Check the connection again or choose a manual');
+  await expect(field(page, 'setup')).toBeDisabled();
+  await page.getByRole('button', { name: 'Apply to Codex', exact: true }).dispatchEvent('click'); await idle(page);
+  expect(await commands(page, 'update_codex_mcp_config')).toEqual([]);
+  await field(page, 'groups').selectOption('core,creator');
+  await expect(field(page, 'setup')).toBeDisabled();
+  await field(page, 'save').click(); await idle(page);
+  await expect(field(page, 'setup')).toBeEnabled();
+  expect(await page.evaluate(() => savedConfig.tool_groups)).toBe('core,creator');
+  expect(await commands(page, 'set_unity_custom_scripts')).toEqual([]);
+  expect(await commands(page, 'set_unity_allow_all_tests')).toEqual([]);
+  const saved = await page.evaluate(() => savedConfig);
+  expect(saved.unrelated).toEqual({ retain: ['exact', 'values'] });
+  expect(saved.channels).toHaveLength(2);
+});
+
+test('manual profiles stay manual across SDK changes and project selection', async ({ page }) => {
+  await open(page, { config: { tool_groups: 'read' } });
+  await page.getByText('Advanced settings', { exact: true }).click();
+  await page.getByRole('button', { name: 'Select Other for MCP', exact: true }).click(); await idle(page);
+  await expect(field(page, 'groups')).toHaveValue('read');
+  await expect(field(page, 'capability-status')).toHaveText('Manual: Inspection');
+  const updates = await commands(page, 'update_codex_mcp_config');
+  expect(updates.at(-1).args.args.toolGroups).toBe('read');
+  expect(await page.evaluate(() => savedConfig.tool_groups)).toBe('read');
+});
+
+test('Auto follows explicit project selection only when enabled', async ({ page }) => {
+  await open(page, { config: { tool_groups: 'auto', auto_start: false } });
+  await page.getByRole('button', { name: 'Select Other for MCP', exact: true }).click(); await idle(page);
+  expect(await commands(page, 'update_codex_mcp_config')).toEqual([]);
+  await page.getByText('Advanced settings', { exact: true }).click();
+  await field(page, 'follow').check(); await field(page, 'save').click(); await idle(page);
+  const updates = await commands(page, 'update_codex_mcp_config');
+  expect(updates.at(-1).args.args.toolGroups).toBe('auto');
+  expect(updates.at(-1).args.args.channel.unity_project_path).toBe('/projects/Other');
+  expect(await page.evaluate(() => savedConfig.tool_groups)).toBe('auto');
+});
+
+test('a late response cannot restore Auto readiness after the project changed', async ({ page }) => {
+  await open(page, { config: { tool_groups: 'auto' } });
+  await page.evaluate(() => { window.hold = 'get_onboarding_status'; });
+  await field(page, 'check').click(); await page.waitForFunction(() => pending.get_onboarding_status);
+  await field(page, 'project').evaluate(input => {
+    input.value = '/projects/Other'; input.dispatchEvent(new Event('input'));
+  });
+  await page.evaluate(() => { window.hold = null; pending.get_onboarding_status(); }); await idle(page);
+  await expect(field(page, 'setup')).toBeDisabled();
+  await expect(field(page, 'capability-status')).toContainText('SDK not verified');
+  await field(page, 'check').click(); await idle(page);
+  await expect(field(page, 'capability-status')).toHaveText('Detected: Banter');
+  expect(await mutationCalls(page)).toEqual([]);
+});
+
+test('saving Auto follows the active project, not an unknown SDK draft', async ({ page }) => {
+  await open(page, { profiles: { '/projects/Other': { profile: 'unknown', error: 'Invalid metadata', recommendedToolGroups: null } } });
+  await field(page, 'discovered').selectOption('/projects/Other'); await idle(page);
+  await page.getByText('Advanced settings', { exact: true }).click();
+  await field(page, 'groups').selectOption('auto');
+  await field(page, 'save').click(); await idle(page);
+  const updates = await commands(page, 'update_codex_mcp_config');
+  expect(updates).toHaveLength(1);
+  expect(updates[0].args.args.channel.unity_project_path).toBe('/projects/Creator');
+  expect(updates[0].args.args.toolGroups).toBe('auto');
+  expect(await page.evaluate(() => savedConfig.active_channel_id)).toBe('0');
+  await expect(field(page, 'project')).toHaveValue('/projects/Other');
+});
+
+test('failed capability save readback keeps the stored manual profile', async ({ page }) => {
+  await open(page);
+  await page.getByText('Advanced settings', { exact: true }).click();
+  await field(page, 'groups').selectOption('auto');
+  await page.evaluate(() => { window.failNext = 'save_config'; });
+  await field(page, 'save').click(); await idle(page);
+  expect(await page.evaluate(() => savedConfig.tool_groups)).toBe('core');
+  expect(await commands(page, 'update_codex_mcp_config')).toEqual([]);
+  await expect(field(page, 'error')).toContainText('save_config');
+});
+
+for (const width of [1100, 320]) test(`Auto and manual capability labels fit at ${width}px`, async ({ page }, testInfo) => {
+  await page.setViewportSize({ width, height: 900 });
+  await open(page, { config: { tool_groups: 'auto' } });
+  await page.getByText('Advanced settings', { exact: true }).click();
+  await field(page, 'groups').scrollIntoViewIfNeeded();
+  await expect(field(page, 'groups')).toBeVisible();
+  const bounds = await field(page, 'groups').boundingBox();
+  expect(bounds.x).toBeGreaterThanOrEqual(0);
+  expect(bounds.x + bounds.width).toBeLessThanOrEqual(width);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
+  await page.screenshot({ path: testInfo.outputPath(`capabilities-${width}.png`) });
+});
+
 test('recent saved state does not claim a live Unity connection', async ({ page }) => {
   await open(page);
   await expect(field(page, 'checks')).toContainText('Recent Unity state found');

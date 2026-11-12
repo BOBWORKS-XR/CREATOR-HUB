@@ -7,6 +7,10 @@ async function load(page, launchView = 'hub', options = {}) {
   await page.addInitScript(({ launchView, options }) => {
     if (!options.freshTerms) localStorage.setItem('creator-usage-terms.hub', JSON.stringify({ policyVersion: '2026-09-28-v1', acceptedAt: '2026-09-28T00:00:00.000Z' }));
     for (const [key, value] of Object.entries(options.preferences || {})) localStorage.setItem(key, value);
+    if (options.platform) {
+      Object.defineProperty(navigator, 'userAgentData', { value: { platform: options.platform } });
+      Object.defineProperty(navigator, 'platform', { value: options.platform });
+    }
     window.calls = [];
     window.events = {};
     window.hubUpdate = { currentVersion: '0.1.0-alpha.3', availableVersion: null, downloaded: false };
@@ -25,6 +29,9 @@ async function load(page, launchView = 'hub', options = {}) {
         return window.inventory;
       }
       if (command === 'hub_update_status') return window.hubUpdate;
+      if (command === options.hubAction) return new Promise((resolve, reject) => {
+        window.finishHubAction = () => reject(options.hubActionError);
+      });
       if (command === 'download_hub_update') { window.hubUpdate.downloaded = true; return 'Hub update downloaded.'; }
       if (window.failOpen) throw 'Browser is unavailable.';
       if (window.failAction) throw window.failAction;
@@ -346,7 +353,35 @@ test('Hub test updates download in-app but only install after the Update Hub cli
   expect(await page.evaluate(() => window.calls.filter(c => c.command === 'hub_update_status').every(c => c.args.preview))).toBe(true);
   await page.locator('#hub-update-button').click();
   expect(await page.evaluate(() => window.calls.filter(c => c.command === 'install_hub_update'))).toEqual([{ command: 'install_hub_update', args: { version: '0.1.0-alpha.4', restoreViews: true } }]);
+  await expect(page.locator('#operation-progress')).toBeVisible();
+  await expect(page.locator('#progress-message')).toHaveText('Operation complete.');
   expect(await page.evaluate(() => window.calls.some(c => c.command === 'open_resource'))).toBe(false);
+});
+
+for (const command of ['download_hub_update', 'install_hub_update']) for (const outcome of ['failed', 'cancelled']) test(`Hub ${command} ${outcome} clears active progress and allows retry`, async ({ page }) => {
+  const message = outcome === 'cancelled' ? 'Hub update cancelled.' : 'Hub could not complete its update. Retry from the installed app.';
+  await load(page, 'hub', { hubAction: command, hubActionError: message });
+  await page.evaluate(downloaded => Object.assign(window.hubUpdate, { availableVersion: '0.1.0-alpha.4', downloaded }), command === 'install_hub_update');
+  await page.locator('#check-updates').click();
+  if (command === 'install_hub_update') await page.locator('#hub-update-button').click();
+  await expect.poll(() => page.evaluate(() => typeof window.finishHubAction)).toBe('function');
+  const downloading = command === 'download_hub_update' || outcome === 'cancelled';
+  const progressMessage = downloading ? 'Downloading Creator Hub 0.1.0-alpha.4' : 'Restarting Hub to install the update...';
+  await page.evaluate(({ message, downloading }) => window.events['app-progress']({ payload: {
+    message, received: downloading ? 1048576 : 0, total: downloading ? 2097152 : 0, cancellable: downloading,
+  } }), { message: progressMessage, downloading });
+  await expect(page.locator('#operation-progress')).toBeVisible();
+  await expect(page.locator('#progress-message')).toHaveText(progressMessage);
+  await expect(page.locator('#hub-update-button')).toBeDisabled();
+  if (outcome === 'cancelled') await page.locator('#cancel-download').click();
+  await page.evaluate(() => window.finishHubAction());
+  await expect(page.locator('#action-error')).toBeVisible();
+  await expect(page.locator('#action-error')).toHaveText(message);
+  await expect(page.locator('#operation-progress')).toBeHidden();
+  await expect(page.locator('#cancel-download')).toBeHidden();
+  await expect(page.locator('#hub-update-button')).toBeEnabled();
+  expect(await page.evaluate(command => window.calls.filter(call => call.command === command).length, command)).toBe(1);
+  if (command === 'download_hub_update') expect(await page.evaluate(() => window.calls.some(call => call.command === 'install_hub_update'))).toBe(false);
 });
 
 test('an app requiring newer Hub points to Hub updates and keeps existing apps openable', async ({ page }) => {
@@ -373,6 +408,58 @@ test('blocked or offline Hub updates remain in-app and never run an installer', 
   await expect(page.locator('#hub-update-warning')).toHaveText('This test copy cannot upgrade.');
   await expect(page.locator('#hub-update-button')).toBeDisabled();
   expect(await page.evaluate(() => window.calls.some(c => ['download_hub_update', 'install_hub_update', 'open_resource'].includes(c.command)))).toBe(false);
+});
+
+for (const width of [940, 320]) test(`blocked Windows Hub offers official installer only after explicit click at ${width}px`, async ({ page }, testInfo) => {
+  await page.setViewportSize({ width, height: 720 });
+  await load(page, 'hub', { platform: 'Windows' });
+  await page.evaluate(() => Object.assign(window.hubUpdate, { availableVersion: '0.1.0-alpha.4', installBlocked: 'Windows records a different Hub version. Updating is paused.' }));
+  await page.locator('#check-updates').click();
+  const fallback = page.locator('#hub-update-fallback');
+  const installer = page.getByRole('button', { name: 'Get official installer', exact: true });
+  await expect(fallback).toBeVisible();
+  await expect(installer).toBeEnabled();
+  await expect(installer).toHaveAttribute('data-resource', 'hub-releases');
+  await expect(fallback).toContainText('existing folder');
+  await expect(fallback).toContainText('keep app data');
+  await expect(page.locator('#hub-update-button')).toBeDisabled();
+  expect(await page.evaluate(() => window.calls.some(c => ['open_resource', 'download_hub_update', 'install_hub_update'].includes(c.command)))).toBe(false);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.locator('.hub-update').screenshot({ path: testInfo.outputPath('hub-official-installer-fallback.png') });
+  await expect(installer).toBeInViewport();
+  await installer.click();
+  expect(await page.evaluate(() => window.calls.filter(c => c.command === 'open_resource'))).toEqual([{ command: 'open_resource', args: { resource: 'hub-releases' } }]);
+  expect(await page.evaluate(() => window.calls.some(c => ['download_hub_update', 'install_hub_update', 'install_app'].includes(c.command)))).toBe(false);
+  await expect(page.locator('#hub-update-button')).toBeDisabled();
+  await expect(page.locator('#hub-update-warning')).toHaveText('Windows records a different Hub version. Updating is paused.');
+  await page.evaluate(() => Object.assign(window.hubUpdate, { installBlocked: null, downloaded: true }));
+  await page.locator('#check-updates').click();
+  await expect(fallback).toBeHidden();
+  await expect(page.locator('#hub-update-button')).toBeEnabled();
+});
+
+test('official installer fallback stays hidden for normal Windows updates and check warnings', async ({ page }) => {
+  await load(page, 'hub', { platform: 'Windows' });
+  await expect(page.locator('#hub-update-fallback')).toBeHidden();
+  for (const state of [
+    { availableVersion: '0.1.0-alpha.4', downloaded: true },
+    { availableVersion: null, warning: 'Connection unavailable.' },
+  ]) {
+    await page.evaluate(state => Object.assign(window.hubUpdate, state), state);
+    await page.locator('#check-updates').click();
+    await expect(page.locator('#hub-update-fallback')).toBeHidden();
+  }
+  expect(await page.evaluate(() => window.calls.some(c => c.command === 'open_resource'))).toBe(false);
+});
+
+for (const platform of ['Linux', 'macOS']) test(`blocked ${platform} Hub does not offer a Windows installer`, async ({ page }) => {
+  await load(page, 'hub', { platform });
+  await page.evaluate(() => Object.assign(window.hubUpdate, { availableVersion: '0.1.0-alpha.4', installBlocked: 'This platform needs its own update recovery.' }));
+  await page.locator('#check-updates').click();
+  await expect(page.locator('#hub-update-fallback')).toBeHidden();
+  await expect(page.locator('#hub-update-button')).toBeDisabled();
+  await expect(page.locator('#hub-update-warning')).toHaveText('This platform needs its own update recovery.');
+  expect(await page.evaluate(() => window.calls.some(c => ['open_resource', 'download_hub_update', 'install_hub_update'].includes(c.command)))).toBe(false);
 });
 
 for (const width of [940, 390]) for (const updateAvailable of [false, true]) test(`mismatched hosted Setup gives update guidance and preserves standalone opening (update ${updateAvailable}, ${width}px)`, async ({ page }, testInfo) => {

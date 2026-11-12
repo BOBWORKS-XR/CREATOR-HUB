@@ -503,6 +503,10 @@ function updateSetupStatus() {
     !selectedProjectPath ? 'Not selected' : (project?.valid ? 'Valid' : 'Invalid'));
 
   const sdkProfile = project?.sdkProfile;
+  const autoOption = Array.from(elements.toolGroups.options).find(item => item.value === 'auto');
+  const sdkLabels = { creator: 'Altspace / Creator SDK', banter: 'Banter', hybrid: 'Altspace + Banter', none: 'Unity core' };
+  if (autoOption) autoOption.textContent = project?.valid && !sdkProfile?.error && sdkProfile?.recommendedToolGroups && sdkLabels[sdkProfile.profile]
+    ? 'Auto: ' + sdkLabels[sdkProfile.profile] : 'Auto (project SDK)';
   let sdkState = 'pending';
   let sdkText = 'Not selected';
   if (selectedProjectPath && sdkProfile) {

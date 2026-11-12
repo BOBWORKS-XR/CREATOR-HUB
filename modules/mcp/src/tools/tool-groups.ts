@@ -1,4 +1,4 @@
-export const TOOL_GROUP_NAMES = ["core", "read", "author", "test", "banter", "shadergraph"] as const;
+export const TOOL_GROUP_NAMES = ["core", "read", "author", "test", "banter", "shadergraph", "creator"] as const;
 
 export type ToolGroupName = typeof TOOL_GROUP_NAMES[number];
 export type ToolGroupSelection = "all" | ReadonlySet<ToolGroupName>;
@@ -130,6 +130,17 @@ export const TOOL_GROUP_MEMBERSHIP: Readonly<Record<ToolGroupName, ReadonlySet<s
     "add_shader_graph_node",
     "connect_shader_graph_nodes",
     "validate_shader_graph",
+  ]),
+  creator: new Set([
+    "get_mcp_reference",
+    "lookup_creator_docs",
+    "search_sidequest_vs_nodes",
+    "validate_vs_graph",
+    "generate_vs_graph",
+    "write_vs_graph",
+    "validate_vs_graph_in_unity",
+    "validate_banter_visual_scripting",
+    "get_banter_sdk_info",
   ]),
 };
 

@@ -18,6 +18,7 @@
 !macro CheckIfAppIsRunning executableName productName
   ; Tauri launches /UPDATE immediately before exiting. Allow that exit to
   ; finish, but never bypass the same running-app guard or terminate a process.
+  ${Do}
   Push $2
   Push $3
   InitPluginsDir
@@ -35,11 +36,13 @@
   Pop $3
   Pop $2
   ${If} $0 != "0"
-    MessageBox MB_ICONSTOP|MB_OK \
-      "Close Creator Hub before continuing.$\r$\n$\r$\nSave your work, close any old Hub preview windows, then run this installer again. Your other apps can stay open.$\r$\n$\r$\nIf Hub is already closed, the safety check failed. Nothing was installed." /SD IDOK
+    ; Retry skips only the cancel exit below and repeats the exact safety check.
+    MessageBox MB_ICONSTOP|MB_RETRYCANCEL \
+      "Creator Hub could not continue the installation.$\r$\n$\r$\nSave your work and close Creator Hub, including preview windows, then choose Retry. Your other apps can stay open.$\r$\n$\r$\nIf Hub is already closed, choose Cancel and reopen your installed Hub. No app data is removed by this check." /SD IDCANCEL IDRETRY +3
     SetErrorLevel 10
     Abort
   ${EndIf}
+  ${LoopUntil} $0 == "0"
 !macroend
 
 ; The legacy uninstall page can run before the install section.

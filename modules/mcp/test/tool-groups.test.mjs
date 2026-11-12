@@ -32,7 +32,9 @@ test("tool group resource is generated from the enforced membership", () => {
 
   assert.equal(payload.default, "all");
   assert.equal(payload.serverDefaultWhenUnset, "all");
-  assert.equal(payload.launcherDefault, "core");
+  assert.equal(payload.launcherDefault, "auto");
+  assert.equal(payload.legacyLauncherDefaultWhenUnset, "core");
+  assert.equal(payload.automaticSelection.creator, "core,creator");
   assert.deepEqual(payload.alwaysAvailable.sort(), [...ALWAYS_AVAILABLE_TOOLS].sort());
   for (const group of TOOL_GROUP_NAMES) {
     assert.deepEqual(payload.groups[group].sort(), [...TOOL_GROUP_MEMBERSHIP[group]].sort());
@@ -51,7 +53,21 @@ test("tool group parsing is composable and rejects ambiguous configuration", () 
   assert.throws(() => parseToolGroupSelection("all,read"), /cannot combine/i);
   assert.throws(() => parseToolGroupSelection("none,test"), /cannot combine/i);
   assert.throws(() => parseToolGroupSelection("admin"), /Unknown CREATOR_WORKS_TOOL_GROUPS/);
+  assert.throws(() => parseToolGroupSelection("auto"), /Unknown CREATOR_WORKS_TOOL_GROUPS/);
   assert.throws(() => parseToolGroupSelection(",,,"), /must contain/);
+});
+
+test("Altspace exposes shared SDK graph tools without Banter WebRoot JavaScript", () => {
+  const names = value => new Set(registerTools(parseToolGroupSelection(value)).map(tool => tool.name));
+  const creator = names('core,creator');
+  const banter = names('core,banter');
+  const hybrid = names('core,banter,creator');
+  for (const name of TOOL_GROUP_MEMBERSHIP.creator) assert.ok(creator.has(name), name);
+  assert.ok(!creator.has('write_webroot_js'));
+  assert.ok(banter.has('write_webroot_js'));
+  assert.deepEqual([...hybrid].sort(), [...banter].sort());
+  assert.deepEqual([...TOOL_GROUP_MEMBERSHIP.creator].sort(),
+    [...TOOL_GROUP_MEMBERSHIP.banter].filter(name => name !== 'write_webroot_js').sort());
 });
 
 test("limited selections retain project routing and expose only selected capabilities", () => {

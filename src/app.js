@@ -347,6 +347,7 @@
       : hubUpdate.warning ? 'Could not check for a Hub update.' : `You are using Hub ${hubUpdate.currentVersion}. No newer update was found.`;
     byId('hub-update-warning').textContent = hubUpdate?.installBlocked || hubUpdate?.warning || '';
     byId('hub-update-warning').classList.toggle('hidden', !byId('hub-update-warning').textContent);
+    byId('hub-update-fallback').classList.toggle('hidden', platformLabel() !== 'Windows' || !hubUpdate?.installBlocked);
     byId('hub-update-review').classList.toggle('hidden', !updateRecovery || retainedUpdate?.retained !== true);
     byId('hub-update-review').disabled = busy;
     for (const app of inventory?.apps || []) {
@@ -579,7 +580,10 @@
     try {
       const message = await invoke(command, { version: hubUpdate.availableVersion, restoreViews: byId('restore-hosted-views').checked });
       setProgress({ message, total: 0, cancellable: false });
-    } catch (reason) { error.textContent = String(reason); error.classList.remove('hidden'); }
+    } catch (reason) {
+      byId('operation-progress').classList.add('hidden');
+      error.textContent = String(reason); error.classList.remove('hidden');
+    }
     finally {
       byId('cancel-download').classList.add('hidden');
       if (command === 'install_hub_update') await restoreHostedViews();

@@ -301,6 +301,7 @@ fn resource_url(resource: &str) -> Option<&'static str> {
     match resource {
         "mcp-releases" => Some("https://github.com/BOBWORKS-XR/CREATOR-WORKS-UNITY-MCP/releases"),
         "setup-releases" => Some("https://github.com/BOBWORKS-XR/CREATOR-PROJECT-SETUP/releases"),
+        "hub-releases" => Some("https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/latest"),
         "mcp-source" => Some("https://github.com/BOBWORKS-XR/CREATOR-WORKS-UNITY-MCP"),
         "setup-source" => Some("https://github.com/BOBWORKS-XR/CREATOR-PROJECT-SETUP"),
         "hub-plan" => Some("https://github.com/BOBWORKS-XR/CREATOR-PROJECT-SETUP/blob/master/docs/CREATOR-HUB-PLAN.md"),
@@ -635,9 +636,11 @@ mod tests {
 
     #[test]
     fn only_named_public_resources_are_accepted() {
+        assert_eq!(resource_url("hub-releases"), Some("https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/latest"));
         for id in [
             "mcp-releases",
             "setup-releases",
+            "hub-releases",
             "mcp-source",
             "setup-source",
             "hub-plan",

@@ -1,5 +1,8 @@
 //! MCP operations shared by the standalone launcher and Creator Hub.
 
+mod capability_profiles;
+#[cfg(test)]
+mod capability_profiles_tests;
 mod claude_desktop;
 mod client_migration;
 mod client_ownership;
@@ -146,6 +149,7 @@ struct SdkProfileStatus {
     legacy_banter: bool,
     packages: Vec<SdkPackageStatus>,
     error: Option<String>,
+    recommended_tool_groups: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -189,55 +193,7 @@ fn default_tool_groups() -> String {
 }
 
 fn normalize_tool_groups(value: &str) -> Result<String, String> {
-    let value = value.trim().to_ascii_lowercase();
-    if value.is_empty() {
-        return Ok(default_tool_groups());
-    }
-    if value == "all" {
-        return Ok("all".to_string());
-    }
-
-    let mut entries: Vec<&str> = value
-        .split(',')
-        .map(str::trim)
-        .filter(|entry| !entry.is_empty())
-        .collect();
-    entries.sort_unstable();
-    entries.dedup();
-
-    if entries.is_empty() {
-        return Err(
-            "Tool groups must contain all, none, core, read, author, test, banter, or shadergraph"
-                .to_string(),
-        );
-    }
-
-    if entries.contains(&"all") || entries.contains(&"none") {
-        if entries.len() != 1 {
-            return Err("Tool groups cannot combine 'all' or 'none' with other groups".to_string());
-        }
-        return Ok(entries[0].to_string());
-    }
-
-    const KNOWN_GROUPS: [&str; 6] = ["core", "read", "author", "test", "banter", "shadergraph"];
-    let unknown: Vec<&str> = entries
-        .iter()
-        .copied()
-        .filter(|entry| !KNOWN_GROUPS.contains(entry))
-        .collect();
-    if !unknown.is_empty() {
-        return Err(format!(
-            "Unknown tool groups: {}. Use all, none, core, read, author, test, banter, or shadergraph",
-            unknown.join(", ")
-        ));
-    }
-
-    Ok(KNOWN_GROUPS
-        .iter()
-        .copied()
-        .filter(|group| entries.contains(group))
-        .collect::<Vec<_>>()
-        .join(","))
+    capability_profiles::normalize(value)
 }
 
 fn find_mcp_server_path(root: &Path) -> Option<PathBuf> {
@@ -808,7 +764,7 @@ fn default_launcher_config(server: PathBuf) -> LauncherConfig {
         auto_start: false,
         enable_custom_scripts: false,
         allow_all_tests: true,
-        tool_groups: default_tool_groups(),
+        tool_groups: capability_profiles::NEW_SETUP_SELECTION.into(),
         automatic_update_checks: false,
         extra: Default::default(),
     }
@@ -1114,7 +1070,7 @@ fn build_claude_mcp_config(
 
     let mut env = serde_json::json!({
         "UNITY_PROJECT_PATH": channel.unity_project_path,
-        TOOL_GROUPS_ENV: normalize_tool_groups(tool_groups)?,
+        TOOL_GROUPS_ENV: resolve_project_tool_groups(tool_groups, Path::new(&channel.unity_project_path))?,
         client_ownership::OWNER_KEY: client_ownership::OWNER
     });
     if let Some(scene) = &channel.scene_path {
@@ -1189,11 +1145,15 @@ fn desktop_entry(
         .to_string_lossy()
         .into_owned();
     let (command, server) = managed_client::target(app, &physical)?;
+    desktop_entry_for_target(channel, &command, &server, groups)
+}
+
+fn desktop_entry_for_target(channel: &ProjectChannel, command: &str, server: &str, groups: &str) -> Result<serde_json::Value, String> {
     Ok(serde_json::json!({
         "command": command,
-        "args": managed_client::arguments(&server),
+        "args": managed_client::arguments(server),
         "env": {"UNITY_PROJECT_PATH": channel.unity_project_path,
-            TOOL_GROUPS_ENV: normalize_tool_groups(groups)?, "CREATOR_WORKS_CONFIG_OWNER": "creator-hub-v1"}
+            TOOL_GROUPS_ENV: resolve_project_tool_groups(groups, Path::new(&channel.unity_project_path))?, "CREATOR_WORKS_CONFIG_OWNER": "creator-hub-v1"}
     }))
 }
 
@@ -1248,7 +1208,7 @@ fn build_codex_mcp_config(
         Some((&node_command.replace('\\', "/"), mcp_server_path)),
     )
     .map_err(|error| format!("Codex: {error}"))?;
-    let tool_groups = normalize_tool_groups(tool_groups)?;
+    let tool_groups = resolve_project_tool_groups(tool_groups, Path::new(&channel.unity_project_path))?;
     let existing = remove_client_mcp_tables(existing, MCP_CLIENT_ID)?;
     let existing = remove_client_mcp_tables(&existing, LEGACY_MCP_CLIENT_ID)?;
     let mut document = existing
@@ -1474,7 +1434,7 @@ fn build_antigravity_mcp_config(
 
     let mut env = serde_json::json!({
         "UNITY_PROJECT_PATH": channel.unity_project_path,
-        TOOL_GROUPS_ENV: normalize_tool_groups(tool_groups)?,
+        TOOL_GROUPS_ENV: resolve_project_tool_groups(tool_groups, Path::new(&channel.unity_project_path))?,
         client_ownership::OWNER_KEY: client_ownership::OWNER
     });
     if let Some(scene) = &channel.scene_path {
@@ -1629,7 +1589,7 @@ fn build_opencode_mcp_config(
 
     let mut environment = serde_json::json!({
         "UNITY_PROJECT_PATH": channel.unity_project_path,
-        TOOL_GROUPS_ENV: normalize_tool_groups(tool_groups)?,
+        TOOL_GROUPS_ENV: resolve_project_tool_groups(tool_groups, Path::new(&channel.unity_project_path))?,
         client_ownership::OWNER_KEY: client_ownership::OWNER
     });
     if let Some(scene) = &channel.scene_path {
@@ -2144,60 +2104,79 @@ fn project_sdk_profile(project_path: &Path) -> SdkProfileStatus {
     const CREATOR_PACKAGE: &str = "com.sidequest.creator-sdk";
     const BANTER_PACKAGE: &str = "com.sidequest.banter";
 
-    let manifest_path = project_path.join("Packages").join("manifest.json");
-    let manifest_source = match fs::read_to_string(&manifest_path) {
-        Ok(source) => source,
-        Err(error) => {
-            return SdkProfileStatus {
-                profile: "unknown".to_string(),
-                label: "SDK unknown".to_string(),
-                creator_sdk: false,
-                legacy_banter: false,
-                packages: Vec::new(),
-                error: Some(format!(
-                    "Could not read {}: {}",
-                    manifest_path.display(),
-                    error
-                )),
+    let unknown = |error: String| SdkProfileStatus {
+        profile: "unknown".into(), label: "SDK unknown".into(),
+        creator_sdk: false, legacy_banter: false, packages: Vec::new(),
+        error: Some(error), recommended_tool_groups: None,
+    };
+    let metadata = |name: &str, required: bool| -> Result<serde_json::Value, String> {
+        let path = project_path.join("Packages").join(name);
+        let source = settings_backup::read_text(&path)
+            .map_err(|_| format!("Could not read {name} safely. Check the project folder and try again."))?;
+        match source {
+            Some(source) => {
+                // Unity package files are strict JSON; reject duplicate keys as well.
+                serde_json::from_str::<serde_json::Value>(&source)
+                    .map_err(|_| format!("Could not parse {name}. Check the project package metadata."))?;
+                jsonc::parse_unambiguous(&source)
+                    .map_err(|_| format!("Could not parse {name} unambiguously. Check the project package metadata."))
             }
+            None if !required => Ok(serde_json::json!({})),
+            None => Err(format!("{name} is missing. Check the selected Unity project.")),
         }
     };
-    let manifest: serde_json::Value = match serde_json::from_str(&manifest_source) {
-        Ok(value) => value,
-        Err(error) => {
-            return SdkProfileStatus {
-                profile: "unknown".to_string(),
-                label: "SDK unknown".to_string(),
-                creator_sdk: false,
-                legacy_banter: false,
-                packages: Vec::new(),
-                error: Some(format!(
-                    "Could not parse {}: {}",
-                    manifest_path.display(),
-                    error
-                )),
-            }
+    let manifest = match metadata("manifest.json", true) { Ok(v) => v, Err(e) => return unknown(e) };
+    let lock = match metadata("packages-lock.json", false) { Ok(v) => v, Err(e) => return unknown(e) };
+    for (document, name, locked) in [(&manifest, "manifest.json", false), (&lock, "packages-lock.json", true)] {
+        if !document.is_object() || document.get("dependencies").is_some_and(|deps|
+            !deps.is_object() || deps.as_object().is_some_and(|deps| deps.values().any(|value|
+                if locked {
+                    !value.is_object()
+                        || value.get("version").is_some_and(|v| v.as_str().map_or(true, |v| v.trim().is_empty()))
+                        || value.get("dependencies").is_some_and(|v| v.as_object().map_or(true, |deps|
+                            deps.values().any(|v| v.as_str().map_or(true, |v| v.trim().is_empty()))))
+                } else { value.as_str().map_or(true, |v| v.trim().is_empty()) }))) {
+            return unknown(format!("Invalid dependencies in {name}. Check the project package metadata."));
         }
-    };
-    let lock_path = project_path.join("Packages").join("packages-lock.json");
-    let lock = fs::read_to_string(&lock_path)
-        .ok()
-        .and_then(|source| serde_json::from_str(&source).ok())
-        .unwrap_or_else(|| serde_json::json!({}));
+    }
     let direct_dependencies = manifest
         .get("dependencies")
         .and_then(|dependencies| dependencies.as_object());
     let locked_dependencies = lock
         .get("dependencies")
         .and_then(|dependencies| dependencies.as_object());
-    let has_package = |package_id: &str| {
-        direct_dependencies
-            .map(|dependencies| dependencies.contains_key(package_id))
-            .unwrap_or(false)
-            || locked_dependencies
-                .map(|dependencies| dependencies.contains_key(package_id))
-                .unwrap_or(false)
-    };
+    for package in [CREATOR_PACKAGE, BANTER_PACKAGE] {
+        if locked_dependencies.and_then(|deps| deps.get(package)).is_some_and(|entry|
+            entry.get("version").and_then(|v| v.as_str()).map_or(true, |v| v.trim().is_empty())) {
+            return unknown("Invalid SDK version in packages-lock.json. Let Unity resolve the packages, then check again.".into());
+        }
+    }
+    // Only follow lock entries reachable from the current manifest. Removed SDKs
+    // can linger in the lock until Unity resolves packages again.
+    let mut reachable = std::collections::HashSet::new();
+    let mut pending: Vec<(String, String)> = direct_dependencies.into_iter()
+        .flat_map(|deps| deps.iter().map(|(id, version)|
+            (id.clone(), version.as_str().unwrap_or_default().to_owned()))).collect();
+    while let Some((package, requested)) = pending.pop() {
+        let locked = locked_dependencies.and_then(|deps| deps.get(&package));
+        if let (Ok(requested), Some(Ok(resolved))) = (
+            semver::Version::parse(&requested),
+            locked.and_then(|entry| entry.get("version")).and_then(|v| v.as_str()).map(semver::Version::parse),
+        ) {
+            // Unity may legitimately resolve a higher version shared by other
+            // dependencies. A lower lock version cannot satisfy this request.
+            if resolved < requested {
+                return unknown("Package versions changed since the lockfile was resolved. Open the project in Unity, then check again; or choose a manual capability profile.".into());
+            }
+        }
+        if !reachable.insert(package.clone()) { continue; }
+        if let Some(deps) = locked
+            .and_then(|entry| entry.get("dependencies")).and_then(|deps| deps.as_object()) {
+            pending.extend(deps.iter().map(|(id, version)|
+                (id.clone(), version.as_str().unwrap_or_default().to_owned())));
+        }
+    }
+    let has_package = |package_id: &str| reachable.contains(package_id);
 
     let creator_sdk = has_package(CREATOR_PACKAGE);
     let legacy_banter = has_package(BANTER_PACKAGE);
@@ -2251,7 +2230,19 @@ fn project_sdk_profile(project_path: &Path) -> SdkProfileStatus {
         legacy_banter,
         packages,
         error: None,
+        recommended_tool_groups: capability_profiles::recommended(profile).map(str::to_owned),
     }
+}
+
+fn resolve_project_tool_groups(value: &str, project: &Path) -> Result<String, String> {
+    let selection = normalize_tool_groups(value)?;
+    if selection != "auto" { return Ok(selection); }
+    if !is_valid_unity_project(project) {
+        return Err("Auto capabilities need a valid Unity project. Check the project or choose a manual profile; client settings were not changed.".into());
+    }
+    let profile = project_sdk_profile(project);
+    profile.recommended_tool_groups.ok_or_else(||
+        "Auto capabilities could not verify this project's SDK. Check the connection again or choose a manual profile; client settings were not changed.".into())
 }
 
 #[tauri::command]
@@ -2376,11 +2367,12 @@ fn one_click_setup(
     unity_cli_consent: Option<String>,
 ) -> Result<SetupResult, String> {
     let candidate = channel_for_project(Path::new(&unity_project_path))?;
+    let selection = normalize_tool_groups(&tool_groups)?;
+    let tool_groups = resolve_project_tool_groups(&selection, Path::new(&candidate.unity_project_path))?;
     let physical_server = default_mcp_server_path(&app)?
         .to_string_lossy()
         .into_owned();
     let (runtime_command, mcp_server_path) = managed_client::target(&app, &physical_server)?;
-    let tool_groups = normalize_tool_groups(&tool_groups)?;
 
     let configure_desktop = configure_claude_desktop.unwrap_or(false);
     if !(configure_codex
@@ -2488,7 +2480,7 @@ fn one_click_setup(
     config.mcp_server_path = physical_server.clone();
     config.auto_start = true;
     config.enable_custom_scripts = enable_custom_scripts;
-    config.tool_groups = tool_groups.clone();
+    config.tool_groups = selection;
     if let Some(enabled) = configure_unity_cli {
         config
             .extra

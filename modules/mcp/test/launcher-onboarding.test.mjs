@@ -26,6 +26,21 @@ test("guided setup accepts a Unity project folder and configures selected client
   assert.doesNotMatch(launcherHtml, /Add Scene Channel/);
 });
 
+test("one-click Auto resolves before any settings, client or bridge mutation", () => {
+  const start = launcherSource.indexOf('fn one_click_setup(');
+  const setup = launcherSource.slice(start, launcherSource.indexOf('\n#[tauri::command]', start));
+  const resolve = setup.indexOf('let tool_groups = resolve_project_tool_groups(');
+  assert.ok(resolve > 0);
+  for (const boundary of ['default_mcp_server_path(', 'managed_client::target(', 'unity_cli::mode()', 'load_operation(', 'save_operation(',
+    'install_unity_extension(', 'set_unity_custom_scripts(', 'update_codex_mcp_config(',
+    'update_claude_mcp_config(', 'update_claude_desktop_mcp_config(',
+    'update_antigravity_mcp_config(', 'update_opencode_mcp_config(']) {
+    assert.ok(setup.indexOf(boundary) > resolve, `${boundary} must follow Auto resolution`);
+  }
+  assert.match(setup, /config\.tool_groups = selection;/);
+  assert.doesNotMatch(setup, /config\.tool_groups = tool_groups/);
+});
+
 test("launcher-managed clients use a pinned private Node runtime", () => {
   assert.match(launcherSource, /resolve_node_command/);
   assert.match(launcherSource, /"command": node_command/);
@@ -43,8 +58,12 @@ test("launcher presents Creator Works as the AI-facing MCP identity", () => {
   assert.match(launcherSource, /const TOOL_GROUPS_ENV: &str = "CREATOR_WORKS_TOOL_GROUPS"/);
   assert.match(launcherSource, /LEGACY_MCP_CLIENT_ID/);
   assert.doesNotMatch(launcherHtml, /BANTWORKS MCP/);
-  assert.match(launcherHtml, /value="core">Token Saver \(recommended\)/);
-  assert.match(launcherHtml, /value="core,banter">Banter workflow/);
+  assert.match(launcherHtml, /value="auto">Auto \(project SDK\)/);
+  assert.match(launcherHtml, /value="core">Token Saver/);
+  assert.match(launcherHtml, /value="core,creator">Altspace \/ Creator SDK/);
+  assert.match(launcherHtml, /value="core,banter">Banter/);
+  assert.match(launcherHtml, /value="core,banter,creator">Altspace \+ Banter/);
+  assert.doesNotMatch(launcherHtml, /Full Unity \+ Banter|Banter workflow/);
   assert.match(launcherHtml, /value="core,shadergraph">Shader Graph preview/);
   assert.match(launcherHtml, /value="core,author">Unity authoring/);
   assert.match(launcherHtml, /value="core,test">Testing/);
