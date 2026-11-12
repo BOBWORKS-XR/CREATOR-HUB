@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const BRANCH = 'validation/windows-sdk-capability-fresh-023-20261112-r2';
+const BRANCH = 'validation/windows-sdk-capability-fresh-023-20261112-r3';
 const WORKFLOW = '.github/workflows/windows-incoming-016.yml';
 function admit(mode, env = process.env, platform = process.platform, target = require('./windows-outgoing-019-target.cjs')) {
   assert.equal(platform, 'win32'); assert.ok(['fresh', 'migration'].includes(mode));

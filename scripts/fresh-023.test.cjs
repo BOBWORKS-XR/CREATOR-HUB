@@ -17,9 +17,9 @@ function compile(name, replacements) {
 function unit() {
   // In-memory synthetic reports only; never written or used as native acceptance.
   const b = clone(require('./fixtures/windows-outgoing-019-test-fixture.cjs').binding);
-  b.target.source = { commit: '7684ed5d5af5c64a9ec6bef6bdb6708756748187', tree: '67b91f1d50cf9a22a03942aae89e387be473ec31' };
+  b.target.source = { commit: '986660d59200c7b10d8662989fcc95b09117d177', tree: '38007614fb779d8c9c297f77a7ba7b2cc014f820' };
   b.target.privateRelease.source = b.target.source.commit;
-  b.target.privateRelease.tag = 'lab-windows-capability-023-20261112-r1';
+  b.target.privateRelease.tag = 'lab-windows-capability-023-20261112-r2';
   b.fixtureQualification.source = clone(b.target.source);
   const q = { ...b.fixtureQualification, schemaVersion: 1, source: clone(b.target.source), minimumHubVersion: '0.1.19', outerSigned: true,
     privateTransportTag: b.target.privateRelease.tag,
@@ -158,11 +158,11 @@ test('dedicated workflow is fresh-only, private, exact-source gated and never bu
   assert.deepEqual(Object.keys(workflow.on), ['workflow_dispatch']);
   assert.equal(workflow.jobs.fresh.runs_on, undefined); assert.equal(workflow.jobs.fresh['runs-on'], 'windows-latest');
   assert.equal(workflow.jobs.fresh.needs, 'preflight');
-  for (const job of Object.values(workflow.jobs)) assert.ok(job.if.includes("refs/heads/validation/windows-sdk-capability-fresh-023-20261112-r2'"));
-  assert.equal(require('./install-admission-023.cjs').BRANCH, 'validation/windows-sdk-capability-fresh-023-20261112-r2');
+  for (const job of Object.values(workflow.jobs)) assert.ok(job.if.includes("refs/heads/validation/windows-sdk-capability-fresh-023-20261112-r3'"));
+  assert.equal(require('./install-admission-023.cjs').BRANCH, 'validation/windows-sdk-capability-fresh-023-20261112-r3');
   assert.equal(require('./install-admission-023.cjs').WORKFLOW, '.github/workflows/windows-incoming-016.yml');
   assert.ok(source.includes("EXPECTED_HARNESS_COMMIT -cne $env:GITHUB_SHA"));
-  assert.ok(source.includes('67b91f1d50cf9a22a03942aae89e387be473ec31'));
+  assert.ok(source.includes('38007614fb779d8c9c297f77a7ba7b2cc014f820'));
   assert.ok(source.includes('fresh-023-input.cjs receipt'));
   assert.doesNotMatch(source, /cargo |npm run build|gh release|git push|native-windows-016-migration/);
   assert.match(local('fresh-023-input.cjs'), /method: 'GET'/); assert.doesNotMatch(local('fresh-023-input.cjs'), /method: '(?:POST|PATCH|PUT|DELETE)'/);
@@ -177,7 +177,7 @@ test('fresh admission accepts only the registered filename on the new r2 branch'
     GITHUB_WORKFLOW_REF: `BOBWORKS-XR/CREATOR-HUB/${admission.WORKFLOW}@refs/heads/${admission.BRANCH}` };
   admission.admit('fresh', env, 'win32', u.target);
   for (const change of [x => x.GITHUB_WORKFLOW_REF = x.GITHUB_WORKFLOW_REF.replace('windows-incoming-016.yml', 'windows-install-023.yml'),
-    x => x.GITHUB_REF = x.GITHUB_REF.replace(/-r2$/, ''), x => x.GITHUB_WORKFLOW_REF = x.GITHUB_WORKFLOW_REF.replace(/-r2$/, ''),
+    x => x.GITHUB_REF = x.GITHUB_REF.replace(/-r3$/, ''), x => x.GITHUB_WORKFLOW_REF = x.GITHUB_WORKFLOW_REF.replace(/-r3$/, ''),
     x => x.GITHUB_REF = 'refs/heads/validation/windows-sdk-capability-023-20261112-r2']) {
     const bad = { ...env }; change(bad); assert.throws(() => admission.admit('fresh', bad, 'win32', u.target));
   }

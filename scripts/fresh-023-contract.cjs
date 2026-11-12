@@ -9,7 +9,7 @@ const binding = target.binding;
 const TARGET = Object.freeze({ version: '0.1.23', asset: 'Creator.Hub_0.1.23_x64-setup.exe',
   bytes: binding.target.installer?.bytes, installer: binding.target.installer?.sha256,
   exe: binding.target.executable?.sha256, productSource: binding.target.source?.commit });
-const SOURCE = { commit: '7684ed5d5af5c64a9ec6bef6bdb6708756748187', tree: '67b91f1d50cf9a22a03942aae89e387be473ec31' };
+const SOURCE = { commit: '986660d59200c7b10d8662989fcc95b09117d177', tree: '38007614fb779d8c9c297f77a7ba7b2cc014f820' };
 const FILES = [TARGET.asset, 'creator-hub-windows-x86_64.json', 'creator-hub-windows-x86_64.json.minisig', 'latest.json'];
 const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 function signedReceipt() {
@@ -20,7 +20,7 @@ function signedReceipt() {
   const q = JSON.parse(bytes);
   assert.equal(q.kind, 'outgoing23-candidate-only-verified'); assert.deepEqual(q.source, SOURCE);
   assert.equal(q.minimumHubVersion, '0.1.19');
-  assert.equal(q.privateTransportTag, 'lab-windows-capability-023-20261112-r1');
+  assert.equal(q.privateTransportTag, 'lab-windows-capability-023-20261112-r2');
   assert.equal(binding.target.privateRelease.tag, q.privateTransportTag);
   assert.equal(q.updaterUrl, `https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/download/v0.1.23/${TARGET.asset}`);
   assert.equal(q.transportMode, 'private-draft-plus-lab-feed');

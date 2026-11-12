@@ -12,7 +12,7 @@ permissions:
   contents: read
 jobs:
   preflight:
-    if: github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.ref == 'refs/heads/validation/windows-sdk-capability-fresh-023-20261112-r2'
+    if: github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.ref == 'refs/heads/validation/windows-sdk-capability-fresh-023-20261112-r3'
     runs-on: windows-latest
     timeout-minutes: 5
     steps:
@@ -39,7 +39,7 @@ jobs:
           }
   fresh:
     needs: preflight
-    if: github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.ref == 'refs/heads/validation/windows-sdk-capability-fresh-023-20261112-r2'
+    if: github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.ref == 'refs/heads/validation/windows-sdk-capability-fresh-023-20261112-r3'
     permissions:
       contents: write # Required by existing private draft asset GET authorization; no write API calls.
     runs-on: windows-latest
@@ -63,13 +63,13 @@ jobs:
       - run: npm ci --ignore-scripts
       - uses: actions/checkout@v6
         with:
-          ref: 7684ed5d5af5c64a9ec6bef6bdb6708756748187
+          ref: 986660d59200c7b10d8662989fcc95b09117d177
           path: product
           persist-credentials: false
       - name: Verify official SDK source checkout
         shell: pwsh
         run: |
-          if ((git -C product rev-parse HEAD) -cne '7684ed5d5af5c64a9ec6bef6bdb6708756748187' -or (git -C product rev-parse 'HEAD^{tree}') -cne '67b91f1d50cf9a22a03942aae89e387be473ec31') { throw 'Product SDK source differs.' }
+          if ((git -C product rev-parse HEAD) -cne '986660d59200c7b10d8662989fcc95b09117d177' -or (git -C product rev-parse 'HEAD^{tree}') -cne '38007614fb779d8c9c297f77a7ba7b2cc014f820') { throw 'Product SDK source differs.' }
       - run: npm --prefix product/modules/mcp ci --ignore-scripts
       - name: Acquire exact signed private target only
         shell: pwsh

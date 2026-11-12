@@ -321,7 +321,7 @@ test('exact outgoing binding survives core.autocrlf=true checkout without relaxi
   const original = fs.readFileSync(bindingFile);
   assert.equal(original.includes(13), false, 'Frozen binding must retain its original LF bytes');
   const expectedHash = target.hash(original);
-  if (checkedInBinding.enabled) assert.equal(expectedHash, '2858d6fbbc9cff299366c5301622732e2cdd32bd4c5c8e69d017a5ec5fc8a3a4');
+  if (checkedInBinding.enabled) assert.equal(expectedHash, '8f6619a05c2e4bbf069a7ad6620cb9ca6988ebe904f62c56d42eb9f9e78e232b');
   const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'creator-outgoing-checkout-'));
   t.diagnostic(`Disposable no-ref checkout: ${temporary}`);
   t.after(() => {
@@ -362,7 +362,7 @@ test('exact outgoing binding survives core.autocrlf=true checkout without relaxi
     const unprotected = checkout(`unprotected-${label}`, formLines.filter(line => line !== rule).join(eol));
     assert.notEqual(target.hash(unprotected), expectedHash, 'Control must reproduce the missing-rule failure');
     assert.equal(unprotected.toString(), original.toString().replace(/\n/g, '\r\n'));
-    if (checkedInBinding.enabled) assert.equal(target.hash(unprotected), '3772cbd9c730e32ccaa637517ec20c3617426306a3f693f83795fa4a582cf4eb');
+    if (checkedInBinding.enabled) assert.equal(target.hash(unprotected), '9e11d549c6a1feaf2b7a6048d915d7c2e989795e0d9d59cd8f1219c8ed1109f9');
     t.diagnostic(`${label.toUpperCase()} attributes: exact binding preserved; missing-rule CRLF control rejected`);
   }
   assert.equal(refs(), '', 'Disposable checkout must not create refs');
