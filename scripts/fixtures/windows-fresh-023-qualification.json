@@ -1,0 +1,118 @@
+{
+  "schemaVersion": 1,
+  "kind": "outgoing23-candidate-only-verified",
+  "source": {
+    "commit": "7684ed5d5af5c64a9ec6bef6bdb6708756748187",
+    "tree": "67b91f1d50cf9a22a03942aae89e387be473ec31"
+  },
+  "minimumHubVersion": "0.1.19",
+  "sourceUnchanged": true,
+  "sourceRawUnchanged": false,
+  "rawChanged": [
+    "modules/mcp/launcher/src-tauri/gen/schemas/acl-manifests.json",
+    "modules/mcp/launcher/src-tauri/gen/schemas/desktop-schema.json",
+    "modules/mcp/launcher/src-tauri/gen/schemas/windows-schema.json"
+  ],
+  "buildExitCode": 0,
+  "inputCount": 1584,
+  "payloadFiles": 15,
+  "outerSigned": true,
+  "fixtureUsableForOutgoingTest": true,
+  "productionSourceGuardException": false,
+  "productionApproval": false,
+  "outgoingNativeAccepted": false,
+  "published": false,
+  "releaseReady": false,
+  "preparationSha256": "d443bbf5a6ee0352295b0ee4b2b0aea3d31656a487cfbc68694b7b5d4161f2a7",
+  "buildResultSha256": "4adaac99250e3ba75550eb08b292e1362c409521bd0e349e446b6d3c64ae1180",
+  "inputSha256": "b89313e424814625a86acadcf219fafb1676c8b0919b487ada4c085652c5db5b",
+  "installer": {
+    "bytes": 38506893,
+    "sha256": "b19ba07f8d4c5bb431c39ae14287ed28df853f8a9c8ff2c5ea49a117f545e90b"
+  },
+  "executable": {
+    "bytes": 19641344,
+    "sha256": "61b55049d9af5c6ab948d8047fc8eb863a68925d05aa476373ca8bd49eb26208"
+  },
+  "rawExecutableSha256": "c9747c146085b079b442cf0791a9bdd2d03b2b3c6b51100db0cde7f428f9790f",
+  "manifest": {
+    "schemaVersion": 1,
+    "platform": "windows",
+    "arch": "x86_64",
+    "modules": {
+      "mcp": {
+        "executable": "mcp/creator-works-mcp-launcher.exe",
+        "version": "2.7.10",
+        "files": {
+          "mcp/creator-works-mcp-launcher.exe": "8b58a29ac51bc8658a03239a272006c0e15354d5b4a160fdf8632a8e9b691693",
+          "mcp/server/creator-works-mcp.mjs": "fb1958548f3c071b2b595e98946452c53b5a1b9fa1e419e06f4ec87f0c72f412",
+          "mcp/server/runtime/node.exe": "c6335d08331c23d68b9f2b18adb102002d76ef150b47248e954c507e0d033664",
+          "mcp/server/runtime/LICENSE": "8efdacdc1cfa3460aeb7fe98e3c54337b971d5da70e6eee292b73b981acb220c",
+          "mcp/server/runtime/VERSION": "98182b41c9ce3357797985cf12dc3b0124490ef88bc918a905373e7688e6aec9",
+          "mcp/server/unity-extension/Editor/BanterMCPBridge.cs": "fe21aefe30c7b48e3b9c487905a75a807371397006138852701bc287fc7570cd",
+          "mcp/server/unity-extension/Editor/CreatorWorksMCPLogo.png": "f3f68baa0d887de92e6cf7aba8beae7ff8ea5c44b13444f018413041ade19ea7",
+          "mcp/server/LICENSE": "b1cfe8ff7191d3e9c6c6b0f832adcd2ebece8e6070ef72d2f7afc1c082fb757f",
+          "mcp/server/THIRD_PARTY_NOTICES.md": "3596f4ad9f49cd460fa4da49ce3f1b92ad2f67113270b96d361e7e27ae0460af"
+        }
+      },
+      "setup": {
+        "executable": "setup/creator-project-setup.exe",
+        "version": "0.3.7",
+        "files": {
+          "setup/creator-project-setup.exe": "139f41d1a5c536b36db570607b869aa84b235ce1757bf922851f8a23dadefd28"
+        }
+      }
+    },
+    "managedRouting": {
+      "protocol": 1,
+      "files": {
+        "routing/creator-hub-mcp-router.exe": "02db8346c38c819df6b37ad2fd7ae17b86c34e21dc6ff68bfa6c1d5360eeead4",
+        "routing/router.json": "5f38f254883acb4ad79a7fbe968b3b0e4ad4e76aeee8fa591acb3abac557ca28",
+        "routing/router.minisig": "bc608cd1ff4854c2b9c3f0e2965b93c4b373f584adfbab00057efc35f44ac6a2",
+        "routing/runtime.json": "e3c195c455c13ea9c31f53d0f147a11d3161a100a58d7e967adb9664681e6572",
+        "routing/runtime.minisig": "08b0b2cf824a92aff8b5f576f67b7859dc9cbf7ac90ef27f6731bb8d7bf17f01"
+      }
+    }
+  },
+  "generation": "3ec9b377f8ee4b36241c57e1977f0663d773e1f67ce0cabf5fe8d326ef9b57ea",
+  "privateTransportTag": "lab-windows-capability-023-20261112-r1",
+  "updaterUrl": "https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/download/v0.1.23/Creator.Hub_0.1.23_x64-setup.exe",
+  "transportMode": "private-draft-plus-lab-feed",
+  "publicReleaseRequired": false,
+  "publicDiscovery": false,
+  "assets": {
+    "Creator.Hub_0.1.23_x64-setup.exe": {
+      "bytes": 38506893,
+      "sha256": "b19ba07f8d4c5bb431c39ae14287ed28df853f8a9c8ff2c5ea49a117f545e90b"
+    },
+    "creator-hub-windows-x86_64.json": {
+      "bytes": 505,
+      "sha256": "00e5c912409621f09c31b2388b637b44b4f05d77f0f63ca70975e74add72bcdb"
+    },
+    "creator-hub-windows-x86_64.json.minisig": {
+      "bytes": 305,
+      "sha256": "ce655f33983b18dd6410b06ef8611766278027ef219394f7c9706f65bb7c9969"
+    },
+    "latest.json": {
+      "bytes": 690,
+      "sha256": "710330ac114149b5a8546175a04a1261b390bb35d67fc281471e29951dd53e44"
+    }
+  },
+  "verification": {
+    "internalSignaturesVerified": true,
+    "descriptorSignatureVerified": true,
+    "installerSignatureVerified": true,
+    "extractedPayloadsMatch": true,
+    "signerClosureSha256": "4add8ce25dfac06257b222053870860622fa682e328c3f995abb19a20e563acc",
+    "negativeProofs": {
+      "descriptorTamperRejected": true,
+      "installerTamperRejected": true,
+      "signatureTamperRejected": true,
+      "trustedCommentTamperRejected": true,
+      "wrongPublicKeyRejected": true,
+      "rawExeDescriptorRejected": true,
+      "encodedMetadataSignatureRejected": true,
+      "updateUrlTamperRejected": true
+    }
+  }
+}

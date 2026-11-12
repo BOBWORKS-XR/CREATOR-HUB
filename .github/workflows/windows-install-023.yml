@@ -1,0 +1,100 @@
+name: Private Windows 0.1.23 fresh install and SDK Auto
+on:
+  workflow_dispatch:
+    inputs:
+      expected_harness_commit:
+        type: string
+        required: true
+      binding_sha256:
+        type: string
+        required: true
+permissions:
+  contents: read
+jobs:
+  preflight:
+    if: github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.ref == 'refs/heads/validation/windows-sdk-capability-fresh-023-20261112'
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - name: Preserve reviewed source bytes
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - run: npm ci --ignore-scripts
+      - run: node --test scripts/windows-outgoing-019-test.cjs scripts/self-update-outgoing-019-feed.test.cjs scripts/sdk-retention-023.test.cjs scripts/fresh-023.test.cjs
+      - name: Parse native helpers without running their bodies
+        shell: pwsh
+        run: |
+          ./scripts/windows-outgoing-019-binding-probe.ps1
+          if ($LASTEXITCODE -ne 0) { throw 'Inherited binding probe failed.' }
+          $files=@('native-window.ps1','native-webview-policy.ps1','native-startup-diagnostics.ps1','native-outgoing-process-019.ps1')
+          foreach($name in $files) {
+            $tokens=$null; $errors=$null
+            [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PWD "scripts/$name"),[ref]$tokens,[ref]$errors) | Out-Null
+            if($errors.Count -ne 0) { throw "Native helper parse failed: $name" }
+          }
+  fresh:
+    needs: preflight
+    if: github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.ref == 'refs/heads/validation/windows-sdk-capability-fresh-023-20261112'
+    permissions:
+      contents: write # Required by existing private draft asset GET authorization; no write API calls.
+    runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      EXPECTED_HARNESS_COMMIT: ${{ inputs.expected_harness_commit }}
+      EXPECTED_BINDING_SHA256: ${{ inputs.binding_sha256 }}
+    steps:
+      - name: Bind exact dispatch before checkout
+        shell: pwsh
+        run: |
+          if ($env:EXPECTED_HARNESS_COMMIT -cnotmatch '^[a-f0-9]{40}$' -or $env:EXPECTED_HARNESS_COMMIT -cne $env:GITHUB_SHA -or $env:EXPECTED_BINDING_SHA256 -cnotmatch '^[a-f0-9]{64}$') { throw 'Exact reviewed source and binding required.' }
+      - name: Preserve reviewed source bytes
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - run: npm ci --ignore-scripts
+      - uses: actions/checkout@v6
+        with:
+          ref: 7684ed5d5af5c64a9ec6bef6bdb6708756748187
+          path: product
+          persist-credentials: false
+      - name: Verify official SDK source checkout
+        shell: pwsh
+        run: |
+          if ((git -C product rev-parse HEAD) -cne '7684ed5d5af5c64a9ec6bef6bdb6708756748187' -or (git -C product rev-parse 'HEAD^{tree}') -cne '67b91f1d50cf9a22a03942aae89e387be473ec31') { throw 'Product SDK source differs.' }
+      - run: npm --prefix product/modules/mcp ci --ignore-scripts
+      - name: Acquire exact signed private target only
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          node scripts/fresh-023-input.cjs acquire
+          if ($LASTEXITCODE -ne 0) { throw 'Signed fresh input refused.' }
+      - name: Fresh target install, native Auto fixtures, normal restart and MCP continuity
+        shell: pwsh
+        run: |
+          node scripts/native-fresh-023.cjs (Join-Path $PWD 'artifacts/fresh-023/data/Creator.Hub_0.1.23_x64-setup.exe')
+          if ($LASTEXITCODE -ne 0) { throw 'Fresh native acceptance failed.' }
+          $reports=@(Get-ChildItem -LiteralPath artifacts -Directory -Filter 'native-suite-*' | ForEach-Object { Get-ChildItem -LiteralPath $_.FullName -File -Filter fresh-023-report.json })
+          if ($reports.Count -ne 1) { throw 'Exactly one fresh report required.' }
+          node scripts/fresh-023-input.cjs receipt $reports[0].FullName
+          if ($LASTEXITCODE -ne 0) { throw 'Fresh evidence or cleanup refused.' }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-fresh-023-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 14
+          if-no-files-found: warn
+          path: |
+            artifacts/fresh-023/*.json
+            artifacts/native-suite-*/*.json
+            artifacts/native-suite-*/*.png
+            !artifacts/native-suite-*/startup.json
