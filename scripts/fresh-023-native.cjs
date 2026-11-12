@@ -33,6 +33,14 @@ function assertFreshNamespace(env = process.env, execute = execFileSync) {
   assert.deepEqual(apps, [], 'Existing product processes refused');
 }
 const EXPECTED = { creator: 'core,creator', banter: 'core,banter', hybrid: 'core,banter,creator', none: 'core' };
+async function loadConfigOwned(page) {
+  return page.evaluate(async () => {
+    const call = (command, args = {}) => window.CreatorHubNative.invoke('feature_call', { feature: 'mcp', command, args });
+    const id = await call('begin_ui_operation');
+    try { return await call('load_config'); }
+    finally { await call('finish_ui_operation', { id }); }
+  });
+}
 function validateAuto(rows) {
   assert.equal(rows.defaultSelection, 'auto');
   assert.deepEqual(Object.keys(rows.profiles).sort(), ['banter', 'creator', 'hybrid', 'malformed', 'missing', 'none']);
@@ -61,7 +69,7 @@ async function checkAuto(page, out, reopen = false) {
     }), folder);
     rows.profiles[name] = { profile: profile.profile, groups: profile.recommendedToolGroups, error: Boolean(profile.error) };
   }
-  const config = await page.evaluate(() => window.CreatorHubNative.invoke('feature_call', { feature: 'mcp', command: 'load_config', args: {} }));
+  const config = await loadConfigOwned(page);
   rows.defaultSelection = config.tool_groups;
   for (const [file, contents] of before) assert.equal(fs.readFileSync(file, 'utf8'), contents);
   rows.manifestsUnchanged = true;
@@ -134,4 +142,4 @@ async function hold(page, out, approve) {
     },
   };
 }
-module.exports = { assertFreshNamespace, validateAuto, checkAuto, validateConnections, hold };
+module.exports = { assertFreshNamespace, validateAuto, loadConfigOwned, checkAuto, validateConnections, hold };

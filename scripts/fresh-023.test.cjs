@@ -81,6 +81,30 @@ test('native Auto evidence requires exact strict-manifest groups and missing/mal
     const bad = auto(); change(bad); assert.throws(() => u.native.validateAuto(bad));
   }
 });
+test('fresh settings reads acquire and release an owned UI operation, including failure', async () => {
+  const u = unit(), previous = globalThis.window;
+  try {
+    for (const fail of [false, true]) {
+      const calls = []; let owned = false;
+      globalThis.window = { CreatorHubNative: { invoke: async (_feature, args) => {
+        calls.push(args.command);
+        if (args.command === 'begin_ui_operation') { owned = true; return 'fixture-op'; }
+        if (args.command === 'load_config') {
+          assert.equal(owned, true);
+          if (fail) throw Error('fixture settings failure');
+          return { tool_groups: 'auto' };
+        }
+        assert.equal(args.command, 'finish_ui_operation');
+        assert.deepEqual(args.args, { id: 'fixture-op' }); owned = false;
+      } } };
+      const pending = u.native.loadConfigOwned({ evaluate: fn => fn() });
+      if (fail) await assert.rejects(pending, /fixture settings failure/);
+      else assert.deepEqual(await pending, { tool_groups: 'auto' });
+      assert.deepEqual(calls, ['begin_ui_operation', 'load_config', 'finish_ui_operation']);
+      assert.equal(owned, false);
+    }
+  } finally { globalThis.window = previous; }
+});
 function pair(u, id) {
   const root = process.env.LOCALAPPDATA || 'C:/unit/Local';
   return [{ pid: id, startTicks: String(id), kernelIdentityVerified: true,
