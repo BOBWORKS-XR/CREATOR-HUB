@@ -3,7 +3,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 
-const VERSION = '0.1.21';
+const VERSION = '0.1.22';
 const removedResource = /Creator-Community|community[._-](?:catalogue|catalog|projects)|community\.(?:js|css)(?:[?#]|$)|creator-plugins\.png(?:[?#]|$)/i;
 
 function directTarget(target, source) {
@@ -12,7 +12,7 @@ function directTarget(target, source) {
 }
 
 function assertProtocol(state, expectedVersion = VERSION) {
-  assert.ok([VERSION, '0.1.22'].includes(expectedVersion), 'Only reviewed direct baselines are supported');
+  assert.ok([VERSION, '0.1.23'].includes(expectedVersion), 'Only reviewed direct baselines are supported');
   assert.equal(state.version, expectedVersion, 'Direct smoke requires the exact native baseline build');
   assert.equal(state.protocol, 1, 'Native direct-feature protocol is required');
   assert.equal(state.integrated, true, 'A hosted build cannot satisfy direct acceptance');
