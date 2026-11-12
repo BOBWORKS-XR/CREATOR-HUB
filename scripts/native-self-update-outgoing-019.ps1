@@ -265,7 +265,7 @@ async function main() {
   if (process.argv[3] === 'validate') {
     console.log(JSON.stringify({ kind: 'lab-contract-validated', targetVersion: contract.targetVersion,
       installerSha256: contract.pins.installer, executableSha256: contract.pins.executable,
-      ...(contract.actualScope?.kind === 'direct-outgoing-021-022' ? { baselineVersion: contract.baseline.version,
+      ...(contract.actualScope?.kind === 'direct-outgoing-022-023' ? { baselineVersion: contract.baseline.version,
         baselineInstallerSha256: contract.baseline.installer, baselineExecutableSha256: contract.baseline.exe } : {}) }));
     return;
   }
@@ -311,6 +311,7 @@ async function main() {
     const report = proxy.report();
     console.log(JSON.stringify({ kind: 'lab-feed-stopped', servedRouteCount: report.requests.length, rejectedRequestCount: report.rejectedRequestCount,
       rejectionSummary: report.rejectionSummary, rejectionOverflow: report.rejectionOverflow,
+      connectDiagnostics: report.connectDiagnostics, connectDiagnosticOverflow: report.connectDiagnosticOverflow,
       rejectedPaths: report.rejectedPaths, rejectedPathOverflow: report.rejectedPathOverflow, syntheticDiscovery: report.syntheticDiscovery,
       connectionResetEventCount: report.connectionResetEventCount, connectionResetSummary: report.connectionResetSummary }));
   } finally {
@@ -357,11 +358,11 @@ $successorCleanupVerified = $false; $hubCleanupState = 'not-started'; $hubCleanu
 $driverExitCode = $null; $feedResult = $null; $rootThumbprint = $null; $leafThumbprint = $null
 $phase = 'timeout'; $failureDetails = $null
 $script:processIdentityFailure = $null
-$actualScope = if ($Outgoing019) { 'exact-direct21-to-qualified22-acceptance-fixture-lab-only' }
+$actualScope = if ($Outgoing019) { 'exact-direct22-to-qualified23-acceptance-fixture-lab-only' }
     elseif ($Incoming016) { 'exact-public14-to-direct16-lab-only' }
     elseif ($Scenario -ceq 'public-stable') { 'unmodified-public-0.1.12-lab-only' }
     else { 'accepted-unmodified-B05-0.1.14-to-outer-only-0.1.15-fixture-lab-only' }
-$reportedScenario = if ($Outgoing019) { 'direct-outgoing-021-022' } else { $Scenario }
+$reportedScenario = if ($Outgoing019) { 'direct-outgoing-022-023' } else { $Scenario }
 try {
     Set-LabPhase 'timeout'
     if (-not $Outgoing019 -or $Incoming016 -or $Scenario -cne 'public-stable' -or $env:EXPECTED_HARNESS_COMMIT -cne $env:GITHUB_SHA) { throw 'Only the exact reviewed outgoing19 mode is admitted.' }
@@ -427,7 +428,7 @@ try {
     $validated = Read-LabLine $validator.StandardOutput | ConvertFrom-Json
     if ($validated.kind -cne 'lab-contract-validated' -or -not $validator.WaitForExit(10000) -or $validator.ExitCode -ne 0) { throw 'Reviewed contract refused.' }
     if ($Outgoing019) {
-        if ($validated.baselineVersion -cne '0.1.21' -or $validated.targetVersion -cne '0.1.22' -or
+        if ($validated.baselineVersion -cne '0.1.22' -or $validated.targetVersion -cne '0.1.23' -or
             $validated.baselineInstallerSha256 -cnotmatch '^[a-f0-9]{64}$' -or
             $validated.baselineExecutableSha256 -cnotmatch '^[a-f0-9]{64}$') { throw 'Outgoing version/baseline binding refused.' }
         if ((Get-FileHash -LiteralPath $BaselineInstallerPath -Algorithm SHA256).Hash.ToLowerInvariant() -cne $validated.baselineInstallerSha256) {
@@ -614,6 +615,8 @@ $result = [ordered]@{kind='lab-lifecycle-result'; lifecycleSucceeded=(-not $fail
     rejectedRequestCount=$(if ($feedResult) { $feedResult.rejectedRequestCount } else { $null });
     rejectionSummary=$(if ($feedResult) { @($feedResult.rejectionSummary) } else { @() });
     rejectionOverflow=$(if ($feedResult) { $feedResult.rejectionOverflow } else { $null });
+    connectDiagnostics=$(if ($feedResult) { @($feedResult.connectDiagnostics) } else { @() });
+    connectDiagnosticOverflow=$(if ($feedResult) { $feedResult.connectDiagnosticOverflow } else { $null });
     rejectedPaths=$(if ($feedResult -and $env:CREATOR_PUBLIC12_R2_PATH_DIAGNOSTIC -ceq '1') { @($feedResult.rejectedPaths) } else { @() });
     rejectedPathOverflow=$(if ($feedResult -and $env:CREATOR_PUBLIC12_R2_PATH_DIAGNOSTIC -ceq '1') { $feedResult.rejectedPathOverflow } else { $null });
     syntheticDiscovery=$(if ($feedResult -and $env:CREATOR_PUBLIC12_R2_EMPTY_DISCOVERY -ceq '1') { $feedResult.syntheticDiscovery } else { $null });
