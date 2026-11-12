@@ -150,3 +150,22 @@ test("invalid tool groups stop server startup", async () => {
   assert.equal(exitCode, 1);
   assert.match(server.stderr(), /Unknown CREATOR_WORKS_TOOL_GROUPS value/);
 });
+
+test("stdio Altspace profile exposes graph tools but refuses Banter WebRoot writes", async () => {
+  const server = await startServer('core,creator');
+  try {
+    await server.request({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {
+      protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'creator-profile-test', version: '1' },
+    } });
+    server.child.stdin.write('{"jsonrpc":"2.0","method":"notifications/initialized"}\n');
+    const listed = await server.request({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} });
+    const names = new Set(listed.result.tools.map(tool => tool.name));
+    assert.ok(names.has('generate_vs_graph'));
+    assert.ok(names.has('search_sidequest_vs_nodes'));
+    assert.ok(!names.has('write_webroot_js'));
+    const rejected = await server.request({ jsonrpc: '2.0', id: 3, method: 'tools/call',
+      params: { name: 'write_webroot_js', arguments: {} } });
+    assert.ok(rejected.error || rejected.result?.isError);
+    assert.match(JSON.stringify(rejected), /disabled/);
+  } finally { await server.stop(); }
+});

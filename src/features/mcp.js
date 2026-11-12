@@ -1,4 +1,5 @@
 import { controller, node, lines, text, confirm } from './common.js';
+import { capabilityView } from './capability-profiles.js';
 
 const clients = [
   ['codex', 'Codex', 'codex'], ['claude', 'Claude Code', 'claude'],
@@ -44,7 +45,8 @@ export function mount(root, api) {
       <details class="feature-section"><summary>Advanced settings</summary>
         <button data-field="product-review-advanced" class="text-button" type="button">Review saved MCP settings</button>
         <label>MCP server path<input data-field="server" type="text" autocomplete="off" spellcheck="false"></label>
-        <label>Capabilities<select data-field="groups"><option value="core">Token Saver (recommended)</option><option value="all">Full Unity + Banter (high context)</option><option value="read">Inspection</option><option value="core,banter">Banter workflow</option><option value="core,shadergraph">Shader Graph preview</option><option value="core,author">Unity authoring</option><option value="core,test">Testing</option><option value="none">Minimal routing</option></select></label>
+        <label>Capabilities<select data-field="groups"><option value="auto">Auto (project SDK)</option><option value="core">Token Saver</option><option value="all">All tools (high context)</option><option value="read">Inspection</option><option value="core,creator">Altspace / Creator SDK</option><option value="core,banter">Banter</option><option value="core,banter,creator">Altspace + Banter</option><option value="core,shadergraph">Shader Graph preview</option><option value="core,author">Unity authoring</option><option value="core,test">Testing</option><option value="none">Minimal routing</option></select></label>
+        <p data-field="capability-status" class="feature-note" role="status"></p>
         <label class="feature-check"><input data-field="follow" type="checkbox"><span>Follow active project</span></label>
         <label class="feature-check"><input data-field="scripts" type="checkbox"><span>Allow custom script components</span></label>
         <label class="feature-check"><input data-field="tests" type="checkbox"><span>Allow running all project tests</span></label>
@@ -125,16 +127,22 @@ export function mount(root, api) {
   }
   function controls() {
     const ready = onboarding?.runtime?.ready && onboarding?.project?.valid;
+    const selection = config?.tool_groups || 'core';
+    const capabilities = capabilityView(selection, onboarding?.project);
+    const draft = capabilityView($('groups').value, onboarding?.project);
+    const profileDirty = $('groups').value !== selection;
+    $('groups').querySelector('option[value="auto"]').textContent = draft.autoLabel;
+    $('capability-status').textContent = profileDirty ? 'Capabilities changed. Save options before applying them.' : capabilities.status;
     const selected = active();
     $('selection').textContent = selected ? `Selected for MCP: ${selected.name} (${selected.unity_project_path}).` : 'No saved project selected for MCP.';
     if ($('project').value && $('project').value !== selected?.unity_project_path) $('selection').textContent += ` Setup draft: ${$('project').value} (not selected for MCP).`;
-    $('setup').disabled = !ready || !selectedClients().length;
+    $('setup').disabled = !ready || !selectedClients().length || profileDirty || !capabilities.ready;
     $('add').disabled = !$('project').value.trim();
     $('bridge').disabled = !onboarding?.project?.valid;
     for (const [id, ui] of clientUi) {
       const state = onboarding?.clients?.find(client => client.id === id);
       ui.checkbox.disabled = state?.supported === false;
-      ui.apply.disabled = !onboarding || !active() || state?.supported === false || active().unity_project_path !== $('project').value;
+      ui.apply.disabled = !onboarding || !active() || state?.supported === false || active().unity_project_path !== $('project').value || profileDirty || !capabilities.ready;
       ui.disconnect.disabled = !state?.configured || state?.supported === false;
     }
     $('cli').disabled = !onboarding?.unityCli?.canEnable && !onboarding?.unityCli?.enabled;
@@ -226,8 +234,13 @@ export function mount(root, api) {
   }
   async function followActive(channel) {
     if (!config.auto_start || !channel) return;
+    const target = channel.unity_project_path === $('project').value ? onboarding
+      : await page.call('get_onboarding_status', { unityProjectPath: channel.unity_project_path });
+    if (!target?.project?.valid || !Array.isArray(target.clients)) throw new Error('Check the selected MCP project before updating its clients.');
+    const capabilities = capabilityView(config.tool_groups || 'core', target.project);
+    if (!capabilities.ready) throw new Error(capabilities.status);
     for (const [id, , commandId] of clients) {
-      const client = onboarding?.clients.find(item => item.id === id);
+      const client = target.clients.find(item => item.id === id);
       if (client?.configured && client.supported !== false) await page.call(`update_${commandId}_mcp_config`, {
         channel, mcpServerPath: config.mcp_server_path, toolGroups: config.tool_groups || 'core',
       });
@@ -332,6 +345,9 @@ export function mount(root, api) {
     page.on(apply, 'click', () => run(async () => {
       const channel = active();
       if (!onboarding || !channel || channel.unity_project_path !== $('project').value) throw new Error('Check this saved project or run reviewed setup first.');
+      if ($('groups').value !== (config.tool_groups || 'core')) throw new Error('Save the changed capability profile before applying it.');
+      const capabilities = capabilityView(config.tool_groups || 'core', onboarding.project);
+      if (!capabilities.ready) throw new Error(capabilities.status);
       await page.call(`update_${commandId}_mcp_config`, { channel, mcpServerPath: config.mcp_server_path, toolGroups: config.tool_groups || 'core' });
       await check(); $('setup-result').textContent = `${label} settings saved. Fully quit and reopen ${label}, then check the connection.`;
     }, `Configuring ${label}`));
@@ -341,6 +357,7 @@ export function mount(root, api) {
     }, `Disconnecting ${label}`));
   }
   page.on($('project'), 'input', () => { syncProjectPicker(); invalidateConnection(); });
+  page.on($('groups'), 'change', controls);
   page.on($('feedback-enabled'), 'change', () => { if (!$('feedback-enabled').checked) $('feedback-usage').checked = false; controls(); });
   page.on($('feedback-check'), 'click', () => run(() => readFeedback(), 'Checking project feedback'));
   page.on($('feedback-save'), 'click', async () => {
@@ -424,7 +441,9 @@ export function mount(root, api) {
   page.on($('setup'), 'click', () => run(async () => {
     if (!onboarding?.project?.valid || !onboarding.runtime.ready || !selectedClients().length) throw new Error('Select a valid Unity project and an AI client, then check the connection.');
     if ($('cli').checked && cliConsent !== cliPolicy) throw new Error('Accept experimental Unity CLI consent before enabling it.');
-    if (!await confirm(page, { title: 'Review connection setup', detail: `Project: ${$('project').value}\nClients: ${selectedClients().map(([, name]) => name).join(', ')}\nCapabilities: ${config.tool_groups || 'core'}\nCustom scripts: ${config.enable_custom_scripts === true ? 'on' : 'off'}\nAll project tests: ${config.allow_all_tests !== false ? 'allowed' : 'restricted'}\nUnity CLI: ${$('cli').checked ? 'experimental' : 'off for selected clients'}`, accept: 'Apply setup' })) return;
+    const capabilities = capabilityView(config.tool_groups || 'core', onboarding.project);
+    if (!capabilities.ready || $('groups').value !== (config.tool_groups || 'core')) throw new Error('Save and check capabilities before applying setup.');
+    if (!await confirm(page, { title: 'Review connection setup', detail: `Project: ${$('project').value}\nClients: ${selectedClients().map(([, name]) => name).join(', ')}\nCapabilities: ${capabilities.label}\nCustom scripts: ${config.enable_custom_scripts === true ? 'on' : 'off'}\nAll project tests: ${config.allow_all_tests !== false ? 'allowed' : 'restricted'}\nUnity CLI: ${$('cli').checked ? 'experimental' : 'off for selected clients'}`, accept: 'Apply setup' })) return;
     let result;
     try { result = await page.call('one_click_setup', {
       unityProjectPath: $('project').value,
@@ -448,12 +467,13 @@ export function mount(root, api) {
   }, 'Updating bridges'));
   page.on($('bridge'), 'click', () => run(async () => { await page.call('install_unity_extension', { unityProjectPath: $('project').value }); await check(); await checkProjectBadges(); }, 'Installing Unity bridge'));
   page.on($('save'), 'click', () => run(async () => {
+    const previous = config;
     const next = { ...config, mcp_server_path: $('server').value.trim(), tool_groups: $('groups').value, auto_start: $('follow').checked, enable_custom_scripts: $('scripts').checked, allow_all_tests: $('tests').checked };
     await saveConfig(next);
     const channel = active();
     if (channel) {
-      await page.call('set_unity_custom_scripts', { unityProjectPath: channel.unity_project_path, enabled: next.enable_custom_scripts });
-      await page.call('set_unity_allow_all_tests', { unityProjectPath: channel.unity_project_path, enabled: next.allow_all_tests });
+      if (next.enable_custom_scripts !== previous.enable_custom_scripts) await page.call('set_unity_custom_scripts', { unityProjectPath: channel.unity_project_path, enabled: next.enable_custom_scripts });
+      if (next.allow_all_tests !== previous.allow_all_tests) await page.call('set_unity_allow_all_tests', { unityProjectPath: channel.unity_project_path, enabled: next.allow_all_tests });
       await check(); await followActive(channel);
     }
     $('setup-result').textContent = next.auto_start ? 'Options saved; configured clients follow the active project. Restart changed clients, then check the connection.' : 'Options saved. Apply to selected clients or use reviewed setup to update their capabilities.';
