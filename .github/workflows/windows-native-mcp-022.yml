@@ -13,6 +13,7 @@ jobs:
         working-directory: modules/mcp
     steps:
       - name: Preserve exact source bytes before checkout
+        working-directory: .
         run: git config --global core.autocrlf false
       - uses: actions/checkout@v6
         with:
