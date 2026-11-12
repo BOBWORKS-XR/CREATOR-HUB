@@ -1,0 +1,78 @@
+{
+  "sourceCommit": "8f7916161e993d8cfc3c200e98895dda865819c4",
+  "sourceTree": "78f73b22cbccf28c9ec8b6907de733e6343390e2",
+  "installerSha256": "2bd535e7f3ea90821bb97878e5d97bfa06a90ff0127bef28f8d8a64f2eb7deea",
+  "executableSha256": "73a2afa5cb2ff4fbfbb1d6458efa6d179441cb9336803228ffbc910ee3f94245",
+  "installerBytes": 38495864,
+  "manifest": {
+    "schemaVersion": 1,
+    "platform": "windows",
+    "arch": "x86_64",
+    "modules": {
+      "mcp": {
+        "executable": "mcp/creator-works-mcp-launcher.exe",
+        "version": "2.7.9",
+        "files": {
+          "mcp/creator-works-mcp-launcher.exe": "a0e7c58cbff544b8baf81ec7d31381ab2428736ea0982b8e1380754792f88346",
+          "mcp/server/creator-works-mcp.mjs": "115adb67aedce3f88ae798872f1c269d992cf410b50755138033eda6484b8d29",
+          "mcp/server/runtime/node.exe": "c6335d08331c23d68b9f2b18adb102002d76ef150b47248e954c507e0d033664",
+          "mcp/server/runtime/LICENSE": "8efdacdc1cfa3460aeb7fe98e3c54337b971d5da70e6eee292b73b981acb220c",
+          "mcp/server/runtime/VERSION": "98182b41c9ce3357797985cf12dc3b0124490ef88bc918a905373e7688e6aec9",
+          "mcp/server/unity-extension/Editor/BanterMCPBridge.cs": "b8c863926455876cdf618089ade4d179c3dc34efbd6dc41f3e612893c98aa7a7",
+          "mcp/server/unity-extension/Editor/CreatorWorksMCPLogo.png": "f3f68baa0d887de92e6cf7aba8beae7ff8ea5c44b13444f018413041ade19ea7",
+          "mcp/server/LICENSE": "b1cfe8ff7191d3e9c6c6b0f832adcd2ebece8e6070ef72d2f7afc1c082fb757f",
+          "mcp/server/THIRD_PARTY_NOTICES.md": "3596f4ad9f49cd460fa4da49ce3f1b92ad2f67113270b96d361e7e27ae0460af"
+        }
+      },
+      "setup": {
+        "executable": "setup/creator-project-setup.exe",
+        "version": "0.3.7",
+        "files": {
+          "setup/creator-project-setup.exe": "52f3b7ff6e3954a91409317633ddd14ce9058c57d419ae8a00a5a51a84bc4c52"
+        }
+      }
+    },
+    "managedRouting": {
+      "protocol": 1,
+      "files": {
+        "routing/creator-hub-mcp-router.exe": "8b8e7ad1bded306c4e0cf13990c8a6aab7f4e77f99ce4f802f53050da51f6eef",
+        "routing/router.json": "9cd2f7eb4ee4a1e1ee0743cd85119d85f119ebe9c7acb4f911c8da8d62f7350d",
+        "routing/router.minisig": "aee726bfabe7e3424937e1b49a384c31f3c20187a9601e5d0245d74b0a1d40d7",
+        "routing/runtime.json": "2f3d21c3c4aa128164bb6e027fd102f29683cfb0865ea52faf5bb2e029a33473",
+        "routing/runtime.minisig": "ce07a82a499aad3808ceaaaf8e8f62317ee0484f07cbb42050db107b6c505dfb"
+      }
+    }
+  },
+  "evidenceSha256": "a1fb6bb3c940deb73cf934dcf297edec72dbd757b3d74ed7d4dbcdb7672eb063",
+  "draftId": 442967050,
+  "privateReleaseId": 442957039,
+  "latestSha256": "0deb98984f136cf530e3d87df17f2d23f004b521329ab78b63f825fff59b99b3",
+  "publicNotes": "New projects select the latest stable Creator SDK from verified registry metadata, with explicit retry or a tested fallback if lookup fails. Clearer updater installation messages, project-lock diagnostics and MCP connection status. Existing projects and preferences are preserved. New official builds are Windows only; older Mac/Linux releases and source remain available.",
+  "publicBranch": "validation/windows-public-update-022-20261112",
+  "sourceCiDelta": [
+    ".github/workflows/windows-native-mcp-022.yml"
+  ],
+  "logCounts": {
+    "sourceLog": {
+      "tests": 467,
+      "pass": 466,
+      "fail": 0,
+      "cancelled": 0,
+      "skipped": 1,
+      "todo": 0
+    },
+    "bundleLog": {
+      "tests": 10,
+      "pass": 10,
+      "fail": 0,
+      "cancelled": 0,
+      "skipped": 0,
+      "todo": 0
+    }
+  },
+  "skipReasons": {
+    "sourceLog": [
+      "Set CREATOR_UNITY_REFERENCE_EDITOR for the native Unity API compile check."
+    ]
+  }
+}
