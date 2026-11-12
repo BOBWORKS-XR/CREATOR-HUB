@@ -1,5 +1,21 @@
 # Compatibility Evidence
 
+## Latest Stable SDK Creation
+
+New-project creation now resolves the official stable SDK tag, verifies the
+selected exact version and its Unity requirement, and pins SDK/Visual Scripting
+versions for that operation. Lookup failure does not create a folder or silently
+use the fallback. The tested recipe below is available only by explicit choice.
+The selected versions are checked again after Unity reopens and recorded in the
+creation receipt. This does not change existing projects.
+
+Native creation with SDK 4.0.25 and Visual Scripting 1.9.1 passed on 2026-11-11,
+including compilation, SDK readiness, 52,183 node payloads and separate reopen
+validation. The final preference-preservation check is pending an independently
+reopened Unity Editor closing. See `docs/SETUP-LATEST-SDK-CREATION.md` in the Hub
+repository for retained failures and exact acceptance boundaries; do not publish
+from creation success alone.
+
 ## Approved Windows Recipe
 
 | Item | Requested or declared | Observed in Unity |
@@ -18,8 +34,8 @@ function behind the application button.
 Unity 6000.3.10f1 was also tested and rejected for this recipe: Creator SDK
 4.0.14 uses UI Toolkit members that are not available to compilation on that
 Editor patch, despite the package metadata declaring 6000.3.10f1. This is why
-the application pins a tested recipe instead of following the registry's
-`latest` tag or minimum Editor field automatically.
+the fallback retains its tested Editor version. The new-project SDK lookup does
+not automatically upgrade or downgrade the installed Unity Editor.
 
 This proves package resolution and Editor compilation on the tested Windows
 machine. It does not prove Android/Windows player builds, hosted loading,

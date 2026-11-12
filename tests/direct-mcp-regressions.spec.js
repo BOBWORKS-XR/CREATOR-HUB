@@ -79,6 +79,15 @@ const mutationCalls = page => page.evaluate(() => calls.filter(call => call.comm
   && /^(?:save_|one_click_setup$|add_project$|install_|update_|set_|remove_|review_|recover_)/.test(call.args.command)));
 const row = (page, name) => field(page, 'projects').locator(`[data-project-path="/projects/${name}"]`);
 const idle = page => expect(page.locator('#feature-mcp')).toHaveAttribute('aria-busy', 'false');
+test('recent saved state does not claim a live Unity connection', async ({ page }) => {
+  await open(page);
+  await expect(field(page, 'checks')).toContainText('Recent Unity state found');
+  await expect(field(page, 'checks')).not.toContainText('Connected');
+  await expect(field(page, 'guide-steps')).toContainText('A live connection has not been verified.');
+  await expect(field(page, 'guide-steps')).toContainText('get_bridge_status');
+  await expect(field(page, 'guide-steps')).not.toContainText('Unity bridge is responding.');
+  expect(await mutationCalls(page)).toEqual([]);
+});
 async function controlsLocked(page, locked) {
   // Fieldsets own the lock; inherited disabled semantics apply to their controls.
   await expect(field(page, 'controls')).toHaveJSProperty('disabled', locked);

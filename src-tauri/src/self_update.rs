@@ -262,7 +262,7 @@ fn raw_installed_location(_handle: &tauri::AppHandle) -> Result<PathBuf, String>
         platform::reject_links(&exe)?;
         if !platform::same_path(&exe, &expected) {
             return Err(
-            "This is a portable test copy. Install Creator Hub first to enable in-app upgrades."
+            "This copy is outside Hub's expected installation folder. Close it and open the installed Hub from Start, or run the official Hub installer over your current installation before using in-app updates."
                 .into(),
         );
         }
@@ -272,7 +272,7 @@ fn raw_installed_location(_handle: &tauri::AppHandle) -> Result<PathBuf, String>
             let key = RegKey::predef(HKEY_CURRENT_USER)
                 .open_subkey("Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Creator Hub")
                 .map_err(|_| {
-                    "Hub's installation record is missing. Run the Hub installer to repair it."
+                    "Hub could not read Windows' installation record. Close Hub and reopen it from Start. If this continues, run the official Hub installer over your current installation to repair it; keep app data."
                 })?;
             let location: String = key
                 .get_value("InstallLocation")
@@ -280,16 +280,9 @@ fn raw_installed_location(_handle: &tauri::AppHandle) -> Result<PathBuf, String>
             let version: String = key
                 .get_value("DisplayVersion")
                 .map_err(|_| "Hub's installed version could not be checked.")?;
-            if version != env!("CARGO_PKG_VERSION")
-                || !platform::same_path(
-                    &exe,
-                    &PathBuf::from(location.trim_matches('"')).join("creator-hub.exe"),
-                )
-            {
-                return Err(
-                    "Another Hub copy is installed. Open that copy before updating.".into(),
-                );
-            }
+            crate::windows_update_identity::verify_registration(
+                &exe, &location, &version, env!("CARGO_PKG_VERSION"),
+            )?;
         }
         platform::verify_nsis_update_target("Creator Hub", &exe)?;
         Ok(exe)

@@ -822,7 +822,7 @@ fn candidate_stamp_receipt_uses_only_the_requested_operation_backup() {
 
 #[test]
 fn candidate_stamp_backup_refuses_missing_or_unapproved_destinations() {
-    let script = validator();
+    let script = active_validator_source(&validator(), &["CREATOR_SETUP_SDK4022_VS1912_CANDIDATE"]);
     let guard = &script[script
         .find("private static string RequireCandidateBackupDirectory()")
         .unwrap()
@@ -865,25 +865,7 @@ fn candidate_stamp_backup_refuses_missing_or_unapproved_destinations() {
 
 #[test]
 fn newer_sdk_members_are_excluded_from_legacy_compilation() {
-    let script = validation_script();
-    let mut active = true;
-    let mut compiled = String::new();
-    for line in script.lines() {
-        match line.trim() {
-            "#if CREATOR_SETUP_SDK4022_VS1912_CANDIDATE" => {
-                assert!(active);
-                active = false;
-            }
-            "#else" => active = !active,
-            "#endif" => active = true,
-            _ if active => {
-                compiled.push_str(line);
-                compiled.push('\n');
-            }
-            _ => {}
-        }
-    }
-    assert!(active);
+    let compiled = active_validator_source(&validation_script(), &[]);
     for newer in [
         "BS.SDKEditor.Setup",
         "NodesBuiltForThisVersion",
@@ -892,13 +874,38 @@ fn newer_sdk_members_are_excluded_from_legacy_compilation() {
         "ReadCandidateNodeDatabase",
         "RequireCandidateBackupDirectory",
     ] {
-        assert!(
-            !compiled.contains(newer),
-            "Legacy compilation contains {newer}"
-        );
+        assert!(!compiled.contains(newer), "Legacy compilation contains {newer}");
     }
     assert!(compiled.contains("if (preserveSelections) UnitBase.Rebuild();"));
     assert!(compiled.contains("result.creatorSdkVersion == \"4.0.14\""));
+}
+
+fn active_validator_source(script: &str, symbols: &[&str]) -> String {
+    let mut active = true;
+    let mut stack = Vec::new();
+    let mut compiled = String::new();
+    for line in script.lines() {
+        match line.trim() {
+            directive if directive.starts_with("#if ") => {
+                let enabled = symbols.contains(&directive.trim_start_matches("#if "));
+                stack.push((active, enabled));
+                active = active && enabled;
+            }
+            "#else" => {
+                let &(parent, enabled) = stack.last().expect("balanced conditional");
+                active = parent && !enabled;
+            }
+            "#endif" => active = stack.pop().expect("balanced conditional").0,
+            directive if directive.starts_with("#define ") => {}
+            _ if active => {
+                compiled.push_str(line);
+                compiled.push('\n');
+            }
+            _ => {}
+        }
+    }
+    assert!(active && stack.is_empty());
+    compiled
 }
 
 #[test]

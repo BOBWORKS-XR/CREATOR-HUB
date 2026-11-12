@@ -73,6 +73,8 @@ mod preferences;
 mod projects;
 mod self_update;
 mod update_target;
+#[cfg(any(windows, test))]
+mod windows_update_identity;
 mod usage_terms;
 use catalog::AppId;
 use tauri::{Emitter, Manager as _};

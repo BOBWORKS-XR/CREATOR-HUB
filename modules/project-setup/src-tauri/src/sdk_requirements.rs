@@ -691,8 +691,7 @@ fn fetch(version: Option<&str>) -> Result<Requirements, String> {
 pub fn latest() -> Result<Requirements, String> {
     fetch(None)
 }
-#[cfg(test)]
-fn exact(version: &str) -> Result<Requirements, String> {
+pub(crate) fn exact(version: &str) -> Result<Requirements, String> {
     fetch(Some(version))
 }
 

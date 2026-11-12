@@ -14,6 +14,9 @@ async function open(page, options = {}) {
     const readyEnvironment = { platform: options.linux ? 'linux' : 'windows', ready: true, hubInstalled: true, hubVersion: '3.21.1', hubAutoRegistration: true,
       recipe, editors: [{ exactRecipe: true, androidPlayer: true, androidSdk: true, androidNdk: true, openJdk: true, windowsStandalone: true, urpTemplate: 'urp.tgz' }], blockers: [], suggestedProjectParent: '/projects' };
     window.setupEnvironment = options.setupMissingRequirements ? { ...readyEnvironment, ready: false, editors: [], blockers: ['Editor is missing'] } : structuredClone(readyEnvironment);
+    window.latestSdkRequirements = { version: '4.0.25', unityVersion: '6000.3.21f1', dependencies: {
+      'com.unity.visualscripting': '1.9.1', 'com.unity.render-pipelines.universal': '17.4.0', 'com.unity.inputsystem': '1.4.4',
+    } };
     const channel = { id: 'one', name: 'Creator project', unity_project_path: '/projects/Creator', enabled: true };
     const profile = { profile: 'creator', label: 'Creator SDK 4.0.14', packages: [] };
     const config = { channels: options.channels || [channel], active_channel_id: options.activeChannel || 'one', mcp_server_path: '/private/server.mjs',
@@ -65,6 +68,9 @@ async function open(page, options = {}) {
           case 'probe_environment':
             if (window.incompleteNextProbe) { window.incompleteNextProbe = false; return { ready: true }; }
             return structuredClone(window.setupEnvironment);
+          case 'latest_sdk_requirements':
+            if (feature !== 'setup' || Object.keys(fields).length) throw new Error('Unexpected latest SDK lookup request');
+            return structuredClone(window.latestSdkRequirements);
           case 'pick_parent_folder': return '/projects/chosen';
           case 'open_official_url':
             if (feature !== 'setup' || Object.keys(fields).join() !== 'url' || ![
@@ -447,14 +453,44 @@ for (const outcome of ['success', 'error']) test(`Setup requirements refresh blo
   expect((await commands(page, 'run_existing_project')).length).toBe(0);
 });
 
+for (const width of [940, 390]) test(`Setup distinguishes selected SDK and declared URP from the build tools at ${width}px`, async ({ page }, testInfo) => {
+  await page.setViewportSize({ width, height: 800 });
+  await open(page); await show(page, 'setup');
+  const note = field(page, 'setup', 'sdk-package-plan');
+  await expect(field(page, 'setup', 'recipe')).toHaveText('Unity and build tools: Unity 6000.3.21f1 · URP 17.3.0 · Input 1.20.0');
+  await expect(field(page, 'setup', 'recipe')).not.toContainText('Creator SDK');
+  await expect(field(page, 'setup', 'sdk-selection')).toHaveText('Selected: Creator SDK 4.0.25 (latest stable).');
+  await expect(note).toHaveText('URP 17.3.0 will be validated with this SDK; its metadata declares 17.4.0. The project is not ready until Unity validation passes.');
+  await expect(note).toBeVisible(); await expect(field(page, 'setup', 'create')).toBeEnabled();
+  expect(await note.evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath('setup-sdk-urp-plan.png'), fullPage: true });
+  await page.evaluate(() => { latestSdkRequirements.dependencies['com.unity.render-pipelines.universal'] = '17.3.0'; });
+  await field(page, 'setup', 'sdk-retry').click(); await expect(note).toBeHidden();
+  await expect(field(page, 'setup', 'create')).toBeEnabled();
+  await page.evaluate(() => { latestSdkRequirements.dependencies['com.unity.render-pipelines.universal'] = '17.4.0'; window.hold = 'latest_sdk_requirements'; });
+  await field(page, 'setup', 'sdk-retry').click(); await page.waitForFunction(() => pending.latest_sdk_requirements);
+  await expect(note).toBeHidden(); await expect(field(page, 'setup', 'create')).toBeDisabled();
+  await page.evaluate(() => { window.hold = null; pending.latest_sdk_requirements(); });
+  await expect(note).toBeVisible();
+  await page.evaluate(() => { window.failNext = 'latest_sdk_requirements'; });
+  await field(page, 'setup', 'sdk-retry').click(); await expect(field(page, 'setup', 'sdk-tested')).toBeVisible();
+  await expect(note).toBeHidden(); await field(page, 'setup', 'sdk-tested').click();
+  await expect(note).toBeHidden();
+  await expect(field(page, 'setup', 'sdk-selection')).toHaveText('Selected: Creator SDK 4.0.14 (tested fallback, not latest).');
+  await page.screenshot({ path: testInfo.outputPath('setup-tested-sdk.png'), fullPage: true });
+  expect(await commands(page, 'create_project')).toEqual([]);
+});
+
 test('Setup creates once with exact DTO, consumes only scoped progress and completes while hidden', async ({ page }) => {
   await open(page); await show(page, 'mcp'); await show(page, 'setup');
+  await expect(field(page, 'setup', 'sdk-selection')).toHaveText('Selected: Creator SDK 4.0.25 (latest stable).');
+  expect(await commands(page, 'latest_sdk_requirements')).toHaveLength(1);
   await field(page, 'setup', 'name').fill('Space');
   await page.evaluate(() => { window.hold = 'create_project'; }); await field(page, 'setup', 'create').click();
   await page.waitForFunction(() => pending.create_project);
   await field(page, 'setup', 'create').dispatchEvent('click');
   expect((await commands(page, 'create_project')).length).toBe(1);
-  expect((await commands(page, 'create_project'))[0].args.args).toEqual({ request: { projectName: 'Space', parentDirectory: '/projects' } });
+  expect((await commands(page, 'create_project'))[0].args.args).toEqual({ request: { projectName: 'Space', parentDirectory: '/projects', sdkVersion: '4.0.25' } });
   await page.evaluate(() => {
     emitFeature('mcp', 'setup-progress', { step: 2, detail: 'Foreign progress' });
     emitFeature('setup', 'setup-progress', { step: 3, detail: '<img src=x onerror=alert(1)>' });
@@ -487,7 +523,7 @@ for (const outcome of ['success', 'licensing-refusal', 'validation-failure', 'in
   await expect(field(page, 'setup', 'controls')).not.toHaveAttribute('disabled');
   await expect(field(page, 'setup', 'refresh')).toBeEnabled();
   expect((await commands(page, 'probe_environment')).length).toBe(2);
-  expect((await commands(page, 'create_project'))[0].args.args).toEqual({ request: { projectName: 'Retain this draft', parentDirectory: '/keep/parent' } });
+  expect((await commands(page, 'create_project'))[0].args.args).toEqual({ request: { projectName: 'Retain this draft', parentDirectory: '/keep/parent', sdkVersion: '4.0.25' } });
   await expect(field(page, 'setup', 'name')).toHaveValue('Retain this draft'); await expect(field(page, 'setup', 'parent')).toHaveValue('/keep/parent');
   if (outcome === 'installation-cancelled') await expect(field(page, 'setup', 'requirements')).toContainText('Missing');
   else await expect(field(page, 'setup', 'requirements')).not.toContainText('Missing');

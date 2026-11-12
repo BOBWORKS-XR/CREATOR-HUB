@@ -20,8 +20,8 @@ namespace CreatorWorks
             public bool success;
             public string unityVersion;
             public string creatorSdkVersion;
-#if CREATOR_SETUP_SDK4022_VS1912_CANDIDATE
             public string visualScriptingVersion;
+#if CREATOR_SETUP_SDK4022_VS1912_CANDIDATE
             public string sdkReadinessState;
             public bool sdkReadyDone;
             public bool nodesBuiltForThisVersion;
@@ -75,6 +75,9 @@ namespace CreatorWorks
                 RequireCandidatePair();
                 WriteCandidateStampBeforeImage();
                 BeginCandidateErrorWatch();
+#if CREATOR_SETUP_NEW_PROJECT
+                UpgradeNewProjectMaterials();
+#endif
 #endif
                 Progress(4, "Initializing Visual Scripting and saving Creator SDK type settings.");
                 VSUsageUtility.isVisualScriptingUsed = true;
@@ -142,6 +145,7 @@ namespace CreatorWorks
         private static LooseAssemblyName[] candidateAssemblies;
         private static Type[] candidateTypes;
         private static int candidateErrors, candidateLoaderDone;
+        private static string candidateFirstError;
         private static bool candidateWatchingErrors, candidateStampManaged;
         private static System.Diagnostics.Stopwatch candidateLoaderClock;
         private static EditorApplication.CallbackFunction candidateAfterLoader;
@@ -163,6 +167,16 @@ namespace CreatorWorks
         {
             var status = new DirectoryInfo(StatusFolder);
             var backups = new DirectoryInfo(Path.Combine(status.FullName, "backups"));
+#if CREATOR_SETUP_NEW_PROJECT
+            // This directory belongs to the fresh project, never an existing project.
+            backups.Create();
+            var fresh = new DirectoryInfo(Path.Combine(backups.FullName, "new-project-sdk"));
+            fresh.Create();
+            foreach (var directory in new[] { status, backups, fresh })
+                if (!directory.Exists || (directory.Attributes & FileAttributes.ReparsePoint) != 0)
+                    throw new InvalidOperationException("The new-project SDK backup directory is linked or unavailable.");
+            return fresh.FullName;
+#else
             foreach (var directory in new[] { status, backups })
                 if (!directory.Exists || (directory.Attributes & FileAttributes.ReparsePoint) != 0)
                     throw new InvalidOperationException("The operation backup folder is missing or linked. Backups retained.");
@@ -180,6 +194,7 @@ namespace CreatorWorks
             if (!backup.Exists || (backup.Attributes & FileAttributes.ReparsePoint) != 0)
                 throw new InvalidOperationException("The requested operation backup is missing or linked. Backups retained.");
             return backup.FullName;
+#endif
         }
 
         private static void WriteCandidateStampBeforeImage()
@@ -211,16 +226,62 @@ namespace CreatorWorks
                 throw new InvalidOperationException("The exact candidate SDK/Visual Scripting pair is required. Backups retained.");
         }
 
+#if CREATOR_SETUP_NEW_PROJECT
+        private static Type UrpEditorType(string name)
+        {
+            if (PackageVersion("com.unity.render-pipelines.universal") != "@@URP_VERSION@@")
+                throw new InvalidOperationException("The selected URP package changed before new-project preparation.");
+            return AppDomain.CurrentDomain.GetAssemblies()
+                .Select(assembly => assembly.GetType("UnityEditor.Rendering.Universal." + name, false))
+                .SingleOrDefault(type => type != null)
+                ?? throw new InvalidOperationException("The selected URP package does not expose the reviewed material upgrader.");
+        }
+
+        private static void UpgradeNewProjectMaterials()
+        {
+            if (!(GraphicsSettings.defaultRenderPipeline is UnityEngine.Rendering.Universal.UniversalRenderPipelineAsset))
+                throw new InvalidOperationException("The fresh project does not have a URP pipeline assigned.");
+            Progress(3, "Upgrading and saving the fresh project's URP materials.");
+            const System.Reflection.BindingFlags flags = System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic;
+            var upgrade = UrpEditorType("MaterialReimporter").GetMethod("ReimportAllMaterials", flags, null, Type.EmptyTypes, null);
+            var save = UrpEditorType("MaterialPostprocessor").GetMethod("SaveAssetsToDisk", flags, null, Type.EmptyTypes, null);
+            if (upgrade == null || save == null || upgrade.ReturnType != typeof(void) || save.ReturnType != typeof(void))
+                throw new InvalidOperationException("The selected URP material-upgrade API is unsupported. The project was preserved.");
+            // Execute the same real migration and save as URP's startup callback,
+            // without its interactive dialog. Never assign the version marker.
+            upgrade.Invoke(null, null);
+            RequireNoCandidateErrors();
+            save.Invoke(null, null);
+            RequireNoCandidateErrors();
+            RequireNewProjectMaterialsCurrent();
+        }
+
+        private static void RequireNewProjectMaterialsCurrent()
+        {
+            const System.Reflection.BindingFlags flags = System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic;
+            var upgraders = UrpEditorType("MaterialPostprocessor").GetField("k_Upgraders", flags)?.GetValue(null) as Array;
+            var version = UrpEditorType("UniversalProjectSettings").GetProperty("materialVersionForUpgrade", flags)?.GetValue(null);
+            if (upgraders == null || upgraders.Length == 0 || !(version is int current) || current != upgraders.Length)
+                throw new InvalidOperationException("The fresh project's URP materials did not finish upgrading and saving.");
+        }
+#endif
+
         private static void CandidateLog(string message, string stack, LogType type)
         {
             if (type == LogType.Error || type == LogType.Exception || type == LogType.Assert)
+            {
+                var detail = string.IsNullOrEmpty(message) ? type.ToString() : message;
+                if (detail.Length > 1600) detail = detail.Substring(0, 1600);
+                System.Threading.Interlocked.CompareExchange(ref candidateFirstError, detail, null);
                 System.Threading.Interlocked.Increment(ref candidateErrors);
+            }
         }
 
         private static void BeginCandidateErrorWatch()
         {
             if (candidateWatchingErrors) throw new InvalidOperationException("A candidate configuration is already active.");
             candidateErrors = 0;
+            candidateFirstError = null;
             Application.logMessageReceivedThreaded += CandidateLog;
             candidateWatchingErrors = true;
         }
@@ -234,7 +295,7 @@ namespace CreatorWorks
         private static void RequireNoCandidateErrors()
         {
             if (System.Threading.Volatile.Read(ref candidateErrors) != 0)
-                throw new InvalidOperationException("Visual Scripting logged an error; a returning builder is not success. Backups retained.");
+                throw new InvalidOperationException("Visual Scripting initialization logged an error; a returning builder is not success. Backups retained. First error: " + candidateFirstError);
         }
 
         private static void BeginCandidateConfiguration()
@@ -430,6 +491,9 @@ namespace CreatorWorks
         {
             try
             {
+#if CREATOR_SETUP_NEW_PROJECT
+                RequireNewProjectMaterialsCurrent();
+#endif
 #if CREATOR_SETUP_SDK4022_VS1912_CANDIDATE
                 candidateAfterLoader = null;
                 RequireCandidateLoaderReady();
@@ -441,9 +505,7 @@ namespace CreatorWorks
                 {
                     unityVersion = Application.unityVersion,
                     creatorSdkVersion = PackageVersion("com.sidequest.creator-sdk"),
-#if CREATOR_SETUP_SDK4022_VS1912_CANDIDATE
                     visualScriptingVersion = PackageVersion("com.unity.visualscripting"),
-#endif
                     urpVersion = PackageVersion("com.unity.render-pipelines.universal"),
                     inputSystemVersion = PackageVersion("com.unity.inputsystem"),
                     urpConfigured = GraphicsSettings.defaultRenderPipeline is UnityEngine.Rendering.Universal.UniversalRenderPipelineAsset,
@@ -484,6 +546,7 @@ namespace CreatorWorks
                 }
                 result.success = result.unityVersion == "@@EDITOR_VERSION@@"
                     && result.creatorSdkVersion == "@@CREATOR_SDK_VERSION@@"
+                    && result.visualScriptingVersion == "@@VISUAL_SCRIPTING_VERSION@@"
                     && result.urpVersion == "@@URP_VERSION@@"
                     && result.inputSystemVersion == "@@INPUT_SYSTEM_VERSION@@"
                     && result.urpConfigured && result.androidSupported && result.windowsSupported

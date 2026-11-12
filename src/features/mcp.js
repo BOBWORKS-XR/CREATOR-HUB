@@ -154,7 +154,7 @@ export function mount(root, api) {
     const rows = [['Private runtime', value.runtime.ready ? 'Ready' : 'Unavailable', value.runtime.ready],
       ['Unity project', p?.valid ? 'Valid' : $('project').value ? 'Invalid' : 'Not selected', p?.valid],
       ['SDK profile', p?.sdkProfile?.label || 'Not selected', p?.sdkProfile?.profile && !['none', 'unknown'].includes(p.sdkProfile.profile)],
-      ['Unity bridge', !p?.valid ? 'Not checked' : p.bridgeCurrent ? p.stateStatus === 'fresh' ? 'Connected' : 'Installed; open Unity and check again' : p.bridgeInstalled ? 'Update available' : 'Not installed', p?.valid && p.bridgeCurrent && p.stateStatus === 'fresh']];
+      ['Unity bridge', !p?.valid ? 'Not checked' : p.bridgeCurrent ? p.stateStatus === 'fresh' ? 'Recent Unity state found' : 'Installed; open Unity and check again' : p.bridgeInstalled ? 'Update available' : 'Not installed', p?.valid && p.bridgeCurrent && p.stateStatus === 'fresh']];
     $('checks').replaceChildren(...rows.map(([name, value, ready]) => { const row = node('div', null, 'feature-row'); row.append(node('span', name), node('span', value, ready ? 'feature-good' : 'feature-warn')); return row; }));
     for (const [id, ui] of clientUi) {
       const state = value.clients.find(client => client.id === id);
@@ -170,7 +170,7 @@ export function mount(root, api) {
     }
     const steps = [
       !value.runtime.ready ? 'The private runtime is unavailable. Do not close unrelated Node processes.' : 'Private runtime is ready.',
-      !p?.valid ? 'Select the Unity project folder containing Assets, Packages and ProjectSettings. Use Project Setup if you need a new project.' : !p.bridgeCurrent ? 'Review setup to install or update the Unity bridge.' : p.stateStatus !== 'fresh' ? 'Open the project in Unity, let it compile, fix Console errors and check again.' : 'Unity bridge is responding.',
+      !p?.valid ? 'Select the Unity project folder containing Assets, Packages and ProjectSettings. Use Project Setup if you need a new project.' : !p.bridgeCurrent ? 'Review setup to install or update the Unity bridge.' : p.stateStatus !== 'fresh' ? 'Open the project in Unity, let it compile, fix Console errors and check again.' : 'Recent Unity state files were found. A live connection has not been verified.',
       'Select your AI clients, review setup, then fully quit and reopen any changed clients. Claude Code and Claude Desktop are different apps; the Claude website is not Desktop.',
       'Ask your AI to call get_bridge_status for this project. Saved settings alone do not prove the AI client loaded MCP.',
     ];

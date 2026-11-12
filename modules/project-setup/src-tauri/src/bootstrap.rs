@@ -1291,6 +1291,8 @@ mod tests {
         let request = logic::CreateRequest {
             project_name: "CreatorBootstrapSmoke".into(),
             parent_directory: parent.to_string_lossy().into(),
+            sdk_version: None,
+            use_tested_sdk: false,
         };
         let mut report = json!({"setupVersion":env!("CARGO_PKG_VERSION"), "editorVersion":EDITOR_VERSION,"prerequisitesVerified":false,"cancellationVerified":false,"existingInstallReused":false,"missingJdkRepaired":false,"activationHandoffRequired":false,"completed":false,"projectCreated":false,"unityAccountUsed":false,"licenseActivationTested":false});
         report["platform"] = json!(std::env::consts::OS);

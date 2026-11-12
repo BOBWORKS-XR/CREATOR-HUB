@@ -13,6 +13,7 @@ mod hub_installer;
 mod hub_restart;
 mod lifecycle;
 mod logic;
+mod creation_sdk;
 #[path = "../../../../native/plugins_retirement.rs"]
 mod plugins_retirement;
 mod repair;
@@ -76,6 +77,8 @@ async fn create_project(
     tauri::async_runtime::spawn_blocking(move || {
         let _operation = operation;
         let _exclusive = setup_operation(&bootstrap::OPERATION)?;
+        logic::creation_target(&request)?;
+        let sdk = creation_sdk::resolve(&request)?;
         bootstrap::ensure(
             &request,
             |plan| approve_installation(&app, plan),
@@ -94,7 +97,7 @@ async fn create_project(
             if open { logic::launch_hub()?; }
             return Err("Unity licence activation is required. Finish activation in Unity Hub, then choose Create and validate project again. Installed requirements were kept; no project was created.".into());
         }
-        logic::create_project(request, |progress| {
+        logic::create_project_with_sdk(request, sdk, |progress| {
             hosted::emit(&app, "setup-progress", progress);
         })
     })
