@@ -9,7 +9,7 @@ function verifyRelease(release, expected) {
   assert.equal(release.id, expected.id); assert.equal(release.tag_name, expected.tag);
   const publicBaseline = expected.id === binding.baseline.releaseId;
   assert.equal(release.draft, !publicBaseline);
-  assert.equal(release.target_commitish, publicBaseline ? '3250bd306ffe8eea1ed75d3de6d9a8319ee496d3' : expected.source);
+  assert.equal(release.target_commitish, publicBaseline ? '75358cf4a783f51a359898b1d4f9bfe2e256b35f' : expected.source);
   for (const [name, pin] of Object.entries(expected.assets)) {
     const matches = release.assets.filter(asset => asset.id === pin.id); assert.equal(matches.length, 1);
     const asset = matches[0]; assert.equal(asset.name, name); assert.equal(asset.state, 'uploaded');
@@ -20,7 +20,7 @@ async function acquire() {
   target.assertHost();
   const base = path.resolve('artifacts/outgoing-019');
   assert.equal(fs.existsSync(base), false, 'Refusing to reuse input directory');
-  const baseline = { id: binding.baseline.releaseId, tag: 'v0.1.21', source: binding.baseline.source.commit,
+  const baseline = { id: binding.baseline.releaseId, tag: 'v0.1.22', source: binding.baseline.source.commit,
     assets: { [target.BASELINE_ASSET]: { id: binding.baseline.assetId, ...binding.baseline.installer } } };
   const successor = binding.target.privateRelease;
   const headers = { Authorization: `Bearer ${process.env.GH_TOKEN}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2026-03-10' };
@@ -55,11 +55,12 @@ function checkReceipt(report, rows, config, env = process.env) {
   const [tool, restore] = target.CASES[env.CREATOR_OUTGOING_CASE];
   assert.equal(report.lastTool, tool); assert.equal(report.restore, restore === 'true');
   assert.equal(report.restoredLastTool, restore === 'true' ? tool : null);
+  assert.deepEqual(report.manualCapabilityRetention, require('./sdk-retention-023.cjs').proof(report.lastTool, report.restore));
   for (const key of ['passed', 'nativeUpdateAccepted', 'automaticRestart', 'cancelPreserved', 'existingConnectionSurvived',
     'newConnectionVerified', 'restorationVerified', 'policyRestored', 'settingsPreserved', 'acceptanceOnly',
     'targetMcpRuntimeVerified', 'installedResourcesVerifiedBeforeAndAfter', 'heldGenerationRetained']) assert.equal(report[key], true, key);
   for (const key of ['publicDiscovery', 'liveAiAcceptance', 'releaseReady']) assert.equal(report[key], false, key);
-  assert.deepEqual(report.beforePeVersion, [0, 1, 21, 0]); assert.deepEqual(report.afterPeVersion, [0, 1, 22, 0]);
+  assert.deepEqual(report.beforePeVersion, [0, 1, 22, 0]); assert.deepEqual(report.afterPeVersion, [0, 1, 23, 0]);
   assert.notEqual(report.beforeRoot.pid, report.afterRoot.pid);
   assert.equal(report.afterRoot.kernelIdentityVerified, true);
   assert.deepEqual(report.resourceProbe, { phase: 'after-automatic-root', attempts: 1, passed: true });
@@ -69,10 +70,10 @@ function checkReceipt(report, rows, config, env = process.env) {
   assert.equal(report.beforeRoute.generation, binding.baseline.generation); assert.equal(report.afterRoute.generation, binding.target.generation);
   const finals = rows.filter(row => row.kind === 'lab-lifecycle-result'); assert.equal(finals.length, 1);
   const last = finals[0]; assert.equal(last.scenario, target.KIND);
-  assert.equal(last.actualScope, 'exact-direct21-to-qualified22-acceptance-fixture-lab-only');
+  assert.equal(last.actualScope, 'exact-direct22-to-qualified23-acceptance-fixture-lab-only');
   for (const key of ['lifecycleSucceeded', 'cleanupVerified', 'systemTlsVerified', 'labDiscovery']) assert.equal(last[key], true, key);
   for (const key of ['publicDiscovery', 'productAcceptance', 'releaseReady']) assert.equal(last[key], false, key);
-  assert.equal(last.driverExitCode, 0); assert.equal(last.servedRouteCount, 5); assert.equal(last.rejectedRequestCount, 0);
+  assert.equal(last.driverExitCode, 0); assert.equal(last.servedRouteCount, 5); require('./sdk-registry-denial-023.cjs').verifySdkRegistryDenial(last, report);
 }
 module.exports = { FILES, verifyRelease, acquire, checkReceipt };
 if (require.main === module) (async () => {

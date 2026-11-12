@@ -24,12 +24,13 @@ for (const [name, item] of [['baseline', binding.baseline], ['target', binding.t
 }
 binding.target.manifest.modules.mcp = structuredClone(binding.baseline.manifest.modules.mcp);
 binding.target.manifest.modules.mcp.files['mcp/creator-works-mcp-launcher.exe'] = digest('target rebuilt launcher');
+binding.target.manifest.modules.mcp.version = '2.7.10';
 const mcp = binding.target.manifest.modules.mcp;
 binding.target.generation = crypto.createHash('sha256').update(JSON.stringify({ executable: mcp.executable, version: mcp.version,
   files: Object.fromEntries(Object.entries(mcp.files).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) })).digest('hex');
 binding.baseline.releaseId = 1; binding.baseline.assetId = 2;
 for (const key of ['descriptor', 'descriptorSignature', 'latest']) binding.target[key] = pin('target ' + key);
-binding.target.privateRelease = { id: 3, tag: 'lab-windows-sdk-022-unit-fixture', source: binding.target.source.commit,
+binding.target.privateRelease = { id: 3, tag: 'lab-windows-capability-023-unit-fixture', source: binding.target.source.commit,
   assets: Object.fromEntries([[binding.target.asset, binding.target.installer], ['creator-hub-windows-x86_64.json', binding.target.descriptor],
     ['creator-hub-windows-x86_64.json.minisig', binding.target.descriptorSignature], ['latest.json', binding.target.latest]]
     .map(([name, value], index) => [name, { id: index + 4, ...value }])) };

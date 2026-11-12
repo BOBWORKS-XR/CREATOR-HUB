@@ -14,6 +14,8 @@ const tls = require('node:tls');
 const semver = require('semver');
 const { selectBaseline } = require('./self-update-baselines.cjs');
 const { readBounded } = require('./read-bounded-input.cjs');
+const { captureConnect, reportConnect } = require('./connect-diagnostic-023.cjs');
+const { trackedDenial, drainDenials, traceReport, enabled: traceEnabled } = require('./connect-trace-023.cjs');
 
 const DESCRIPTOR = 'creator-hub-windows-x86_64.json';
 const FEED_PATH = '/repos/BOBWORKS-XR/CREATOR-HUB/releases?per_page=10';
@@ -165,14 +167,14 @@ function createIncoming016Contract(input) {
 function createDirectOutgoing019Contract(input) {
   keys(input, ['targetVersion', 'baseline', 'descriptor', 'descriptorSignature', 'installer', 'manifest', 'pins'], 'direct outgoing input');
   keys(input.baseline, ['version', 'installer', 'exe'], 'direct outgoing baseline');
-  assert.equal(input.baseline.version, '0.1.21', 'Genuine direct21 baseline required');
-  assert.equal(input.targetVersion, '0.1.22', 'Only acceptance-only direct22 target admitted');
+  assert.equal(input.baseline.version, '0.1.22', 'Genuine direct22 baseline required');
+  assert.equal(input.targetVersion, '0.1.23', 'Only acceptance-only direct23 target admitted');
   for (const field of ['installer', 'exe']) assert.match(input.baseline[field], /^[a-f0-9]{64}$/);
   assert.notEqual(input.baseline.installer, input.pins.installer, 'Same installer cannot be a higher-version target');
   assert.notEqual(input.baseline.exe, input.pins.executable, 'Same executable cannot be a higher-version target');
   return validatedContract(input, Object.freeze({ ...input.baseline }), {
-    descriptor: { assetName: 'Creator.Hub_0.1.22_x64-setup.exe', minHubVersion: '0.1.19' },
-    actualScope: { kind: 'direct-outgoing-021-022', acceptanceOnly: true, labDiscovery: true,
+    descriptor: { assetName: 'Creator.Hub_0.1.23_x64-setup.exe', minHubVersion: '0.1.19' },
+    actualScope: { kind: 'direct-outgoing-022-023', acceptanceOnly: true, labDiscovery: true,
       publicDiscovery: false, liveAiAcceptance: false, productAcceptance: false, releaseReady: false },
   });
 }
@@ -346,6 +348,8 @@ function labReport(contract, state) {
     baseline: contract.baseline, targetVersion: contract.targetVersion,
     requests: [...state.served.values()], rejectedRequestCount: state.rejected,
     rejectionSummary: [...state.rejections.values()], rejectionOverflow: state.rejectionOverflow,
+    connectDiagnostics: reportConnect(state), connectDiagnosticOverflow: state.connectDiagnosticsOverflow ?? 0,
+    ...traceReport(state),
     connectionResetEventCount: state.connectionResetEvents, connectionResetSummary: [...state.connectionResets.values()],
     ...(state.pathDiagnostics ? { rejectedPaths: [...state.rejectedPaths.values()], rejectedPathOverflow: state.rejectedPathOverflow } : {}),
     ...(contract.syntheticDiscovery ? { syntheticDiscovery: { ...state.syntheticDiscovery } } : {}) };
@@ -366,7 +370,7 @@ async function startLabProxy(contract, tlsOptions, env = process.env, transport 
     recordRejection(state, 'outer-http-405'); res.writeHead(405, { Connection: 'close', 'Content-Length': '0' }); res.end();
   });
   function reject(socket, status = 400, kind = 'connection', code) {
-    recordRejection(state, kind, code); socket.end(`HTTP/1.1 ${status} Rejected\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
+    recordRejection(state, kind, code); if (!socket.destroyed) socket.end(`HTTP/1.1 ${status} Rejected\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
   }
   for (const server of [inner, outer]) {
     server.on('clientError', (error, socket) => {
@@ -388,7 +392,11 @@ async function startLabProxy(contract, tlsOptions, env = process.env, transport 
     const host = connectHost(req.url);
     if (!host || head.length || !singleHost(req) || ![req.url, host].includes(req.headers.host) ||
       ['authorization', 'proxy-authorization', 'cookie', 'content-length', 'transfer-encoding'].some(key => Object.hasOwn(req.headers, key))) {
-      reject(socket, 400, 'connect-policy'); return;
+      captureConnect(state, req, head);
+      if (traceEnabled(env, process.platform)) {
+        trackedDenial(state, req, socket, env, () => reject(socket, 400, 'connect-policy'));
+      } else reject(socket, 400, 'connect-policy');
+      return;
     }
     socket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
     // Terminate locally on this socket. No DNS lookup, upstream connection or relay.
@@ -412,9 +420,12 @@ async function startLabProxy(contract, tlsOptions, env = process.env, transport 
     outer.once('error', rejectListen); outer.listen(0, '127.0.0.1', resolve);
   });
   let closing;
-  const close = () => closing ||= new Promise(resolve => {
-    clearTimeout(expiry); for (const socket of sockets) socket.destroy(); outer.close(resolve);
-  });
+  const close = () => closing ||= (async () => {
+    clearTimeout(expiry);
+    await drainDenials(state);
+    for (const socket of sockets) socket.destroy();
+    await new Promise(resolve => outer.close(resolve));
+  })();
   const expiry = setTimeout(close, LIMITS.durationMs);
   return { proxyUrl: `http://127.0.0.1:${outer.address().port}`, report: () => labReport(contract, state), close };
 }
