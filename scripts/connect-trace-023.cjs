@@ -2,7 +2,7 @@
 const path = require('node:path');
 const { execFile } = require('node:child_process');
 const MAX = 8;
-const BRANCH = 'refs/heads/validation/windows-sdk-capability-023-20261112-r6';
+const BRANCH = 'refs/heads/codex/windows-warning-023-20261113-r4-ci2';
 function target(value) {
   if (typeof value !== 'string' || value.length > 272) return { kind: 'redacted' };
   const match = /^(\[[0-9a-fA-F:]+\]|[A-Za-z0-9.-]+):([1-9][0-9]{0,4})$/.exec(value);

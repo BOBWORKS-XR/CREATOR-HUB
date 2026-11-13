@@ -2,7 +2,7 @@ param([ValidateRange(1,65535)][int]$ClientPort, [ValidateRange(1,65535)][int]$Pr
 $ErrorActionPreference = 'Stop'
 if ($env:GITHUB_ACTIONS -cne 'true' -or $env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or
     $env:GITHUB_REPOSITORY -cne 'BOBWORKS-XR/CREATOR-HUB' -or
-    $env:GITHUB_REF -cne 'refs/heads/validation/windows-sdk-capability-023-20261112-r6' -or
+    $env:GITHUB_REF -cne 'refs/heads/codex/windows-warning-023-20261113-r4-ci2' -or
     $env:GITHUB_JOB -cne 'acceptance') { throw 'Disposable diagnostic job required.' }
 $rows = @(Get-NetTCPConnection -State Established -LocalPort $ClientPort -RemotePort $ProxyPort -ErrorAction SilentlyContinue |
     Where-Object { $_.LocalAddress -eq '127.0.0.1' -and $_.RemoteAddress -eq '127.0.0.1' } |

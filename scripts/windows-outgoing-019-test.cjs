@@ -19,8 +19,8 @@ function env(caseName = 'mcp-restore') {
   const [last, restore] = target.CASES[caseName];
   return { GITHUB_ACTIONS: 'true', RUNNER_ENVIRONMENT: 'github-hosted', RUNNER_OS: 'Windows', RUNNER_ARCH: 'X64',
     GITHUB_REPOSITORY: 'BOBWORKS-XR/CREATOR-HUB', GITHUB_REPOSITORY_ID: '1364807512', GITHUB_EVENT_NAME: 'workflow_dispatch', GITHUB_JOB: 'acceptance',
-    GITHUB_REF: 'refs/heads/codex/windows-warning-023-20261113-r4-ci',
-    GITHUB_WORKFLOW_REF: 'BOBWORKS-XR/CREATOR-HUB/.github/workflows/windows-outgoing-019.yml@refs/heads/codex/windows-warning-023-20261113-r4-ci',
+    GITHUB_REF: 'refs/heads/codex/windows-warning-023-20261113-r4-ci2',
+    GITHUB_WORKFLOW_REF: 'BOBWORKS-XR/CREATOR-HUB/.github/workflows/windows-outgoing-019.yml@refs/heads/codex/windows-warning-023-20261113-r4-ci2',
     GITHUB_SHA: 'a'.repeat(40), EXPECTED_HARNESS_COMMIT: 'a'.repeat(40), CREATOR_OUTGOING_CASE: caseName,
     CREATOR_OUTGOING_LAST_TOOL: last, CREATOR_OUTGOING_RESTORE: restore, CREATOR_OUTGOING_REVIEW_SHA256: reviewSha };
 }
@@ -269,7 +269,7 @@ test('resource completion phase and verified automatic Root identity are mandato
 });
 test('workflow is finite Windows-only and binds SDK source before private acquisition', () => {
   const workflow = fs.readFileSync(path.join(__dirname, '../.github/workflows/windows-outgoing-019.yml'), 'utf8');
-  assert.ok(workflow.includes('branches: [codex/windows-warning-023-20261113-r4-ci]'));
+  assert.ok(workflow.includes('branches: [codex/windows-warning-023-20261113-r4-ci2]'));
   assert.ok(workflow.includes('scripts/windows-outgoing-019-input.cjs source'));
   assert.ok(workflow.includes('ref: '+ '\u0024{{ steps.binding.outputs.source_commit }}'));
   assert.ok(workflow.includes("git -C product rev-parse 'HEAD^{tree}'"));
