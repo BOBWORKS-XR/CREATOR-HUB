@@ -1,5 +1,6 @@
 ; Preserve active Hub workflows; never use Tauri's default force-close path.
 ; Tauri includes hooks before defining MAINBINARYSRCPATH, including GUI-init code.
+!include WinMessages.nsh
 !ifndef CREATOR_HUB_PREFLIGHT_EXE
   !define DOLLAR "$"
   !if "$%CARGO_TARGET_DIR%" == "${DOLLAR}%CARGO_TARGET_DIR%"
@@ -36,6 +37,12 @@
   Pop $3
   Pop $2
   ${If} $0 != "0"
+    ; GUI-init precedes the first page, which normally names and shows the owner.
+    ${IfNot} ${Silent}
+      SendMessage $HWNDPARENT ${WM_SETTEXT} 0 "STR:${productName}"
+      ShowWindow $HWNDPARENT ${SW_SHOW}
+      BringToFront
+    ${EndIf}
     ; Retry skips only the cancel exit below and repeats the exact safety check.
     MessageBox MB_ICONSTOP|MB_RETRYCANCEL \
       "Creator Hub could not continue the installation.$\r$\n$\r$\nSave your work and close Creator Hub, including preview windows, then choose Retry. Your other apps can stay open.$\r$\n$\r$\nIf Hub is already closed, choose Cancel and reopen your installed Hub. No app data is removed by this check." /SD IDCANCEL IDRETRY +3

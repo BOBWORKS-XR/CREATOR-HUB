@@ -20,6 +20,13 @@ test('Retry repeats the unchanged preflight; silent cancellation remains fail-cl
   }
 });
 
+test('a refused visible install exposes its owner before the warning, but silent installs do not', () => {
+  const source = fs.readFileSync(hook, 'utf8');
+  assert.match(source, /\$\{If\} \$0 != "0"\s+;[^\r\n]+\s+\$\{IfNot\} \$\{Silent\}\s+SendMessage \$HWNDPARENT \$\{WM_SETTEXT\} 0 "STR:\$\{productName\}"\s+ShowWindow \$HWNDPARENT \$\{SW_SHOW\}\s+BringToFront\s+\$\{EndIf\}\s+;[^\r\n]+\s+MessageBox MB_ICONSTOP\|MB_RETRYCANCEL/);
+  assert.equal((source.match(/^\s*BringToFront\s*$/gm) || []).length, 1);
+  assert.match(source, /\/SD IDCANCEL IDRETRY \+3\s+SetErrorLevel 10\s+Abort/);
+});
+
 const nsis = path.join(process.env.LOCALAPPDATA || '', 'tauri/NSIS/makensis.exe');
 test('the real hook compiles into the no-install guard fixture', { skip: process.platform !== 'win32' || !fs.existsSync(nsis) }, () => {
   const folder = fs.mkdtempSync(path.join(os.tmpdir(), 'creator-installer-retry-'));
