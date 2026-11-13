@@ -1,7 +1,7 @@
 name: Windows exact22 to private23 restore and qualified-MCP acceptance
 on:
   push:
-    branches: [validation/windows-sdk-capability-023-20261112-r6]
+    branches: [codex/windows-warning-023-20261113-r4-ci]
     paths:
       - .github/workflows/windows-outgoing-019.yml
       - scripts/windows-outgoing-019-*.cjs
@@ -32,7 +32,7 @@ permissions:
   contents: read
 jobs:
   preflight:
-    if: github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.ref == 'refs/heads/validation/windows-sdk-capability-023-20261112-r6'
+    if: github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.ref == 'refs/heads/codex/windows-warning-023-20261113-r4-ci'
     runs-on: windows-latest
     timeout-minutes: 5
     steps:

@@ -30,7 +30,7 @@ binding.target.generation = crypto.createHash('sha256').update(JSON.stringify({ 
   files: Object.fromEntries(Object.entries(mcp.files).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) })).digest('hex');
 binding.baseline.releaseId = 1; binding.baseline.assetId = 2;
 for (const key of ['descriptor', 'descriptorSignature', 'latest']) binding.target[key] = pin('target ' + key);
-binding.target.privateRelease = { id: 3, tag: 'lab-windows-capability-023-unit-fixture', source: binding.target.source.commit,
+binding.target.privateRelease = { id: 3, tag: 'lab-windows-warning-023-20261113-r4', source: binding.target.source.commit,
   assets: Object.fromEntries([[binding.target.asset, binding.target.installer], ['creator-hub-windows-x86_64.json', binding.target.descriptor],
     ['creator-hub-windows-x86_64.json.minisig', binding.target.descriptorSignature], ['latest.json', binding.target.latest]]
     .map(([name, value], index) => [name, { id: index + 4, ...value }])) };

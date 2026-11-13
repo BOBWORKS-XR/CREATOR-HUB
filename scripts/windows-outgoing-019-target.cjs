@@ -79,7 +79,7 @@ function validateBindingShape(value) {
   assert.ok(release && Number.isSafeInteger(release.id) && release.id > 0);
   assert.notEqual(value.baseline.releaseId, release.id);
   assert.equal(release.source, value.target.source.commit);
-  assert.match(release.tag, /^lab-windows-capability-023-[a-z0-9-]+$/);
+  assert.equal(release.tag, 'lab-windows-warning-023-20261113-r4');
   const assetPins = { [ASSET]: value.target.installer, 'creator-hub-windows-x86_64.json': value.target.descriptor,
     'creator-hub-windows-x86_64.json.minisig': value.target.descriptorSignature, 'latest.json': value.target.latest };
   assert.deepEqual(Object.keys(release.assets).sort(), Object.keys(assetPins).sort());
@@ -90,7 +90,7 @@ function validateBindingShape(value) {
   }
   assert.equal(new Set(ids).size, ids.length);
   const q = value.fixtureQualification;
-  assert.equal(q.kind, 'outgoing23-candidate-only-verified'); assert.deepEqual(q.source, value.target.source);
+  assert.equal(q.kind, 'visibility-r4-signed-candidate'); assert.deepEqual(q.source, value.target.source);
   assert.equal(q.sha256, value.target.verificationReceiptSha256);
   assert.equal(q.sourceUnchanged, true); assert.equal(q.buildExitCode, 0);
   assert.ok(Number.isSafeInteger(q.inputCount) && q.inputCount > 0); assert.equal(q.payloadFiles, 15);
@@ -105,8 +105,8 @@ function assertHost(env = process.env, platform = process.platform) {
   assert.equal(platform, 'win32');
   for (const [key, expected] of Object.entries({ GITHUB_ACTIONS: 'true', RUNNER_ENVIRONMENT: 'github-hosted', RUNNER_OS: 'Windows', RUNNER_ARCH: 'X64',
     GITHUB_REPOSITORY: 'BOBWORKS-XR/CREATOR-HUB', GITHUB_REPOSITORY_ID: '1364807512', GITHUB_EVENT_NAME: 'workflow_dispatch',
-    GITHUB_JOB: 'acceptance', GITHUB_REF: 'refs/heads/validation/windows-sdk-capability-023-20261112-r6',
-    GITHUB_WORKFLOW_REF: 'BOBWORKS-XR/CREATOR-HUB/.github/workflows/windows-outgoing-019.yml@refs/heads/validation/windows-sdk-capability-023-20261112-r6' })) assert.equal(env[key], expected, key);
+    GITHUB_JOB: 'acceptance', GITHUB_REF: 'refs/heads/codex/windows-warning-023-20261113-r4-ci',
+    GITHUB_WORKFLOW_REF: 'BOBWORKS-XR/CREATOR-HUB/.github/workflows/windows-outgoing-019.yml@refs/heads/codex/windows-warning-023-20261113-r4-ci' })) assert.equal(env[key], expected, key);
   assert.match(env.GITHUB_SHA || '', /^[a-f0-9]{40}$/); assert.equal(env.EXPECTED_HARNESS_COMMIT, env.GITHUB_SHA);
   assert.ok(Object.hasOwn(CASES, env.CREATOR_OUTGOING_CASE));
   assert.deepEqual([env.CREATOR_OUTGOING_LAST_TOOL, env.CREATOR_OUTGOING_RESTORE], CASES[env.CREATOR_OUTGOING_CASE]);
