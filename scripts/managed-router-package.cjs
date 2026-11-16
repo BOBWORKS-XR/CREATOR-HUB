@@ -42,7 +42,8 @@ function prepare(directory, manifest, router, runtime, sign) {
   fs.copyFileSync(router, file(names[0]), fs.constants.COPYFILE_EXCL);
   fs.chmodSync(file(names[0]), 0o755);
   const identity = { schemaVersion: 1, product: 'com.creatorworks.hub.mcp-router',
-    platform: manifest.platform, arch: manifest.arch, protocol: 1, sha256: hash(file(names[0])) };
+    platform: manifest.platform, arch: manifest.arch, protocol: 1,
+    ...(manifest.platform === 'windows' ? { storeBinding: 2 } : {}), sha256: hash(file(names[0])) };
   fs.writeFileSync(file(names[1]), JSON.stringify(identity), { flag: 'wx' });
   fs.writeFileSync(file(names[2]), sign(file(names[1])), { flag: 'wx' });
   fs.writeFileSync(file(names[3]), bytes, { flag: 'wx' });

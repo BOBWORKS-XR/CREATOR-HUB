@@ -24,6 +24,7 @@ test('managed package binds exactly its signed router and retained runtime; chan
     const router = path.join(root, 'router.exe'); fs.writeFileSync(router, 'never-executed fixture');
     const signer = testSigner();
     manifest.managedRouting = prepare(root, manifest, router, runtime, file => signer.sign(fs.readFileSync(file)));
+    assert.equal(JSON.parse(fs.readFileSync(path.join(root, 'modules/routing/router.json'))).storeBinding, 2);
     assert.deepEqual(Object.keys(manifest.managedRouting.files).sort(), routeFiles('windows').sort());
     verifyStage(path.join(root, 'modules'), manifest);
     assert.throws(() => prepare(root, manifest, router, runtime, () => ''), /already exists/);

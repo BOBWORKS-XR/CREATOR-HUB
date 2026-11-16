@@ -3,7 +3,7 @@ fn main() {
         eprintln!("Creator Hub MCP router does not accept paths or configuration overrides.");
         std::process::exit(64);
     }
-    match creator_hub_mcp_router::Store::installed()
+    match creator_hub_mcp_router::Store::for_current_router()
         .and_then(|store| store.resolve())
         .and_then(|runtime| runtime.run())
     {

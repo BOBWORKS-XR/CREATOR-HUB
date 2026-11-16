@@ -3,6 +3,8 @@ use crate::{client_ownership, jsonc, settings_backup};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
+const LAUNCHER_CONFIG: &str = "CREATOR_WORKS_LAUNCHER_CONFIG";
+
 #[path = "migration_recovery.rs"]
 pub(crate) mod recovery;
 
@@ -47,6 +49,18 @@ fn same_router_path(command: &str, expected: &str) -> bool {
     }
 }
 
+fn verify_retained_router(command: &Path) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        creator_hub_mcp_router::Store::verify_retained_router_command(command)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = command;
+        Err("Relocated router review is only available on Windows. Nothing was changed.".into())
+    }
+}
+
 fn reviewable(value: &str) -> Result<(), String> {
     if value.len() > 4096 || value.chars().any(char::is_control) {
         return Err(
@@ -63,6 +77,7 @@ fn safe_environment<'a>(keys: impl Iterator<Item = &'a str>) -> Result<(), Strin
         if !seen.insert(normalized.clone())
             || ["NODE_OPTIONS", "NODE_PATH"].contains(&normalized.as_str())
             || normalized == client_ownership::OWNER_KEY && key != client_ownership::OWNER_KEY
+            || normalized == LAUNCHER_CONFIG && key != LAUNCHER_CONFIG
         {
             return Err("Node overrides or ambiguous environment keys require manual review. Nothing was changed.".into());
         }
@@ -101,6 +116,103 @@ fn set_toml(table: &mut dyn toml_edit::TableLike, key: &str, value: impl Into<to
         *value.decor_mut() = previous.decor().clone();
     }
     table.insert(key, toml_edit::Item::Value(value));
+}
+
+fn edit_toml_router_command(
+    source: &str,
+    old_literal: &str,
+    new_literal: &str,
+    expected: &str,
+) -> Result<String, String> {
+    // This toml_edit version duplicates root trivia for dotted keys on output.
+    // Locate the literal in the original, then reparse to prove the exact edit.
+    let expected = expected.parse::<toml_edit::Document>().map_err(|_| "Invalid expected TOML edit.")?;
+    let mut result = None;
+    for (index, (start, _)) in source.match_indices(old_literal).enumerate() {
+        if index == 64 {
+            return Err("Ambiguous TOML command requires manual review. Nothing was changed.".into());
+        }
+        let mut candidate = source.to_owned();
+        candidate.replace_range(start..start + old_literal.len(), new_literal);
+        if candidate.parse::<toml_edit::Document>().is_ok_and(|doc| same_toml(doc.as_item(), expected.as_item())) {
+            if result.is_some() {
+                return Err("Ambiguous TOML command requires manual review. Nothing was changed.".into());
+            }
+            result = Some(candidate);
+        }
+    }
+    result.ok_or("TOML command edit could not be verified. Nothing was changed.".into())
+}
+
+fn same_toml(left: &toml_edit::Item, right: &toml_edit::Item) -> bool {
+    if let (Some(left), Some(right)) = (left.as_table_like(), right.as_table_like()) {
+        return left.len() == right.len() && left.iter().all(|(key, value)| {
+            right.get(key).is_some_and(|other| same_toml(value, other))
+        });
+    }
+    if let (Some(left), Some(right)) = (left.as_array_of_tables(), right.as_array_of_tables()) {
+        return left.len() == right.len() && left.iter().zip(right.iter()).all(|(left, right)| {
+            same_toml(&toml_edit::Item::Table(left.clone()), &toml_edit::Item::Table(right.clone()))
+        });
+    }
+    match (left.as_value(), right.as_value()) {
+        (Some(left), Some(right)) => same_toml_value(left, right),
+        _ => left.is_none() && right.is_none(),
+    }
+}
+
+fn same_toml_value(left: &toml_edit::Value, right: &toml_edit::Value) -> bool {
+    use toml_edit::Value;
+    match (left, right) {
+        (Value::String(left), Value::String(right)) => left.value() == right.value(),
+        (Value::Integer(left), Value::Integer(right)) => left.value() == right.value(),
+        (Value::Float(left), Value::Float(right)) => left.value().to_bits() == right.value().to_bits(),
+        (Value::Boolean(left), Value::Boolean(right)) => left.value() == right.value(),
+        (Value::Datetime(left), Value::Datetime(right)) => left.value() == right.value(),
+        (Value::Array(left), Value::Array(right)) => left.len() == right.len()
+            && left.iter().zip(right.iter()).all(|(left, right)| same_toml_value(left, right)),
+        (Value::InlineTable(_), Value::InlineTable(_)) => same_toml(
+            &toml_edit::Item::Value(left.clone()), &toml_edit::Item::Value(right.clone())),
+        _ => false,
+    }
+}
+
+fn pin_toml_config(source: &str, id: &str, config: &str) -> Result<String, String> {
+    let mut doc = source.parse::<toml_edit::Document>().map_err(|_| "Invalid TOML pin input.")?;
+    let env_item = &mut doc["mcp_servers"][id]["env"];
+    let config = env_item.get("BANTWORKS_LAUNCHER_CONFIG")
+        .and_then(toml_edit::Item::as_str).unwrap_or(config).to_owned();
+    if let Some(env) = env_item.as_inline_table_mut() {
+        let before = env.to_string();
+        env.insert(LAUNCHER_CONFIG, config.into());
+        let after = env.to_string();
+        return edit_toml_router_command(source, &before, &after, &doc.to_string());
+    }
+    let env = env_item.as_table_like_mut().ok_or("Invalid TOML pin environment.")?;
+    let owner = match env.get(client_ownership::OWNER_KEY).and_then(toml_edit::Item::as_value) {
+        Some(toml_edit::Value::String(value)) => value.display_repr().into_owned(),
+        _ => return Err("Missing TOML pin ownership.".into()),
+    };
+    env.insert(LAUNCHER_CONFIG, toml_edit::value(config.clone()));
+    let newline = if source.contains("\r\n") { "\r\n" } else { "\n" };
+    let literal = toml_edit::Value::from(config).to_string();
+    let expected = doc;
+    let mut result = None;
+    let mut positions = std::collections::HashSet::new();
+    for (index, (start, _)) in source.match_indices(&owner).enumerate() {
+        if index == 64 { return Err("Ambiguous TOML environment requires manual review.".into()); }
+        let start = source[..start].rfind('\n').map_or(0, |at| at + 1);
+        if !positions.insert(start) { continue; }
+        for key in [LAUNCHER_CONFIG.to_owned(), format!("mcp_servers.{}.env.{LAUNCHER_CONFIG}", toml_edit::Key::new(id))] {
+            let mut candidate = source.to_owned();
+            candidate.insert_str(start, &format!("{key} = {literal}{newline}"));
+            if candidate.parse::<toml_edit::Document>().is_ok_and(|doc| same_toml(doc.as_item(), expected.as_item())) {
+                if result.is_some() { return Err("Ambiguous TOML environment requires manual review.".into()); }
+                result = Some(candidate);
+            }
+        }
+    }
+    result.ok_or("TOML configuration pin could not be verified. Nothing was changed.".into())
 }
 
 // The existing JSONC parser validates semantics and ambiguity. These ranges only
@@ -238,12 +350,10 @@ fn json_comments(source: &str) -> String {
 fn json_insert(
     source: &str,
     object: &JsonRanges,
-    key: &str,
-    value: &Value,
+    members: &[(&str, &Value)],
     edits: &mut Vec<(std::ops::Range<usize>, String)>,
 ) -> Result<(), String> {
-    let key = serde_json::to_string(key).map_err(|_| "Cannot encode JSON key.")?;
-    let value = serde_json::to_string(value).map_err(|_| "Cannot encode JSON value.")?;
+    if members.is_empty() { return Ok(()); }
     let newline = if source.contains("\r\n") {
         "\r\n"
     } else {
@@ -262,9 +372,14 @@ fn json_insert(
         .last()
         .map(|(_, range)| indent_at(range.start))
         .unwrap_or_else(|| format!("{close_indent}  "));
+    let members = members.iter().map(|(key, value)| {
+        let key = serde_json::to_string(key).map_err(|_| "Cannot encode JSON key.")?;
+        let value = serde_json::to_string(value).map_err(|_| "Cannot encode JSON value.")?;
+        Ok(format!("{key}: {value}"))
+    }).collect::<Result<Vec<_>, &str>>()?.join(&format!(",{newline}{indent}"));
     edits.push((
         object.close..object.close,
-        format!("{newline}{indent}{key}: {value}{newline}{close_indent}"),
+        format!("{newline}{indent}{members}{newline}{close_indent}"),
     ));
     if let Some((_, last)) = object.members.last() {
         if source.as_bytes().get(json_trivia(source, last.end)) != Some(&b',') {
@@ -303,17 +418,13 @@ fn edit_json_entry(
     }
     if let Ok(range) = json_member(&object, env_key) {
         let env = json_object(source, range.start)?;
-        if json_member(&env, client_ownership::OWNER_KEY).is_err() {
-            json_insert(
-                source,
-                &env,
-                client_ownership::OWNER_KEY,
-                &entry[env_key][client_ownership::OWNER_KEY],
-                &mut edits,
-            )?;
-        }
+        let members: Vec<_> = [client_ownership::OWNER_KEY, LAUNCHER_CONFIG].into_iter()
+            .filter(|key| json_member(&env, key).is_err())
+            .filter_map(|key| entry[env_key].get(key).map(|value| (key, value)))
+            .collect();
+        json_insert(source, &env, &members, &mut edits)?;
     } else {
-        json_insert(source, &object, env_key, &entry[env_key], &mut edits)?;
+        json_insert(source, &object, &[(env_key, &entry[env_key])], &mut edits)?;
     }
     edits.sort_by_key(|edit| std::cmp::Reverse(edit.0.start));
     let mut after = source.to_owned();
@@ -333,6 +444,7 @@ impl Plan {
     ) -> Result<Option<Self>, String> {
         Self::review_target(client, path, format, node, Some(server))
     }
+    #[allow(dead_code)] // Retained for the unpinned compatibility/test caller.
     pub(crate) fn review_router(
         client: &str,
         path: &Path,
@@ -341,6 +453,19 @@ impl Plan {
     ) -> Result<Option<Self>, String> {
         Self::review_target(client, path, format, router, None)
     }
+    pub(crate) fn review_router_with_config(
+        client: &str,
+        path: &Path,
+        format: Format,
+        router: &Path,
+        launcher_config: &Path,
+    ) -> Result<Option<Self>, String> {
+        Self::review_target_inner(
+            client, path, format, router, None, Some(launcher_config),
+            #[cfg(test)]
+            verify_retained_router,
+        )
+    }
     fn review_target(
         client: &str,
         path: &Path,
@@ -348,8 +473,34 @@ impl Plan {
         node: &Path,
         server: Option<&Path>,
     ) -> Result<Option<Self>, String> {
+        Self::review_target_inner(
+            client,
+            path,
+            format,
+            node,
+            server,
+            None,
+            #[cfg(test)]
+            verify_retained_router,
+        )
+    }
+
+    fn review_target_inner(
+        client: &str,
+        path: &Path,
+        format: Format,
+        node: &Path,
+        server: Option<&Path>,
+        launcher_config: Option<&Path>,
+        #[cfg(test)] verify_router: impl Fn(&Path) -> Result<(), String>,
+    ) -> Result<Option<Self>, String> {
+        #[cfg(not(test))]
+        let verify_router = verify_retained_router;
         if !path.is_absolute() {
             return Err("Client settings require an absolute path.".into());
+        }
+        if let Some(config) = launcher_config {
+            crate::managed_settings_path::physical(config)?;
         }
         let Some(before) = settings_backup::read_text(path)? else {
             return Ok(None);
@@ -392,9 +543,12 @@ impl Plan {
                     .and_then(|env| env.get(client_ownership::OWNER_KEY));
                 let owned =
                     owner.and_then(toml_edit::Item::as_str) == Some(client_ownership::OWNER);
+                let needs_pin = launcher_config.is_some() && entry.get("env")
+                    .and_then(toml_edit::Item::as_table_like)
+                    .is_none_or(|env| !env.contains_key(LAUNCHER_CONFIG));
                 if owned
                     && (!managed
-                        || entry.get("command").and_then(toml_edit::Item::as_str)
+                        || !needs_pin && entry.get("command").and_then(toml_edit::Item::as_str)
                             .is_some_and(|command| same_router_path(command, &node))
                             && entry
                                 .get("args")
@@ -414,16 +568,34 @@ impl Plan {
                 let args = entry
                     .get("args")
                     .and_then(toml_edit::Item::as_array)
-                    .filter(|args| args.len() == 1)
                     .ok_or("Custom client arguments require manual review.")?;
-                let old_server = args
-                    .get(0)
-                    .and_then(toml_edit::Value::as_str)
-                    .ok_or("Custom client arguments require manual review.")?
-                    .to_owned();
-                legacy_shape(&old_node, &old_server)?;
+                let relocated = managed && owned && args.is_empty();
+                let command_literal = if relocated && !same_router_path(&old_node, &node) {
+                    match entry.get("command").and_then(toml_edit::Item::as_value) {
+                        Some(toml_edit::Value::String(value)) => Some(value.display_repr().into_owned()),
+                        _ => unreachable!(),
+                    }
+                } else {
+                    None
+                };
+                let old_server = if managed && owned && args.is_empty() {
+                    reviewable(&old_node)?;
+                    verify_router(Path::new(&old_node))?;
+                    String::new()
+                } else {
+                    if args.len() != 1 {
+                        return Err("Custom client arguments require manual review.".into());
+                    }
+                    let server = args
+                        .get(0)
+                        .and_then(toml_edit::Value::as_str)
+                        .ok_or("Custom client arguments require manual review.")?
+                        .to_owned();
+                    legacy_shape(&old_node, &server)?;
+                    server
+                };
                 let mut args = args.clone();
-                if managed {
+                if managed && !args.is_empty() {
                     let value = args.get(0).unwrap();
                     let trivia = format!(
                         "{}{}{}",
@@ -442,11 +614,18 @@ impl Plan {
                     args.clear();
                     args.set_trailing_comma(false);
                     args.set_trailing(trivia);
-                } else {
+                } else if !managed {
                     args.replace(0, server);
                 }
-                set_toml(entry, "command", node);
-                set_toml(entry, "args", args);
+                if relocated && command_literal.is_some() {
+                    let previous = entry.get_mut("command").unwrap().as_value_mut().unwrap();
+                    let mut value = toml_edit::Value::from(node.clone());
+                    *value.decor_mut() = previous.decor().clone();
+                    *previous = value;
+                } else if !relocated {
+                    set_toml(entry, "command", node.clone());
+                    set_toml(entry, "args", args);
+                }
                 if entry.get("env").is_none() {
                     entry.insert("env", toml_edit::Item::Table(toml_edit::Table::new()));
                 }
@@ -460,8 +639,23 @@ impl Plan {
                     .get("UNITY_PROJECT_PATH")
                     .and_then(toml_edit::Item::as_str)
                     .map(str::to_owned);
-                set_toml(env, client_ownership::OWNER_KEY, client_ownership::OWNER);
-                (doc.to_string(), old_node, old_server, project)
+                if !relocated {
+                    set_toml(env, client_ownership::OWNER_KEY, client_ownership::OWNER);
+                }
+                let rendered = doc.to_string();
+                let mut after = if relocated {
+                    if let Some(literal) = command_literal {
+                        edit_toml_router_command(&before, &literal, &toml_edit::Value::from(node).to_string(), &rendered)?
+                    } else {
+                        before.clone()
+                    }
+                } else {
+                    rendered
+                };
+                if managed && needs_pin {
+                    after = pin_toml_config(&after, ids[0], &crate::managed_settings_path::physical(launcher_config.unwrap())?)?;
+                }
+                (after, old_node, old_server, project)
             }
             Format::Json | Format::OpenCode => {
                 if matches!(format, Format::Json) {
@@ -510,6 +704,7 @@ impl Plan {
                     .get(env_key)
                     .and_then(|env| env.get(client_ownership::OWNER_KEY));
                 let owned = owner == Some(&Value::String(client_ownership::OWNER.into()));
+                let needs_pin = launcher_config.is_some() && entry[env_key].get(LAUNCHER_CONFIG).is_none();
                 let routed = if matches!(format, Format::OpenCode) {
                     entry["command"].as_array().is_some_and(|command| command.len() == 1
                         && command[0].as_str().is_some_and(|command| same_router_path(command, &node)))
@@ -517,7 +712,7 @@ impl Plan {
                     entry["command"].as_str().is_some_and(|command| same_router_path(command, &node))
                         && entry["args"] == serde_json::json!([])
                 };
-                if owned && (!managed || routed) {
+                if owned && (!managed || routed && !needs_pin) {
                     return Ok(None);
                 }
                 if owner.is_some() && !owned {
@@ -529,26 +724,43 @@ impl Plan {
                     }
                     let command = entry["command"]
                         .as_array()
-                        .filter(|a| a.len() == 2)
                         .ok_or("Custom client arguments require manual review.")?;
-                    (command[0].as_str(), command[1].as_str())
+                    if managed && owned && command.len() == 1 {
+                        (command[0].as_str(), None)
+                    } else if command.len() == 2 {
+                        (command[0].as_str(), Some(command[1].as_str()))
+                    } else {
+                        return Err("Custom client arguments require manual review.".into());
+                    }
                 } else {
                     let args = entry["args"]
                         .as_array()
-                        .filter(|a| a.len() == 1)
                         .ok_or("Custom client arguments require manual review.")?;
-                    (entry["command"].as_str(), args[0].as_str())
+                    if managed && owned && args.is_empty() {
+                        (entry["command"].as_str(), None)
+                    } else if args.len() == 1 {
+                        (entry["command"].as_str(), Some(args[0].as_str()))
+                    } else {
+                        return Err("Custom client arguments require manual review.".into());
+                    }
                 };
-                let (old_node, old_server) = (
-                    old_node
-                        .ok_or("Custom client command requires manual review.")?
-                        .to_owned(),
-                    old_server
+                let old_node = old_node
+                    .ok_or("Custom client command requires manual review.")?
+                    .to_owned();
+                let old_server = if let Some(server) = old_server {
+                    let server = server
                         .ok_or("Custom client arguments require manual review.")?
-                        .to_owned(),
-                );
-                legacy_shape(&old_node, &old_server)?;
-                if matches!(format, Format::OpenCode) {
+                        .to_owned();
+                    legacy_shape(&old_node, &server)?;
+                    server
+                } else {
+                    reviewable(&old_node)?;
+                    verify_router(Path::new(&old_node))?;
+                    String::new()
+                };
+                if routed {
+                    // A config-only pin keeps the current command spelling intact.
+                } else if matches!(format, Format::OpenCode) {
                     entry["command"] = if managed {
                         serde_json::json!([node])
                     } else {
@@ -577,6 +789,13 @@ impl Plan {
                     client_ownership::OWNER_KEY.into(),
                     Value::String(client_ownership::OWNER.into()),
                 );
+                if managed && needs_pin {
+                    let config = match env.get("BANTWORKS_LAUNCHER_CONFIG").and_then(Value::as_str) {
+                        Some(config) => config.to_owned(),
+                        None => crate::managed_settings_path::physical(launcher_config.unwrap())?,
+                    };
+                    env.insert(LAUNCHER_CONFIG.into(), Value::String(config));
+                }
                 let entry = entry.clone();
                 let after = edit_json_entry(&before, key, id, env_key, &entry)?;
                 if jsonc::parse_unambiguous(&after)? != config {

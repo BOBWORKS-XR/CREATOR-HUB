@@ -297,6 +297,7 @@ fn finish_server_review(
             );
         }
     }
+    crate::managed_settings_path::refresh_recovered(&paths.current, &paths.legacy)?;
     Ok(ServerTransition {
         changed: true,
         server: server.to_path_buf(),
@@ -798,7 +799,8 @@ pub(crate) fn save_operation(
 
 fn commit_operation(config: crate::LauncherConfig, operation: Operation) -> Result<(), String> {
     let after = encoded_config(config)?;
-    save_snapshot(&operation.paths, &operation.before, &after).map(|_| ())
+    save_snapshot(&operation.paths, &operation.before, &after)?;
+    crate::managed_settings_path::refresh_existing(&operation.paths.current)
 }
 
 /// Existing schema/ownership approval belongs to the caller. This binds publication
@@ -940,7 +942,7 @@ pub(super) fn save(config: crate::LauncherConfig) -> Result<(), String> {
         .as_ref()
         .ok_or("Load MCP settings before saving; no unreviewed overwrite is allowed.")?;
     *loaded = Some(save_snapshot(&paths, before, &after)?);
-    Ok(())
+    crate::managed_settings_path::refresh_existing(&paths.current)
 }
 
 pub(super) fn native_review(app: &tauri::AppHandle, base: &Path) -> Result<Report, String> {
@@ -975,8 +977,19 @@ pub(crate) fn native_review_decision(
 
 fn review_with(
     paths: &Paths,
+    approve_recovery: impl FnMut(&recovery::Report) -> bool,
+    approve_backup: impl FnOnce(&Paths) -> bool,
+) -> Result<ReviewReceipt, String> {
+    review_with_refresh(paths, approve_recovery, approve_backup, || {
+        crate::managed_settings_path::refresh_recovered(&paths.current, &paths.legacy)
+    })
+}
+
+fn review_with_refresh(
+    paths: &Paths,
     mut approve_recovery: impl FnMut(&recovery::Report) -> bool,
     approve_backup: impl FnOnce(&Paths) -> bool,
+    refresh: impl FnOnce() -> Result<(), String>,
 ) -> Result<ReviewReceipt, String> {
     let mut reviewed_recovery = false;
     let mut any_approved = false;
@@ -998,6 +1011,9 @@ fn review_with(
         })?;
     }
     if reviewed_recovery {
+        if any_approved && !any_declined {
+            refresh()?;
+        }
         return Ok(ReviewReceipt {
             report: inspect_paths(paths)?,
             approved: any_approved && !any_declined,
@@ -1013,6 +1029,7 @@ fn review_with(
     let approved = approve_backup(paths);
     if approved {
         preserve(paths, &saved)?;
+        refresh()?;
     }
     Ok(ReviewReceipt {
         report: inspect_paths(paths)?,

@@ -73,6 +73,31 @@ fn pending_review_save(fixture: &Fixture, path: &Path) -> recovery::Transaction 
     .unwrap()
 }
 
+#[test]
+fn recovered_save_refreshes_the_same_shared_settings_view_only_after_approval() {
+    for approve in [false, true] {
+        let fixture = Fixture::new();
+        let transaction = pending_review_save(&fixture, &fixture.paths.current);
+        let views = fixture.root.path().join("shared-views");
+        let view = crate::managed_settings_path::prepare_fixture(&fixture.paths.current, &fixture.paths.legacy, &views).unwrap();
+        view.publish().unwrap();
+        let path = view.path().unwrap();
+        let original = fs::read(&path).unwrap();
+        let receipt = review_with_refresh(&fixture.paths, |_| approve, |_| panic!("Unexpected backup prompt"), || {
+            crate::managed_settings_path::refresh_fixture(&fixture.paths.current, &fixture.paths.legacy, &views)
+        }).unwrap();
+        assert_eq!(receipt.approved, approve);
+        if approve {
+            let saved: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            assert_eq!(saved["futureCurrent"], "reviewed change");
+            assert!(transaction.inspect().unwrap().completed);
+        } else {
+            assert_eq!(fs::read(&path).unwrap(), original);
+            assert!(!transaction.inspect().unwrap().completed);
+        }
+    }
+}
+
 #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 #[test]
 fn completed_preview_location_history_does_not_disable_product_settings_review() {

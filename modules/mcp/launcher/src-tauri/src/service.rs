@@ -9,6 +9,11 @@ use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 const MAX_ARGUMENTS: usize = 60_000;
 static INITIALIZING: Mutex<()> = Mutex::new(());
 
+/// Read-only hint for reopening review after a retained-router upgrade.
+pub fn connection_update_key() -> Result<Option<String>, String> {
+    crate::connection_update::review_key()
+}
+
 /// Home inventory only: verifies payload bytes without acquiring writer
 /// ownership, creating a service context, binding routes or changing settings.
 pub fn project_bridge_statuses(

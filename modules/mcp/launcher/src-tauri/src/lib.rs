@@ -26,6 +26,8 @@ mod integration_context;
 mod jsonc;
 mod lifecycle;
 mod managed_client;
+mod managed_settings_path;
+mod connection_update;
 #[path = "../../../../../native/plugins_retirement.rs"]
 mod plugins_retirement;
 pub mod service;
@@ -794,7 +796,8 @@ fn save_config(mut config: LauncherConfig) -> Result<(), String> {
     let content = serde_json::to_string_pretty(&config)
         .map_err(|e| format!("Failed to serialize config: {}", e))?;
 
-    atomic_write(&config_path, &content)
+    atomic_write(&config_path, &content)?;
+    managed_settings_path::refresh_existing(&config_path)
 }
 
 /// Add a new scene channel
@@ -1041,6 +1044,39 @@ fn get_claude_mcp_config() -> Result<serde_json::Value, String> {
     }
 }
 
+fn preserved_client_environment(
+    config: &serde_json::Value,
+    opencode: bool,
+) -> Result<serde_json::Value, String> {
+    let (servers, key) = if opencode { ("mcp", "environment") } else { ("mcpServers", "env") };
+    let mut retained = serde_json::Map::new();
+    for id in [LEGACY_MCP_CLIENT_ID, MCP_CLIENT_ID] {
+        let Some(entry) = config[servers].get(id) else { continue };
+        let entry = entry.as_object().ok_or("Managed MCP entry must be an object; nothing was changed.")?;
+        let Some(env) = entry.get(key) else { continue };
+        let env = env.as_object().ok_or("Managed MCP environment must be an object; nothing was changed.")?;
+        for (name, value) in env {
+            if !value.is_string() {
+                return Err(format!("Managed MCP environment value {name} must be a string; nothing was changed."));
+            }
+            if matches!(name.as_str(), "UNITY_PROJECT_PATH" | "UNITY_SCENE_PATH" | TOOL_GROUPS_ENV | client_ownership::OWNER_KEY) {
+                continue;
+            }
+            if retained.get(name).is_some_and(|previous| previous != value) {
+                return Err(format!("Creator Works and Banter environment value {name} conflicts; review both entries before retrying."));
+            }
+            retained.insert(name.clone(), value.clone());
+        }
+    }
+    // Keep the legacy fallback effective when normal setup adds a primary pin.
+    if !retained.contains_key("CREATOR_WORKS_LAUNCHER_CONFIG") {
+        if let Some(legacy) = retained.get("BANTWORKS_LAUNCHER_CONFIG").cloned() {
+            retained.insert("CREATOR_WORKS_LAUNCHER_CONFIG".into(), legacy);
+        }
+    }
+    Ok(serde_json::Value::Object(retained))
+}
+
 fn build_claude_mcp_config(
     mut config: serde_json::Value,
     channel: &ProjectChannel,
@@ -1063,16 +1099,16 @@ fn build_claude_mcp_config(
         return Err("Claude config mcpServers must be a JSON object".to_string());
     }
 
+    let mut env = preserved_client_environment(&config, false)
+        .map_err(|error| format!("Claude Code: {error}"))?;
     if let Some(servers) = config["mcpServers"].as_object_mut() {
         servers.remove(MCP_CLIENT_ID);
         servers.remove(LEGACY_MCP_CLIENT_ID);
     }
 
-    let mut env = serde_json::json!({
-        "UNITY_PROJECT_PATH": channel.unity_project_path,
-        TOOL_GROUPS_ENV: resolve_project_tool_groups(tool_groups, Path::new(&channel.unity_project_path))?,
-        client_ownership::OWNER_KEY: client_ownership::OWNER
-    });
+    env["UNITY_PROJECT_PATH"] = channel.unity_project_path.clone().into();
+    env[TOOL_GROUPS_ENV] = resolve_project_tool_groups(tool_groups, Path::new(&channel.unity_project_path))?.into();
+    env[client_ownership::OWNER_KEY] = client_ownership::OWNER.into();
     if let Some(scene) = &channel.scene_path {
         env["UNITY_SCENE_PATH"] = serde_json::json!(scene);
     }
@@ -1123,7 +1159,10 @@ fn update_claude_mcp_config(
         &tool_groups,
     )?;
 
-    let config = unity_cli::augment_json(config, &channel.unity_project_path, false)?;
+    let mut config = unity_cli::augment_json(config, &channel.unity_project_path, false)?;
+    if mcp_server_path.is_empty() {
+        managed_settings_path::pin_json(&mut config, false, &managed_settings_path::current_for_client(&get_config_path(), &get_legacy_config_path())?)?;
+    }
     let content = serde_json::to_string_pretty(&config)
         .map_err(|e| format!("Failed to serialize Claude config: {}", e))?;
 
@@ -1145,7 +1184,12 @@ fn desktop_entry(
         .to_string_lossy()
         .into_owned();
     let (command, server) = managed_client::target(app, &physical)?;
-    desktop_entry_for_target(channel, &command, &server, groups)
+    let mut entry = desktop_entry_for_target(channel, &command, &server, groups)?;
+    if server.is_empty() {
+        entry["env"]["CREATOR_WORKS_LAUNCHER_CONFIG"] = managed_settings_path::planned_path(&get_config_path())?
+            .to_str().ok_or("MCP settings path is not UTF-8.")?.into();
+    }
+    Ok(entry)
 }
 
 fn desktop_entry_for_target(channel: &ProjectChannel, command: &str, server: &str, groups: &str) -> Result<serde_json::Value, String> {
@@ -1155,6 +1199,20 @@ fn desktop_entry_for_target(channel: &ProjectChannel, command: &str, server: &st
         "env": {"UNITY_PROJECT_PATH": channel.unity_project_path,
             TOOL_GROUPS_ENV: resolve_project_tool_groups(groups, Path::new(&channel.unity_project_path))?, "CREATOR_WORKS_CONFIG_OWNER": "creator-hub-v1"}
     }))
+}
+
+fn merge_desktop_entry(
+    config: serde_json::Value,
+    mut entry: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    // Apply Desktop's ownership and duplicate-connection checks before merging.
+    claude_desktop::merge(config.clone(), entry.clone())?;
+    let retained = preserved_client_environment(&config, false)
+        .map_err(|error| format!("Claude Desktop: {error}"))?;
+    for (key, value) in retained.as_object().unwrap() {
+        entry["env"][key] = value.clone();
+    }
+    claude_desktop::merge(config, entry)
 }
 
 #[tauri::command]
@@ -1169,11 +1227,14 @@ fn update_claude_desktop_mcp_config(
         return Err("Install and open Claude Desktop once, then retry. Claude Code and the Claude website are different clients.".into());
     }
     let (before, config) = claude_desktop::read(&path)?;
-    let config = claude_desktop::merge(
+    let config = merge_desktop_entry(
         config,
         desktop_entry(&app, &channel, &mcp_server_path, &tool_groups)?,
     )?;
     let config = unity_cli::augment_json(config, &channel.unity_project_path, false)?;
+    if app.try_state::<managed_client::ManagedClient>().is_some() {
+        managed_settings_path::current_for_client(&get_config_path(), &get_legacy_config_path())?;
+    }
     claude_desktop::write(&path, before.as_deref(), &config)
 }
 
@@ -1208,6 +1269,29 @@ fn build_codex_mcp_config(
         Some((&node_command.replace('\\', "/"), mcp_server_path)),
     )
     .map_err(|error| format!("Codex: {error}"))?;
+    let original = existing.parse::<toml_edit::Document>()
+        .map_err(|_| "Failed to parse Codex config; refusing to overwrite it.")?;
+    let mut retained = toml_edit::Table::new();
+    for id in [LEGACY_MCP_CLIENT_ID, MCP_CLIENT_ID] {
+        let Some(entry) = original.get("mcp_servers").and_then(|servers| servers.get(id)) else { continue };
+        let Some(env) = entry.get("env") else { continue };
+        let env = env.as_table_like().ok_or("Codex: Managed MCP environment must be a table; nothing was changed.")?;
+        for (name, value) in env.iter() {
+            let value_text = value.as_str().ok_or_else(|| format!("Codex: Managed MCP environment value {name} must be a string; nothing was changed."))?;
+            if matches!(name, "UNITY_PROJECT_PATH" | "UNITY_SCENE_PATH" | TOOL_GROUPS_ENV | client_ownership::OWNER_KEY) {
+                continue;
+            }
+            if retained.get(name).is_some_and(|previous| previous.as_str() != Some(value_text)) {
+                return Err(format!("Codex: Creator Works and Banter environment value {name} conflicts; review both entries before retrying."));
+            }
+            retained.insert(name, value.clone());
+        }
+    }
+    if !retained.contains_key("CREATOR_WORKS_LAUNCHER_CONFIG") {
+        if let Some(legacy) = retained.get("BANTWORKS_LAUNCHER_CONFIG").cloned() {
+            retained.insert("CREATOR_WORKS_LAUNCHER_CONFIG", legacy);
+        }
+    }
     let tool_groups = resolve_project_tool_groups(tool_groups, Path::new(&channel.unity_project_path))?;
     let existing = remove_client_mcp_tables(existing, MCP_CLIENT_ID)?;
     let existing = remove_client_mcp_tables(&existing, LEGACY_MCP_CLIENT_ID)?;
@@ -1270,6 +1354,9 @@ fn build_codex_mcp_config(
         .as_table_mut()
         .ok_or("Failed to build the Codex MCP environment.")?
         .set_position(usize::MAX);
+    for (name, value) in retained.iter() {
+        entry_table["env"].as_table_mut().unwrap().insert(name, value.clone());
+    }
     document
         .entry("mcp_servers")
         .or_insert(toml_edit::table())
@@ -1353,7 +1440,10 @@ fn update_codex_mcp_config(
         &tool_groups,
     )?;
 
-    let content = unity_cli::augment_toml(content, &channel.unity_project_path)?;
+    let mut content = unity_cli::augment_toml(content, &channel.unity_project_path)?;
+    if mcp_server_path.is_empty() {
+        content = managed_settings_path::pin_toml(content, &managed_settings_path::current_for_client(&get_config_path(), &get_legacy_config_path())?)?;
+    }
     client_setup_write::commit(
         "Codex",
         &config_path,
@@ -1432,11 +1522,11 @@ fn build_antigravity_mcp_config(
         return Err("Antigravity config mcpServers must be a JSON object".to_string());
     }
 
-    let mut env = serde_json::json!({
-        "UNITY_PROJECT_PATH": channel.unity_project_path,
-        TOOL_GROUPS_ENV: resolve_project_tool_groups(tool_groups, Path::new(&channel.unity_project_path))?,
-        client_ownership::OWNER_KEY: client_ownership::OWNER
-    });
+    let mut env = preserved_client_environment(&config, false)
+        .map_err(|error| format!("Antigravity: {error}"))?;
+    env["UNITY_PROJECT_PATH"] = channel.unity_project_path.clone().into();
+    env[TOOL_GROUPS_ENV] = resolve_project_tool_groups(tool_groups, Path::new(&channel.unity_project_path))?.into();
+    env[client_ownership::OWNER_KEY] = client_ownership::OWNER.into();
     if let Some(scene) = &channel.scene_path {
         env["UNITY_SCENE_PATH"] = serde_json::json!(scene);
     }
@@ -1495,7 +1585,10 @@ fn update_antigravity_mcp_config(
         &tool_groups,
     )?;
 
-    let config = unity_cli::augment_json(config, &channel.unity_project_path, false)?;
+    let mut config = unity_cli::augment_json(config, &channel.unity_project_path, false)?;
+    if mcp_server_path.is_empty() {
+        managed_settings_path::pin_json(&mut config, false, &managed_settings_path::current_for_client(&get_config_path(), &get_legacy_config_path())?)?;
+    }
     let content = serde_json::to_string_pretty(&config)
         .map_err(|e| format!("Failed to serialize Antigravity config: {}", e))?;
 
@@ -1587,11 +1680,11 @@ fn build_opencode_mcp_config(
         return Err("OpenCode config 'mcp' must be a JSON object".to_string());
     }
 
-    let mut environment = serde_json::json!({
-        "UNITY_PROJECT_PATH": channel.unity_project_path,
-        TOOL_GROUPS_ENV: resolve_project_tool_groups(tool_groups, Path::new(&channel.unity_project_path))?,
-        client_ownership::OWNER_KEY: client_ownership::OWNER
-    });
+    let mut environment = preserved_client_environment(&config, true)
+        .map_err(|error| format!("OpenCode: {error}"))?;
+    environment["UNITY_PROJECT_PATH"] = channel.unity_project_path.clone().into();
+    environment[TOOL_GROUPS_ENV] = resolve_project_tool_groups(tool_groups, Path::new(&channel.unity_project_path))?.into();
+    environment[client_ownership::OWNER_KEY] = client_ownership::OWNER.into();
     if let Some(scene) = &channel.scene_path {
         environment["UNITY_SCENE_PATH"] = serde_json::json!(scene);
     }
@@ -1628,16 +1721,19 @@ fn update_opencode_mcp_config(
 
     let before = client_setup_write::snapshot(&config_path)?;
     let content = before.as_deref().unwrap_or("{}");
-    parse_opencode_config(content)?;
+    let existing = parse_opencode_config(content)?;
 
     let (node_command, mcp_server_path) = managed_client::target(&app, &mcp_server_path)?;
-    let config = build_opencode_mcp_config(
-        serde_json::json!({ "mcp": {} }),
+    let mut config = build_opencode_mcp_config(
+        existing,
         &channel,
         &node_command,
         &mcp_server_path,
         &tool_groups,
     )?;
+    if mcp_server_path.is_empty() {
+        managed_settings_path::pin_json(&mut config, true, &managed_settings_path::current_for_client(&get_config_path(), &get_legacy_config_path())?)?;
+    }
     let entry = config["mcp"][MCP_CLIENT_ID].clone();
     client_ownership::guard_json(&parse_opencode_config(content)?, Some(&entry), true)?;
     let content =
@@ -2440,7 +2536,7 @@ fn one_click_setup(
             return Err("Install and open Claude Desktop once, then check again.".into());
         }
         let (_, existing) = claude_desktop::read(&path)?;
-        let built = claude_desktop::merge(
+        let built = merge_desktop_entry(
             existing,
             desktop_entry(&app, &candidate, &physical_server, &tool_groups)?,
         )?;
@@ -2570,8 +2666,11 @@ fn review_existing_client_connection(
         return Err("A verified private runtime is required. No client was changed.".into());
     }
     let server = default_mcp_server_path(&app)?;
+    let settings_review = if app.try_state::<managed_client::ManagedClient>().is_some() {
+        Some(managed_settings_path::Review::prepare_current(&get_config_path(), &get_legacy_config_path())?)
+    } else { None };
     let plan = if let Some(managed) = app.try_state::<managed_client::ManagedClient>() {
-        client_migration::Plan::review_router(name, &path, format, &managed.0.command)
+        client_migration::Plan::review_router_with_config(name, &path, format, &managed.0.command, &settings_review.as_ref().unwrap().path()?)
     } else {
         client_migration::Plan::review(name, &path, format, &node, &server)
     };
@@ -2591,13 +2690,19 @@ fn review_existing_client_connection(
             server.display()
         )
     };
-    let backup = plan.apply(|review| {
+    let approved = {
+        let review = &plan;
         app.dialog().message(format!(
             "Move this existing {} connection to the running Hub's managed runtime?\n\nSettings: {}\nOld command: {}\nOld server: {}\n\n{}\n\nExisting project (kept): {}\n\nIts publisher is not verified by its name or ownership marker. Continue only if this is your Creator Works connection. An exact local backup is kept. Other servers, project selection and client options are preserved. No old app is uninstalled and no client or Unity process is stopped.",
             review.client, path.display(), review.old_node, review.old_server, target_description, review.project.as_deref().unwrap_or("Not specified")
         )).title("Review existing MCP connection").kind(MessageDialogKind::Warning)
             .buttons(MessageDialogButtons::OkCancelCustom("Move connection".into(), "Keep existing".into())).blocking_show()
-    }).map_err(|error| format!("{name}: {error}"))?;
+    };
+    if !approved {
+        return Ok(serde_json::json!({"client":client,"status":"cancelled"}));
+    }
+    if let Some(review) = settings_review { review.publish()?; }
+    let backup = plan.apply(|_| true).map_err(|error| format!("{name}: {error}"))?;
     Ok(match backup {
         Some(path) => serde_json::json!({"client":client,"status":"migrated","backupPath":path}),
         None => serde_json::json!({"client":client,"status":"cancelled"}),
@@ -2639,12 +2744,14 @@ fn review_existing_client_connections(
     let managed = app
         .try_state::<managed_client::ManagedClient>()
         .ok_or("A verified managed router is required for batch migration.")?;
+    let settings_review = managed_settings_path::Review::prepare_current(&get_config_path(), &get_legacy_config_path())?;
+    let settings_path = settings_review.path()?;
     let mut plans = Vec::new();
     for client in &clients {
         let (name, path, format) = client_target(client)?;
         client_recovery_ui::require_no_pending_adjacent(&path)?;
         if let Some(plan) =
-            client_migration::Plan::review_router(name, &path, format, &managed.0.command)?
+            client_migration::Plan::review_router_with_config(name, &path, format, &managed.0.command, &settings_path)?
         {
             plans.push(plan);
         }
@@ -2652,10 +2759,7 @@ fn review_existing_client_connections(
     if plans.is_empty() {
         return Ok(serde_json::json!({"status":"unchanged", "count":0}));
     }
-    let report = client_migration::Plan::apply_reviewed(
-        &plans,
-        &client_recovery_ui::central_root()?,
-        |plans| {
+    let approved = {
             let details = plans
                 .iter()
                 .map(|plan| {
@@ -2672,8 +2776,12 @@ fn review_existing_client_connections(
             app.dialog().message(format!("Move these existing connections to Creator Hub?\n\n{details}\n\nManaged router: {}\nArguments: none. Signed activation selects the retained runtime.\n\nNames and ownership markers are not publisher verification. Continue only for your Creator Works connections. Exact local before/after images and backups are retained. Client options, other servers and selected projects are preserved. Interrupted changes require recovery review; no blind rollback is attempted. No app is uninstalled or stopped.", managed.0.command.display()))
             .title("Review existing MCP connections").kind(MessageDialogKind::Warning)
             .buttons(MessageDialogButtons::OkCancelCustom("Move selected connections".into(), "Keep existing".into())).blocking_show()
-        },
-    )?;
+    };
+    if !approved {
+        return Ok(serde_json::json!({"status":"cancelled", "count":0}));
+    }
+    settings_review.publish()?;
+    let report = client_migration::Plan::apply_reviewed(&plans, &client_recovery_ui::central_root()?, |_| true)?;
     match report {
         None => Ok(serde_json::json!({"status":"cancelled", "count":0})),
         Some(report) if report.completed => Ok(serde_json::json!({"status":"migrated", "count":report.files.len(), "journal":report.journal})),
@@ -2698,6 +2806,8 @@ fn apply_convergence_clients(
     let managed = app
         .try_state::<managed_client::ManagedClient>()
         .ok_or("The signed MCP router is unavailable.")?;
+    let settings_review = managed_settings_path::Review::prepare_current(&get_config_path(), &get_legacy_config_path())?;
+    let settings_path = settings_review.path()?;
     let mut plans = Vec::new();
     let mut unverified = Vec::new();
     for id in [
@@ -2713,9 +2823,11 @@ fn apply_convergence_clients(
         let (name, path, format) = client_target(id)?;
         client_recovery_ui::require_no_pending_adjacent(&path)?;
         if let Some(plan) =
-            client_migration::Plan::review_router(name, &path, format, &managed.0.command)?
+            client_migration::Plan::review_router_with_config(name, &path, format, &managed.0.command, &settings_path)?
         {
-            if !hosted_commands::product_settings::verified_previous_connection(
+            let verified_router = plan.old_server.is_empty()
+                && creator_hub_mcp_router::Store::verify_retained_router_command(Path::new(&plan.old_node)).is_ok();
+            if !verified_router && !hosted_commands::product_settings::verified_previous_connection(
                 Path::new(&plan.old_node),
                 Path::new(&plan.old_server),
             )? {
@@ -2745,7 +2857,8 @@ fn apply_convergence_clients(
     service::recheck_convergence_owner(app)?;
     consent.recheck_clients()?;
     apply_convergence_client_plans(&plans, &client_recovery_ui::central_root()?, || {
-        consent.recheck_imported_settings()
+        consent.recheck_imported_settings()?;
+        settings_review.publish()
     })
 }
 
@@ -3225,6 +3338,164 @@ mod tests {
             enabled: true,
             extra: Default::default(),
         }
+    }
+
+    #[test]
+    fn normal_json_reconfiguration_preserves_explicit_config_and_manual_environment() {
+        let mut channel = codex_fixture_channel();
+        channel.scene_path = None;
+        let root = tempfile::tempdir().unwrap();
+        let default_pin = root.path().join("default.json");
+        std::fs::write(&default_pin, "{}").unwrap();
+        let router = if cfg!(windows) { "C:/verified/creator-hub-mcp-router.exe" } else { "/verified/creator-hub-mcp-router" };
+        for (build, opencode) in [(build_claude_mcp_config as fn(_, _, _, _, _) -> _, false), (build_antigravity_mcp_config, false), (build_opencode_mcp_config, true)] {
+            let (servers, env_key) = if opencode { ("mcp", "environment") } else { ("mcpServers", "env") };
+            for id in [MCP_CLIENT_ID, LEGACY_MCP_CLIENT_ID] {
+                for primary in [false, true] {
+                    for (command, server) in [("node", "server.mjs"), (router, "")] {
+                        let mut env = serde_json::json!({
+                            client_ownership::OWNER_KEY: client_ownership::OWNER,
+                            "BANTWORKS_LAUNCHER_CONFIG": "C:\\manual legacy\\config.json",
+                            "CUSTOM": "exact \\\" value\nnext line",
+                            "UNITY_PROJECT_PATH": "old project",
+                            "UNITY_SCENE_PATH": "old scene",
+                            TOOL_GROUPS_ENV: "all"
+                        });
+                        if primary { env["CREATOR_WORKS_LAUNCHER_CONFIG"] = "C:\\manual primary\\config.json".into(); }
+                        let entry = if opencode {
+                            serde_json::json!({"type":"local", "command":["old-node", "old-server"], env_key:env})
+                        } else {
+                            serde_json::json!({"command":"old-node", "args":["old-server"], env_key:env})
+                        };
+                        let original = serde_json::json!({"preferences":{"keep":true}, servers:{id:entry, "other":{"custom":[1,2]}}});
+                        let mut updated = build(original.clone(), &channel, command, server, "read").unwrap();
+                        managed_settings_path::pin_json(&mut updated, opencode, &default_pin).unwrap();
+                        let actual = &updated[servers][MCP_CLIENT_ID][env_key];
+                        assert_eq!(actual["CREATOR_WORKS_LAUNCHER_CONFIG"], env[if primary { "CREATOR_WORKS_LAUNCHER_CONFIG" } else { "BANTWORKS_LAUNCHER_CONFIG" }]);
+                        assert_eq!(actual["BANTWORKS_LAUNCHER_CONFIG"], env["BANTWORKS_LAUNCHER_CONFIG"]);
+                        assert_eq!(actual["CUSTOM"], env["CUSTOM"]);
+                        assert_eq!(actual["UNITY_PROJECT_PATH"], channel.unity_project_path);
+                        assert!(actual.get("UNITY_SCENE_PATH").is_none());
+                        assert_eq!(actual[TOOL_GROUPS_ENV], "read");
+                        assert_eq!(updated["preferences"], original["preferences"]);
+                        assert_eq!(updated[servers]["other"], original[servers]["other"]);
+                        assert!(updated[servers].get(LEGACY_MCP_CLIENT_ID).is_none());
+                        assert_eq!(build(updated.clone(), &channel, command, server, "read").unwrap(), updated);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn normal_codex_reconfiguration_preserves_explicit_config_in_all_table_forms() {
+        let mut channel = codex_fixture_channel();
+        channel.scene_path = None;
+        let root = tempfile::tempdir().unwrap();
+        let default_pin = root.path().join("default.json");
+        std::fs::write(&default_pin, "{}").unwrap();
+        let router = if cfg!(windows) { "C:/verified/creator-hub-mcp-router.exe" } else { "/verified/creator-hub-mcp-router" };
+        for id in [MCP_CLIENT_ID, LEGACY_MCP_CLIENT_ID] {
+            for key in ["CREATOR_WORKS_LAUNCHER_CONFIG", "BANTWORKS_LAUNCHER_CONFIG"] {
+                for (command, server) in [("node", "server.mjs"), (router, "")] {
+                    let env = format!("{key}='C:\\explicit override\\config.json', CUSTOM='exact \\\" value', UNITY_SCENE_PATH='old scene', {}='{}'", client_ownership::OWNER_KEY, client_ownership::OWNER);
+                    for entry in [
+                        format!("[mcp_servers.'{id}']\ncommand='old-node'\nargs=['old-server']\n[mcp_servers.'{id}'.env]\n{}\n", env.replace(", ", "\n")),
+                        format!("mcp_servers={{'{id}'={{command='old-node',args=['old-server'],env={{{env}}}}},other={{command='keep'}}}}\n"),
+                        format!("mcp_servers.'{id}'.command='old-node'\nmcp_servers.'{id}'.args=['old-server']\nmcp_servers.'{id}'.env={{{env}}}\n"),
+                    ] {
+                        let other = if entry.starts_with("mcp_servers=") { "" } else { "\n[mcp_servers.other]\ncommand='keep'\n" };
+                        let original = format!("# keep root comment\nmodel='keep'\n{entry}{other}");
+                        let updated = build_codex_mcp_config(&original, &channel, command, server, "read").unwrap_or_else(|error| panic!("{error}\n{original}"));
+                        let updated = managed_settings_path::pin_toml(updated, &default_pin).unwrap();
+                        let parsed = updated.parse::<toml_edit::Document>().unwrap();
+                        let actual = &parsed["mcp_servers"][MCP_CLIENT_ID]["env"];
+                        assert_eq!(actual["CREATOR_WORKS_LAUNCHER_CONFIG"].as_str(), Some("C:\\explicit override\\config.json"));
+                        assert_eq!(actual[key].as_str(), Some("C:\\explicit override\\config.json"));
+                        assert_eq!(actual["CUSTOM"].as_str(), Some("exact \\\" value"));
+                        assert!(actual.get("UNITY_SCENE_PATH").is_none());
+                        assert_eq!(actual[TOOL_GROUPS_ENV].as_str(), Some("read"));
+                        assert_eq!(parsed["model"].as_str(), Some("keep"));
+                        assert_eq!(parsed["mcp_servers"]["other"]["command"].as_str(), Some("keep"));
+                        assert!(updated.starts_with("# keep root comment\n"));
+                        assert!(parsed["mcp_servers"].get(LEGACY_MCP_CLIENT_ID).is_none());
+                        assert_eq!(build_codex_mcp_config(&updated, &channel, command, server, "read").unwrap(), updated);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn normal_desktop_merge_keeps_overrides_ahead_of_the_planned_pin() {
+        let channel = codex_fixture_channel();
+        for key in ["CREATOR_WORKS_LAUNCHER_CONFIG", "BANTWORKS_LAUNCHER_CONFIG"] {
+            let original = serde_json::json!({"preferences":{"keep":true}, "mcpServers":{MCP_CLIENT_ID:{
+                "command":"old-node", "args":["old-server"], "env":{
+                    client_ownership::OWNER_KEY:client_ownership::OWNER, key:"C:\\explicit override\\config.json", "CUSTOM":"keep"
+                }}, "other":{"custom":true}}});
+            let mut entry = desktop_entry_for_target(&channel, "node", "server.mjs", "read").unwrap();
+            entry["env"]["CREATOR_WORKS_LAUNCHER_CONFIG"] = "planned default".into();
+            let updated = merge_desktop_entry(original.clone(), entry.clone()).unwrap();
+            let actual = &updated["mcpServers"][MCP_CLIENT_ID]["env"];
+            assert_eq!(actual["CREATOR_WORKS_LAUNCHER_CONFIG"], "C:\\explicit override\\config.json");
+            assert_eq!(actual[key], original["mcpServers"][MCP_CLIENT_ID]["env"][key]);
+            assert_eq!(actual["CUSTOM"], "keep");
+            assert_eq!(actual[TOOL_GROUPS_ENV], "read");
+            assert_eq!(updated["preferences"], original["preferences"]);
+            assert_eq!(updated["mcpServers"]["other"], original["mcpServers"]["other"]);
+            assert_eq!(merge_desktop_entry(updated.clone(), entry).unwrap(), updated);
+        }
+    }
+
+    #[test]
+    fn normal_json_reconfiguration_refuses_malformed_environments_and_values() {
+        let channel = codex_fixture_channel();
+        for bad in [serde_json::json!(null), serde_json::json!([]), serde_json::json!(false), serde_json::json!(17), serde_json::json!("not an object")] {
+            for (build, opencode) in [(build_claude_mcp_config as fn(_, _, _, _, _) -> _, false), (build_antigravity_mcp_config, false), (build_opencode_mcp_config, true)] {
+                let (servers, key) = if opencode { ("mcp", "environment") } else { ("mcpServers", "env") };
+                for id in [MCP_CLIENT_ID, LEGACY_MCP_CLIENT_ID] {
+                    for env in [bad.clone(), serde_json::json!({"CREATOR_WORKS_LAUNCHER_CONFIG":bad}), serde_json::json!({"BANTWORKS_LAUNCHER_CONFIG":bad}), serde_json::json!({"CUSTOM":bad})] {
+                        let entry = if opencode { serde_json::json!({"command":["node","server.mjs"], key:env}) } else { serde_json::json!({"command":"node","args":["server.mjs"], key:env}) };
+                        let original = serde_json::json!({servers:{id:entry}});
+                        if env.is_object() && bad.is_string() { continue; }
+                        assert!(build(original.clone(), &channel, "node", "server.mjs", "read").is_err(), "Unexpected accepted input: {original}");
+                        if !opencode && id == MCP_CLIENT_ID {
+                            assert!(merge_desktop_entry(original, desktop_entry_for_target(&channel, "node", "server.mjs", "read").unwrap()).is_err());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn normal_codex_reconfiguration_refuses_malformed_environments_and_values() {
+        let channel = codex_fixture_channel();
+        for id in [MCP_CLIENT_ID, LEGACY_MCP_CLIENT_ID] {
+            for bad in ["[]", "false", "17", "'not a table'"] {
+                for env in [bad.to_owned(), format!("{{CREATOR_WORKS_LAUNCHER_CONFIG={bad}}}"), format!("{{BANTWORKS_LAUNCHER_CONFIG={bad}}}"), format!("{{CUSTOM={bad}}}")] {
+                    if env.starts_with('{') && bad.starts_with('\'') { continue; }
+                    let original = format!("[mcp_servers.'{id}']\ncommand='node'\nargs=['server.mjs']\nenv={env}\n");
+                    assert!(build_codex_mcp_config(&original, &channel, "node", "server.mjs", "read").is_err());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn normal_reconfiguration_refuses_conflicting_manual_environment_values() {
+        let channel = codex_fixture_channel();
+        for (build, opencode) in [(build_claude_mcp_config as fn(_, _, _, _, _) -> _, false), (build_antigravity_mcp_config, false), (build_opencode_mcp_config, true)] {
+            let (servers, key) = if opencode { ("mcp", "environment") } else { ("mcpServers", "env") };
+            let mut config = serde_json::json!({servers:{}});
+            for id in [MCP_CLIENT_ID, LEGACY_MCP_CLIENT_ID] {
+                config[servers][id] = if opencode { serde_json::json!({"command":["node","server.mjs"], key:{"CUSTOM":id}}) } else { serde_json::json!({"command":"node","args":["server.mjs"], key:{"CUSTOM":id}}) };
+            }
+            assert!(build(config, &channel, "node", "server.mjs", "read").unwrap_err().contains("conflicts"));
+        }
+        let original = "[mcp_servers.creator-works]\ncommand='node'\nargs=['server.mjs']\nenv={CUSTOM='current'}\n[mcp_servers.banter]\ncommand='node'\nargs=['server.mjs']\nenv={CUSTOM='legacy'}\n";
+        assert!(build_codex_mcp_config(original, &channel, "node", "server.mjs", "read").unwrap_err().contains("conflicts"));
     }
 
     #[test]

@@ -257,9 +257,7 @@ fn verify(root: &Path, id: &str, entry: Module) -> Result<Candidate, String> {
 }
 
 fn generations() -> Result<PathBuf, String> {
-    Ok(dirs::data_local_dir()
-        .ok_or("Local app data is unavailable.")?
-        .join("creator-hub")
+    Ok(creator_hub_mcp_router::Store::installed_base()?
         .join("runtime-generations")
         .join(format!(
             "{}-{}",

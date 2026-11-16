@@ -21,6 +21,7 @@ const KEY: &str = include_str!("../../../src-tauri/src/catalog-key.pub");
 
 mod bootstrap;
 pub use bootstrap::Router;
+mod location;
 
 #[cfg(target_os = "linux")]
 pub mod gui_exec_linux;
@@ -253,13 +254,41 @@ impl Store {
     }
 
     pub fn installed() -> Result<Self, String> {
-        let base = dirs::data_local_dir()
-            .ok_or("Local app data is unavailable.")?
-            .join("creator-hub");
+        let base = Self::installed_base()?;
         Self::new(
             &base,
             PublicKey::decode(KEY).map_err(|_| "Invalid embedded MCP routing key.")?,
         )
+    }
+
+    pub fn installed_base() -> Result<PathBuf, String> {
+        #[cfg(windows)]
+        let base = dirs::home_dir()
+            .ok_or("The shared per-user MCP location is unavailable.")?
+            .join(".creator-hub");
+        #[cfg(not(windows))]
+        let base = dirs::data_local_dir()
+            .ok_or("Local app data is unavailable.")?
+            .join("creator-hub");
+        reject_links(&base)?;
+        Ok(base)
+    }
+
+    /// The headless command is bound to its retained physical location, never to
+    /// the launching client's virtualized AppData view.
+    pub fn for_current_router() -> Result<Self, String> {
+        if !cfg!(windows) {
+            return Self::installed();
+        }
+        let executable =
+            std::env::current_exe().map_err(|_| "Cannot locate the retained MCP router.")?;
+        let store = location::store_for_command(&executable, 2)?;
+        Self::verify_retained_router_command(&executable)?;
+        Ok(store)
+    }
+
+    pub fn verify_retained_router_command(command: &Path) -> Result<(), String> {
+        location::verify_command(command)
     }
 
     pub fn snapshot(&self) -> Result<Option<Vec<u8>>, String> {
@@ -557,7 +586,7 @@ impl Runtime {
             let job = child_job::Job::contain_router()?;
             let mut command = Command::new(&self.node);
             command
-                .arg(&self.server)
+                .arg(location::node_argument(&self.server))
                 .stdin(Stdio::inherit())
                 .stdout(Stdio::inherit())
                 .stderr(Stdio::inherit())

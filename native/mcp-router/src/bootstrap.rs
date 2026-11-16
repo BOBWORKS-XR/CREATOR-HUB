@@ -1,4 +1,4 @@
-//! Retain the first signed protocol-1 router independently of replaceable Hub resources.
+//! Retain signed routers independently of replaceable Hub resources and active sessions.
 use super::*;
 
 const ROUTER_PRODUCT: &str = "com.creatorworks.hub.mcp-router";
@@ -11,7 +11,13 @@ struct Identity {
     platform: String,
     arch: String,
     protocol: u32,
+    #[serde(default = "legacy_store_binding")]
+    store_binding: u32,
     sha256: String,
+}
+
+fn legacy_store_binding() -> u32 {
+    1
 }
 
 pub struct Router {
@@ -47,6 +53,7 @@ impl Store {
             || identity.platform != platform()
             || identity.arch != std::env::consts::ARCH
             || identity.protocol != 1
+            || ![1, 2].contains(&identity.store_binding)
             || !hash_valid(&identity.sha256)
         {
             return Err("Signed router identity does not match this platform/protocol.".into());
@@ -54,10 +61,20 @@ impl Store {
         Ok(identity)
     }
 
-    fn router_at(&self, directory: &Path) -> Result<Router, String> {
+    pub(super) fn router_at(&self, directory: &Path) -> Result<Router, String> {
         let bytes = bounded(&directory.join("router.json"), MAX_DESCRIPTOR)?;
         let signature = bounded(&directory.join("router.minisig"), 4096)?;
         let identity = self.router_identity(&bytes, &signature)?;
+        if directory
+            .file_name()
+            .and_then(|value| value.to_str())
+            .is_some_and(|value| {
+                value.starts_with("router-v")
+                    && value != format!("router-v{}", identity.store_binding)
+            })
+        {
+            return Err("Signed router identity does not match its retained location.".into());
+        }
         let command = directory.join(name());
         let mut image = open_payload(&command)?;
         let mut hasher = Sha256::new();
@@ -112,7 +129,9 @@ impl Store {
         lock.try_lock_exclusive()
             .map_err(|_| "Another Hub is preparing its router.")?;
         let _guard = ActivationLock(lock);
-        let target = self.root.join("router-v1");
+        let target = self
+            .root
+            .join(format!("router-v{}", identity.store_binding));
         reject_links(&target)?;
         if target.exists() {
             return self.router_at(&target);
@@ -143,13 +162,62 @@ impl Store {
     }
 
     pub fn router(&self) -> Result<Router, String> {
-        self.router_at(&self.root.join("router-v1"))
+        let bound = self.root.join("router-v2");
+        reject_links(&bound)?;
+        if bound.exists() {
+            self.router_at(&bound)
+        } else {
+            self.router_at(&self.root.join("router-v1"))
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn signed_store_binding_upgrade_retains_old_router_and_refuses_damaged_new_router() {
+        let root = tempfile::tempdir().unwrap();
+        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/binding-fixtures");
+        let key =
+            PublicKey::decode(&fs::read_to_string(fixtures.join("public.txt")).unwrap()).unwrap();
+        let store = Store::new(&root.path().canonicalize().unwrap(), key).unwrap();
+        let source = root.path().join(name());
+        for binding in [1, 2] {
+            fs::write(&source, format!("router-binding-{binding}")).unwrap();
+            let bytes = fs::read(fixtures.join(format!("{binding}.json"))).unwrap();
+            let signature = fs::read(fixtures.join(format!("{binding}.minisig"))).unwrap();
+            let router = store.prepare_router(&source, &bytes, &signature).unwrap();
+            assert_eq!(
+                router.command.parent().unwrap().file_name().unwrap(),
+                format!("router-v{binding}").as_str()
+            );
+        }
+        assert_eq!(
+            fs::read(store.root.join("router-v1").join(name())).unwrap(),
+            b"router-binding-1"
+        );
+        assert_eq!(
+            fs::read(&store.router().unwrap().command).unwrap(),
+            b"router-binding-2"
+        );
+        let next = store.root.join("router-v2").join(name());
+        fs::write(&next, b"tampered").unwrap();
+        assert!(
+            store.router().is_err(),
+            "Never fall back silently to the previous router"
+        );
+        let unknown = fs::read(fixtures.join("3.json")).unwrap();
+        let signature = fs::read(fixtures.join("3.minisig")).unwrap();
+        assert!(store.prepare_router(&source, &unknown, &signature).is_err());
+        assert_eq!(fs::read(next).unwrap(), b"tampered");
+        assert_eq!(
+            fs::read(store.root.join("router-v1").join(name())).unwrap(),
+            b"router-binding-1"
+        );
+    }
     fn fixture(kind: &str) -> (tempfile::TempDir, Store, PathBuf, Vec<u8>, Vec<u8>) {
         let root = tempfile::tempdir().unwrap();
         let base = root.path().canonicalize().unwrap();

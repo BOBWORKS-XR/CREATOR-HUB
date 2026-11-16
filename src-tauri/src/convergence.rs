@@ -383,7 +383,8 @@ fn inspect() -> Result<Plan, String> {
         && creator_hub_mcp_router::Store::installed()
             .and_then(|store| store.resolve())
             .is_ok_and(|runtime| settings_use_verified_runtime(&snapshots, &runtime.server));
-    let required = migration_required(
+    let connection_update = connection_update_key()?.is_some();
+    let required = connection_update || migration_required(
         legacy_apps.len(),
         settings.len(),
         already_reviewed || already_using_hub,
@@ -422,6 +423,8 @@ fn inspect() -> Result<Plan, String> {
                 "An earlier Move to Hub stopped before completion. Retained state can be inspected before a fresh native review. No transaction is replayed."
             } else if pending_retirement {
                 "An earlier standalone-app cleanup was interrupted. Review fresh backups and connections before resuming; no saved operation is replayed."
+            } else if connection_update {
+                "Update your existing MCP connections to keep using the correct tools from every AI app. Hub will back up the reviewed client settings; projects, preferences and running connections are kept."
             } else if already_using_hub {
                 "Your MCP settings already use Hub's verified runtime. No standalone apps were found."
             } else {
@@ -457,9 +460,16 @@ fn prompt_review_key(
             )
         })
         .collect();
-    let bytes = serde_json::to_vec(&(POLICY, pending, images, apps))
+    let bytes = serde_json::to_vec(&(POLICY, pending, images, apps, connection_update_key()?))
         .map_err(|_| "Cannot identify the migration reminder; existing data were kept.")?;
     Ok(format!("{:x}", Sha256::digest(bytes)))
+}
+
+fn connection_update_key() -> Result<Option<String>, String> {
+    #[cfg(all(windows, feature = "integrated-features"))]
+    { creator_works_mcp_launcher::service::connection_update_key() }
+    #[cfg(not(all(windows, feature = "integrated-features")))]
+    { Ok(None) }
 }
 
 fn settings_equivalent(current: &[u8], legacy: &[u8]) -> bool {
