@@ -32,6 +32,10 @@ on:
       binding_sha256:
         type: string
         required: true
+      fresh_only:
+        type: boolean
+        required: false
+        default: false
 permissions:
   contents: read
 jobs:
@@ -60,7 +64,7 @@ jobs:
           if ($errors.Count) { throw 'CONNECT owner helper did not parse.' }
   acceptance:
     needs: preflight
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' && !inputs.fresh_only
     permissions:
       contents: write # Existing draft-asset GET authorization; no write API calls.
     runs-on: windows-latest

@@ -125,6 +125,27 @@ test('fresh job reuses exact binding and signed inputs without adding build or a
   assert.equal(acquisition.env.GH_TOKEN, '${{ github.token }}');
   assert.equal(job.steps.find(step => step.run?.endsWith('.cjs run')).env, undefined);
 });
+test('optional fresh_only skips only upgrade execution and defaults to the full unchanged matrix', () => {
+  assert.deepEqual(workflow.on.workflow_dispatch.inputs.fresh_only, { type: 'boolean', required: false, default: false });
+  assert.equal(workflow.jobs.acceptance.if, "github.event_name == 'workflow_dispatch' && !inputs.fresh_only");
+  const enabled = (event, value) => vm.runInNewContext(workflow.jobs.acceptance.if,
+    { github: { event_name: event }, inputs: value === undefined ? {} : { fresh_only: value } });
+  assert.equal(enabled('workflow_dispatch', undefined), true);
+  assert.equal(enabled('workflow_dispatch', false), true);
+  assert.equal(enabled('workflow_dispatch', true), false);
+  assert.equal(enabled('push', false), false);
+  assert.equal(enabled('push', true), false);
+  assert.equal(workflow.jobs.fresh.if, "github.event_name == 'workflow_dispatch'");
+  assert.equal(workflow.jobs.fresh.needs, 'preflight');
+  assert.equal(workflow.jobs.acceptance.needs, 'preflight');
+  assert.equal(workflow.jobs.preflight.if, "github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.ref == 'refs/heads/codex/windows-root-ui-023-20261116-r12-ci1'");
+  const preflight = workflow.jobs.preflight.steps.filter(step => step.run?.startsWith('node --test '));
+  assert.equal(preflight.length, 2);
+  assert.ok(preflight[0].run.includes('scripts/windows-outgoing-019-test.cjs'));
+  assert.ok(preflight[0].run.includes('scripts/incoming-receipt-r11.test.cjs'));
+  assert.equal(preflight[1].run, 'node --test scripts/native-windows-r12-fresh.test.cjs');
+  assert.deepEqual(Object.keys(workflow.on.workflow_dispatch.inputs).sort(), ['binding_sha256', 'expected_harness_commit', 'fresh_only']);
+});
 test('fresh output obeys the unchanged native policy guard and is collected by its job', () => {
   const root = 'D:\\a\\CREATOR-HUB\\CREATOR-HUB';
   const out = fresh.outputDirectory(root, 123456789, path.win32);
