@@ -249,7 +249,7 @@ test('workflow is finite Windows-only and binds SDK source before private acquis
   assert.ok(workflow.includes('ref: '+ '\u0024{{ steps.binding.outputs.source_commit }}'));
   assert.ok(workflow.includes("git -C product rev-parse 'HEAD^{tree}'"));
   assert.ok(workflow.indexOf('input.cjs source') < workflow.indexOf('input.cjs acquire'));
-  assert.equal((workflow.match(/persist-credentials: false/g) || []).length, 3);
+  assert.equal((workflow.match(/persist-credentials: false/g) || []).length, 4);
   assert.equal((workflow.match(/- case:/g) || []).length, 3);
   assert.ok(workflow.includes("if: github.event_name == 'workflow_dispatch'"));
   assert.doesNotMatch(workflow, /cargo |npm run build|gh workflow run|gh release |secrets\./);
@@ -277,7 +277,7 @@ test('parsed workflow retains exactly three Windows profiles and pinned checkout
     assert.equal(tests.filter(value => value === file).length, 1, `${file} must run once in preflight`);
   }
   for (const file of ['scripts/incoming-store-r11.test.cjs', 'scripts/incoming-receipt-r11.test.cjs']) assert.ok(workflow.on.push.paths.includes(file));
-  assert.deepEqual(Object.keys(workflow.jobs).sort(), ['acceptance', 'preflight']);
+  assert.deepEqual(Object.keys(workflow.jobs).sort(), ['acceptance', 'fresh', 'preflight']);
   for (const job of Object.values(workflow.jobs)) {
     assert.equal(job['runs-on'], 'windows-latest');
     for (const step of job.steps) if (step.uses === 'actions/checkout@v6') assert.equal(step.with['persist-credentials'], false);

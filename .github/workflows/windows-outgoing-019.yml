@@ -22,6 +22,8 @@ on:
       - scripts/connect-trace-023.cjs
       - scripts/connect-trace-023.test.cjs
       - scripts/connect-owner-023.ps1
+      - scripts/native-windows-r12-fresh.cjs
+      - scripts/native-windows-r12-fresh.test.cjs
   workflow_dispatch:
     inputs:
       expected_harness_commit:
@@ -48,6 +50,7 @@ jobs:
           node-version: 24
       - run: npm ci --ignore-scripts
       - run: node --test scripts/sdk-retention-023.test.cjs scripts/connect-diagnostic-023.test.cjs scripts/connect-trace-023.test.cjs scripts/sdk-registry-denial-023.test.cjs scripts/windows-outgoing-019-test.cjs scripts/incoming-store-r11.test.cjs scripts/incoming-receipt-r11.test.cjs scripts/self-update-outgoing-019-feed.test.cjs
+      - run: node --test scripts/native-windows-r12-fresh.test.cjs
       - name: Parse actual native script and probe its named parameters
         shell: pwsh
         run: |
@@ -143,3 +146,38 @@ jobs:
             artifacts/native-suite-*/*.json
             artifacts/native-suite-*/*.png
             !artifacts/native-suite-*/startup.json
+  fresh:
+    needs: preflight
+    if: github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: write # Existing private draft asset reads only.
+    runs-on: windows-latest
+    timeout-minutes: 15
+    env:
+      EXPECTED_HARNESS_COMMIT: ${{ inputs.expected_harness_commit }}
+      CREATOR_OUTGOING_REVIEW_SHA256: ${{ inputs.binding_sha256 }}
+    steps:
+      - name: Preserve exact source bytes
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - run: npm ci --ignore-scripts
+      - name: Acquire the exact private R12 signed assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/native-windows-r12-fresh.cjs acquire
+      - name: Clean installation, first launch and normal reopen
+        run: node scripts/native-windows-r12-fresh.cjs run
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-r12-fresh-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 14
+          if-no-files-found: warn
+          path: |
+            artifacts/fresh-r12-report/*.json
+            artifacts/fresh-r12-report/*.png
