@@ -12,6 +12,8 @@ const BRANCH = 'codex/windows-root-ui-023-20261116-r12-ci1';
 const WORKFLOW = '.github/workflows/windows-outgoing-019.yml';
 const ROOT = path.resolve(__dirname, '..');
 const NAMES = [target.ASSET, 'creator-hub-windows-x86_64.json', 'creator-hub-windows-x86_64.json.minisig', 'latest.json'];
+const CLOSE_MESSAGE = 'MCP has an unfinished interface workflow, but its native operation has returned.\n\nClose Hub anyway? Earlier completed changes and recovery records will be kept. Nothing will be rolled back or marked successful. Existing AI connections, Unity and unrelated processes will not be stopped. Check the last outcome before repeating work.';
+const POLICY = '2026-09-28-v1';
 function admission(env = process.env, platform = process.platform) {
   assert.equal(platform, 'win32'); target.validateBinding();
   for (const [name, value] of Object.entries({ GITHUB_ACTIONS: 'true', RUNNER_ENVIRONMENT: 'github-hosted',
@@ -34,7 +36,7 @@ function freshPaths(profile, paths = path) {
     paths.join(profile.home, '.codex/config.toml'), paths.join(profile.home, '.claude.json'),
     paths.join(profile.roaming, 'Claude/claude_desktop_config.json'),
     paths.join(profile.home, '.gemini/config/mcp_config.json'), paths.join(profile.roaming, 'opencode/opencode.json'),
-    paths.join(profile.roaming, 'opencode/opencode.jsonc')];
+    paths.join(profile.roaming, 'opencode/opencode.jsonc'), paths.join(profile.local, 'com.creatorworks.hub')];
 }
 function assertFresh(profile, exists = fs.existsSync, paths = path) {
   for (const file of freshPaths(profile, paths)) assert.equal(exists(file), false, 'Existing product/settings refused');
@@ -45,7 +47,35 @@ function environment(env = process.env) {
 function settingsFiles(profile) {
   return [path.join(profile.roaming, 'creator-works-mcp/launcher-config.json'), path.join(profile.roaming, 'banter-mcp/launcher-config.json'),
     path.join(profile.local, 'CreatorProjectSetup/editor-roots.json'), path.join(profile.local, 'CreatorHub/consent/hub-usage-terms.json'),
-    path.join(profile.local, 'CreatorHub/preferences/hub-preferences.json'), ...freshPaths(profile).slice(10)];
+    path.join(profile.local, 'CreatorHub/preferences/hub-preferences.json'), ...freshPaths(profile).slice(10, 16)];
+}
+function consentRecord(bytes) {
+  assert.ok(Buffer.isBuffer(bytes) && bytes.length > 0 && bytes.length <= 2048, 'Native consent record required');
+  const value = JSON.parse(bytes.toString());
+  assert.deepEqual(Object.keys(value).sort(), ['acceptedAtMs', 'policyVersion', 'schemaVersion']);
+  assert.equal(value.schemaVersion, 1); assert.equal(value.policyVersion, POLICY);
+  assert.ok(Number.isSafeInteger(value.acceptedAtMs) && value.acceptedAtMs > 0);
+  return value;
+}
+function closeDialog(windows) {
+  const matches = windows.filter(window => window.title === 'Close Creator Hub?');
+  if (!matches.length) return false;
+  assert.equal(matches.length, 1); const dialog = matches[0];
+  assert.equal(dialog.class, '#32770');
+  assert.ok(dialog.controls.some(control => control.name.replace(/\r\n/g, '\n') === CLOSE_MESSAGE), 'Exact R12 close message required');
+  const buttons = dialog.controls.filter(control => control.name === 'Close Hub');
+  assert.equal(buttons.length, 1); assert.match(buttons[0].id, /^CommandButton_(1000|1001)$/);
+  return true;
+}
+async function closeNormally({ request, exitCode, snapshot: windows, approve, delay, attempts = 60 }) {
+  request(); let approved = false;
+  for (let i = 0; i < attempts; i++) {
+    const code = exitCode();
+    if (code !== null) { assert.equal(code, 0, 'Normal Hub close failed'); return; }
+    if (!approved && closeDialog(windows())) { approve(); approved = true; }
+    await delay();
+  }
+  throw Error('Normal Hub close timed out; no process was force-closed');
 }
 function snapshot(files) {
   return files.map(file => {
@@ -63,6 +93,16 @@ function checkReceipt(report) {
   for (const key of ['migrationAccepted', 'signedUpdateAccepted', 'publicDiscovery', 'liveAiAcceptance', 'releaseReady', 'cleanupForced']) assert.equal(report[key], false, key);
   assert.ok(Array.isArray(report.settingsBeforeReopen) && report.settingsBeforeReopen.length > 0);
   assert.deepEqual(report.settingsBeforeReopen, report.settingsAfterReopen);
+  assert.ok(path.win32.isAbsolute(report.profile?.local || ''));
+  const consentFile = path.join(report.profile.local, 'CreatorHub/consent/hub-usage-terms.json');
+  for (const [proof, rows] of [[report.consentBeforeReopen, report.settingsBeforeReopen], [report.consentAfterReopen, report.settingsAfterReopen]]) {
+    assert.ok(proof); assert.equal(proof.file, consentFile);
+    consentRecord(Buffer.from(JSON.stringify(proof.record)));
+    assert.match(proof.sha256 || '', /^[a-f0-9]{64}$/); assert.ok(proof.bytes > 0 && proof.bytes <= 2048);
+    const matches = rows.filter(row => row.file === consentFile); assert.equal(matches.length, 1);
+    assert.deepEqual(matches[0], { file: proof.file, bytes: proof.bytes, sha256: proof.sha256 });
+  }
+  assert.deepEqual(report.consentBeforeReopen, report.consentAfterReopen);
   assert.equal(report.normalCloses.length, 2); assert.equal(new Set(report.normalCloses.map(row => row.pid)).size, 2);
   for (const row of report.normalCloses) { assert.ok(Number.isSafeInteger(row.pid) && row.pid > 0); assert.equal(row.exitCode, 0); }
 }
@@ -123,22 +163,30 @@ async function main() {
   const hub = path.join(profile.local, 'Creator Hub/creator-hub.exe'), policyFile = path.join(out, 'webview-policy.json');
   const report = { kind: 'r12-fresh-install', sourceCommit: target.binding.target.source.commit,
     bindingSha256: target.hash(fs.readFileSync(path.join(__dirname, 'fixtures/windows-outgoing-019-binding.json'))),
-    installer: target.binding.target.installer, executable: target.binding.target.executable, cleanAdmission: true,
+    installer: target.binding.target.installer, executable: target.binding.target.executable, profile, cleanAdmission: true,
     normalCloses: [], passed: false, cleanupForced: false, migrationAccepted: false, signedUpdateAccepted: false,
     publicDiscovery: false, liveAiAcceptance: false, releaseReady: false };
   const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
   async function retry(action, seconds = 30) { let last; for (const end = Date.now() + seconds * 1000; Date.now() < end;) {
     try { return await action(); } catch (error) { last = error; await delay(250); }
   } throw last || Error('Bounded wait expired'); }
-  let child, browser, page, owned, policyEnabled = false;
+  let child, browser, page, owned, policyEnabled = false, closeAttempted = false;
   const record = pid => { const rows = inventory().filter(row => row.pid === pid); assert.equal(rows.length, 1); return rows[0]; };
   const same = () => assert.deepEqual(record(owned.pid), owned);
   async function close() {
-    same(); ps('native-window.ps1', ['-TargetPid', String(owned.pid), '-ExpectedExecutable', hub, '-Action', 'close']);
-    await retry(() => assert.equal(child.exitCode, 0), 15); report.normalCloses.push({ pid: owned.pid, exitCode: child.exitCode });
+    closeAttempted = true; same();
+    await closeNormally({
+      request: () => ps('native-window.ps1', ['-TargetPid', String(owned.pid), '-ExpectedExecutable', hub, '-Action', 'close']),
+      exitCode: () => child.exitCode,
+      snapshot: () => { same(); return JSON.parse(ps('native-window.ps1', ['-TargetPid', String(owned.pid), '-ExpectedExecutable', hub, '-Action', 'snapshot'])); },
+      approve: () => { same(); ps('native-window.ps1', ['-TargetPid', String(owned.pid), '-ExpectedExecutable', hub, '-Action', 'button', '-Value', 'CloseCreatorHub']); },
+      delay: () => delay(250),
+    });
+    report.normalCloses.push({ pid: owned.pid, exitCode: child.exitCode });
     await browser.close(); browser = null; page = null; child = null; owned = null; assert.deepEqual(moduleRows(), []);
   }
   async function launch(first) {
+    closeAttempted = false;
     target.assertInstalledResources(path.dirname(hub), '0.1.23');
     child = spawn(hub, [], { env: { ...env, WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: '--remote-debugging-port=9238' }, windowsHide: true, stdio: 'ignore' });
     owned = await retry(() => record(child.pid)); assert.equal(owned.image.toLowerCase(), hub.toLowerCase()); assert.equal(owned.kernelIdentityVerified, true);
@@ -156,6 +204,7 @@ async function main() {
     } else assert.equal(await page.locator('#usage-terms-dialog').isVisible(), false);
     await page.waitForFunction(() => !document.querySelector('#check-updates').disabled, null, { timeout: 90000 });
     assert.equal(await page.locator('#usage-terms-dialog').isVisible(), false, 'Terms must remain accepted');
+    assert.equal(await page.evaluate(() => window.CreatorHubNative.invoke('usage_terms_status')), true, 'Native consent status required');
     assert.equal(await page.locator('#convergence-dialog').isVisible(), false, 'Clean runner must not offer migration');
     await direct.checkHome(page);
     const services = await direct.checkPages({ page, expectedVersion: '0.1.23', requests, processes: moduleRows,
@@ -173,17 +222,22 @@ async function main() {
     ps('native-webview-policy.ps1', ['-Action', 'Enable', '-StateFile', policyFile]); policyEnabled = true;
     report.firstServices = await launch(true); report.firstLaunchAccepted = true;
     await close(); report.settingsBeforeReopen = snapshot(settingsFiles(profile));
+    const readConsent = () => {
+      const file = path.join(profile.local, 'CreatorHub/consent/hub-usage-terms.json');
+      const bytes = target.readBounded(file, 2048);
+      return { file, bytes: bytes.length, sha256: target.hash(bytes), record: consentRecord(bytes) };
+    };
+    report.consentBeforeReopen = readConsent();
     report.reopenedServices = await launch(false); await close();
     report.settingsAfterReopen = snapshot(settingsFiles(profile)); assert.deepEqual(report.settingsAfterReopen, report.settingsBeforeReopen);
+    report.consentAfterReopen = readConsent(); assert.deepEqual(report.consentAfterReopen, report.consentBeforeReopen);
     target.assertInstalledResources(path.dirname(hub), '0.1.23');
     report.normalRestartAccepted = true; report.settingsUnchanged = true; report.installedResourcesVerified = true; report.passed = true;
   } catch (error) { report.errorSha256 = target.hash(String(error.stack || error)); report.error = String(error.message).slice(0, 600); report.passed = false; }
   finally {
     if (child?.exitCode === null && owned) {
-      try { await close(); } catch {
-        report.passed = false; report.cleanupForced = true;
-        try { same(); execFileSync('taskkill.exe', ['/PID', String(owned.pid), '/T', '/F'], { windowsHide: true, timeout: 15000, stdio: 'pipe' }); } catch { report.cleanupError = true; }
-      }
+      if (!closeAttempted) try { await close(); } catch { report.passed = false; report.cleanupError = true; }
+      if (child?.exitCode === null) { report.passed = false; report.cleanupError = true; child.unref(); }
     }
     if (browser) await browser.close().catch(() => { report.passed = false; });
     try { if (policyEnabled || fs.existsSync(policyFile)) ps('native-webview-policy.ps1', ['-Action', 'Restore', '-StateFile', policyFile]); report.policyRestored = true; }
@@ -196,7 +250,7 @@ async function main() {
   }
   console.log(JSON.stringify({ passed: report.passed, releaseReady: false, out })); process.exitCode = report.passed ? 0 : 1;
 }
-module.exports = { BRANCH, admission, freshPaths, assertFresh, environment, snapshot, checkReceipt };
+module.exports = { BRANCH, admission, freshPaths, assertFresh, environment, snapshot, checkReceipt, consentRecord, closeDialog, closeNormally, CLOSE_MESSAGE };
 if (require.main === module) {
   const action = process.argv[2]; assert.ok(action === 'acquire' || action === 'run');
   (action === 'acquire' ? acquire() : main()).then(result => { if (result) console.log(JSON.stringify(result)); })

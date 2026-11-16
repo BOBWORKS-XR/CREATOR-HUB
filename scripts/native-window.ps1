@@ -75,7 +75,16 @@ if ($Action -eq 'snapshot') {
 }
 foreach ($window in $windows) {
     if ($Action -eq 'button') {
-        $matchesByName = $window.FindAll([Windows.Automation.TreeScope]::Descendants, [Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::NameProperty, $Value))
+        $buttonName = $Value
+        if ($Value -ceq 'CloseCreatorHub') {
+            if ($window.Current.Name -cne 'Close Creator Hub?') { continue }
+            $expectedMessage = "MCP has an unfinished interface workflow, but its native operation has returned.`n`nClose Hub anyway? Earlier completed changes and recovery records will be kept. Nothing will be rolled back or marked successful. Existing AI connections, Unity and unrelated processes will not be stopped. Check the last outcome before repeating work."
+            $controls = $window.FindAll([Windows.Automation.TreeScope]::Descendants, [Windows.Automation.Condition]::TrueCondition)
+            $messages = @($controls | Where-Object { $_.Current.Name.Replace("`r`n", "`n") -ceq $expectedMessage })
+            if ($messages.Count -ne 1) { throw 'Exact R12 close message required.' }
+            $buttonName = 'Close Hub'
+        }
+        $matchesByName = $window.FindAll([Windows.Automation.TreeScope]::Descendants, [Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::NameProperty, $buttonName))
         if ($matchesByName.Count -gt 1) { throw 'Requested dialog control is ambiguous.' }
         $button = if ($matchesByName.Count -eq 1) { $matchesByName[0] } else { $null }
         if ($null -ne $button) {
@@ -83,6 +92,7 @@ foreach ($window in $windows) {
                 $id = [int]$Matches[1]
                 $dialog = [IntPtr]$window.Current.NativeWindowHandle
                 $titles = @{
+                    'CloseCreatorHub' = @('Close Creator Hub?')
                     'Install' = @('Install Creator app'); 'Cancel' = @('Install Creator app', 'Add Unity menu', 'Update Unity menu', 'Disconnect MCP for update')
                     'Disconnect MCP' = @('Disconnect MCP for update')
                     'Add menu' = @('Add Unity menu'); 'Update menu' = @('Update Unity menu')
@@ -105,6 +115,7 @@ foreach ($window in $windows) {
                 if (-not [NativeTestWindows]::PostMessage($dialog, 0x466, [IntPtr]$id, [IntPtr]::Zero)) { throw "Could not invoke the owned task dialog button: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())." }
                 exit
             }
+            if ($Value -ceq 'CloseCreatorHub') { throw 'Exact R12 close task-dialog control required.' }
             if ($button.Current.NativeWindowHandle -ne 0) {
                 $control = [IntPtr]$button.Current.NativeWindowHandle
                 $id = [NativeTestWindows]::GetDlgCtrlID($control)
