@@ -103,7 +103,9 @@
       later.textContent = 'Keep existing apps for now';
       error.hidden = true; error.textContent = '';
 
-      function showError(reason, explanation = 'Setup stopped. Keep the saved files and backups. Check setup again, or choose Not now to return to Hub. Earlier completed changes may remain.') {
+      function showError(reason, explanation = current?.keepCurrentAvailable
+        ? 'Setup did not finish. Choose Keep my current setup to back up your settings and use Hub without repeating this move. Or check setup again.'
+        : 'Setup did not finish. Check setup again to review the saved progress, or choose Not now to return to Hub. No changes will be repeated automatically.') {
         const message = document.createElement('p');
         message.textContent = explanation;
         const diagnostic = document.createElement('details');
@@ -290,7 +292,24 @@
           }
           current = next; result = outcome.message;
           stopped = outcome.outcome === 'stopped';
-          if (stopped) showError(outcome.message);
+          if (stopped) {
+            let diagnostic = outcome.message;
+            // Refresh recovery choices after the backend records the stopped phase.
+            // This command only inspects; it cannot repeat the move or cleanup.
+            try {
+              if (window.CreatorHubNative !== native || native.convergencePersistence !== true) {
+                throw new Error('Native migration support changed.');
+              }
+              const inspected = report(await native.invoke('inspect_convergence_outcome'));
+              if (!inspected.streamlined || inspected.stage === 'complete') {
+                throw new Error('Recovery inspection returned an unexpected state.');
+              }
+              current = inspected;
+            } catch (reason) {
+              diagnostic += ` Recovery options could not be refreshed: ${String(reason).slice(0, 1000)}`;
+            }
+            showError(diagnostic);
+          }
         } catch (reason) {
           stopped = true;
           showError(`Outcome needs review; no automatic retry was started. ${String(reason).slice(0, 2000)}`);
