@@ -94,6 +94,10 @@ function snapshot(files) {
     return { file, bytes: bytes.length, sha256: target.hash(bytes) };
   });
 }
+function outputDirectory(root, stamp = Date.now(), paths = path) {
+  assert.ok(Number.isSafeInteger(stamp) && stamp > 0);
+  return paths.join(root, 'artifacts', `native-suite-${stamp}`);
+}
 function checkReceipt(report) {
   assert.equal(report.kind, 'r12-fresh-install'); assert.equal(report.sourceCommit, target.binding.target.source.commit);
   assert.equal(report.bindingSha256, target.hash(fs.readFileSync(path.join(__dirname, 'fixtures/windows-outgoing-019-binding.json'))));
@@ -169,7 +173,7 @@ async function main() {
   const inventory = () => JSON.parse(ps('native-outgoing-process-019.ps1').replace(/^\uFEFF/, ''));
   const moduleRows = () => inventory().filter(row => /(?:creator-project-setup|creator-works-mcp-launcher)\.exe$/i.test(row.image));
   assert.deepEqual(inventory().filter(row => /creator-(?:hub|project-setup|works-mcp-launcher|hub-mcp-router)\.exe$/i.test(row.image)), []);
-  const out = path.join(ROOT, 'artifacts/fresh-r12-report'); fs.mkdirSync(out, { recursive: false });
+  const out = outputDirectory(ROOT); fs.mkdirSync(out, { recursive: false });
   const hub = path.join(profile.local, 'Creator Hub/creator-hub.exe'), policyFile = path.join(out, 'webview-policy.json');
   const report = { kind: 'r12-fresh-install', sourceCommit: target.binding.target.source.commit,
     bindingSha256: target.hash(fs.readFileSync(path.join(__dirname, 'fixtures/windows-outgoing-019-binding.json'))),
@@ -260,7 +264,7 @@ async function main() {
   }
   console.log(JSON.stringify({ passed: report.passed, releaseReady: false, out })); process.exitCode = report.passed ? 0 : 1;
 }
-module.exports = { BRANCH, admission, freshPaths, assertFresh, environment, snapshot, checkReceipt, consentRecord, closeDialog, closeNormally, CLOSE_MESSAGE };
+module.exports = { BRANCH, admission, freshPaths, assertFresh, environment, snapshot, outputDirectory, checkReceipt, consentRecord, closeDialog, closeNormally, CLOSE_MESSAGE };
 if (require.main === module) {
   const action = process.argv[2]; assert.ok(action === 'acquire' || action === 'run');
   (action === 'acquire' ? acquire() : main()).then(result => { if (result) console.log(JSON.stringify(result)); })

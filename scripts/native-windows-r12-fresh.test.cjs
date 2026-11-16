@@ -124,3 +124,19 @@ test('fresh job reuses exact binding and signed inputs without adding build or a
   assert.equal(acquisition.env.GH_TOKEN, '${{ github.token }}');
   assert.equal(job.steps.find(step => step.run?.endsWith('.cjs run')).env, undefined);
 });
+test('fresh output obeys the unchanged native policy guard and is collected by its job', () => {
+  const root = 'D:\\a\\CREATOR-HUB\\CREATOR-HUB';
+  const out = fresh.outputDirectory(root, 123456789, path.win32);
+  assert.equal(path.win32.dirname(out), path.win32.join(root, 'artifacts'));
+  const guard = fs.readFileSync(path.join(__dirname, 'native-webview-policy.ps1'), 'utf8');
+  const pattern = guard.match(/-notmatch '([^']+)'/); assert.ok(pattern);
+  assert.match(path.win32.basename(out), new RegExp(pattern[1]));
+  assert.equal(path.win32.basename(path.win32.join(out, 'webview-policy.json')), 'webview-policy.json');
+  assert.ok(guard.includes("-ne 'webview-policy.json'"));
+  assert.throws(() => fresh.outputDirectory(root, -1, path.win32));
+  const driver = fs.readFileSync(path.join(__dirname, 'native-windows-r12-fresh.cjs'), 'utf8');
+  assert.ok(driver.includes("out = outputDirectory(ROOT)"));
+  assert.ok(driver.includes("path.join(out, 'webview-policy.json')"));
+  const upload = workflow.jobs.fresh.steps.find(step => step.uses === 'actions/upload-artifact@v4');
+  assert.equal(upload.with.path, 'artifacts/native-suite-*/*.json\nartifacts/native-suite-*/*.png\n');
+});

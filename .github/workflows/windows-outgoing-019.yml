@@ -179,5 +179,5 @@ jobs:
           retention-days: 14
           if-no-files-found: warn
           path: |
-            artifacts/fresh-r12-report/*.json
-            artifacts/fresh-r12-report/*.png
+            artifacts/native-suite-*/*.json
+            artifacts/native-suite-*/*.png
