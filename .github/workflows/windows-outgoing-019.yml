@@ -7,7 +7,7 @@ on:
 permissions: {contents: read}
 jobs:
   preflight:
-    if: github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.ref == 'refs/heads/codex/windows-missing-server-025-acceptance'
+    if: github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.ref == 'refs/heads/codex/windows-missing-server-025-acceptance-r2'
     runs-on: windows-latest
     timeout-minutes: 5
     steps:
@@ -17,7 +17,7 @@ jobs:
       - uses: actions/setup-node@v6
         with: {node-version: 24}
       - run: npm ci --ignore-scripts
-      - run: node --check scripts/native-missing-runner.cjs
+      - run: node --test scripts/hotfix-025-harness.test.cjs
       - name: Parse actual native script
         shell: pwsh
         run: |

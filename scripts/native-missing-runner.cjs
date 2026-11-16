@@ -14,7 +14,7 @@ async function main(){
   for(const p of [local,roaming,home])assert.ok(path.win32.isAbsolute(p));
   for(const p of [path.join(local,'Creator Hub'),path.join(local,'CreatorHub'),path.join(home,'.creator-hub'),path.join(roaming,'creator-works-mcp'),path.join(roaming,'banter-mcp'),path.join(home,'.claude.json'),path.join(home,'.codex/config.toml')])assert.equal(fs.existsSync(p),false,'Nonempty profile refused: '+p);
   const data=path.join(ROOT,'artifacts/outgoing-019/data'),hub=path.join(local,'Creator Hub/creator-hub.exe');
-  const out=path.join(ROOT,'artifacts','native-suite-'+caseName+'-'+Date.now());fs.mkdirSync(out,{recursive:true});
+  const out=path.join(ROOT,'artifacts','native-suite-'+Date.now());fs.mkdirSync(out,{recursive:true});
   const ps=(name,args=[])=>execFileSync('powershell.exe',['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',path.join(ROOT,'scripts',name),...args],{encoding:'utf8',windowsHide:true,timeout:30000});
   const inventory=()=>JSON.parse(ps('native-outgoing-process-019.ps1').replace(/^\uFEFF/,''));
   const record=pid=>{const rows=inventory().filter(r=>r.pid===pid);assert.equal(rows.length,1);assert.equal(rows[0].kernelIdentityVerified,true);return rows[0];};

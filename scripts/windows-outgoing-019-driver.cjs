@@ -344,7 +344,7 @@ async function main() {
     await retry(() => assertSavedPreferences(JSON.parse(fs.readFileSync(prefPath)), restore));
     protectedFiles.push({ file: prefPath, sha256: hashFile(prefPath) });
     const draft = await page.locator('#feature-setup [data-field="name"]').inputValue();
-    await show('mcp'); await continueMcpGuide(page); await direct.showHome(page);
+    await show('mcp'); await continueMcpGuide(page); await show(lastTool); await direct.showHome(page);
     if (!migrated) await page.evaluate(() => localStorage.setItem('outgoing-preserved', 'direct24-to25'));
     await retry(async () => assert.equal(await page.locator('#hub-update-button').isEnabled(), true), 90);
     const status = await page.evaluate(() => window.CreatorHubNative.invoke('hub_update_status', { online: false, preview: false }));
