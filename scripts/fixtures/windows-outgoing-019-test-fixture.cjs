@@ -6,7 +6,7 @@ const pin = text => ({ bytes: 123, sha256: digest(text) });
 const binding = { schemaVersion: 1, enabled: true, privateOnly: true, kind: 'direct-outgoing-022-023',
   baseline: { version: '0.1.22', asset: 'Creator.Hub_0.1.22_x64-setup.exe' },
   target: { version: '0.1.23', asset: 'Creator.Hub_0.1.23_x64-setup.exe' },
-  fixtureQualification: { kind: 'routing-r11-signed-candidate', payloadFiles: 15,
+  fixtureQualification: { kind: 'root-ui-r12-signed-candidate', payloadFiles: 15,
     productionSourceGuardException: false, productionApproval: false, outgoingNativeAccepted: false,
     published: false, releaseReady: false } };
 const paths = ["mcp/creator-works-mcp-launcher.exe","mcp/server/LICENSE","mcp/server/THIRD_PARTY_NOTICES.md","mcp/server/creator-works-mcp.mjs","mcp/server/runtime/LICENSE","mcp/server/runtime/VERSION","mcp/server/runtime/node.exe","mcp/server/unity-extension/Editor/BanterMCPBridge.cs","mcp/server/unity-extension/Editor/CreatorWorksMCPLogo.png","routing/creator-hub-mcp-router.exe","routing/router.json","routing/router.minisig","routing/runtime.json","routing/runtime.minisig","setup/creator-project-setup.exe"];
@@ -25,14 +25,14 @@ for (const [name, item] of [['baseline', binding.baseline], ['target', binding.t
   item.generation = crypto.createHash('sha256').update(JSON.stringify({ executable: mcp.executable, version: mcp.version,
     files: Object.fromEntries(Object.entries(mcp.files).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) })).digest('hex');
 }
-binding.target.source = { commit: 'e9b4cbe9c9d6bcc99bf4c79a763fe2d153a84b90', tree: 'c448958bc6e4bac39f17ec35357f6afe4c8a1283' };
+binding.target.source = { commit: '385af11b7c21ca69ad8924bec53d07375c65aab5', tree: 'c68f401a66b850013a04f82217a016e0d9fcb123' };
 binding.target.manifest.modules.mcp.version = '2.7.10';
 const mcp = binding.target.manifest.modules.mcp;
 binding.target.generation = crypto.createHash('sha256').update(JSON.stringify({ executable: mcp.executable, version: mcp.version,
   files: Object.fromEntries(Object.entries(mcp.files).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) })).digest('hex');
 binding.baseline.releaseId = 1; binding.baseline.assetId = 2;
 for (const key of ['descriptor', 'descriptorSignature', 'latest']) binding.target[key] = pin('target ' + key);
-binding.target.privateRelease = { id: 3, tag: 'lab-windows-routing-023-20261116-r11', source: binding.target.source.commit,
+binding.target.privateRelease = { id: 3, tag: 'lab-windows-root-ui-023-20261116-r12', source: binding.target.source.commit,
   assets: Object.fromEntries([[binding.target.asset, binding.target.installer], ['creator-hub-windows-x86_64.json', binding.target.descriptor],
     ['creator-hub-windows-x86_64.json.minisig', binding.target.descriptorSignature], ['latest.json', binding.target.latest]]
     .map(([name, value], index) => [name, { id: index + 4, ...value }])) };
