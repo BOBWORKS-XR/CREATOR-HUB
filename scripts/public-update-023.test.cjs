@@ -29,3 +29,19 @@ test('resource verifier hashes actual bytes and rejects mismatch',()=>{
     assert.throws(()=>resources.readHash(file,'0'.repeat(64)));}
   finally {fs.unlinkSync(file);fs.rmdirSync(folder);}
 });
+test('full generated migration collector validates inherited real-file fixture',t=>{
+  const Module=require('node:module');
+  const sourceFile=path.join(__dirname,'incoming-receipt-r11.test.cjs');
+  const source=fs.readFileSync(sourceFile,'utf8');
+  const fixtureModule=new Module(sourceFile,module);fixtureModule.filename=sourceFile;fixtureModule.paths=Module._nodeModulePaths(__dirname);
+  fixtureModule._compile(source.slice(0,source.indexOf("test('disabled binding"))+'\nmodule.exports={fixture};',sourceFile);
+  const fixture=fixtureModule.exports.fixture(t);
+  const file=path.join(__dirname,'public-migration-023.cjs'),loaded=new Module(file,module);
+  loaded.filename=file;loaded.paths=Module._nodeModulePaths(__dirname);
+  const actual=loaded.require.bind(loaded);
+  loaded.require=name=>name==='./public-update-023.cjs'?fixture.target:actual(name);
+  loaded._compile(fs.readFileSync(file,'utf8'),file);
+  loaded.exports.checkMigrationReceipt(fixture.report);
+  const altered=structuredClone(fixture.report);altered.freshOldServerVersion.version='2.7.10';
+  assert.throws(()=>loaded.exports.checkMigrationReceipt(altered));
+});

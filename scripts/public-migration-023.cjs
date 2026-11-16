@@ -1,6 +1,6 @@
 const assert=require('node:assert/strict'),path=require('node:path');
 const target=require('./public-update-023.cjs'),direct=require('./native-outgoing-direct-019.cjs');
-const hash=target.hash;
+const hash=target.hash,binding=target.binding;
 function checkMigrationReceipt(report) {
   const { profile, clients, clientReview } = report;
   assert.deepEqual(Object.keys(profile || {}).sort(), ['home', 'local', 'roaming'], 'Explicit captured profile required');
