@@ -1,6 +1,7 @@
 import { controller, node, lines, text, confirm } from './common.js';
 import { capabilityView } from './capability-profiles.js';
 import { recalledProductReview, rememberProductReview } from './product-review.js';
+import { bundledServerPath, sameSettingsExceptServer } from './runtime-repair.js';
 
 const clients = [
   ['codex', 'Codex', 'codex'], ['claude', 'Claude Code', 'claude'],
@@ -27,6 +28,7 @@ export function mount(root, api) {
     </section>
     <div data-field="notice" class="feature-banner"><p>AI results and token charges are unpredictable. Your AI provider controls billing. Back up projects and review generated actions.</p><label class="feature-check"><input data-field="notice-remember" type="checkbox">Don't show again</label><button data-field="notice-close" class="icon-button" type="button" title="Dismiss AI usage notice" aria-label="Dismiss AI usage notice">&#215;</button></div>
     <fieldset data-field="controls" disabled aria-label="MCP controls">
+      <section data-field="runtime-repair" class="feature-section" hidden><h3>Finish connecting Hub</h3><p>Your saved setup points to a different MCP server. You can switch to the verified runtime included with Hub without changing your projects or preferences.</p><button data-field="repair-runtime" class="primary-button" type="button">Use Hub MCP runtime</button></section>
       <div class="feature-actions feature-section"><button data-field="guide" class="text-button" type="button">Connection guide</button><button data-field="check" class="icon-button" type="button" title="Check Unity connection" aria-label="Check Unity connection"><span class="icon icon-refresh" aria-hidden="true"></span></button></div>
       <div class="feature-grid">
         <section aria-label="Unity connection">
@@ -163,6 +165,8 @@ export function mount(root, api) {
     $('groups').querySelector('option[value="auto"]').textContent = draft.autoLabel;
     $('capability-status').textContent = profileDirty ? 'Capabilities changed. Save options before applying them.' : capabilities.status;
     const selected = active();
+    const server = bundledServerPath(onboarding);
+    $('runtime-repair').hidden = !server || !config || config.mcp_server_path?.replaceAll('\\', '/') === server;
     $('selection').textContent = selected ? `Selected for MCP: ${selected.name} (${selected.unity_project_path}).` : 'No saved project selected for MCP.';
     if ($('project').value && $('project').value !== selected?.unity_project_path) $('selection').textContent += ` Setup draft: ${$('project').value} (not selected for MCP).`;
     $('setup').disabled = !ready || !selectedClients().length || profileDirty || !capabilities.ready;
@@ -455,6 +459,35 @@ export function mount(root, api) {
   }
   page.on($('product-review'), 'click', reviewProductSettings);
   page.on($('product-review-advanced'), 'click', reviewProductSettings);
+  page.on($('repair-runtime'), 'click', async () => {
+    let changed = false;
+    const repaired = await run(async () => {
+      const server = bundledServerPath(onboarding);
+      if (!server || !config) throw new Error('Hub could not verify its bundled runtime. Your saved setup was kept.');
+      if (!await confirm(page, { title: 'Use Hub MCP runtime?', detail: 'Only the saved MCP server location will change. Hub keeps a backup, your projects and preferences stay the same, and the older settings copy is not changed. AI-client connections and Unity files are not changed.', accept: 'Use Hub runtime' })) return;
+      const before = await page.call('load_config');
+      if (!sameSettingsExceptServer(config, before) || config.mcp_server_path !== before.mcp_server_path) {
+        productError('Your settings changed. Check your saved setup before trying again.');
+        requireReload('Your settings changed. Check your saved setup before trying again.');
+      }
+      const status = await page.call('get_onboarding_status', { unityProjectPath: null });
+      if (bundledServerPath(status) !== server) throw new Error('Hub runtime changed during review. Your setup was kept.');
+      const next = { ...before, mcp_server_path: server };
+      await saveConfig(next);
+      let after;
+      try { after = await page.call('load_config'); }
+      catch (reason) { productError(reason); requireReload(reason); }
+      if (!sameSettingsExceptServer(before, after) || after.mcp_server_path?.replaceAll('\\', '/') !== server) {
+        productError('The saved runtime location could not be confirmed.');
+        requireReload('The saved runtime location could not be confirmed.');
+      }
+      config = after;
+      changed = true;
+      await reload();
+      $('setup-result').textContent = 'Hub runtime selected. Projects, preferences and existing AI connections are unchanged. Finish the backup review to remember this setup.';
+    }, 'Updating MCP runtime location');
+    if (repaired && changed && !page.needsRestart() && ['legacy-only', 'conflict'].includes(productReport?.status)) await reviewProductSettings();
+  });
   page.on($('discovered'), 'change', () => { if ($('discovered').value) { $('project').value = $('discovered').value; void run(check, 'Checking project'); } });
   page.on($('browse'), 'click', () => run(async () => { const path = await page.call('pick_project_folder'); if (path) { $('project').value = path; await check(); } }, 'Choosing project'));
   page.on($('add'), 'click', () => run(async () => {
@@ -502,7 +535,9 @@ export function mount(root, api) {
     await checkProjectBadges();
   }, 'Updating bridges'));
   page.on($('bridge'), 'click', () => run(async () => { await page.call('install_unity_extension', { unityProjectPath: $('project').value }); await check(); await checkProjectBadges(); }, 'Installing Unity bridge'));
-  page.on($('save'), 'click', () => run(async () => {
+  page.on($('save'), 'click', () => {
+    if ($('save').matches(':disabled')) return;
+    return run(async () => {
     const next = { ...config, mcp_server_path: $('server').value.trim(), tool_groups: $('groups').value, auto_start: $('follow').checked, enable_custom_scripts: $('scripts').checked, allow_all_tests: $('tests').checked };
     const channel = active();
     const unityOptions = [['enable_custom_scripts', 'set_unity_custom_scripts'], ['allow_all_tests', 'set_unity_allow_all_tests']];
@@ -525,7 +560,8 @@ export function mount(root, api) {
       await check(); await followActive(channel);
     }
     $('setup-result').textContent = next.auto_start ? 'Options saved; configured clients follow the active project. Restart changed clients, then check the connection.' : 'Options saved. Apply to selected clients or use reviewed setup to update their capabilities.';
-  }, 'Saving options'));
+    }, 'Saving options');
+  });
   page.on($('review'), 'click', () => run(async () => {
     const ids = selectedClients().map(([id]) => id); if (!ids.length) throw new Error('Select at least one AI client.');
     if (onboarding?.managedRouting) {

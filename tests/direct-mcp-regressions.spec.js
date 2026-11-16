@@ -46,11 +46,12 @@ async function open(page, options = {}) {
           case 'load_config': return structuredClone(window.savedConfig);
           case 'save_config':
             window.savedConfig = structuredClone(fields.config);
+            if (window.failNextReadback) { window.failNextReadback = false; window.failNext = 'load_config'; }
             if (window.failAfterSave) { window.failAfterSave = false; throw new Error('Save outcome unknown after publication'); }
             return null;
           case 'discover_unity_projects': return channels.map(channel => ({ name: channel.name, path: channel.unity_project_path }));
           case 'get_onboarding_status': return window.invalidStatus ? { runtime: { ready: true }, clients: [] } : {
-            managedRouting: true, runtime: { ready: true },
+            managedRouting: true, runtime: { ready: true, ...options.runtime },
             project: fields.unityProjectPath ? { valid: true, bridgeInstalled: true, bridgeCurrent: true, stateStatus: 'fresh', sdkProfile: window.profiles[fields.unityProjectPath] } : null,
             clients: ['codex', 'claude', 'claudeDesktop', 'antigravity', 'opencode'].map(id => ({ id, detected: true, configured: true, supported: true })),
             unityCli: { canEnable: true, enabled: false, message: 'Optional Unity CLI' },
@@ -305,6 +306,52 @@ test('explicit review repairs a malformed remembered receipt after rechecking ba
   await controlsLocked(page, false);
   expect(await page.evaluate(() => JSON.parse(localStorage.getItem('creator-hub.mcp-product-review.v1')).version)).toBe(1);
   expect(await commands(page, 'save_config')).toEqual([]);
+});
+
+test('runtime repair preserves every other setting and does not touch Unity or client configurations', async ({ page }) => {
+  await open(page, { runtime: { bundled: true, command: 'C:/Hub/mcp/server/runtime/node.exe' } });
+  const before = await page.evaluate(() => structuredClone(savedConfig));
+  await field(page, 'repair-runtime').click();
+  await page.getByRole('button', { name: 'Use Hub runtime', exact: true }).click(); await idle(page);
+  const after = await page.evaluate(() => structuredClone(savedConfig));
+  expect(after).toEqual({ ...before, mcp_server_path: 'C:/Hub/mcp/server/creator-works-mcp.mjs' });
+  expect((await mutationCalls(page)).map(call => call.args.command)).toEqual(['save_config']);
+  await expect(field(page, 'runtime-repair')).toBeHidden();
+});
+
+test('runtime repair cancellation keeps all settings unchanged', async ({ page }) => {
+  await open(page, { runtime: { bundled: true, command: 'C:/Hub/mcp/server/runtime/node.exe' } });
+  const before = await page.evaluate(() => structuredClone(savedConfig));
+  await field(page, 'repair-runtime').click();
+  await page.getByRole('button', { name: 'Cancel', exact: true }).click(); await idle(page);
+  expect(await page.evaluate(() => savedConfig)).toEqual(before);
+  expect(await mutationCalls(page)).toEqual([]);
+});
+
+test('runtime repair refuses settings changed while its confirmation is open', async ({ page }) => {
+  await open(page, { runtime: { bundled: true, command: 'C:/Hub/mcp/server/runtime/node.exe' } });
+  await field(page, 'repair-runtime').click();
+  await page.evaluate(() => { savedConfig.unrelated.externalChange = true; });
+  await page.getByRole('button', { name: 'Use Hub runtime', exact: true }).click(); await idle(page);
+  expect(await commands(page, 'save_config')).toEqual([]);
+  expect(await page.evaluate(() => savedConfig.unrelated.externalChange)).toBe(true);
+  await expect(field(page, 'error')).toContainText('Your settings changed');
+  await controlsLocked(page, true);
+  await field(page, 'save').dispatchEvent('click'); await idle(page);
+  expect(await commands(page, 'save_config')).toEqual([]);
+});
+
+test('runtime repair readback failure locks stale controls without replaying the save', async ({ page }) => {
+  await open(page, { runtime: { bundled: true, command: 'C:/Hub/mcp/server/runtime/node.exe' } });
+  await page.evaluate(() => { window.failNextReadback = true; });
+  await field(page, 'repair-runtime').click();
+  await page.getByRole('button', { name: 'Use Hub runtime', exact: true }).click(); await idle(page);
+  await controlsLocked(page, true);
+  expect((await commands(page, 'save_config')).length).toBe(1);
+  expect(await commands(page, 'review_product_settings')).toEqual([]);
+  await field(page, 'save').dispatchEvent('click'); await idle(page);
+  expect((await commands(page, 'save_config')).length).toBe(1);
+  expect(await page.evaluate(() => savedConfig.mcp_server_path)).toBe('C:/Hub/mcp/server/creator-works-mcp.mjs');
 });
 
 test('completed history from another settings location is disclosed but never offered for resume', async ({ page }) => {
