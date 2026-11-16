@@ -248,3 +248,88 @@ fn auto_accepts_unity_resolving_a_higher_shared_dependency_version() {
         "core,creator"
     );
 }
+
+#[test]
+fn sdk_identity_survives_a_lower_resolved_render_pipeline_without_enabling_auto() {
+    let dir = project();
+    for version in ["4.0.22", "4.0.25"] {
+        manifest(dir.path(), &format!(r#"{{"dependencies":{{"com.sidequest.creator-sdk":"{version}","com.unity.render-pipelines.universal":"17.3.0"}}}}"#));
+        let lock = format!(r#"{{"dependencies":{{
+            "com.sidequest.creator-sdk":{{"version":"{version}","dependencies":{{"com.unity.render-pipelines.universal":"17.4.0"}}}},
+            "com.unity.render-pipelines.universal":{{"version":"17.3.0","dependencies":{{"com.unity.render-pipelines.core":"17.4.0"}}}},
+            "com.unity.render-pipelines.core":{{"version":"17.3.0","dependencies":{{}}}}
+        }}}}"#);
+        fs::write(dir.path().join("Packages/packages-lock.json"), &lock).unwrap();
+        let before = fs::read(dir.path().join("Packages/manifest.json")).unwrap();
+        let profile = project_sdk_profile(dir.path());
+        assert_eq!(profile.profile, "creator");
+        assert_eq!(profile.label, format!("Creator SDK {version}"));
+        assert!(profile.creator_sdk);
+        assert!(profile.error.is_some());
+        assert!(profile.recommended_tool_groups.is_none());
+        assert!(resolve_project_tool_groups("auto", dir.path()).is_err());
+        assert_eq!(resolve_project_tool_groups("core,creator", dir.path()).unwrap(), "core,creator");
+        assert_eq!(fs::read(dir.path().join("Packages/manifest.json")).unwrap(), before);
+        assert_eq!(fs::read_to_string(dir.path().join("Packages/packages-lock.json")).unwrap(), lock);
+    }
+}
+
+#[test]
+fn stale_wrapper_dependencies_do_not_invent_a_detected_sdk() {
+    let dir = project();
+    manifest(dir.path(), r#"{"dependencies":{"com.example.wrapper":"2.0.0"}}"#);
+    fs::write(dir.path().join("Packages/packages-lock.json"), r#"{"dependencies":{
+        "com.example.wrapper":{"version":"1.0.0","dependencies":{"com.sidequest.creator-sdk":"4.0.25"}},
+        "com.sidequest.creator-sdk":{"version":"4.0.25","dependencies":{}}
+    }}"#).unwrap();
+    let profile = project_sdk_profile(dir.path());
+    assert_eq!(profile.profile, "unknown");
+    assert!(!profile.creator_sdk);
+    assert!(profile.recommended_tool_groups.is_none());
+}
+
+#[test]
+fn trusted_transitive_sdk_keeps_its_identity_when_its_own_dependency_differs() {
+    let dir = project();
+    manifest(dir.path(), r#"{"dependencies":{"com.example.wrapper":"1.0.0"}}"#);
+    fs::write(dir.path().join("Packages/packages-lock.json"), r#"{"dependencies":{
+        "com.example.wrapper":{"version":"1.0.0","dependencies":{"com.sidequest.creator-sdk":"4.0.25"}},
+        "com.sidequest.creator-sdk":{"version":"4.0.25","dependencies":{"com.unity.render-pipelines.universal":"17.4.0"}},
+        "com.unity.render-pipelines.universal":{"version":"17.3.0","dependencies":{}}
+    }}"#).unwrap();
+    let profile = project_sdk_profile(dir.path());
+    assert_eq!(profile.label, "Creator SDK 4.0.25");
+    assert!(profile.error.is_some());
+    assert!(profile.recommended_tool_groups.is_none());
+}
+
+#[test]
+fn shared_sdk_identity_does_not_depend_on_dependency_traversal_order() {
+    let dir = project();
+    for (first, second) in [("com.example.a", "com.example.z"), ("com.example.z", "com.example.a")] {
+        manifest(dir.path(), &format!(r#"{{"dependencies":{{"{first}":"1.0.0","{second}":"2.0.0"}}}}"#));
+        fs::write(dir.path().join("Packages/packages-lock.json"), format!(r#"{{"dependencies":{{
+            "{first}":{{"version":"1.0.0","dependencies":{{"com.example.shared":"1.0.0"}}}},
+            "{second}":{{"version":"2.0.0","dependencies":{{"com.example.shared":"2.0.0"}}}},
+            "com.example.shared":{{"version":"1.0.0","dependencies":{{"com.sidequest.creator-sdk":"4.0.25"}}}},
+            "com.sidequest.creator-sdk":{{"version":"4.0.25","dependencies":{{}}}}
+        }}}}"#)).unwrap();
+        let profile = project_sdk_profile(dir.path());
+        assert_eq!(profile.label, "Creator SDK 4.0.25");
+        assert!(profile.error.is_some());
+        assert!(profile.recommended_tool_groups.is_none());
+    }
+}
+
+#[test]
+fn future_sdk_versions_keep_their_version_and_do_not_require_a_hub_update() {
+    let dir = project();
+    for (version, tested) in [("4.0.25", true), ("4.0.27", false), ("100.42.7", false)] {
+        manifest(dir.path(), &format!(r#"{{"dependencies":{{"com.sidequest.creator-sdk":"{version}"}}}}"#));
+        let profile = project_sdk_profile(dir.path());
+        assert_eq!(profile.label, format!("Creator SDK {version}"));
+        assert_eq!(profile.creator_sdk_tested, Some(tested));
+        assert_eq!(profile.recommended_tool_groups.as_deref(), Some("core,creator"));
+        assert!(profile.error.is_none());
+    }
+}

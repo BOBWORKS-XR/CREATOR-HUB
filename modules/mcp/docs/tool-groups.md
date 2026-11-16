@@ -58,6 +58,19 @@ Invalid, duplicate or
 unreadable metadata blocks Auto application with a recheck/manual-choice path;
 it does not silently choose broader access. Package versions are not changed.
 
+The project list identifies the SDK separately from package compatibility.
+A confirmed Creator SDK name/version remains visible when another dependency
+needs review; that warning still prevents Auto from being applied. Direct SDK
+declarations count as identity evidence, but SDKs reachable only through a stale
+parent's lock entry do not. Future SDK versions are displayed as installed and
+marked **Not yet tested with Hub**, not renamed **SDK unknown**. This label is
+not a claim that every project using a tested SDK has passed validation.
+
+The MCP page checks the official stable SDK metadata through Setup's existing
+read-only lookup and provides **Check latest SDK** for a fresh check. The latest
+available version is separate from each installed version. Lookup failure does
+not hide installed versions, block manual MCP setup, or change any packages.
+
 Codex, Claude Code, Claude Desktop, Antigravity and OpenCode receive concrete
 groups. Existing manual values stay manual when changing projects. With Follow
 active project enabled, explicitly selecting a saved project reapplies its

@@ -28,6 +28,10 @@ async function open(page, options = {}) {
       core: { invoke: async (command, args = {}) => {
         window.calls.push({ command, args: structuredClone(args) });
         if (command === 'feature_status') return { integrated: true, features: ['mcp', 'setup'] };
+        if (command === 'feature_call' && args.feature === 'setup' && args.command === 'latest_sdk_requirements') {
+          if (options.latestSdkFails) throw new Error('Registry unavailable');
+          return { version: options.latestSdkVersion || '4.0.27' };
+        }
         if (command !== 'feature_call' || args.feature !== 'mcp') throw new Error(`Unexpected outer command: ${command}`);
         const { command: name, args: fields } = args;
         if (window.hold === name) await new Promise(resolve => { window.pending[name] = resolve; });
@@ -102,6 +106,59 @@ const mutationCalls = page => page.evaluate(() => calls.filter(call => call.comm
   && /^(?:save_|one_click_setup$|add_project$|install_|update_|set_|remove_|review_|recover_)/.test(call.args.command)));
 const row = (page, name) => field(page, 'projects').locator(`[data-project-path="/projects/${name}"]`);
 const idle = page => expect(page.locator('#feature-mcp')).toHaveAttribute('aria-busy', 'false');
+
+test('latest SDK lookup is independent of the installed future SDK and never changes settings', async ({ page }) => {
+  await open(page, { latestSdkVersion: '100.42.8', profiles: {
+    '/projects/Creator': { profile: 'creator', label: 'Creator SDK 100.42.7', creatorSdkTested: false,
+      recommendedToolGroups: 'core,creator' },
+  } });
+  await expect(row(page, 'Creator')).toContainText('Creator SDK 100.42.7');
+  await expect(row(page, 'Creator')).toContainText('Not yet tested with Hub');
+  await expect(field(page, 'sdk-latest')).toHaveText('Latest Creator SDK: 100.42.8');
+  await field(page, 'sdk-check').click();
+  await expect(field(page, 'sdk-latest')).toHaveText('Latest Creator SDK: 100.42.8');
+  expect(await mutationCalls(page)).toEqual([]);
+});
+
+test('offline SDK lookup keeps installed versions and MCP controls usable', async ({ page }) => {
+  await open(page, { latestSdkFails: true });
+  await expect(field(page, 'sdk-latest')).toContainText('Installed versions are still shown');
+  await expect(row(page, 'Creator')).toContainText('Creator SDK');
+  await expect(field(page, 'setup')).toBeEnabled();
+  await expect(field(page, 'sdk-check')).toBeEnabled();
+  expect(await mutationCalls(page)).toEqual([]);
+});
+
+for (const width of [1100, 320]) test(`SDK identity remains visible when package versions need review at ${width}px`, async ({ page }, testInfo) => {
+  await page.setViewportSize({ width, height: 844 });
+  await open(page, { config: { tool_groups: 'core,creator' }, profiles: {
+    '/projects/Creator': { profile: 'creator', label: 'Creator SDK 4.0.25', creatorSdk: true,
+      error: 'Some installed package versions differ from their dependencies.', recommendedToolGroups: null },
+  } });
+  await expect(row(page, 'Creator')).toContainText('Creator SDK 4.0.25');
+  await expect(row(page, 'Creator')).not.toContainText('SDK unknown');
+  await expect(row(page, 'Creator')).toContainText('Package versions need review');
+  await page.getByText('Advanced settings', { exact: true }).click();
+  await expect(field(page, 'groups')).toHaveValue('core,creator');
+  await expect(field(page, 'setup')).toBeEnabled();
+  expect(await mutationCalls(page)).toEqual([]);
+  expect(await page.evaluate(() => savedConfig.tool_groups)).toBe('core,creator');
+  expect(await row(page, 'Creator').evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
+  await row(page, 'Creator').screenshot({ path: testInfo.outputPath(`sdk-identity-${width}.png`) });
+});
+
+test('known SDK with unresolved package versions does not enable Auto', async ({ page }) => {
+  await open(page, { config: { tool_groups: 'auto' }, profiles: {
+    '/projects/Creator': { profile: 'creator', label: 'Creator SDK 4.0.22', creatorSdk: true,
+      error: 'Some installed package versions differ from their dependencies.', recommendedToolGroups: null },
+  } });
+  await expect(row(page, 'Creator')).toContainText('Creator SDK 4.0.22');
+  await page.getByText('Advanced settings', { exact: true }).click();
+  await expect(field(page, 'capability-status')).toContainText('Creator SDK 4.0.22 detected');
+  await expect(field(page, 'capability-status')).toContainText('Setup / Repair');
+  await expect(field(page, 'setup')).toBeDisabled();
+  expect(await mutationCalls(page)).toEqual([]);
+});
 
 test('Auto labels follow the checked SDK without changing stored preferences', async ({ page }) => {
   await open(page, { config: { tool_groups: 'auto' } });

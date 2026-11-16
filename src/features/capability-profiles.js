@@ -25,6 +25,8 @@ export function capabilityView(selection, project) {
     status: `Detected: ${detected.label}`, autoLabel: `Auto: ${detected.label}`,
   } : {
     ready: false, label: 'Auto (project SDK)', groups: null, autoLabel: 'Auto (project SDK)',
-    status: 'SDK not verified. Check the connection again or choose a manual capability profile.',
+    status: sdk?.error && sdkProfiles[sdk.profile] && sdk.profile !== 'none'
+      ? `${sdk.label || sdkProfiles[sdk.profile].label} detected. Package versions need review in Setup / Repair before using Auto. Your manual choices are kept.`
+      : 'SDK not verified. Check the connection again or choose a manual capability profile.',
   };
 }

@@ -152,6 +152,7 @@ struct SdkProfileStatus {
     packages: Vec<SdkPackageStatus>,
     error: Option<String>,
     recommended_tool_groups: Option<String>,
+    creator_sdk_tested: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2203,7 +2204,7 @@ fn project_sdk_profile(project_path: &Path) -> SdkProfileStatus {
     let unknown = |error: String| SdkProfileStatus {
         profile: "unknown".into(), label: "SDK unknown".into(),
         creator_sdk: false, legacy_banter: false, packages: Vec::new(),
-        error: Some(error), recommended_tool_groups: None,
+        error: Some(error), recommended_tool_groups: None, creator_sdk_tested: None,
     };
     let metadata = |name: &str, required: bool| -> Result<serde_json::Value, String> {
         let path = project_path.join("Packages").join(name);
@@ -2250,6 +2251,7 @@ fn project_sdk_profile(project_path: &Path) -> SdkProfileStatus {
     // Only follow lock entries reachable from the current manifest. Removed SDKs
     // can linger in the lock until Unity resolves packages again.
     let mut reachable = std::collections::HashSet::new();
+    let mut version_issue = None;
     let mut pending: Vec<(String, String)> = direct_dependencies.into_iter()
         .flat_map(|deps| deps.iter().map(|(id, version)|
             (id.clone(), version.as_str().unwrap_or_default().to_owned()))).collect();
@@ -2262,7 +2264,8 @@ fn project_sdk_profile(project_path: &Path) -> SdkProfileStatus {
             // Unity may legitimately resolve a higher version shared by other
             // dependencies. A lower lock version cannot satisfy this request.
             if resolved < requested {
-                return unknown("Package versions changed since the lockfile was resolved. Open the project in Unity, then check again; or choose a manual capability profile.".into());
+                version_issue = Some("Some installed package versions differ from their dependencies. Review this project in Setup / Repair before using Auto capabilities. Your project files and manual choices are unchanged.".to_string());
+                continue;
             }
         }
         if !reachable.insert(package.clone()) { continue; }
@@ -2272,10 +2275,16 @@ fn project_sdk_profile(project_path: &Path) -> SdkProfileStatus {
                 (id.clone(), version.as_str().unwrap_or_default().to_owned())));
         }
     }
-    let has_package = |package_id: &str| reachable.contains(package_id);
+    // A package mismatch does not erase an SDK declared directly in the project.
+    // Do not infer transitive SDKs through a mismatched parent, however.
+    let has_package = |package_id: &str| reachable.contains(package_id)
+        || direct_dependencies.is_some_and(|deps| deps.contains_key(package_id));
 
     let creator_sdk = has_package(CREATOR_PACKAGE);
     let legacy_banter = has_package(BANTER_PACKAGE);
+    if !creator_sdk && !legacy_banter {
+        if let Some(error) = version_issue { return unknown(error); }
+    }
     let mut packages = Vec::new();
     if creator_sdk {
         packages.push(SdkPackageStatus {
@@ -2319,14 +2328,20 @@ fn project_sdk_profile(project_path: &Path) -> SdkProfileStatus {
         (false, false) => ("none", "Unity only".to_string()),
     };
 
+    // Exact releases with retained Hub/Unity qualification evidence, not a compatibility allowlist.
+    let creator_sdk_tested = packages.iter().find(|p| p.package_id == CREATOR_PACKAGE)
+        .map(|p| matches!(p.version.as_deref(), Some("4.0.14" | "4.0.22" | "4.0.25")));
     SdkProfileStatus {
         profile: profile.to_string(),
         label,
         creator_sdk,
         legacy_banter,
         packages,
-        error: None,
-        recommended_tool_groups: capability_profiles::recommended(profile).map(str::to_owned),
+        recommended_tool_groups: if version_issue.is_none() {
+            capability_profiles::recommended(profile).map(str::to_owned)
+        } else { None },
+        error: version_issue,
+        creator_sdk_tested,
     }
 }
 

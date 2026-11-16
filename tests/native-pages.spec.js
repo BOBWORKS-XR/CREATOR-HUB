@@ -491,9 +491,12 @@ for (const width of [940, 390]) test(`Setup distinguishes selected SDK and decla
 });
 
 test('Setup creates once with exact DTO, consumes only scoped progress and completes while hidden', async ({ page }) => {
-  await open(page); await show(page, 'mcp'); await show(page, 'setup');
-  await expect(field(page, 'setup', 'sdk-selection')).toHaveText('Selected: Creator SDK 4.0.25 (latest stable).');
+  await open(page); await show(page, 'mcp');
+  await expect(field(page, 'mcp', 'sdk-latest')).toHaveText('Latest Creator SDK: 4.0.25');
   expect(await commands(page, 'latest_sdk_requirements')).toHaveLength(1);
+  await show(page, 'setup');
+  await expect(field(page, 'setup', 'sdk-selection')).toHaveText('Selected: Creator SDK 4.0.25 (latest stable).');
+  expect(await commands(page, 'latest_sdk_requirements')).toHaveLength(2);
   await field(page, 'setup', 'name').fill('Space');
   await page.evaluate(() => { window.hold = 'create_project'; }); await field(page, 'setup', 'create').click();
   await page.waitForFunction(() => pending.create_project);

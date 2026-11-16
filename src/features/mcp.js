@@ -42,7 +42,7 @@ export function mount(root, api) {
         </section>
         <section class="feature-section" aria-label="Connection status"><h3>Connection status</h3><p data-field="checked-project" class="feature-note"></p><div data-field="checks"></div><p class="feature-note">Saved settings are not proof of a live AI connection. Fully quit and reopen changed AI clients, then ask your AI to call get_bridge_status.</p></section>
       </div>
-      <section class="feature-section" aria-label="Saved Unity projects"><div class="feature-heading"><h3>Unity projects</h3><div class="feature-actions"><button data-field="add" class="text-button" type="button"><span class="icon icon-folder" aria-hidden="true"></span> Add project</button><button data-field="bridges" class="text-button" type="button">Update bridges</button></div></div><div data-field="projects"></div></section>
+      <section class="feature-section" aria-label="Saved Unity projects"><div class="feature-heading"><h3>Unity projects</h3><div class="feature-actions"><button data-field="add" class="text-button" type="button"><span class="icon icon-folder" aria-hidden="true"></span> Add project</button><button data-field="bridges" class="text-button" type="button">Update bridges</button></div></div><div class="feature-actions"><p data-field="sdk-latest" class="feature-note" role="status">Latest Creator SDK not checked.</p><button data-field="sdk-check" class="text-button" type="button"><span class="icon icon-refresh" aria-hidden="true"></span> Check latest SDK</button></div><div data-field="projects"></div></section>
       <section class="feature-section" aria-label="Local project feedback"><div class="feature-heading"><h3>Local project feedback</h3><button data-field="feedback-check" class="icon-button" type="button" title="Check project feedback preferences" aria-label="Check project feedback preferences" disabled><span class="icon icon-refresh" aria-hidden="true"></span></button></div>
         <label class="feature-check"><input data-field="feedback-enabled" type="checkbox" disabled><span>Enable local feedback for this Unity project</span></label>
         <label class="feature-check"><input data-field="feedback-usage" type="checkbox" disabled><span>Enable optional usage check-ins</span></label>
@@ -81,6 +81,8 @@ export function mount(root, api) {
   const optionBaseline = new Map();
   const appliedUnityOptions = new Map();
   const projectChecks = new Map();
+  let latestSdkRequest = 0;
+  let disposed = false;
   const clientUi = new Map();
   const active = () => config?.channels?.find(channel => channel.id === config.active_channel_id);
   function syncProjectPicker() {
@@ -194,7 +196,7 @@ export function mount(root, api) {
     const p = value.project;
     const rows = [['Private runtime', value.runtime.ready ? 'Ready' : 'Unavailable', value.runtime.ready],
       ['Unity project', p?.valid ? 'Valid' : $('project').value ? 'Invalid' : 'Not selected', p?.valid],
-      ['SDK profile', p?.sdkProfile?.label || 'Not selected', p?.sdkProfile?.profile && !['none', 'unknown'].includes(p.sdkProfile.profile)],
+      ['SDK profile', p?.sdkProfile?.label || 'Not selected', !p?.sdkProfile?.error && p?.sdkProfile?.profile && !['none', 'unknown'].includes(p.sdkProfile.profile)],
       ['Unity bridge', !p?.valid ? 'Not checked' : p.bridgeCurrent ? p.stateStatus === 'fresh' ? 'Recent Unity state found' : 'Installed; open Unity and check again' : p.bridgeInstalled ? 'Update available' : 'Not installed', p?.valid && p.bridgeCurrent && p.stateStatus === 'fresh']];
     $('checks').replaceChildren(...rows.map(([name, value, ready]) => { const row = node('div', null, 'feature-row'); row.append(node('span', name), node('span', value, ready ? 'feature-good' : 'feature-warn')); return row; }));
     for (const [id, ui] of clientUi) {
@@ -297,6 +299,12 @@ export function mount(root, api) {
       if (selected) meta.append(node('span', 'Selected for MCP', 'feature-project-badge feature-good'));
       const checked = projectChecks.get(channel.unity_project_path);
       meta.append(node('span', checked?.sdk || 'Checking SDK', 'feature-project-badge feature-note'));
+      if (checked?.sdkUntested) meta.append(node('span', 'Not yet tested with Hub', 'feature-project-badge feature-note'));
+      if (checked?.sdkIssue) {
+        const issue = node('span', 'Package versions need review', 'feature-project-badge feature-warn');
+        issue.title = 'The SDK was found. Review package versions in Setup / Repair; project files have not been changed.';
+        meta.append(issue);
+      }
       const badge = node('span', checked?.bridge || 'Checking bridge', `feature-project-badge ${checked?.current ? 'feature-good' : 'feature-warn'}`);
       if (checked?.issue) badge.title = checked.issue;
       meta.append(badge);
@@ -327,11 +335,36 @@ export function mount(root, api) {
       try {
         const profile = await page.call('get_project_sdk_profile', { unityProjectPath: channel.unity_project_path });
         if (typeof profile?.label === 'string' && profile.label) result.sdk = profile.label;
+        result.sdkIssue = Boolean(profile?.error && ['creator', 'banter', 'hybrid'].includes(profile.profile));
+        result.sdkUntested = profile?.creatorSdkTested === false;
       } catch { /* Bridge and SDK checks are independent. */ }
       projectChecks.set(channel.unity_project_path, result);
       renderProjects();
     }
   }
+  async function checkLatestSdk() {
+    if (disposed || $('sdk-check').disabled) return;
+    const request = ++latestSdkRequest;
+    $('sdk-check').disabled = true;
+    $('sdk-latest').textContent = 'Checking latest Creator SDK...';
+    let timer;
+    try {
+      const value = await Promise.race([
+        api.invoke('feature_call', { feature: 'setup', command: 'latest_sdk_requirements', args: {} }),
+        new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('SDK lookup timed out.')), 20000); }),
+      ]);
+      if (disposed || request !== latestSdkRequest) return;
+      if (typeof value?.version !== 'string' || value.version.length > 128
+        || !/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/.test(value.version)) throw new Error('Invalid SDK version.');
+      $('sdk-latest').textContent = `Latest Creator SDK: ${value.version}`;
+    } catch {
+      if (!disposed && request === latestSdkRequest) $('sdk-latest').textContent = 'Latest SDK could not be checked. Installed versions are still shown below.';
+    } finally {
+      clearTimeout(timer);
+      if (!disposed && request === latestSdkRequest) $('sdk-check').disabled = false;
+    }
+  }
+  page.on($('sdk-check'), 'click', checkLatestSdk);
   async function reload() {
     try { await loadSettings(); $('retry').hidden = true; }
     catch (reason) { $('retry').hidden = false; throw reason; }
@@ -636,7 +669,7 @@ export function mount(root, api) {
   });
   try { $('notice').hidden = localStorage.getItem(noticeKey) === 'true'; } catch { /* Keep warning visible. */ }
   return Object.assign(page, {
-    dispose() { if (page.busy()) return false; disposeRouteNotice(); return disposePage(); },
+    dispose() { if (page.busy()) return false; disposed = true; latestSdkRequest++; disposeRouteNotice(); return disposePage(); },
     async initialize() {
       page.lock(true);
       let loaded = false;
@@ -647,6 +680,7 @@ export function mount(root, api) {
       if (!complete && productIssue) productError(page.errorMessage());
       if (complete && !loaded) $('status').textContent = 'Review saved settings';
       if (complete && loaded && config.connection_guide_version !== 1 && !root.hidden) $('guide-dialog').showModal();
+      if (complete && loaded) void checkLatestSdk();
       return complete && loaded;
     },
     event(name, value) {
