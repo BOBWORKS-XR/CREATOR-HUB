@@ -5,11 +5,11 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const feed = require('./self-update-outgoing-019-feed.cjs');
 const binding = require('./fixtures/windows-outgoing-019-binding.json');
-const KIND = 'direct-outgoing-023-024';
-const ASSET = 'Creator.Hub_0.1.24_x64-setup.exe';
-const BASELINE_ASSET = 'Creator.Hub_0.1.23_x64-setup.exe';
-const EXPECTED_TARGET_SOURCE = Object.freeze({"commit":"9e46f1a9212df4f56b4b7e1188e2afb8e33e264a","tree":"6567eb46f1d3bc70f94131dcfef79d1251896fcf"});
-const CASES = Object.freeze({ 'mcp-restore': ['mcp', 'true'] });
+const KIND = 'direct-outgoing-024-025';
+const ASSET = 'Creator.Hub_0.1.25_x64-setup.exe';
+const BASELINE_ASSET = 'Creator.Hub_0.1.24_x64-setup.exe';
+const EXPECTED_TARGET_SOURCE = Object.freeze({"commit":"392b423604dca249e8c23f943c54c722cb948f37","tree":"ddbb073e289e7e7185e17145a5d6dfd982f4e917"});
+const CASES = Object.freeze({ 'mcp-restore': ['mcp', 'true'], 'setup-restore': ['setup', 'true'], 'setup-no-restore': ['setup', 'false'] });
 const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 const generation = module => hash(JSON.stringify({ executable: module.executable, version: module.version,
   files: Object.fromEntries(Object.entries(module.files).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) }));
@@ -43,12 +43,12 @@ function source(value) {
 function validateBindingShape(value) {
   assert.equal(value.schemaVersion, 1); assert.equal(value.enabled, true, 'Pending exact23/private24 pins: native admission refused');
   assert.equal(value.privateOnly, true); assert.equal(value.kind, KIND);
-  assert.equal(value.baseline.version, '0.1.23'); assert.equal(value.target.version, '0.1.24');
+  assert.equal(value.baseline.version, '0.1.24'); assert.equal(value.target.version, '0.1.25');
   assert.equal(value.baseline.asset, BASELINE_ASSET); assert.equal(value.target.asset, ASSET);
-  assert.equal(value.baseline.releaseId,447075046); assert.equal(value.baseline.assetId,754953571);
-  assert.equal(value.baseline.installer.sha256,'4c85dbf3064b136ada3ad20a24c5c6b25ddfb16fe8be941b9dd33058d916f456');
-  assert.equal(value.baseline.executable.sha256,'966ef4bb22598927f18ec5afd7f75f068c6bb083ca89dd3aac4757afb8f17010');
-  assert.equal(value.baseline.verificationReceiptSha256,'0a022ae88d72b22e63da0920c99c5baeb0465e45d58c72b98b2ad971a61866e6');
+  assert.equal(value.baseline.releaseId,447323263); assert.equal(value.baseline.assetId,755655839);
+  assert.equal(value.baseline.installer.sha256,'ef8d0e3e59e25fbdfdc24ad3e739e568d4ddf8714dcd7bde6a0498045fe80db1');
+  assert.equal(value.baseline.executable.sha256,'69a5a90fe30c0d23d5ef08f6ed7f0820ba3dfba1851b448205493cee2e595000');
+  assert.equal(value.baseline.verificationReceiptSha256,'926d0645ebba86f874f99b80dee372e13b69742c78431b8405dc59efc6041e3a');
   for (const item of [value.baseline, value.target]) {
     source(item.source); pin(item.installer, 'installer'); pin(item.executable, 'executable');
     assert.equal(item.buildExitCode, 0); assert.equal(item.sourceUnchanged, true);
@@ -89,7 +89,7 @@ function validateBindingShape(value) {
   assert.ok(release && Number.isSafeInteger(release.id) && release.id > 0);
   assert.notEqual(value.baseline.releaseId, release.id);
   assert.equal(release.source, value.target.source.commit);
-  assert.equal(release.tag, 'lab-windows-sdk-labels-024-20261116');
+  assert.equal(release.tag, 'lab-windows-missing-server-025-20261116');
   const assetPins = { [ASSET]: value.target.installer, 'creator-hub-windows-x86_64.json': value.target.descriptor,
     'creator-hub-windows-x86_64.json.minisig': value.target.descriptorSignature, 'latest.json': value.target.latest };
   assert.deepEqual(Object.keys(release.assets).sort(), Object.keys(assetPins).sort());
@@ -100,7 +100,7 @@ function validateBindingShape(value) {
   }
   assert.equal(new Set(ids).size, ids.length);
   const q = value.fixtureQualification;
-  assert.equal(q.kind, 'sdk-labels-024-signed-candidate'); assert.deepEqual(q.source, value.target.source);
+  assert.equal(q.kind, 'missing-server-025-signed-candidate'); assert.deepEqual(q.source, value.target.source);
   assert.equal(q.sha256, value.target.verificationReceiptSha256);
   assert.equal(q.sourceUnchanged, true); assert.equal(q.buildExitCode, 0);
   assert.ok(Number.isSafeInteger(q.inputCount) && q.inputCount > 0); assert.equal(q.payloadFiles, 15);
@@ -116,8 +116,8 @@ function assertHost(env = process.env, platform = process.platform) {
   assert.equal(platform, 'win32');
   for (const [key, expected] of Object.entries({ GITHUB_ACTIONS: 'true', RUNNER_ENVIRONMENT: 'github-hosted', RUNNER_OS: 'Windows', RUNNER_ARCH: 'X64',
     GITHUB_REPOSITORY: 'BOBWORKS-XR/CREATOR-HUB', GITHUB_REPOSITORY_ID: '1364807512', GITHUB_EVENT_NAME: 'workflow_dispatch',
-    GITHUB_JOB: 'acceptance', GITHUB_REF: 'refs/heads/codex/windows-sdk-labels-024-update',
-    GITHUB_WORKFLOW_REF: 'BOBWORKS-XR/CREATOR-HUB/.github/workflows/windows-outgoing-019.yml@refs/heads/codex/windows-sdk-labels-024-update' })) assert.equal(env[key], expected, key);
+    GITHUB_JOB: 'acceptance', GITHUB_REF: 'refs/heads/codex/windows-missing-server-025-acceptance',
+    GITHUB_WORKFLOW_REF: 'BOBWORKS-XR/CREATOR-HUB/.github/workflows/windows-outgoing-019.yml@refs/heads/codex/windows-missing-server-025-acceptance' })) assert.equal(env[key], expected, key);
   assert.match(env.GITHUB_SHA || '', /^[a-f0-9]{40}$/); assert.equal(env.EXPECTED_HARNESS_COMMIT, env.GITHUB_SHA);
   assert.ok(Object.hasOwn(CASES, env.CREATOR_OUTGOING_CASE));
   assert.deepEqual([env.CREATOR_OUTGOING_LAST_TOOL, env.CREATOR_OUTGOING_RESTORE], CASES[env.CREATOR_OUTGOING_CASE]);
@@ -137,8 +137,8 @@ function assertAdmission(env = process.env, platform = process.platform) {
 function configFor(directory) {
   validateBinding(); assert.ok(path.isAbsolute(directory));
   return { schemaVersion: 1, kind: KIND, sourceCommit: binding.target.source.commit,
-    baseline: { version: '0.1.23', installer: binding.baseline.installer.sha256, exe: binding.baseline.executable.sha256 },
-    targetVersion: '0.1.24', directory, pins: { descriptor: binding.target.descriptor.sha256,
+    baseline: { version: '0.1.24', installer: binding.baseline.installer.sha256, exe: binding.baseline.executable.sha256 },
+    targetVersion: '0.1.25', directory, pins: { descriptor: binding.target.descriptor.sha256,
       descriptorSignature: binding.target.descriptorSignature.sha256, installer: binding.target.installer.sha256,
       executable: binding.target.executable.sha256, manifest: binding.target.latest.sha256 },
     runtime: { baselineDescriptor: binding.baseline.manifest.managedRouting.files['routing/runtime.json'],
@@ -174,7 +174,7 @@ function readHash(file, expected, relativePath = path.basename(file)) {
     throw error;
   }
 }
-function itemFor(version) { assert.ok(['0.1.23', '0.1.24'].includes(version)); return version === '0.1.23' ? binding.baseline : binding.target; }
+function itemFor(version) { assert.ok(['0.1.24', '0.1.25'].includes(version)); return version === '0.1.24' ? binding.baseline : binding.target; }
 function assertInstalledResources(directory, version) {
   const item = itemFor(version); readHash(path.join(directory, 'creator-hub.exe'), item.executable.sha256, 'creator-hub.exe');
   const files = { ...item.manifest.modules.mcp.files, ...item.manifest.modules.setup.files, ...item.manifest.managedRouting.files };
@@ -221,7 +221,7 @@ function assertFreshConnection(held, fresh, profile) {
   for (const rows of [held, fresh]) assert.equal(rows[1].parentPid, rows[0].pid);
   const normalize = image => path.win32.normalize(image).toLowerCase();
   assert.ok(profile && profile.local && profile.home, 'Explicit old/new profile roots required');
-  for (const [rows, version] of [[held, '0.1.23'], [fresh, '0.1.24']]) {
+  for (const [rows, version] of [[held, '0.1.24'], [fresh, '0.1.25']]) {
     const locations = managedLocations(profile.local, version, profile.home);
     assert.equal(normalize(rows[0].image), normalize(locations.command), 'Exact version-bound router required');
     assert.equal(normalize(rows[1].image), normalize(path.join(locations.payload, 'mcp/server/runtime/node.exe')),

@@ -21,7 +21,7 @@ async function acquire() {
   target.assertHost();
   const base = path.resolve('artifacts/outgoing-019');
   assert.equal(fs.existsSync(base), false, 'Refusing to reuse input directory');
-  const baseline = { id: binding.baseline.releaseId, tag: 'v0.1.23', source: binding.baseline.source.commit,
+  const baseline = { id: binding.baseline.releaseId, tag: 'v0.1.24', source: binding.baseline.source.commit,
     assets: { [target.BASELINE_ASSET]: { id: binding.baseline.assetId, ...binding.baseline.installer } } };
   const successor = binding.target.privateRelease;
   const headers = { Authorization: `Bearer ${process.env.GH_TOKEN}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2026-03-10' };
@@ -64,11 +64,11 @@ function checkMigrationReceipt(report) {
     if(key==='selected'||key==='old')assert.ok(capture(clients.afterUpdateCancel[key],file,name+'-update-cancel.json').equals(before));
   }
   assert.equal(report.clientReview,undefined);assert.equal(report.clientConnectionsUnchanged,true);
-  const old=target.managedLocations(profile.local,'0.1.23',profile.home),next=target.managedLocations(profile.local,'0.1.24',profile.home);
+  const old=target.managedLocations(profile.local,'0.1.24',profile.home),next=target.managedLocations(profile.local,'0.1.25',profile.home);
   assert.equal(old.command,next.command);assert.equal(old.active,next.active);assert.equal(old.payload,next.payload);
-  target.assertActiveResources(profile.local,'0.1.23',report.beforeRoute,false,profile.home);
-  target.assertActiveResources(profile.local,'0.1.24',report.afterRoute,true,profile.home);
-  target.assertInstalledResources(path.join(profile.local,'Creator Hub'),'0.1.24');
+  target.assertActiveResources(profile.local,'0.1.24',report.beforeRoute,false,profile.home);
+  target.assertActiveResources(profile.local,'0.1.25',report.afterRoute,true,profile.home);
+  target.assertInstalledResources(path.join(profile.local,'Creator Hub'),'0.1.25');
   target.assertFreshConnection(report.heldProcessesBefore,report.reconnectedProcesses,profile);
   target.assertFreshConnection(report.freshOldProcesses,report.reconnectedProcesses,profile);
   assert.equal(new Set([...report.heldProcessesBefore,...report.freshOldProcesses,...report.reconnectedProcesses].map(p=>p.pid)).size,6);
@@ -86,7 +86,7 @@ function checkMigrationReceipt(report) {
 function checkReceipt(report, rows, config, env = process.env) {
   target.assertBound(config); assert.equal(report.kind, target.KIND); assert.equal(report.sourceCommit, binding.target.source.commit);
   assert.deepEqual(report.baseline, config.baseline); assert.deepEqual(report.pins, config.pins);
-  assert.equal(env.CREATOR_OUTGOING_CASE,'mcp-restore');
+  assert.ok(Object.hasOwn(target.CASES,env.CREATOR_OUTGOING_CASE));
   const [tool, restore] = target.CASES[env.CREATOR_OUTGOING_CASE];
   assert.equal(report.lastTool, tool); assert.equal(report.restore, restore === 'true');
   assert.equal(report.restoredLastTool, restore === 'true' ? tool : null);
@@ -96,7 +96,7 @@ function checkReceipt(report, rows, config, env = process.env) {
     'targetMcpRuntimeVerified', 'installedResourcesVerifiedBeforeAndAfter', 'heldGenerationRetained',
     'activeRouteUnchangedAfterCancel', 'normalRestartPreserved', 'fixtureEvidencePreservedAfterCleanup']) assert.equal(report[key], true, key);
   for (const key of ['publicDiscovery', 'liveAiAcceptance', 'releaseReady']) assert.equal(report[key], false, key);
-  assert.deepEqual(report.beforePeVersion, [0, 1, 23, 0]); assert.deepEqual(report.afterPeVersion, [0, 1, 24, 0]);
+  assert.deepEqual(report.beforePeVersion, [0, 1, 24, 0]); assert.deepEqual(report.afterPeVersion, [0, 1, 25, 0]);
   assert.notEqual(report.beforeRoot.pid, report.afterRoot.pid);
   const roots=[report.beforeRoot,report.afterRoot,report.normalRestartRoot];
   assert.equal(new Set(roots.map(r=>r.pid)).size,3);
@@ -111,7 +111,7 @@ function checkReceipt(report, rows, config, env = process.env) {
   assert.equal(report.beforeRoute.generation, binding.baseline.generation); assert.equal(report.afterRoute.generation, binding.target.generation);
   const finals = rows.filter(row => row.kind === 'lab-lifecycle-result'); assert.equal(finals.length, 1);
   const last = finals[0]; assert.equal(last.scenario, target.KIND);
-  assert.equal(last.actualScope, 'exact-direct23-to-qualified24-acceptance-fixture-lab-only');
+  assert.equal(last.actualScope, 'exact-direct24-to-qualified25-acceptance-fixture-lab-only');
   for (const key of ['lifecycleSucceeded', 'cleanupVerified', 'systemTlsVerified', 'labDiscovery']) assert.equal(last[key], true, key);
   for (const key of ['publicDiscovery', 'productAcceptance', 'releaseReady']) assert.equal(last[key], false, key);
   assert.equal(last.driverExitCode, 0); assert.equal(last.servedRouteCount, 5); require('./sdk-registry-denial-023.cjs').verifySdkRegistryDenial(last, report);

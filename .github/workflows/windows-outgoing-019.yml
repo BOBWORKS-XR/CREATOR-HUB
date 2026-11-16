@@ -1,4 +1,4 @@
-name: Private signed 023 to 024 MCP restore
+name: Private Windows 024 to 025 update and missing-server acceptance
 on:
   workflow_dispatch:
     inputs:
@@ -7,7 +7,7 @@ on:
 permissions: {contents: read}
 jobs:
   preflight:
-    if: github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.ref == 'refs/heads/codex/windows-sdk-labels-024-update'
+    if: github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.ref == 'refs/heads/codex/windows-missing-server-025-acceptance'
     runs-on: windows-latest
     timeout-minutes: 5
     steps:
@@ -17,7 +17,7 @@ jobs:
       - uses: actions/setup-node@v6
         with: {node-version: 24}
       - run: npm ci --ignore-scripts
-      - run: node --test scripts/update-024.test.cjs
+      - run: node --check scripts/native-missing-runner.cjs
       - name: Parse actual native script
         shell: pwsh
         run: |
@@ -30,12 +30,23 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 20
     permissions: {contents: write} # Existing private draft asset GET only.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {case: mcp-restore, tool: mcp, restore: 'true', regression: ''}
+          - {case: setup-restore, tool: setup, restore: 'true', regression: ''}
+          - {case: setup-no-restore, tool: setup, restore: 'false', regression: ''}
+          - {case: mcp-restore, tool: mcp, restore: 'true', regression: fresh-025-approve}
+          - {case: mcp-restore, tool: mcp, restore: 'true', regression: fresh-025-cancel}
+          - {case: mcp-restore, tool: mcp, restore: 'true', regression: stopped-024-upgrade}
     env:
       EXPECTED_HARNESS_COMMIT: ${{ inputs.expected_harness_commit }}
       CREATOR_OUTGOING_REVIEW_SHA256: ${{ inputs.binding_sha256 }}
-      CREATOR_OUTGOING_CASE: mcp-restore
-      CREATOR_OUTGOING_LAST_TOOL: mcp
-      CREATOR_OUTGOING_RESTORE: 'true'
+      CREATOR_OUTGOING_CASE: ${{ matrix.case }}
+      CREATOR_MISSING_CASE: ${{ matrix.regression }}
+      CREATOR_OUTGOING_LAST_TOOL: ${{ matrix.tool }}
+      CREATOR_OUTGOING_RESTORE: ${{ matrix.restore }}
     steps:
       - run: git config --global core.autocrlf false
       - uses: actions/checkout@v6
@@ -69,18 +80,25 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Input admission failed' }
           "CREATOR_OUTGOING_CONFIG_SHA256=$($input.configSha256)" | Add-Content -LiteralPath $env:GITHUB_ENV
       - name: Native cancel approve automatic and normal restart
+        if: matrix.regression == ''
         shell: pwsh
         run: |
-          ./scripts/native-self-update-outgoing-019.ps1 -Outgoing019 -ContractPath (Join-Path $PWD artifacts/outgoing-019/runner-config.json) -BaselineInstallerPath (Join-Path $PWD artifacts/outgoing-019/data/Creator.Hub_0.1.23_x64-setup.exe) -TimeoutSeconds 480 | Tee-Object -FilePath artifacts/outgoing-019/lifecycle.jsonl
+          ./scripts/native-self-update-outgoing-019.ps1 -Outgoing019 -ContractPath (Join-Path $PWD artifacts/outgoing-019/runner-config.json) -BaselineInstallerPath (Join-Path $PWD artifacts/outgoing-019/data/Creator.Hub_0.1.24_x64-setup.exe) -TimeoutSeconds 480 | Tee-Object -FilePath artifacts/outgoing-019/lifecycle.jsonl
           if ($LASTEXITCODE -ne 0) { throw 'Native update failed' }
           $reports=@(Get-ChildItem artifacts/native-suite-*/outgoing-report.json)
           if ($reports.Count -ne 1) { throw 'One native report required' }
           node scripts/windows-outgoing-019-input.cjs receipt $reports[0].FullName (Join-Path $PWD artifacts/outgoing-019/lifecycle.jsonl)
           if ($LASTEXITCODE -ne 0) { throw 'Receipt failed' }
+      - name: Installed missing-server migration and restart
+        if: matrix.regression != ''
+        shell: pwsh
+        run: |
+          node scripts/native-missing-runner.cjs
+          if ($LASTEXITCODE -ne 0) { throw 'Missing-server acceptance failed' }
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: windows-024-mcp-restore-${{ github.run_id }}-${{ github.run_attempt }}
+          name: windows-025-${{ matrix.case }}-${{ matrix.regression }}-${{ github.run_id }}-${{ github.run_attempt }}
           retention-days: 14
           path: |
             artifacts/outgoing-019/*.json
@@ -88,3 +106,5 @@ jobs:
             artifacts/native-suite-*/*.json
             artifacts/native-suite-*/*.png
             artifacts/native-suite-*/sdk-metadata-*/Packages/*.json
+            artifacts/native-suite-*/*.bin
+            artifacts/native-suite-*/*.toml
