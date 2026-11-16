@@ -32,7 +32,7 @@ pub(crate) fn commit(
             path,
             before,
             after,
-            &crate::client_recovery_ui::central_root()?,
+            &crate::client_recovery_ui::prepare_central_root()?,
             &mut |_| Ok(()),
         );
     }

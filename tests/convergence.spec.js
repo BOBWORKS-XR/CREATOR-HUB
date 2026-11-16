@@ -1,7 +1,7 @@
 const { test, expect } = require('@playwright/test');
 
-async function load(page, { required = true, failPrepare = false, holdPrepare = false, retirementReady = false, pauseRetirement = false, reviewKey = 'a'.repeat(64), streamlined = false, failPhase = '', nativeCancel = false, holdMove = false, uncertain = false, invalidComplete = false, initialRecovery = null, settingsImportAvailable = false, keepCurrentAvailable, cancelKeepCurrent = false, holdKeepCurrent = false } = {}) {
-  await page.addInitScript(({ required, failPrepare, holdPrepare, retirementReady, pauseRetirement, reviewKey, streamlined, failPhase, nativeCancel, holdMove, uncertain, invalidComplete, initialRecovery, settingsImportAvailable, keepCurrentAvailable, cancelKeepCurrent, holdKeepCurrent }) => {
+async function load(page, { required = true, failPrepare = false, holdPrepare = false, retirementReady = false, pauseRetirement = false, reviewKey = 'a'.repeat(64), streamlined = false, failPhase = '', nativeCancel = false, holdMove = false, uncertain = false, invalidComplete = false, initialRecovery = null, settingsImportAvailable = false, keepCurrentAvailable, cancelKeepCurrent = false, holdKeepCurrent = false, missingPreviousServer = false } = {}) {
+  await page.addInitScript(({ required, failPrepare, holdPrepare, retirementReady, pauseRetirement, reviewKey, streamlined, failPhase, nativeCancel, holdMove, uncertain, invalidComplete, initialRecovery, settingsImportAvailable, keepCurrentAvailable, cancelKeepCurrent, holdKeepCurrent, missingPreviousServer }) => {
     localStorage.setItem('creator-usage-terms.hub', JSON.stringify({ policyVersion: '2026-09-28-v1', acceptedAt: '2026-09-28T00:00:00.000Z' }));
     localStorage.setItem('creator-hub.auto-download', 'false');
     window.__CREATOR_HUB_CONVERGENCE_PROTOCOL__ = 1;
@@ -44,7 +44,7 @@ async function load(page, { required = true, failPrepare = false, holdPrepare = 
                 backups: phase === 'backup' ? [] : ['C:/fixture-only/original.bak'], moveAvailable: false,
                 recoveryHelp: uncertain ? `Last migration phase: ${phase}\nRetained phase record: C:/fixture-only/convergence/move-v1.json\nChoose Not now to keep using Hub. Migration remains incomplete.\nHave support review the retained phase record before removing an app.` : null };
               return { outcome: 'stopped', phase, report: window.report,
-                message: `Migration stopped during ${phase}. Settings and backups retained.${phase === 'cleanup' && uncertain ? ' Cleanup may be partial.' : ' Standalone cleanup was not started.'} No automatic retry.` };
+                message: missingPreviousServer ? 'Migration stopped during connections: The previous MCP server is missing; old apps were kept.' : `Migration stopped during ${phase}. Settings and backups retained.${phase === 'cleanup' && uncertain ? ' Cleanup may be partial.' : ' Standalone cleanup was not started.'} No automatic retry.` };
             }
           }
           window.report = { ...window.report, stage: 'complete', required: false, legacyApps: invalidComplete ? window.report.legacyApps : [], retirementAvailable: false,
@@ -52,8 +52,11 @@ async function load(page, { required = true, failPrepare = false, holdPrepare = 
           return { outcome: 'complete', phase: 'cleanup', report: window.report, message: 'Move complete. Settings and backups kept; standalone cleanup verified.' };
         }
         if (command === 'inspect_convergence_outcome') {
+          if (window.holdInspection) await new Promise(resolve => { window.releaseInspection = resolve; });
+          if (window.inspectionFailure) throw Error('Fixture recovery inspection unavailable');
           if (window.inspectionOverride) return window.inspectionOverride;
           window.report = { ...window.report, stage: 'review', moveAvailable: !uncertain,
+            ...(missingPreviousServer ? { keepCurrentAvailable: true, moveAvailable: false } : {}),
             message: uncertain ? 'Retained state inspected. Partial or uncertain native outcome needs recovery review; no transaction retried.' : 'Retained state inspected. No cleanup was started; fresh native review is available.' };
           return window.report;
         }
@@ -86,7 +89,7 @@ async function load(page, { required = true, failPrepare = false, holdPrepare = 
         return null;
       } },
     };
-  }, { required, failPrepare, holdPrepare, retirementReady, pauseRetirement, reviewKey, streamlined, failPhase, nativeCancel, holdMove, uncertain, invalidComplete, initialRecovery, settingsImportAvailable, keepCurrentAvailable, cancelKeepCurrent, holdKeepCurrent });
+  }, { required, failPrepare, holdPrepare, retirementReady, pauseRetirement, reviewKey, streamlined, failPhase, nativeCancel, holdMove, uncertain, invalidComplete, initialRecovery, settingsImportAvailable, keepCurrentAvailable, cancelKeepCurrent, holdKeepCurrent, missingPreviousServer });
   await page.goto('http://127.0.0.1:4188');
 }
 
@@ -298,6 +301,62 @@ for (const viewport of [{ width: 1100, height: 785 }, { width: 390, height: 844 
   });
 }
 
+for (const width of [390, 1100]) test(`missing old server offers current-setup recovery immediately at ${width}px`, async ({ page }) => {
+  await page.setViewportSize({ width, height: 700 });
+  await load(page, { streamlined: true, failPhase: 'connections', missingPreviousServer: true });
+  await page.locator('#convergence-move').click();
+  const keep = page.getByRole('button', { name: 'Keep my current setup', exact: true });
+  await expect(keep).toBeVisible();
+  await expect(keep).toBeEnabled();
+  await expect(page.locator('#convergence-error > p')).toContainText('Keep my current setup');
+  await expect(page.locator('#convergence-error details')).not.toHaveAttribute('open', '');
+  await expect(page.locator('#convergence-error details')).toContainText('previous MCP server is missing');
+  await expect(page.locator('#convergence-move')).toBeHidden();
+  expect(await page.evaluate(() => window.calls.filter(call => /convergence|move_to_hub/.test(call.command)).map(call => call.command)))
+    .toEqual(['convergence_status', 'move_to_hub', 'inspect_convergence_outcome']);
+  await page.screenshot({ path: test.info().outputPath('missing-server-recovery.png') });
+  await keep.click();
+  await expect(page.locator('#convergence-title')).toHaveText('Current setup kept');
+  await page.getByRole('button', { name: 'Continue in Hub', exact: true }).click();
+  await expect(page.locator('#convergence-dialog')).toBeHidden();
+  expect(await page.evaluate(() => window.calls.filter(call => call.command === 'move_to_hub').length)).toBe(1);
+});
+
+for (const failure of ['unavailable', 'invalid-completion']) test(`failed automatic recovery inspection keeps the stopped outcome: ${failure}`, async ({ page }) => {
+  await load(page, { streamlined: true, failPhase: 'connections', uncertain: true, missingPreviousServer: true });
+  await page.evaluate(failure => {
+    if (failure === 'unavailable') window.inspectionFailure = true;
+    else window.inspectionOverride = { ...window.report, stage: 'complete', required: false, legacyApps: [], recoveryHelp: null, keepCurrentAvailable: true };
+  }, failure);
+  await page.locator('#convergence-move').click();
+  await expect(page.locator('#convergence-error')).toContainText('previous MCP server is missing');
+  await expect(page.locator('#convergence-error')).toContainText('Recovery options could not be refreshed');
+  await expect(page.locator('#convergence-recovery-text')).toHaveValue(/Last migration phase: connections/);
+  await expect(page.locator('#convergence-keep-current')).toBeHidden();
+  await expect(page.locator('#convergence-move')).toBeHidden();
+  await expect(page.locator('#convergence-later')).toBeEnabled();
+  expect(await page.evaluate(() => window.calls.filter(call => /convergence|move_to_hub/.test(call.command)).map(call => call.command)))
+    .toEqual(['convergence_status', 'move_to_hub', 'inspect_convergence_outcome']);
+});
+
+test('automatic recovery inspection blocks duplicate actions until the read finishes', async ({ page }) => {
+  await load(page, { streamlined: true, failPhase: 'connections', missingPreviousServer: true });
+  await page.evaluate(() => { window.holdInspection = true; });
+  await page.locator('#convergence-move').click();
+  await expect.poll(() => page.evaluate(() => typeof window.releaseInspection)).toBe('function');
+  await expect(page.locator('#convergence-later')).toBeDisabled();
+  await page.keyboard.press('Escape');
+  await expect(page.locator('#convergence-dialog')).toBeVisible();
+  await page.evaluate(() => {
+    for (const name of ['move', 'refresh', 'keep-current']) document.querySelector(`#convergence-${name}`).dispatchEvent(new MouseEvent('click'));
+  });
+  expect(await page.evaluate(() => window.calls.filter(call => /convergence|move_to_hub/.test(call.command)).map(call => call.command)))
+    .toEqual(['convergence_status', 'move_to_hub', 'inspect_convergence_outcome']);
+  await page.evaluate(() => window.releaseInspection());
+  await expect(page.locator('#convergence-keep-current')).toBeVisible();
+  await expect(page.locator('#convergence-later')).toBeEnabled();
+});
+
 for (const phase of ['backup', 'connections', 'cleanup']) test(`integrated ${phase} error stops the sequence without claiming completion`, async ({ page }) => {
   await load(page, { streamlined: true, failPhase: phase });
   await page.locator('#convergence-move').click();
@@ -315,7 +374,7 @@ test('known unchanged cleanup refusal permits a fresh review through read-only i
   await expect(page.locator('#convergence-error')).toContainText('cleanup was not started');
   await page.locator('#convergence-refresh').click();
   await expect(page.locator('#convergence-move')).toBeVisible();
-  expect(await page.evaluate(() => window.calls.filter(call => /move_to_hub|inspect_convergence_outcome/.test(call.command)).map(call => call.command))).toEqual(['move_to_hub', 'inspect_convergence_outcome']);
+  expect(await page.evaluate(() => window.calls.filter(call => /move_to_hub|inspect_convergence_outcome/.test(call.command)).map(call => call.command))).toEqual(['move_to_hub', 'inspect_convergence_outcome', 'inspect_convergence_outcome']);
 });
 
 test('partial retirement can be inspected but is never automatically retried or re-enabled', async ({ page }) => {

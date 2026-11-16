@@ -413,7 +413,7 @@ for (const [phase, stage] of [['backup', 'review'], ['connections', 'backed-up']
     assert.equal(f.elements.move.hidden, true);
     assert.equal(f.elements.recovery.hidden, false);
     f.click('later'); await done;
-    assert.deepEqual(f.calls, ['convergence_status', 'move_to_hub', 'inspect_convergence_outcome', 'convergence_status']);
+    assert.deepEqual(f.calls, ['convergence_status', 'move_to_hub', 'inspect_convergence_outcome', 'inspect_convergence_outcome', 'convergence_status']);
   });
 }
 

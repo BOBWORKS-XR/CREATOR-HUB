@@ -2,6 +2,122 @@ use super::*;
 
 static FORM_TEST_LOCK: Mutex<()> = Mutex::new(());
 
+#[cfg(windows)]
+#[test]
+fn missing_previous_windows_server_is_unverified_not_a_convergence_error() {
+    let root = tempfile::tempdir().unwrap();
+    let server = root.path().join("Creator Works MCP/server/creator-works-mcp.mjs");
+    assert!(!server.exists());
+    assert_eq!(official_previous_server_at(&server, &server), Ok(false));
+    assert!(!server.exists());
+    assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
+}
+
+#[cfg(windows)]
+#[test]
+fn previous_windows_server_wrong_path_or_bytes_are_unverified() {
+    let root = tempfile::tempdir().unwrap();
+    let expected = root.path().join("official/creator-works-mcp.mjs");
+    let other = root.path().join("custom/creator-works-mcp.mjs");
+    fs::create_dir_all(expected.parent().unwrap()).unwrap();
+    fs::create_dir_all(other.parent().unwrap()).unwrap();
+    fs::write(&expected, b"not an official payload").unwrap();
+    fs::write(&other, b"custom content kept").unwrap();
+    assert_eq!(official_previous_server_at(&other, &expected), Ok(false));
+    assert_eq!(official_previous_server_at(&expected, &expected), Ok(false));
+    assert_eq!(fs::read(&other).unwrap(), b"custom content kept");
+    assert_eq!(fs::read(&expected).unwrap(), b"not an official payload");
+}
+
+#[cfg(windows)]
+#[test]
+fn previous_windows_server_unreadable_or_non_file_still_errors() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let server = root.path().join("creator-works-mcp.mjs");
+    fs::write(&server, b"inert protected fixture").unwrap();
+    let exclusive = fs::OpenOptions::new().read(true).share_mode(0).open(&server).unwrap();
+    assert!(official_previous_server_at(&server, &server).is_err());
+    drop(exclusive);
+    assert_eq!(fs::read(&server).unwrap(), b"inert protected fixture");
+    let directory = root.path().join("directory/creator-works-mcp.mjs");
+    fs::create_dir_all(&directory).unwrap();
+    assert!(official_previous_server_at(&directory, &directory).is_err());
+}
+
+#[cfg(windows)]
+#[test]
+fn previous_windows_server_junction_path_still_errors() {
+    let root = tempfile::tempdir().unwrap();
+    let target = root.path().join("real");
+    let link = root.path().join("linked");
+    fs::create_dir(&target).unwrap();
+    let output = std::process::Command::new("cmd.exe")
+        .args(["/d", "/c", "mklink", "/J"])
+        .arg(&link).arg(&target).output().unwrap();
+    assert!(output.status.success(), "Disposable junction creation failed");
+    let server = link.join("creator-works-mcp.mjs");
+    let result = official_previous_server_at(&server, &server);
+    fs::remove_dir(&link).unwrap();
+    assert!(result.is_err());
+    assert!(target.is_dir());
+    assert_eq!(fs::read_dir(&target).unwrap().count(), 0);
+}
+
+#[cfg(windows)]
+#[test]
+fn missing_previous_windows_server_client_plan_needs_explicit_approval() {
+    for approved in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let old = root.path().join("old/server/creator-works-mcp.mjs");
+        let node = root.path().join("old/server/runtime/node.exe");
+        let router = root.path().join("hub-router.exe");
+        let client = root.path().join("client.json");
+        let settings = root.path().join("settings.json");
+        fs::write(&router, b"inert target, never executed").unwrap();
+        let original = serde_json::json!({
+            "preferences":{"keep":true},
+            "mcpServers":{
+                "other":{"command":"custom-preserved","args":["unchanged"]},
+                "creator-works":{"command":node,"args":[old],"timeout":37,
+                    "env":{"UNITY_PROJECT_PATH":"C:/fixture/untouched","CUSTOM":"kept"}}
+            }
+        }).to_string();
+        fs::write(&client, &original).unwrap();
+        fs::write(&settings, b"protected settings sentinel").unwrap();
+        let plan = crate::client_migration::Plan::review_router(
+            "Fixture client", &client, crate::client_migration::Format::Json, &router,
+        ).unwrap().unwrap();
+        assert_eq!(official_previous_server_at(Path::new(&plan.old_server), &old), Ok(false));
+        assert_eq!(fs::read_to_string(&client).unwrap(), original);
+        let journal = root.path().join("client-migrations");
+        let outcome = crate::client_migration::Plan::apply_reviewed(&[plan], &journal, |_| approved).unwrap();
+        if approved {
+            let report = outcome.unwrap();
+            assert!(report.completed);
+            assert_eq!(report.files.len(), 1);
+            assert_eq!(fs::read_to_string(&report.files[0].before_backup).unwrap(), original);
+            let before: serde_json::Value = serde_json::from_str(&original).unwrap();
+            let after: serde_json::Value = serde_json::from_slice(&fs::read(&client).unwrap()).unwrap();
+            assert_eq!(after["preferences"], before["preferences"]);
+            assert_eq!(after["mcpServers"]["other"], before["mcpServers"]["other"]);
+            let entry = &after["mcpServers"]["creator-works"];
+            assert_eq!(entry["command"], serde_json::json!(crate::normalized_existing_path(router)));
+            assert_eq!(entry["args"], serde_json::json!([]));
+            assert_eq!(entry["timeout"], 37);
+            assert_eq!(entry["env"]["CUSTOM"], "kept");
+            assert_eq!(entry["env"]["UNITY_PROJECT_PATH"], "C:/fixture/untouched");
+        } else {
+            assert!(outcome.is_none());
+            assert_eq!(fs::read_to_string(&client).unwrap(), original);
+            assert!(!journal.exists());
+        }
+        assert!(!old.exists());
+        assert!(!node.exists());
+        assert_eq!(fs::read(settings).unwrap(), b"protected settings sentinel");
+    }
+}
+
 struct OwnedTempDir {
     _owner: tempfile::TempDir,
     path: PathBuf,

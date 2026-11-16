@@ -62,6 +62,29 @@ pub(crate) fn central_root() -> Result<std::path::PathBuf, String> {
     }
 }
 
+fn prepare_central_root_at(base: &Path) -> Result<std::path::PathBuf, String> {
+    if !base.is_absolute() || !base.is_dir() {
+        return Err("Existing local app data directory required.".into());
+    }
+    crate::settings_backup::reject_links(base)?;
+    let parent = base.join("creator-hub");
+    crate::settings_backup::private_directory(&parent)?;
+    let root = parent.join("client-migrations-v1");
+    crate::settings_backup::private_directory(&root)?;
+    Ok(root)
+}
+
+pub(crate) fn prepare_central_root() -> Result<std::path::PathBuf, String> {
+    #[cfg(test)]
+    {
+        Err("Unit tests must use explicit disposable migration storage.".into())
+    }
+    #[cfg(not(test))]
+    {
+        prepare_central_root_at(&dirs::data_local_dir().ok_or("Local Hub data is unavailable.")?)
+    }
+}
+
 pub(crate) fn require_no_pending_adjacent(path: &Path) -> Result<(), String> {
     if !collect("client", "Client", path)?.is_empty() {
         return Err("A previous connection migration requires recovery review before setup. Current files and retained evidence were kept.".into());
@@ -275,6 +298,42 @@ mod tests {
         assert!(central_root()
             .unwrap_err()
             .contains("explicit disposable migration storage"));
+        assert!(prepare_central_root().is_err());
+    }
+
+    #[test]
+    fn first_client_write_prepares_only_owned_recovery_directories() {
+        let fixture = tempfile::tempdir().unwrap();
+        let base = fixture.path().canonicalize().unwrap();
+        let unrelated = base.join("settings.json");
+        fs::write(&unrelated, b"keep exactly").unwrap();
+        let root = prepare_central_root_at(&base).unwrap();
+        assert_eq!(root, base.join("creator-hub/client-migrations-v1"));
+        assert!(root.is_dir());
+        assert_eq!(prepare_central_root_at(&base).unwrap(), root);
+        assert_eq!(fs::read(unrelated).unwrap(), b"keep exactly");
+        assert_eq!(fs::read_dir(root).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn recovery_directory_preparation_preserves_conflicting_files() {
+        let fixture = tempfile::tempdir().unwrap();
+        let base = fixture.path().canonicalize().unwrap();
+        fs::write(base.join("creator-hub"), b"not ours").unwrap();
+        assert!(prepare_central_root_at(&base).is_err());
+        assert_eq!(fs::read(base.join("creator-hub")).unwrap(), b"not ours");
+        assert!(prepare_central_root_at(Path::new("relative")).is_err());
+    }
+
+    #[test]
+    fn read_only_recovery_check_does_not_prepare_storage() {
+        let fixture = tempfile::tempdir().unwrap();
+        let base = fixture.path().canonicalize().unwrap();
+        let config = base.join("settings.json");
+        fs::write(&config, b"original").unwrap();
+        assert!(collect("codex", "Codex", &config).unwrap().is_empty());
+        assert_eq!(fs::read_dir(&base).unwrap().count(), 1);
+        assert_eq!(fs::read(config).unwrap(), b"original");
     }
     #[test]
     fn ui_cannot_supply_a_path_as_a_recovery_identifier() {

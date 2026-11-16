@@ -370,24 +370,32 @@ fn server_writes(
 
 #[cfg(not(unix))]
 fn official_previous_server(path: &Path) -> Result<bool, String> {
-    // This hash is the server from the byte-verified published 2.7.7 Windows
-    // installer. Other versions/platform payloads remain unverified, not guessed.
-    const SHA: &str = "8d7cbe21d3b3691d6b1aa052846d6ee36f4274c18bd4228c6d4a73583be74149";
     if !cfg!(windows) {
         return Ok(false);
     }
     let expected = dirs::data_local_dir()
         .ok_or("Local app data is unavailable.")?
         .join("Creator Works MCP/server/creator-works-mcp.mjs");
+    official_previous_server_at(path, &expected)
+}
+
+#[cfg(not(unix))]
+fn official_previous_server_at(path: &Path, expected: &Path) -> Result<bool, String> {
+    // This hash is the server from the byte-verified published 2.7.7 Windows
+    // installer. Other versions/platform payloads remain unverified, not guessed.
+    const SHA: &str = "8d7cbe21d3b3691d6b1aa052846d6ee36f4274c18bd4228c6d4a73583be74149";
     storage::reject_links(path)?;
-    storage::reject_links(&expected)?;
+    storage::reject_links(expected)?;
     if crate::normalized_existing_path(path.to_path_buf())
-        != crate::normalized_existing_path(expected)
+        != crate::normalized_existing_path(expected.to_path_buf())
     {
         return Ok(false);
     }
-    let bytes = storage::read_bytes(path)?
-        .ok_or("The previous MCP server is missing; old apps were kept.")?;
+    // Absence is not publisher verification. The caller must obtain the same
+    // explicit replacement consent as for an unrecognized previous server.
+    let Some(bytes) = storage::read_bytes(path)? else {
+        return Ok(false);
+    };
     Ok(bytes.len() == 1_221_209 && format!("{:x}", Sha256::digest(&bytes)) == SHA)
 }
 

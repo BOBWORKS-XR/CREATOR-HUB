@@ -2796,7 +2796,7 @@ fn review_existing_client_connections(
         return Ok(serde_json::json!({"status":"cancelled", "count":0}));
     }
     settings_review.publish()?;
-    let report = client_migration::Plan::apply_reviewed(&plans, &client_recovery_ui::central_root()?, |_| true)?;
+    let report = client_migration::Plan::apply_reviewed(&plans, &client_recovery_ui::prepare_central_root()?, |_| true)?;
     match report {
         None => Ok(serde_json::json!({"status":"cancelled", "count":0})),
         Some(report) if report.completed => Ok(serde_json::json!({"status":"migrated", "count":report.files.len(), "journal":report.journal})),
@@ -2871,7 +2871,7 @@ fn apply_convergence_clients(
     // The original snapshots include missing/no-op clients, not just changed entries.
     service::recheck_convergence_owner(app)?;
     consent.recheck_clients()?;
-    apply_convergence_client_plans(&plans, &client_recovery_ui::central_root()?, || {
+    apply_convergence_client_plans(&plans, &client_recovery_ui::prepare_central_root()?, || {
         consent.recheck_imported_settings()?;
         settings_review.publish()
     })
