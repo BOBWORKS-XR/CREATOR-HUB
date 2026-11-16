@@ -69,3 +69,17 @@ test('reused dialog selector binds exact PID, body, button and guarded command',
   const changed = structuredClone(row); changed.controls[0].name += ' changed';
   assert.throws(() => settings.selectDialog([changed], 99, 'preserve', true, f));
 });
+test('cancel wait accepts signed R13 wording only after the native workflow returns', () => {
+  const fs = require('node:fs');
+  const local = path.join(__dirname, 'native-windows-016-settings-only.cjs');
+  const settings = require(fs.existsSync(local) ? local : path.join(__dirname,
+    'incoming-ci-r13b/cancel-fix/source/scripts/native-windows-016-settings-only.cjs'));
+  const document = (busy, text) => ({ querySelector: () => ({
+    getAttribute: () => busy,
+    querySelector: () => ({ textContent: text }),
+  }) });
+  assert.equal(settings.reviewSettled(true, document('false', 'Review stopped. Earlier completed changes may remain.')), true);
+  assert.equal(settings.reviewSettled(true, document('true', 'Review stopped. Earlier completed changes may remain.')), false);
+  for (const text of ['Ready', 'Your saved setup is ready.', 'Settings retained without explicit approval'])
+    assert.equal(settings.reviewSettled(true, document('false', text)), false);
+});

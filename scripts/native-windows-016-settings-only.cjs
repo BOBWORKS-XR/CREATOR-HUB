@@ -97,7 +97,7 @@ function mergedDocument(current, legacy) {
 function reviewSettled(cancelled, document = globalThis.document) {
   const root = document.querySelector('#feature-mcp');
   return Boolean(root && root.getAttribute('aria-busy') === 'false' && (!cancelled
-    || root.querySelector('[data-field="product-status"]')?.textContent.includes('without explicit approval')));
+    || root.querySelector('[data-field="product-status"]')?.textContent.startsWith('Review stopped.')));
 }
 async function loadMcpConfig(page) {
   return page.evaluate(async () => {
