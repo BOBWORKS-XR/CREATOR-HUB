@@ -15,6 +15,7 @@
   const api = {
     invoke: (...args) => (native?.invoke || window.CreatorHubNative.invoke)(...args),
     changed,
+    openHome() { window.dispatchEvent(new Event('creator-feature-home')); },
     mcpRouteUpdate: () => mcpRouteUpdate,
     retry(feature) { const page = pages.get(feature); if (canLoad && page && !page.busy()) { page.attempted = false; page.initialized = false; } return window.CreatorFeaturePages.show(feature); },
   };
@@ -83,8 +84,14 @@
               if (currentGeneration !== generation) { root.remove(); return null; }
               const name = feature === 'setup' ? 'Project Setup' : 'Creator Works MCP';
               const error = document.createElement('p'); error.className = 'feature-error'; error.setAttribute('role', 'alert');
-              error.textContent = `${name} could not open. Close and reopen Hub to try again. Other Hub pages remain available. ${String(reason).slice(0, 2000)}`;
-              root.replaceChildren(error); render();
+              error.textContent = `${name} could not open. Close and reopen Hub to try again. Other Hub pages remain available.`;
+              const details = document.createElement('details');
+              const summary = document.createElement('summary'); summary.textContent = 'Technical details';
+              const diagnostic = document.createElement('p'); diagnostic.textContent = String(reason).slice(0, 2000);
+              details.append(summary, diagnostic);
+              const home = document.createElement('button'); home.type = 'button'; home.className = 'text-button';
+              home.textContent = 'Back to Home'; home.addEventListener('click', api.openHome);
+              root.replaceChildren(error, home, details); render();
               // Failed module loads can remain cached for this document. Do not
               // offer a same-document retry or reload across an active operation.
               return null;

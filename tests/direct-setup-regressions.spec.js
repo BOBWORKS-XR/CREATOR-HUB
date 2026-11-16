@@ -55,7 +55,7 @@ async function openSetup(page, options = {}) {
           case 'run_existing_project':
             if (fixture.outcome === 'throw') throw new Error('Another project setup operation is running. Wait for it to finish.');
             return { success: fixture.outcome === 'success', projectPath: fields.request.projectPath,
-              partialRepair: inspection.partialRepair === true, validated: inspection.partialRepair !== true,
+              partialRepair: inspection.partialRepair === true, validated: fixture.outcome === 'success' && inspection.partialRepair !== true,
               skippedChecks: fixture.resultSkippedChecks || inspection.skippedChecks,
               message: fixture.outcome === 'success' ? 'Validation passed' : 'Validation needs attention. Review the report.',
               backupPath: '/retained/backup', reportPath: '/retained/report.json' };
@@ -326,6 +326,8 @@ test('blocked Setup exposes copyable recovery locations without enabling repairs
   await field(page, 'inspect').click();
   await expect(field(page, 'diagnostics')).toBeVisible();
   await expect(field(page, 'diagnostic-details')).toHaveValue(/operation\.lock/);
+  await expect(field(page, 'diagnostic-details')).not.toBeVisible();
+  await field(page, 'diagnostics').locator('summary').click();
   await field(page, 'copy-diagnostics').click();
   expect(await page.evaluate(() => window.copiedDetails)).toEqual([await field(page, 'diagnostic-details').inputValue()]);
   await expect(field(page, 'repair')).toBeDisabled();
@@ -468,7 +470,9 @@ for (const action of ['repair', 'validate']) for (const outcome of ['success', '
     await field(page, action).dispatchEvent('click');
     expect((await calls(page, 'run_existing_project')).length).toBe(1);
     await settle(page, 'run_existing_project');
-    await expect(field(page, 'inspection-summary')).toContainText('Inspect again before another repair or validation');
+    const finished = action === 'repair' ? 'Repairs finished.' : 'Validation finished.';
+    await expect(field(page, 'inspection-summary')).toContainText(outcome === 'success' ? `${finished} Inspection complete.` : 'Inspect again before another repair or validation');
+    if (outcome === 'success') await expect(field(page, 'inspection-summary')).not.toContainText('No project files were changed');
     await expect(field(page, 'activity')).toBeHidden(); await expect(field(page, 'approval')).not.toBeChecked();
     await expect(field(page, 'repair')).toBeDisabled(); await expect(field(page, 'validate')).toBeDisabled();
     if (outcome === 'success') {
@@ -479,9 +483,9 @@ for (const action of ['repair', 'validate']) for (const outcome of ['success', '
     }
     if (outcome !== 'throw') await expect(field(page, 'existing-result')).toContainText('Report: /retained/report.json');
     await navigateBack(page);
-    await expect(field(page, 'inspection-summary')).toContainText('pre-operation inspection');
+    await expect(field(page, 'inspection-summary')).toContainText(outcome === 'success' ? finished : 'pre-operation inspection');
     expect((await calls(page, 'probe_environment')).length).toBe(1);
-    expect((await calls(page, 'inspect_project')).length).toBe(1);
+    expect((await calls(page, 'inspect_project')).length).toBe(outcome === 'success' ? 2 : 1);
     expect((await calls(page, 'run_existing_project')).length).toBe(1);
     expect((await calls(page, 'run_existing_project'))[0].args.args).toEqual({ request: { projectPath: '/projects/Reviewed', fingerprint: 'reviewed-fingerprint', repair: action === 'repair', approved: true } });
     await field(page, 'inspect').click();
@@ -492,6 +496,47 @@ for (const action of ['repair', 'validate']) for (const outcome of ['success', '
     expect((await calls(page, 'run_existing_project')).length).toBe(1);
   });
 }
+
+test('successful repair checks again read-only and displays remaining findings without repeating repair', async ({ page }) => {
+  await openSetup(page); await existing(page); await field(page, 'approval').check();
+  await hold(page, 'run_existing_project'); await field(page, 'repair').click(); await waitPending(page, 'run_existing_project');
+  await page.evaluate(() => { setupFixture.inspection = { canRepair: false, canValidate: true,
+    findings: [{ title: 'Visual Scripting setup', status: 'pass', detail: 'Node database is ready.' }], proposedChanges: [] }; });
+  await settle(page, 'run_existing_project');
+  await expect(field(page, 'findings')).toContainText('Node database is ready.');
+  await expect(field(page, 'findings')).not.toContainText('missing');
+  await expect(field(page, 'approval')).not.toBeChecked();
+  expect(await calls(page, 'inspect_project')).toHaveLength(2);
+  expect(await calls(page, 'run_existing_project')).toHaveLength(1);
+});
+
+test('failed follow-up check preserves successful repair and offers inspection without repeating changes', async ({ page }) => {
+  await openSetup(page); await existing(page); await field(page, 'approval').check();
+  await hold(page, 'run_existing_project'); await field(page, 'repair').click(); await waitPending(page, 'run_existing_project');
+  await page.evaluate(() => { setupFixture.failNext = 'inspect_project'; });
+  await settle(page, 'run_existing_project');
+  await expect(field(page, 'inspection-summary')).toContainText('Repairs finished. The follow-up check did not finish');
+  await expect(field(page, 'existing-result')).toContainText('Validation passed');
+  await expect(field(page, 'findings')).toBeEmpty();
+  await expect(field(page, 'approval')).not.toBeChecked();
+  await expect(field(page, 'inspect')).toBeEnabled();
+  expect(await calls(page, 'run_existing_project')).toHaveLength(1);
+});
+
+test('late failed follow-up inspection cannot replace a new project selection with the previous result', async ({ page }) => {
+  await openSetup(page); await existing(page); await field(page, 'approval').check();
+  await hold(page, 'inspect_project'); await field(page, 'repair').click(); await waitPending(page, 'inspect_project');
+  await field(page, 'existing-path').evaluate(input => {
+    input.value = '/projects/Second'; input.dispatchEvent(new Event('input'));
+  });
+  await settle(page, 'inspect_project', true);
+  await expect(field(page, 'existing-path')).toHaveValue('/projects/Second');
+  await expect(field(page, 'inspection-summary')).toBeEmpty();
+  await expect(field(page, 'existing-result')).toBeEmpty();
+  await expect(field(page, 'error')).toBeHidden();
+  await expect(field(page, 'approval')).not.toBeChecked();
+  expect(await calls(page, 'run_existing_project')).toHaveLength(1);
+});
 
 test('direct Setup exposes approved missing-SDK repair for a URP project, without enabling validation first', async ({ page }) => {
   await openSetup(page, { inspection: {
@@ -550,14 +595,14 @@ test('direct Setup shows supported SDK 4.0.22 / VS 1.9.12 findings and uses ordi
   await expect(field(page, 'existing-result')).toContainText('Backup: /retained/backup');
   await expect(field(page, 'existing-result')).toContainText('Report: /retained/report.json');
   await expect(field(page, 'error')).toBeHidden();
-  await expect(field(page, 'inspection-summary')).toContainText('Inspect again before another repair or validation');
+  await expect(field(page, 'inspection-summary')).toContainText('Repairs finished. Inspection complete.');
   await expect(field(page, 'approval')).not.toBeChecked();
   await expect(field(page, 'repair')).toBeDisabled(); await expect(field(page, 'validate')).toBeDisabled();
   await navigateBack(page);
   const operations = await calls(page, 'run_existing_project');
   expect(operations).toHaveLength(1);
   expect(operations[0].args.args).toEqual({ request: { projectPath: '/projects/Qualified pair', fingerprint: 'reviewed-fingerprint', repair: true, approved: true } });
-  expect(await calls(page, 'inspect_project')).toHaveLength(1);
+  expect(await calls(page, 'inspect_project')).toHaveLength(2);
 });
 
 test('newer-version advice preserves independent safety blockers and explicit inspection retry', async ({ page }) => {

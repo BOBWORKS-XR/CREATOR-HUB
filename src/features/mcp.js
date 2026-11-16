@@ -14,10 +14,15 @@ export function mount(root, api) {
     <section data-field="route-update" hidden></section>
     <p data-field="error" class="feature-error" role="alert" hidden></p><button data-field="retry" class="text-button" type="button" hidden>Check connection again</button>
     <section data-field="product-panel" class="feature-section" aria-label="Saved MCP settings review" hidden>
-      <h3>Saved MCP settings</h3><p data-field="product-status" role="status">Checking retained settings</p>
-      <div data-field="product-evidence" class="feature-note"></div>
-      <button data-field="product-review" data-native-action class="text-button" type="button" disabled>Review saved MCP settings</button>
-      <button data-field="product-check" data-native-action class="text-button" type="button" disabled>Check saved settings</button>
+      <h3 data-field="product-title">Use your saved MCP setup</h3><p data-field="product-status" role="status">Checking your saved setup...</p>
+      <ul data-field="product-summary" class="feature-note"><li>Back up your saved settings before continuing.</li><li>Keep your current preferences and saved projects.</li><li>Your Unity projects will not be changed.</li></ul>
+      <div class="feature-actions product-settings-actions">
+        <button data-field="product-review" data-native-action class="primary-button" type="button" disabled>Back up and continue</button>
+        <button data-field="product-later" class="text-button" type="button">Back to Home</button>
+      </div>
+      <details data-field="product-details"><summary>Technical details</summary><p data-field="product-diagnostic" class="feature-note" hidden></p><div data-field="product-evidence" class="feature-note"></div>
+        <button data-field="product-check" data-native-action class="text-button" type="button" disabled><span class="icon icon-refresh" aria-hidden="true"></span> Check again</button>
+      </details>
     </section>
     <div data-field="notice" class="feature-banner"><p>AI results and token charges are unpredictable. Your AI provider controls billing. Back up projects and review generated actions.</p><label class="feature-check"><input data-field="notice-remember" type="checkbox">Don't show again</label><button data-field="notice-close" class="icon-button" type="button" title="Dismiss AI usage notice" aria-label="Dismiss AI usage notice">&#215;</button></div>
     <fieldset data-field="controls" disabled aria-label="MCP controls">
@@ -38,7 +43,7 @@ export function mount(root, api) {
       <section class="feature-section" aria-label="Local project feedback"><div class="feature-heading"><h3>Local project feedback</h3><button data-field="feedback-check" class="icon-button" type="button" title="Check project feedback preferences" aria-label="Check project feedback preferences" disabled><span class="icon icon-refresh" aria-hidden="true"></span></button></div>
         <label class="feature-check"><input data-field="feedback-enabled" type="checkbox" disabled><span>Enable local feedback for this Unity project</span></label>
         <label class="feature-check"><input data-field="feedback-usage" type="checkbox" disabled><span>Enable optional usage check-ins</span></label>
-        <p data-field="feedback-status" class="feature-note" role="status">Select and check a Unity project. Local only; nothing is uploaded automatically.</p><p data-field="feedback-error" class="feature-error" role="alert" hidden></p>
+        <p data-field="feedback-status" class="feature-note" role="status">Select and check a Unity project. Local only; nothing is uploaded automatically.</p><div data-field="feedback-error" class="feature-error" role="alert" hidden></div>
         <button data-field="feedback-save" class="text-button" type="button" disabled>Save project feedback preferences</button>
       </section>
       <details class="feature-section"><summary>Existing client connections and recovery</summary><p class="feature-note">Review only the clients selected above. Native review keeps backups and asks before changing existing entries.</p><button data-field="review" class="text-button" type="button">Review selected connections</button><button data-field="recovery-check" class="text-button" type="button">Check interrupted changes</button><div data-field="recovery"></div><button data-field="recover" class="text-button" type="button" disabled>Review and resume eligible changes</button></details>
@@ -54,7 +59,7 @@ export function mount(root, api) {
         <button data-field="bridge" class="text-button" type="button">Install or update bridge for selected project</button>
       </details>
     </fieldset>
-    <dialog data-field="guide-dialog" class="feature-dialog" aria-labelledby="feature-mcp-guide-title"><h3 id="feature-mcp-guide-title">Connect your AI to Unity</h3><p>Project Setup creates a Unity project. MCP connects an AI client to it; it is not the AI model.</p><ol data-field="guide-steps"></ol><p data-field="guide-error" class="feature-error" role="alert" hidden></p><div class="feature-actions"><button data-field="guide-help" class="text-button" type="button">Help &amp; troubleshooting</button><button data-field="guide-skip" class="text-button" type="button">Use existing controls</button><button data-field="guide-start" class="primary-button" type="button">Set up a connection</button></div></dialog>`;
+    <dialog data-field="guide-dialog" class="feature-dialog" aria-labelledby="feature-mcp-guide-title"><h3 id="feature-mcp-guide-title">Connect your AI to Unity</h3><p>Project Setup creates a Unity project. MCP connects an AI client to it; it is not the AI model.</p><ol data-field="guide-steps"></ol><div data-field="guide-error" class="feature-error" role="alert" hidden></div><div class="feature-actions"><button data-field="guide-help" class="text-button" type="button">Help &amp; troubleshooting</button><button data-field="guide-skip" class="text-button" type="button">Use existing controls</button><button data-field="guide-start" class="primary-button" type="button">Set up a connection</button></div></dialog>`;
   const page = controller(root, api, 'mcp'); const $ = page.field;
   const disposeRouteNotice = window.CreatorMcpRouteUpdate.mount($('route-update'), api.mcpRouteUpdate?.(), { mcpPage: true });
   const disposePage = page.dispose;
@@ -71,6 +76,7 @@ export function mount(root, api) {
   let feedbackRequest = 0;
   let connectionRequest = 0;
   const optionBaseline = new Map();
+  const appliedUnityOptions = new Map();
   const projectChecks = new Map();
   const clientUi = new Map();
   const active = () => config?.channels?.find(channel => channel.id === config.active_channel_id);
@@ -89,6 +95,12 @@ export function mount(root, api) {
     catch (reason) { requireReload(reason); }
     config = next;
   }
+  function localError(name, message, reason) {
+    const details = node('details');
+    details.append(node('summary', 'Technical details'), node('p', text(reason)));
+    $(name).replaceChildren(node('p', message), details);
+    $(name).hidden = false;
+  }
   function productVisibility() {
     const required = productReport && (['legacy-only', 'conflict'].includes(productReport.status)
       || productReport.recovery.some(item => !item.historical_completed));
@@ -97,7 +109,15 @@ export function mount(root, api) {
   function productError(reason) {
     productReviewed = false; page.lock(true);
     productIssue = true;
-    $('product-status').textContent = `Saved settings could not be loaded or reviewed. Review saved settings and recovery evidence before retrying. ${text(reason)}`;
+    $('product-title').textContent = 'Your saved setup needs a check';
+    $('product-status').textContent = page.needsRestart()
+      ? 'Hub could not confirm that the last step finished. Close and reopen Hub before trying again. Your saved files are kept.'
+      : 'We could not finish checking your settings. Your existing files are kept. Try again, or return Home and continue later.';
+    $('product-diagnostic').textContent = text(reason); $('product-diagnostic').hidden = false;
+    $('product-details').open = false;
+    $('error').textContent = page.needsRestart() ? 'Close and reopen Hub before continuing. Your saved files are kept.'
+      : 'Your saved setup could not be checked. Try Check connection again, or return Home for now.';
+    $('error').hidden = false;
     productVisibility();
   }
   function renderProductSettings(report) {
@@ -106,11 +126,15 @@ export function mount(root, api) {
     productReport = report;
     const interrupted = report.recovery.some(item => !item.historical_completed);
     if (interrupted) productReviewed = false;
-    const reviewMessage = productReviewed ? 'Reviewed settings remain in use from their existing store.' : 'Review before loading this form.';
-    const messages = { none: 'No existing MCP settings found.', current: 'Current MCP settings retained.', identical: 'Current and older MCP settings match; both are retained.',
-      'legacy-only': `Older MCP settings remain at their existing location. ${reviewMessage}`,
-      conflict: `Current and older MCP settings differ. Both originals are kept. ${reviewMessage}` };
-    $('product-status').textContent = interrupted ? 'A saved-settings operation needs recovery review. No automatic rollback or reset is attempted.' : messages[report.status];
+    const reviewMessage = productReviewed ? 'Your saved setup is ready. Your original files and backups are kept.' : '';
+    const messages = { none: 'No previous MCP setup was found.', current: 'Your current MCP settings are ready.', identical: 'Your saved setups match. Both copies will be kept.',
+      'legacy-only': 'Your previous MCP setup is available. Back it up to continue.',
+      conflict: 'We found two saved setups. Continue with your current preferences and projects; the older copy will be kept.' };
+    $('product-title').textContent = interrupted ? 'Finish checking your saved setup' : productReviewed ? 'Saved MCP setup' : 'Use your saved MCP setup';
+    $('product-status').textContent = interrupted ? 'An earlier settings change did not finish. Review it to continue safely, or return Home for now.' : reviewMessage || messages[report.status];
+    $('product-diagnostic').hidden = true;
+    $('product-review').textContent = interrupted ? 'Review and continue' : productReviewed ? 'Review saved setup' : 'Back up and continue';
+    $('product-summary').hidden = productReviewed && !interrupted;
     lines($('product-evidence'), [report.currentPath ? `Current: ${report.currentPath}` : null, report.legacyPath ? `Older settings: ${report.legacyPath}` : null,
       report.evidencePath ? `Evidence: ${report.evidencePath}` : null,
       ...report.backups.map(path => `Retained backup: ${path}`),
@@ -126,6 +150,7 @@ export function mount(root, api) {
     catch (reason) { productError(reason); throw reason; }
   }
   function controls() {
+    $('product-later').disabled = page.busy();
     const ready = onboarding?.runtime?.ready && onboarding?.project?.valid;
     const selection = config?.tool_groups || 'core';
     const capabilities = capabilityView(selection, onboarding?.project);
@@ -209,7 +234,7 @@ export function mount(root, api) {
     } catch (reason) {
       if (request === feedbackRequest && project === $('project').value) {
         $('feedback-status').textContent = 'Preferences could not be verified. Check project feedback before saving.';
-        $('feedback-error').textContent = text(reason); $('feedback-error').hidden = false;
+        localError('feedback-error', 'Feedback preferences could not be checked. Try Check project feedback again.', reason);
       }
       return false;
     }
@@ -372,7 +397,7 @@ export function mount(root, api) {
         await page.call('set_project_feedback_settings', { unityProjectPath: project, enabled, usageCheckIns });
       } catch (reason) {
         $('feedback-status').textContent = 'Save failed or its outcome is unknown. Check project feedback before trying another save.';
-        $('feedback-error').textContent = text(reason); $('feedback-error').hidden = false;
+        localError('feedback-error', 'Feedback preferences could not be confirmed. Check them before saving again. Earlier completed changes may remain.', reason);
         throw reason;
       }
       if (!await readFeedback(project)) throw new Error('Project feedback preferences could not be verified after saving. Check them before retrying; earlier changes may remain.');
@@ -383,6 +408,7 @@ export function mount(root, api) {
   page.on($('check'), 'click', () => run(async () => { await check(); await checkProjectBadges(); }, 'Checking connection'));
   page.on($('retry'), 'click', () => { if (!page.busy()) void api.retry('mcp'); });
   page.on($('product-check'), 'click', () => run(inspectProductSettings, 'Inspecting saved settings'));
+  page.on($('product-later'), 'click', () => { if (!page.busy()) api.openHome(); });
   async function reviewProductSettings() {
     if (page.busy()) return;
     const wasReady = page.initialized && !$('controls').disabled && !productIssue;
@@ -399,23 +425,26 @@ export function mount(root, api) {
       if (report.approved !== true) {
         keepReady = wasReady && ['none', 'current', 'identical'].includes(report.status)
           && report.recovery.every(item => item.historical_completed);
-        $('product-status').textContent = keepReady ? 'No settings change was approved. Existing ready settings remain in use.'
-          : 'Review returned without explicit approval. Originals are retained and the form stays locked.';
+        $('product-status').textContent = keepReady ? 'Review stopped. Earlier completed changes may remain. Your current setup is still ready.'
+          : 'Review stopped. Earlier completed changes may remain. Continue when you are ready, or return Home for now.';
         return;
       }
       if (report.recovery.some(item => !item.historical_completed)) throw new Error('Settings recovery still needs review. Nothing was reset.');
       await reload();
     }, 'Reviewing saved settings');
+    if (!reviewed) productError(page.errorMessage());
     if (reviewed && keepReady) {
       productReviewed = wasReviewed; productIssue = false; productVisibility(); page.lock(false);
     }
     if (reviewed && productReport?.approved === true && !$('controls').disabled) {
       productReviewed = true;
-      $('product-status').textContent = 'Reviewed settings loaded from their existing store. Originals and backups were retained.';
+      $('product-title').textContent = 'Saved MCP setup';
+      $('product-status').textContent = 'Your saved setup is ready. Your original files and backups are kept.';
+      $('product-summary').hidden = true;
+      $('product-review').textContent = 'Review saved setup';
       $('retry').hidden = true;
       page.initialized = true; api.changed();
     }
-    if (!reviewed) productError($('error').textContent);
   }
   page.on($('product-review'), 'click', reviewProductSettings);
   page.on($('product-review-advanced'), 'click', reviewProductSettings);
@@ -467,13 +496,25 @@ export function mount(root, api) {
   }, 'Updating bridges'));
   page.on($('bridge'), 'click', () => run(async () => { await page.call('install_unity_extension', { unityProjectPath: $('project').value }); await check(); await checkProjectBadges(); }, 'Installing Unity bridge'));
   page.on($('save'), 'click', () => run(async () => {
-    const previous = config;
     const next = { ...config, mcp_server_path: $('server').value.trim(), tool_groups: $('groups').value, auto_start: $('follow').checked, enable_custom_scripts: $('scripts').checked, allow_all_tests: $('tests').checked };
-    await saveConfig(next);
     const channel = active();
+    const unityOptions = [['enable_custom_scripts', 'set_unity_custom_scripts'], ['allow_all_tests', 'set_unity_allow_all_tests']];
+    $('setup-result').textContent = '';
+    await saveConfig(next);
     if (channel) {
-      if (next.enable_custom_scripts !== previous.enable_custom_scripts) await page.call('set_unity_custom_scripts', { unityProjectPath: channel.unity_project_path, enabled: next.enable_custom_scripts });
-      if (next.allow_all_tests !== previous.allow_all_tests) await page.call('set_unity_allow_all_tests', { unityProjectPath: channel.unity_project_path, enabled: next.allow_all_tests });
+      // Only successful setters establish this session's baseline; loaded config is not Unity readback.
+      const applied = appliedUnityOptions.get(channel.unity_project_path) || new Map();
+      appliedUnityOptions.set(channel.unity_project_path, applied);
+      for (const [key, command] of unityOptions) {
+        if (applied.has(key) && applied.get(key) === next[key]) continue;
+        applied.delete(key);
+        try { await page.call(command, { unityProjectPath: channel.unity_project_path, enabled: next[key] }); }
+        catch (reason) {
+          $('setup-result').textContent = `Hub options are saved, but Unity options are not fully confirmed for ${channel.name}. Earlier completed changes are kept. Save options again to retry for this project.`;
+          throw reason;
+        }
+        applied.set(key, next[key]);
+      }
       await check(); await followActive(channel);
     }
     $('setup-result').textContent = next.auto_start ? 'Options saved; configured clients follow the active project. Restart changed clients, then check the connection.' : 'Options saved. Apply to selected clients or use reviewed setup to update their capabilities.';
@@ -536,7 +577,10 @@ export function mount(root, api) {
     $('guide-error').hidden = true;
     const saved = await run(async () => { const next = { ...config, connection_guide_version: 1 }; await page.call('save_config', { config: next }); config = next; }, 'Saving guide preference');
     if (saved) $('guide-dialog').close();
-    else { $('guide-error').textContent = $('error').textContent || 'The preference was not saved. No connection was changed.'; $('guide-error').hidden = false; }
+    else localError('guide-error', page.needsRestart()
+      ? 'Close and reopen Hub before continuing. Earlier completed changes are kept.'
+      : 'The guide preference could not be confirmed. Try again, or close this guide for now.',
+    page.errorMessage() || 'The preference could not be confirmed.');
   });
   page.on($('notice-close'), 'click', async () => {
     if (page.busy()) return;
@@ -557,6 +601,7 @@ export function mount(root, api) {
         if (await inspectProductSettings()) return;
         await reload(); loaded = true;
       }, 'Checking Unity connection');
+      if (!complete && productIssue) productError(page.errorMessage());
       if (complete && !loaded) $('status').textContent = 'Review saved settings';
       if (complete && loaded && config.connection_guide_version !== 1 && !root.hidden) $('guide-dialog').showModal();
       return complete && loaded;

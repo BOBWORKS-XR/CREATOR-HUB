@@ -13,12 +13,29 @@ async function load(page, launchView = 'hub', options = {}) {
     }
     window.calls = [];
     window.events = {};
+    if (options.startupFailure) {
+      window.__CREATOR_HUB_CONVERGENCE_PROTOCOL__ = 1;
+      window.__CREATOR_HUB_PREFERENCES_PROTOCOL__ = 1;
+      window.failStartup = true;
+      window.convergence = { enabled: true, required: true, stage: 'review', streamlined: true,
+        settings: [], backups: [], legacyApps: [], message: 'Review your existing setup.', reviewKey: 'a'.repeat(64) };
+      const showModal = HTMLDialogElement.prototype.showModal;
+      HTMLDialogElement.prototype.showModal = function () {
+        if (this.id === 'convergence-dialog' && window.failStartup) throw new Error('Review dialog unavailable.');
+        return showModal.call(this);
+      };
+    }
     window.hubUpdate = { currentVersion: '0.1.0-alpha.3', availableVersion: null, downloaded: false };
     window.inventory = { supported: true, apps: ['mcp', 'setup'].map(app => ({ app, installed: false, trusted: false, availableVersion: app === 'mcp' ? '2.6.0' : '0.2.2', downloaded: false, issue: null, installerInteractive: true })) };
     if (options.updateAvailable) Object.assign(window.inventory.apps[0], { installed: true, trusted: true, installedVersion: '2.5.0', updateAvailable: true });
     if (options.blockers) window.inventory.apps[0].updateBlockers = options.blockers;
     window.__TAURI__ = { event: { listen: async (name, handler) => { window.events[name] = handler; return () => {}; } }, core: { invoke: async (command, args) => {
       window.calls.push({ command, args });
+      if (command === 'hub_preferences_status') return { preview: false, autoDownload: true, restoreHostedViews: true };
+      if (command === 'convergence_status') {
+        if (window.holdConvergence) return new Promise(resolve => { window.finishConvergence = () => resolve(window.convergence); });
+        return window.convergence;
+      }
       if (command === 'get_launch_request') return { view: launchView, revision: 0 };
       if (command === 'pending_hosted_restore') return [];
       if (command === 'project_inventory') return { projects: [], warnings: [] };
@@ -49,11 +66,54 @@ async function load(page, launchView = 'hub', options = {}) {
     } } };
   }, { launchView, options });
   await page.goto('http://127.0.0.1:4188');
+  if (options.startupFailure) {
+    await expect(page.locator('#action-error')).toContainText('Hub could not finish starting');
+    return;
+  }
   if (options.freshTerms) return;
   await expect.poll(() => page.evaluate(() => window.calls.some(c => c.command === 'app_inventory' && c.args.check))).toBe(true);
   await expect(page.locator('#catalog-status')).toHaveText(/^(Update check complete\. Installation always needs your approval\.|Installed apps checked\.)$/);
   if (launchView === 'hub') await page.locator('#hub-pages [data-view="hub"]').click();
 }
+
+test('paused startup retries status reads once without saving preferences or starting downloads', async ({ page }) => {
+  await load(page, 'hub', { startupFailure: true });
+  const retry = page.getByRole('button', { name: 'Try starting Hub again', exact: true });
+  await expect(retry).toBeVisible();
+  await expect(page.locator('#convergence-dialog')).not.toBeVisible();
+  expect(await page.evaluate(() => calls.filter(c => c.command === 'convergence_status').length)).toBe(1);
+  expect(await page.evaluate(() => calls.some(c => c.command === 'app_inventory'))).toBe(false);
+  await page.evaluate(() => {
+    window.failStartup = false; window.holdConvergence = true;
+    window.convergence.required = false;
+    window.hubUpdate.availableVersion = '0.1.0-alpha.4';
+  });
+  await retry.click();
+  await expect(retry).toBeDisabled();
+  await page.evaluate(() => document.getElementById('retry-startup').click());
+  expect(await page.evaluate(() => calls.filter(c => c.command === 'convergence_status').length)).toBe(2);
+  await page.evaluate(() => window.finishConvergence());
+  await expect(retry).toBeHidden();
+  await expect(page.locator('#action-error')).toBeHidden();
+  await expect(page.locator('#hub-update-status')).toContainText('0.1.0-alpha.4');
+  expect(await page.evaluate(() => calls.filter(c => c.command === 'hub_update_status').map(c => c.args.online))).toEqual([false]);
+  expect(await page.evaluate(() => calls.filter(c => /^(set_hub_preference|download_|install_|move_to_hub|prepare_convergence|migrate_convergence|retire_convergence)/.test(c.command)))).toEqual([]);
+});
+
+test('startup retry keeps a pending migration behind its explicit review and preserves the Home listener', async ({ page }) => {
+  await load(page, 'hub', { startupFailure: true });
+  await page.evaluate(() => { window.failStartup = false; });
+  await page.getByRole('button', { name: 'Try starting Hub again', exact: true }).click();
+  await expect(page.locator('#convergence-dialog')).toBeVisible();
+  expect(await page.evaluate(() => calls.some(c => /^(move_to_hub|prepare_convergence|migrate_convergence|retire_convergence)/.test(c.command)))).toBe(false);
+  await page.locator('#convergence-later').click();
+  await expect(page.locator('#retry-startup')).toBeHidden();
+  await page.getByRole('button', { name: 'View Creator Project Setup', exact: true }).click();
+  await expect(page.locator('#view-hub')).toBeHidden();
+  await page.evaluate(() => window.dispatchEvent(new Event('creator-feature-home')));
+  await expect(page.locator('#view-hub')).toBeVisible();
+  expect(await page.evaluate(() => calls.some(c => /^(move_to_hub|prepare_convergence|migrate_convergence|retire_convergence)/.test(c.command)))).toBe(false);
+});
 
 test('first launch requires saved terms acceptance before app discovery', async ({ page }) => {
   await load(page, 'hub', { freshTerms: true });

@@ -12,7 +12,7 @@ const stableSdkVersion = value => typeof value === 'string' && value.length <= 1
 
 export function mount(root, api) {
   root.innerHTML = `
-    <div class="feature-heading"><h2>Project Setup</h2><span data-field="status" role="status">Checking availability</span></div>
+    <div class="feature-heading"><h2>Project Setup</h2><div class="feature-actions"><span data-field="status" role="status">Checking availability</span><button data-field="home" class="text-button" type="button">Back to Home</button></div></div>
     <p data-field="error" class="feature-error" role="alert" hidden></p>
     <button data-field="retry" class="text-button" type="button" hidden>Check connection again</button>
     <fieldset data-field="controls" disabled aria-label="Project Setup controls">
@@ -49,12 +49,12 @@ export function mount(root, api) {
             <p data-field="inspection-summary" role="status"></p>
             <div data-field="findings"></div><ul data-field="changes"></ul>
             <div data-field="skipped" hidden><strong>Checks and repairs not run</strong><ul data-field="skipped-checks"></ul></div>
-            <div data-field="diagnostics" hidden>
+            <details data-field="diagnostics" hidden><summary>Technical details for support</summary>
               <label>Setup recovery details<textarea data-field="diagnostic-details" rows="5" readonly spellcheck="false"></textarea></label>
               <button data-field="copy-diagnostics" class="text-button" type="button">Copy recovery details</button>
               <p data-field="copy-status" class="feature-note" role="status"></p>
-            </div>
-            <button data-field="review-hub" class="text-button" type="button" hidden>Open Unity Hub for manual review</button>
+            </details>
+            <button data-field="review-hub" class="text-button" type="button" hidden>Open Unity Hub</button>
             <label class="feature-check"><input data-field="approval" type="checkbox"><span data-field="approval-label">Back up settings and allow Unity to import and validate this project.</span></label>
             <div class="feature-actions"><button data-field="repair" class="primary-button" type="button" disabled>Back up and apply repairs</button><button data-field="validate" class="text-button" type="button" disabled>Back up and validate</button><button data-field="open-existing" class="text-button" type="button" hidden>Open project in Unity</button></div>
             <p data-field="import-guidance" class="feature-note" hidden>For SDK setup issues, use the SDK install/update guide above to update in Unity Package Manager. Open this project and let Unity finish importing and compiling, then Inspect again.</p>
@@ -71,6 +71,7 @@ export function mount(root, api) {
     </fieldset>`;
   const page = controller(root, api, 'setup');
   const $ = page.field;
+  page.on($('home'), 'click', () => { if (!page.busy()) api.openHome(); });
   let environment = null;
   let created = null;
   let inspection = null;
@@ -92,6 +93,7 @@ export function mount(root, api) {
     controls(); return result;
   };
   function controls() {
+    $('home').disabled = page.busy();
     const partial = inspection?.partialRepair === true;
     const canBootstrap = ['windows', 'linux'].includes(environment?.platform);
     $('create').disabled = Boolean(created) || !environment || (!environment.ready && !canBootstrap) || latestPending || !selectedSdk;
@@ -289,24 +291,20 @@ export function mount(root, api) {
   page.on($('restart'), 'click', () => run(async () => { if (await page.call('restart_hub')) showHub({ ...hub, refreshPending: false, message: 'Unity Hub restarted. Check its Projects list.' }); }, 'Restarting Unity Hub'));
   page.on($('existing-path'), 'input', clearInspection);
   page.on($('approval'), 'change', controls);
-  page.on($('inspect'), 'click', () => run(async () => {
-    clearInspection();
-    const path = $('existing-path').value;
-    const revision = inspectionRevision;
-    const result = await page.call('inspect_project', { path });
-    if (revision !== inspectionRevision || path !== $('existing-path').value) throw new Error('Project selection changed during inspection. Inspect the current folder again.');
+  function renderInspection(result, { afterOperation = false } = {}) {
     inspection = result; $('existing-path').value = result.projectPath;
     inspectedProjectPath = result.projectPath;
     const blockers = result.findings.filter(finding => finding.status === 'blocked').length;
     const unqualified = result.findings.some(finding => finding.qualificationRequired === true);
+    const inspectionNote = afterOperation ? '' : ' No project files were changed.';
     $('inspection-summary').textContent = blockers
-      ? `${blockers} ${blockers === 1 ? 'item needs' : 'items need'} review before automatic repair. No project files were changed.${unqualified ? ' Newer versions are kept; their version-specific checks are not a full validation.' : ''} For manual review, open this project in its existing Editor.`
+      ? `${blockers} ${blockers === 1 ? 'item needs' : 'items need'} review before automatic repair.${inspectionNote}${unqualified ? ' Newer versions are kept; their version-specific checks are not a full validation.' : ''} For manual review, open this project in its existing Editor.`
       : result.partialRepair === true
-        ? 'Inspection complete. Newer versions are kept. Only the supported repairs listed below can be applied; skipped checks are not a full project validation. No project files were changed.'
+        ? `Inspection complete. Newer versions are kept. Only the supported repairs listed below can be applied; skipped checks are not a full project validation.${inspectionNote}`
       : result.canRepair && !result.canValidate
-        ? 'Inspection complete. No project files were changed. Review the proposed changes; repairs are required before validation is available.'
-        : 'Inspection complete. No project files were changed. Review the findings before approving a repair or validation.';
-    const labels = { pass: ['Ready', 'feature-good'], blocked: ['Blocked', 'feature-warn'], repair: ['Repair available', 'feature-warn'], check: ['Needs Unity check', 'feature-note'] };
+        ? `Inspection complete.${inspectionNote} Review the proposed changes; repairs are required before validation is available.`
+        : `Inspection complete.${inspectionNote} Review the findings before approving a repair or validation.`;
+    const labels = { pass: ['Ready', 'feature-good'], blocked: ['Needs attention', 'feature-warn'], repair: ['Repair available', 'feature-warn'], check: ['Check in Unity', 'feature-note'] };
     $('findings').replaceChildren(...result.findings.map(finding => {
       const [label, style] = finding.qualificationRequired === true ? ['Newer version kept', 'feature-note'] : Object.hasOwn(labels, finding.status) ? labels[finding.status] : ['Review', 'feature-note'];
       const block = node('div', null, 'feature-section'); block.append(node('strong', `${finding.title}: ${label}`, style), node('p', finding.detail)); return block;
@@ -319,25 +317,52 @@ export function mount(root, api) {
       $('diagnostics').hidden = false;
     }
     renderRequirements();
+  }
+  page.on($('inspect'), 'click', () => run(async () => {
+    clearInspection();
+    const path = $('existing-path').value;
+    const revision = inspectionRevision;
+    const result = await page.call('inspect_project', { path });
+    if (revision !== inspectionRevision || path !== $('existing-path').value) throw new Error('Project selection changed during inspection. Inspect the current folder again.');
+    renderInspection(result);
   }, 'Inspecting project; no files changed'));
   async function existing(repair) {
     return run(async () => {
       if (!inspection || !$('approval').checked || (!repair && inspection.partialRepair) || !(repair ? inspection.canRepair : inspection.canValidate)) throw new Error('Inspect and approve the reviewed changes first.');
       const reviewed = inspection;
+      const revision = inspectionRevision;
       let partial = reviewed.partialRepair === true;
+      let succeeded = false;
       $('inspection-summary').textContent = 'Operation in progress. The findings below describe the pre-operation inspection.';
       startActivity('existing', reviewed.partialRepair ? 'Applying supported repairs' : repair ? 'Repairing project' : 'Validating project', 'Preparing the settings backup.');
       try {
         const result = await page.call('run_existing_project', { request: { projectPath: reviewed.projectPath, fingerprint: reviewed.fingerprint, repair, approved: true } });
-        partial ||= result.partialRepair === true || result.validated === false;
+        partial ||= result.partialRepair === true;
         if (partial) showSkippedChecks(result.skippedChecks ?? reviewed.skippedChecks);
         lines($('existing-result'), [partial && result.success ? 'Supported repairs applied. Full project validation was not run.' : result.message, result.backupPath ? `Backup: ${result.backupPath}` : null, result.reportPath ? `Report: ${result.reportPath}` : null]);
         if (!result.success) throw new Error(result.message || 'Validation needs attention. Review the report.');
+        succeeded = true;
       } finally {
         inspection = null; $('approval').checked = false; operation = null; $('activity').hidden = true;
         $('inspection-summary').textContent = partial
           ? 'Inspect again after Unity finishes importing and compiling. The findings below describe the pre-operation inspection.'
           : 'Inspect again before another repair or validation. The findings below describe the pre-operation inspection.';
+      }
+      if (succeeded && !partial && revision === inspectionRevision && $('existing-path').value === reviewed.projectPath) {
+        const completed = repair ? 'Repairs finished.' : 'Validation finished.';
+        $('inspection-summary').textContent = `${completed} Checking the project again...`;
+        $('findings').replaceChildren(); $('changes').replaceChildren();
+        $('diagnostics').hidden = true; $('diagnostic-details').value = '';
+        try {
+          const refreshed = await page.call('inspect_project', { path: reviewed.projectPath });
+          if (revision !== inspectionRevision || $('existing-path').value !== reviewed.projectPath) return;
+          renderInspection(refreshed, { afterOperation: true });
+          $('inspection-summary').textContent = `${completed} ${$('inspection-summary').textContent}`;
+        } catch (reason) {
+          if (revision !== inspectionRevision || $('existing-path').value !== reviewed.projectPath) return;
+          $('inspection-summary').textContent = `${completed} The follow-up check did not finish. Choose Inspect project to try that check again. No further repair was started.`;
+          throw reason;
+        }
       }
     }, repair ? 'Backing up and repairing' : 'Backing up and validating');
   }

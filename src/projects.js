@@ -3,8 +3,21 @@
   let snapshot = null;
   let busy = false;
   let retryProject = null;
+  let lastError = '';
+  let missingUnity = null;
   let revision = 0, loadedRevision = -1;
   let refreshQueued = false;
+  const diagnostics = document.createElement('details');
+  diagnostics.id = 'project-details'; diagnostics.className = 'catalog-status'; diagnostics.hidden = true;
+  diagnostics.style.overflowWrap = 'anywhere';
+  const diagnosticSummary = document.createElement('summary'); diagnosticSummary.textContent = 'Technical details';
+  const errorDetail = document.createElement('p'); errorDetail.id = 'project-status-detail';
+  const warnings = byId('project-warnings');
+  warnings.before(diagnostics); diagnostics.append(diagnosticSummary, errorDetail, warnings);
+  const openHub = document.createElement('button');
+  openHub.id = 'open-project-unity-hub'; openHub.type = 'button'; openHub.className = 'text-button hidden'; openHub.hidden = true;
+  openHub.innerHTML = '<span class="icon icon-external" aria-hidden="true"></span>Open Unity Hub';
+  byId('project-recovery').prepend(openHub);
   const names = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
   const dateFormat = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' });
   function modifiedDate(project) {
@@ -28,6 +41,9 @@
     byId('retry-project-open').disabled = busy || Boolean(failedProject?.issue);
     byId('retry-project-open').title = failedProject ? `Try opening ${failedProject.name} again` : '';
     byId('refresh-project-recovery').disabled = busy;
+    openHub.hidden = !missingUnity || !failedProject || window.CreatorHubNative?.integratedFeatures !== true;
+    openHub.classList.toggle('hidden', openHub.hidden);
+    openHub.disabled = busy || window.CreatorFeaturePages?.busy() === true;
     byId('view-projects').setAttribute('aria-busy', String(busy));
     const query = byId('project-search').value.trim().toLowerCase();
     const filter = byId('project-sdk').value;
@@ -43,10 +59,10 @@
       }
       return names.compare(a.name, b.name) || names.compare(a.path, b.path) || a.id.localeCompare(b.id);
     });
-    const status = byId('project-status').textContent.replace(/^Error: /, '').trim();
-    const warnings = [...new Set(snapshot?.warnings || [])].filter(warning => warning.trim() !== status);
-    byId('project-warnings').textContent = warnings.join(' ');
-    byId('project-warnings').hidden = !warnings.length;
+    const notices = [...new Set(snapshot?.warnings || [])].filter(warning => warning.trim() !== lastError.replace(/^Error: /, '').trim());
+    warnings.textContent = notices.join(' '); warnings.hidden = !notices.length;
+    errorDetail.textContent = lastError; errorDetail.hidden = !lastError;
+    diagnostics.hidden = !lastError && !notices.length;
     const rows = projects.map(project => {
       const row = element('div', '', 'project-row');
       row.dataset.mcpSelected = String(project.selected === true);
@@ -93,6 +109,7 @@
     if (busy) return;
     const requestedRevision = revision;
     if (command !== 'open_unity_project' || retryProject !== args.id) retryProject = null;
+    lastError = ''; missingUnity = null; diagnostics.open = false;
     busy = true; render();
     byId('project-status').textContent = command === 'project_inventory' ? 'Reading known project locations...' : command === 'prepare_project_registry' ? 'Preparing verified Unity registry discovery...' : command === 'open_unity_project' ? 'Checking Unity version and project lock...' : 'Updating saved list...';
     try {
@@ -101,12 +118,22 @@
         if (!Array.isArray(result.projects) || !Array.isArray(result.warnings)) throw new Error('Project list response was invalid.');
         snapshot = result;
         loadedRevision = requestedRevision;
-        byId('project-status').textContent = `${result.projects.length} known projects. SDK labels reflect package declarations, not build validation.`;
+        byId('project-status').textContent = `${result.projects.length} known projects.${result.warnings.length ? ' Some locations could not be checked. See Technical details.' : ''}`;
       } else byId('project-status').textContent = result || 'No project added.';
       retryProject = null;
     } catch (reason) {
-      byId('project-status').textContent = String(reason);
-      if (command === 'open_unity_project') retryProject = args.id;
+      lastError = String(reason);
+      if (command === 'open_unity_project') {
+        retryProject = args.id;
+        const version = snapshot?.projects.find(project => project.id === args.id)?.unityVersion;
+        const expected = `Unity ${version} is not available. Install this exact version in Unity Hub, then retry. No project upgrade was attempted.`;
+        if (typeof version === 'string' && /^[0-9]+\.[0-9]+\.[0-9]+[abfp][0-9]+$/.test(version) && lastError === expected) missingUnity = version;
+      }
+      byId('project-status').textContent = missingUnity
+        ? `Unity ${missingUnity} is needed. Install this version in Unity Hub, then try opening again. Your project version has not changed.`
+        : command === 'open_unity_project' ? 'Could not open this project. Check the technical details, then try again.'
+        : command === 'prepare_project_registry' ? 'Could not prepare project discovery. Check the technical details, then try again.'
+        : 'Could not refresh the project list. Your saved projects are kept. Try again or check the technical details.';
     }
     finally {
       busy = false; render();
@@ -116,6 +143,17 @@
     }
   }
   byId('refresh-projects').addEventListener('click', () => run('project_inventory'));
+  openHub.addEventListener('click', async () => {
+    if (openHub.hidden || busy || window.CreatorFeaturePages?.busy()) return;
+    busy = true; render();
+    try {
+      await window.CreatorHubNative.invoke('feature_call', { feature: 'setup', command: 'launch_hub', args: {} });
+      byId('project-status').textContent = `Unity Hub launch requested. Install Unity ${missingUnity}, then try opening the project again.`;
+    } catch (reason) {
+      lastError = String(reason); diagnostics.open = false;
+      byId('project-status').textContent = 'Could not open Unity Hub. Check the technical details, then try again.';
+    } finally { busy = false; render(); }
+  });
   byId('prepare-project-registry').addEventListener('click', () => run('prepare_project_registry'));
   byId('retry-project-open').addEventListener('click', () => {
     if (retryProject) void run('open_unity_project', { id: retryProject });

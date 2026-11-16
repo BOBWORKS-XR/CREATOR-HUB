@@ -83,7 +83,7 @@ test('fixtures retain nondefault preferences and unknown fields; bootstrap requi
 test('legacy review must finish its UI lease before either inspecting state or retrying after Cancel', () => {
   const doc = (busy, message) => ({ querySelector: () => ({ getAttribute: () => busy,
     querySelector: () => ({ textContent: message }) }) });
-  const cancelled = 'Review returned without explicit approval. Originals are retained and the form stays locked.';
+  const cancelled = 'Review stopped. Earlier completed changes may remain. Continue when you are ready, or return Home for now.';
   assert.equal(driver.reviewSettled(true, doc('true', cancelled)), false, 'Message alone precedes finish_ui_operation');
   assert.equal(driver.reviewSettled(true, doc('false', 'Checking retained settings')), false);
   assert.equal(driver.reviewSettled(true, doc('false', cancelled)), true);
@@ -206,7 +206,7 @@ test('native confirmation text and current product/UI semantics match the finite
   assert.match(mcp, /let productReviewed = false/); assert.match(mcp, /report\.approved !== true/);
   assert.match(mcp, /\['legacy-only', 'conflict'\]\.includes\(report\.status\)/);
   for (const field of ['controls', 'status', 'product-status', 'project', 'groups', 'server', 'follow', 'scripts', 'tests']) assert.ok(mcp.includes(`data-field="${field}"`));
-  assert.ok(mcp.includes('aria-label="Saved MCP settings review"')); assert.ok(mcp.includes('Review returned without explicit approval'));
+  assert.ok(mcp.includes('aria-label="Saved MCP settings review"')); assert.ok(mcp.includes('Review stopped. Earlier completed changes may remain.'));
   const builtinLoad = text('modules/mcp/launcher/src-tauri/src/lib.rs').split('fn load_builtin_config(')[1].split('/// Save configuration')[0];
   assert.match(builtinLoad, /hosted::config_snapshot\(current, legacy\)/); assert.doesNotMatch(builtinLoad, /atomic_write|save_config/);
   const menu = text('scripts/windows-incoming-016.cjs').split('async function showPage(')[1].split('function assertOwnedDebugging')[0];

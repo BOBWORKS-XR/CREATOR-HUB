@@ -15,7 +15,10 @@ export function controller(root, api, feature) {
   let poisoned = false;
   let locked = false;
   const field = name => root.querySelector(`[data-field="${name}"]`);
-  const error = field('error');
+  const originalError = field('error');
+  const error = document.createElement('div');
+  for (const attribute of originalError.attributes) error.setAttribute(attribute.name, attribute.value);
+  originalError.replaceWith(error);
   const status = field('status');
   const controls = field('controls');
   const call = async (command, args = {}) => {
@@ -33,12 +36,22 @@ export function controller(root, api, feature) {
     root.setAttribute('aria-busy', String(working));
     api.changed();
   };
-  const showError = value => { error.textContent = text(value); error.hidden = false; };
+  let errorMessage = '';
+  const showError = (value, message) => {
+    errorMessage = text(value);
+    const summary = node('p', message || (poisoned
+      ? 'Close and reopen Hub before continuing. Earlier completed changes are kept.'
+      : 'This step did not finish. Check the details before trying again. Earlier completed changes may remain.'));
+    const details = node('details');
+    details.append(node('summary', 'Technical details'), node('p', errorMessage));
+    error.replaceChildren(summary, details); error.hidden = false;
+  };
   return {
-    root, field, call, showError,
+    root, field, call, showError, errorMessage: () => errorMessage,
     busy: () => working,
+    needsRestart: () => poisoned,
     on(element, event, action) { element.addEventListener(event, action, { signal: abort.signal }); },
-    enable(value, issue) { available = value; field('retry').hidden = value || !issue; if (issue) showError(issue); update(); },
+    enable(value, issue) { available = value; field('retry').hidden = value || !issue; if (issue) showError(issue, 'This page could not connect. Choose Check connection again, or return Home and try later.'); update(); },
     lock(value) { locked = value; update(); },
     hide() { for (const dialog of root.querySelectorAll('dialog[open]')) dialog.close(); },
     async run(action, label = 'Working') {
@@ -52,7 +65,10 @@ export function controller(root, api, feature) {
         status.textContent = 'Ready';
         succeeded = true;
       } catch (reason) {
-        showError(reason); status.textContent = 'Needs attention';
+        const recovery = feature === 'setup' && /repair|validat/i.test(label)
+          ? 'Project setup did not finish. Keep any backup and choose Inspect project before trying again. Earlier completed changes may remain.'
+          : undefined;
+        showError(reason, recovery); status.textContent = 'Needs attention';
       } finally {
         if (lease !== undefined) {
           try { await call('finish_ui_operation', { id: lease }); }

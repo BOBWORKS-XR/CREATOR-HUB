@@ -6,20 +6,23 @@ async function open(page, options = {}) {
   await page.addInitScript(options => {
     localStorage.setItem('creator-usage-terms.hub', JSON.stringify({ policyVersion: '2026-09-28-v1', acceptedAt: '2026-09-28T00:00:00Z' }));
     window.__CREATOR_HUB_FEATURE_PROTOCOL__ = 1;
-    window.calls = []; window.pending = {}; window.failNext = options.fail || null;
+    window.calls = []; window.pending = {}; window.failNext = options.fail || null; window.failures = {};
     const channels = ['Creator', 'Other'].map((name, index) => ({ id: String(index), name, unity_project_path: `/projects/${name}`, enabled: true }));
     window.savedConfig = { channels, active_channel_id: '0', mcp_server_path: '/private/server.mjs', tool_groups: 'core',
       auto_start: true, enable_custom_scripts: false, allow_all_tests: true, connection_guide_version: 1,
       unrelated: { retain: ['exact', 'values'] }, ...options.config };
     window.bridgeStatuses = { '/projects/Creator': { installed: true, current: true }, '/projects/Other': { installed: true, current: false } };
     window.recoveryRecords = options.recovery || [];
+    window.unityOptions = Object.fromEntries(channels.map(channel => [channel.unity_project_path, {
+      enable_custom_scripts: window.savedConfig.enable_custom_scripts, allow_all_tests: window.savedConfig.allow_all_tests,
+    }]));
     const profile = { profile: 'creator', label: 'Creator SDK', packages: [], recommendedToolGroups: 'core,creator' };
     window.profiles = {
       '/projects/Creator': profile,
       '/projects/Other': { profile: 'banter', label: 'Banter SDK', packages: [], recommendedToolGroups: 'core,banter' },
       ...options.profiles,
     };
-    const report = { status: 'current', backups: [], recovery: options.productRecovery || [] };
+    const report = { status: options.productStatus || 'current', backups: [], recovery: options.productRecovery || [] };
     window.__TAURI__ = {
       event: { listen: async () => () => {} },
       core: { invoke: async (command, args = {}) => {
@@ -28,12 +31,18 @@ async function open(page, options = {}) {
         if (command !== 'feature_call' || args.feature !== 'mcp') throw new Error(`Unexpected outer command: ${command}`);
         const { command: name, args: fields } = args;
         if (window.hold === name) await new Promise(resolve => { window.pending[name] = resolve; });
-        if (window.failNext === name) { window.failNext = null; throw new Error(`Fixture failure: ${name}`); }
+        if (window.failNext === name || window.failures[name] > 0) {
+          if (window.failNext === name) window.failNext = null;
+          else window.failures[name]--;
+          throw new Error(`Fixture failure: ${name}`);
+        }
         switch (name) {
           case 'begin_ui_operation': return 17;
           case 'finish_ui_operation': return null;
           case 'product_settings_status': return report;
-          case 'review_product_settings': return { ...report, approved: true };
+          case 'review_product_settings':
+            if (options.partialProductReview) window.savedConfig.unrelated.recovered = true;
+            return options.productReviewResult || { ...report, approved: true };
           case 'load_config': return structuredClone(window.savedConfig);
           case 'save_config':
             window.savedConfig = structuredClone(fields.config);
@@ -64,8 +73,16 @@ async function open(page, options = {}) {
             return { channel };
           }
           case 'update_codex_mcp_config': case 'update_claude_mcp_config': case 'update_claude_desktop_mcp_config':
-          case 'update_antigravity_mcp_config': case 'update_opencode_mcp_config':
-          case 'set_unity_custom_scripts': case 'set_unity_allow_all_tests': return null;
+          case 'update_antigravity_mcp_config': case 'update_opencode_mcp_config': return null;
+          case 'set_unity_custom_scripts': case 'set_unity_allow_all_tests': {
+            const key = name === 'set_unity_custom_scripts' ? 'enable_custom_scripts' : 'allow_all_tests';
+            window.unityOptions[fields.unityProjectPath][key] = fields.enabled;
+            if (window.unityFailAfter === name) {
+              window.unityFailAfter = null;
+              throw new Error(`Unity write outcome unknown: ${name}`);
+            }
+            return null;
+          }
           default: throw new Error(`Unexpected feature command: ${name}`);
         }
       } },
@@ -110,7 +127,7 @@ for (const [profile, groups, label] of [
   expect(await mutationCalls(page)).toEqual([]);
 });
 
-test('unverified Auto blocks client changes and offers manual recovery without other preference writes', async ({ page }) => {
+test('unverified Auto blocks client changes and explicit manual Save confirms Unity options', async ({ page }) => {
   await open(page, { config: { tool_groups: 'auto', auto_start: false }, profiles: {
     '/projects/Creator': { profile: 'unknown', error: 'Invalid metadata', recommendedToolGroups: null },
   } });
@@ -124,8 +141,12 @@ test('unverified Auto blocks client changes and offers manual recovery without o
   await field(page, 'save').click(); await idle(page);
   await expect(field(page, 'setup')).toBeEnabled();
   expect(await page.evaluate(() => savedConfig.tool_groups)).toBe('core,creator');
-  expect(await commands(page, 'set_unity_custom_scripts')).toEqual([]);
-  expect(await commands(page, 'set_unity_allow_all_tests')).toEqual([]);
+  expect((await commands(page, 'set_unity_custom_scripts')).map(call => call.args.args)).toEqual([
+    { unityProjectPath: '/projects/Creator', enabled: false },
+  ]);
+  expect((await commands(page, 'set_unity_allow_all_tests')).map(call => call.args.args)).toEqual([
+    { unityProjectPath: '/projects/Creator', enabled: true },
+  ]);
   const saved = await page.evaluate(() => savedConfig);
   expect(saved.unrelated).toEqual({ retain: ['exact', 'values'] });
   expect(saved.channels).toHaveLength(2);
@@ -231,7 +252,7 @@ test('completed history from another settings location is disclosed but never of
     completed: false, historical_completed: true, history_only: true }] });
   await controlsLocked(page, false);
   await expect(field(page, 'product-evidence')).toContainText('completed history from another settings location; read-only');
-  await expect(field(page, 'product-status')).toHaveText('Current MCP settings retained.');
+  await expect(field(page, 'product-status')).toHaveText('Your current MCP settings are ready.');
   await field(page, 'recover').dispatchEvent('click');
   expect(await commands(page, 'recover_client_connection')).toEqual([]);
   expect(await commands(page, 'review_product_settings')).toEqual([]);
@@ -242,7 +263,7 @@ test('an unfinished settings journal still locks the form without implicit revie
   await open(page, { productRecovery: [{ journal: '/retained/unfinished', files: [],
     completed: false, historical_completed: false, history_only: false }] });
   await controlsLocked(page, true);
-  await expect(field(page, 'product-status')).toContainText('needs recovery review');
+  await expect(field(page, 'product-status')).toContainText('An earlier settings change did not finish');
   expect(await mutationCalls(page)).toEqual([]);
 });
 async function recoveryPanel(page) { await page.getByText('Existing client connections and recovery', { exact: true }).click(); }
@@ -405,7 +426,7 @@ test('uncertain config publication cannot be overwritten before explicit readbac
   await controlsLocked(page, true);
   expect(await mutationCalls(page)).toEqual(beforeRetry);
   await page.evaluate(() => { window.failNext = 'load_config'; window.hold = null; pending.load_config(); }); await idle(page);
-  await expect(field(page, 'error')).toContainText('load_config');
+  await expect(field(page, 'product-diagnostic')).toContainText('load_config');
   await controlsLocked(page, true); await expect(field(page, 'retry')).toBeVisible();
   expect(await mutationCalls(page)).toEqual(beforeRetry);
   await field(page, 'retry').click(); await controlsLocked(page, false);
@@ -414,6 +435,216 @@ test('uncertain config publication cannot be overwritten before explicit readbac
   await expect(row(page, 'Other')).toHaveAttribute('data-selected', 'true');
   expect((await commands(page, 'save_config')).length).toBe(1);
   expect(await commands(page, 'update_codex_mcp_config')).toEqual([]);
+});
+
+for (const [command, fieldName, key, enabled] of [
+  ['set_unity_custom_scripts', 'scripts', 'enable_custom_scripts', true],
+  ['set_unity_allow_all_tests', 'tests', 'allow_all_tests', false],
+]) test(`Save options retries failed ${command} despite already persisted config`, async ({ page }) => {
+  await open(page);
+  await page.getByText('Advanced settings', { exact: true }).click();
+  await field(page, fieldName).setChecked(enabled);
+  await page.evaluate(command => { window.failNext = command; }, command);
+  await field(page, 'save').click(); await idle(page);
+  expect(await page.evaluate(key => savedConfig[key], key)).toBe(enabled);
+  expect(await page.evaluate(key => unityOptions['/projects/Creator'][key], key)).not.toBe(enabled);
+  await expect(field(page, 'setup-result')).toContainText('Unity options are not fully confirmed');
+  await navigateBack(page);
+  expect((await commands(page, command)).length).toBe(1);
+  await field(page, 'save').click(); await idle(page);
+  expect((await commands(page, command)).length).toBe(2);
+  expect(await page.evaluate(key => unityOptions['/projects/Creator'][key], key)).toBe(enabled);
+  await expect(field(page, 'setup-result')).toContainText('Options saved');
+  expect((await commands(page, command === 'set_unity_custom_scripts' ? 'set_unity_allow_all_tests' : 'set_unity_custom_scripts')).length).toBe(1);
+});
+
+for (const failed of ['set_unity_custom_scripts', 'set_unity_allow_all_tests']) test(`remount with persisted config reasserts unknown Unity flags after ${failed} failure`, async ({ page }) => {
+  await open(page, { config: { auto_start: false } });
+  expect(await mutationCalls(page)).toEqual([]);
+  await page.getByText('Advanced settings', { exact: true }).click();
+  await field(page, 'scripts').check(); await field(page, 'tests').uncheck();
+  await page.evaluate(failed => { window.failNext = failed; }, failed);
+  await field(page, 'save').click(); await idle(page);
+  expect(await page.evaluate(() => ({ scripts: savedConfig.enable_custom_scripts, tests: savedConfig.allow_all_tests })))
+    .toEqual({ scripts: true, tests: false });
+  const failedKey = failed === 'set_unity_custom_scripts' ? 'enable_custom_scripts' : 'allow_all_tests';
+  expect(await page.evaluate(key => unityOptions['/projects/Creator'][key], failedKey))
+    .toBe(failedKey === 'allow_all_tests');
+  const beforeRemount = await mutationCalls(page);
+  expect(await page.evaluate(() => CreatorFeaturePages.dispose())).toBe(true);
+  await page.evaluate(() => CreatorFeaturePages.show('mcp')); await idle(page);
+  await expect(field(page, 'scripts')).toBeChecked(); await expect(field(page, 'tests')).not.toBeChecked();
+  expect(await mutationCalls(page)).toEqual(beforeRemount);
+  await navigateBack(page);
+  expect(await mutationCalls(page)).toEqual(beforeRemount);
+  await page.getByText('Advanced settings', { exact: true }).click();
+  const scriptsBefore = (await commands(page, 'set_unity_custom_scripts')).length;
+  const testsBefore = (await commands(page, 'set_unity_allow_all_tests')).length;
+  await field(page, 'save').click(); await idle(page);
+  expect((await commands(page, 'set_unity_custom_scripts')).length).toBe(scriptsBefore + 1);
+  expect((await commands(page, 'set_unity_allow_all_tests')).length).toBe(testsBefore + 1);
+  expect(await page.evaluate(() => unityOptions['/projects/Creator']))
+    .toEqual({ enable_custom_scripts: true, allow_all_tests: false });
+  await expect(field(page, 'setup-result')).toContainText('Options saved');
+  await field(page, 'save').click(); await idle(page);
+  expect((await commands(page, 'set_unity_custom_scripts')).length).toBe(scriptsBefore + 1);
+  expect((await commands(page, 'set_unity_allow_all_tests')).length).toBe(testsBefore + 1);
+});
+
+test('partial Unity option success retries only unfinished work after readback', async ({ page }) => {
+  await open(page);
+  await page.getByText('Advanced settings', { exact: true }).click();
+  await field(page, 'scripts').check(); await field(page, 'tests').uncheck();
+  await page.evaluate(() => { window.failNext = 'set_unity_allow_all_tests'; });
+  await field(page, 'save').click(); await idle(page);
+  expect(await page.evaluate(() => unityOptions['/projects/Creator'])).toEqual({ enable_custom_scripts: true, allow_all_tests: true });
+  expect((await commands(page, 'set_unity_custom_scripts')).length).toBe(1);
+  expect((await commands(page, 'set_unity_allow_all_tests')).length).toBe(1);
+  await recoveryPanel(page); await field(page, 'review').click(); await idle(page);
+  expect((await commands(page, 'set_unity_allow_all_tests')).length).toBe(1);
+  await field(page, 'save').click(); await idle(page);
+  expect((await commands(page, 'set_unity_custom_scripts')).length).toBe(1);
+  expect((await commands(page, 'set_unity_allow_all_tests')).length).toBe(2);
+  expect(await page.evaluate(() => unityOptions['/projects/Creator'])).toEqual({ enable_custom_scripts: true, allow_all_tests: false });
+  await field(page, 'save').click(); await idle(page);
+  expect((await commands(page, 'set_unity_custom_scripts')).length).toBe(1);
+  expect((await commands(page, 'set_unity_allow_all_tests')).length).toBe(2);
+});
+
+test('an uncertain Unity setter outcome stays pending until explicitly reasserted', async ({ page }) => {
+  await open(page);
+  await page.getByText('Advanced settings', { exact: true }).click();
+  await field(page, 'scripts').check();
+  await page.evaluate(() => { window.unityFailAfter = 'set_unity_custom_scripts'; });
+  await field(page, 'save').click(); await idle(page);
+  expect(await page.evaluate(() => unityOptions['/projects/Creator'].enable_custom_scripts)).toBe(true);
+  await expect(field(page, 'error')).toContainText('Unity write outcome unknown');
+  await expect(field(page, 'setup-result')).not.toContainText('Options saved');
+  await field(page, 'save').click(); await idle(page);
+  expect((await commands(page, 'set_unity_custom_scripts')).length).toBe(2);
+  await expect(field(page, 'setup-result')).toContainText('Options saved');
+});
+
+test('failed flag changes invalidate prior success even when the retry returns to its old value', async ({ page }) => {
+  await open(page);
+  await page.getByText('Advanced settings', { exact: true }).click();
+  await field(page, 'save').click(); await idle(page);
+  await field(page, 'scripts').check();
+  await page.evaluate(() => { window.unityFailAfter = 'set_unity_custom_scripts'; });
+  await field(page, 'save').click(); await idle(page);
+  expect(await page.evaluate(() => unityOptions['/projects/Creator'].enable_custom_scripts)).toBe(true);
+  await field(page, 'scripts').uncheck(); await field(page, 'save').click(); await idle(page);
+  expect((await commands(page, 'set_unity_custom_scripts')).map(call => call.args.args.enabled))
+    .toEqual([false, true, false]);
+  expect((await commands(page, 'set_unity_allow_all_tests')).length).toBe(1);
+  expect(await page.evaluate(() => unityOptions['/projects/Creator'].enable_custom_scripts)).toBe(false);
+});
+
+test('pending Unity option work stays with its project and honors a changed retry value', async ({ page }) => {
+  await open(page);
+  await page.getByText('Advanced settings', { exact: true }).click();
+  await field(page, 'scripts').check();
+  await page.evaluate(() => { window.failNext = 'set_unity_custom_scripts'; });
+  await field(page, 'save').click(); await idle(page);
+  await page.getByRole('button', { name: 'Select Other for MCP', exact: true }).click(); await idle(page);
+  expect((await commands(page, 'set_unity_custom_scripts')).length).toBe(1);
+  expect(await commands(page, 'set_unity_allow_all_tests')).toEqual([]);
+  await field(page, 'save').click(); await idle(page);
+  expect((await commands(page, 'set_unity_custom_scripts')).length).toBe(2);
+  await page.getByRole('button', { name: 'Select Creator for MCP', exact: true }).click(); await idle(page);
+  await field(page, 'scripts').uncheck(); await field(page, 'save').click(); await idle(page);
+  const writes = await commands(page, 'set_unity_custom_scripts');
+  expect(writes.map(call => call.args.args)).toEqual([
+    { unityProjectPath: '/projects/Creator', enabled: true },
+    { unityProjectPath: '/projects/Other', enabled: true },
+    { unityProjectPath: '/projects/Creator', enabled: false },
+  ]);
+  expect(await page.evaluate(() => unityOptions['/projects/Creator'].enable_custom_scripts)).toBe(false);
+});
+
+test('pending Unity writes cannot replay after workflow release poisons the page', async ({ page }) => {
+  await open(page);
+  await page.getByText('Advanced settings', { exact: true }).click();
+  await field(page, 'scripts').check(); await field(page, 'tests').uncheck();
+  await page.evaluate(() => { window.failures = { set_unity_allow_all_tests: 1, finish_ui_operation: 1 }; });
+  await field(page, 'save').click(); await idle(page);
+  await controlsLocked(page, true);
+  await expect(field(page, 'error')).toContainText('Operation state is unknown');
+  const before = await mutationCalls(page);
+  await navigateBack(page);
+  await field(page, 'save').dispatchEvent('click'); await idle(page);
+  expect(await mutationCalls(page)).toEqual(before);
+  expect((await commands(page, 'set_unity_custom_scripts')).length).toBe(1);
+  expect((await commands(page, 'set_unity_allow_all_tests')).length).toBe(1);
+  expect(await page.evaluate(() => unityOptions['/projects/Creator'].allow_all_tests)).toBe(true);
+});
+
+test('declined partial settings recovery retains truthful wording, lock and safe exit', async ({ page }) => {
+  await open(page, { productStatus: 'conflict', partialProductReview: true, productReviewResult: {
+    status: 'conflict', approved: false, backups: ['/retained/exact-backup'], recovery: [
+      { journal: '/retained/completed', historical_completed: true, files: [] },
+      { journal: '/retained/declined', historical_completed: false, files: [] },
+    ],
+  } });
+  await field(page, 'product-review').click(); await idle(page);
+  expect(await page.evaluate(() => savedConfig.unrelated.recovered)).toBe(true);
+  await expect(field(page, 'product-status')).toContainText('Earlier completed changes may remain');
+  await expect(field(page, 'product-status')).not.toContainText('Nothing changed');
+  await controlsLocked(page, true); await expect(field(page, 'product-review')).toBeEnabled();
+  expect(await commands(page, 'load_config')).toEqual([]);
+  expect(await commands(page, 'save_config')).toEqual([]);
+  await page.evaluate(() => { window.addEventListener('creator-feature-home', () => { window.homeRequested = true; }); });
+  await field(page, 'product-later').click();
+  expect(await page.evaluate(() => homeRequested)).toBe(true);
+  expect((await commands(page, 'review_product_settings')).length).toBe(1);
+});
+
+test('saved-settings failures retain only raw diagnostics in closed technical details', async ({ page }) => {
+  await open(page, { fail: 'load_config' });
+  await expect(field(page, 'product-diagnostic')).toHaveText('Error: Fixture failure: load_config');
+  await expect(field(page, 'product-diagnostic')).not.toBeVisible();
+  await expect(field(page, 'product-details')).not.toHaveAttribute('open');
+  await field(page, 'product-details').locator('summary').click();
+  await page.evaluate(() => { window.failNext = 'review_product_settings'; });
+  await field(page, 'product-review').click(); await idle(page);
+  await expect(field(page, 'product-diagnostic')).toHaveText('Error: Fixture failure: review_product_settings');
+  await expect(field(page, 'product-details')).not.toHaveAttribute('open');
+  await expect(field(page, 'error')).toHaveText('Your saved setup could not be checked. Try Check connection again, or return Home for now.');
+  await controlsLocked(page, true);
+});
+
+test('feedback failures keep a clear explanation and collapse raw read and write diagnostics', async ({ page }) => {
+  await open(page, { fail: 'get_project_feedback_settings' });
+  const error = field(page, 'feedback-error');
+  await expect(error.locator(':scope > p')).toHaveText('Feedback preferences could not be checked. Try Check project feedback again.');
+  await expect(error.locator('details')).not.toHaveAttribute('open');
+  await expect(error.locator('details p')).toHaveText('Error: Fixture failure: get_project_feedback_settings');
+  await expect(error.locator('details p')).not.toBeVisible();
+  await field(page, 'feedback-check').click(); await idle(page);
+  await expect(error).toBeHidden();
+  await field(page, 'feedback-enabled').check();
+  await page.evaluate(() => { window.failNext = 'set_project_feedback_settings'; });
+  await field(page, 'feedback-save').click(); await idle(page);
+  await expect(error.locator(':scope > p')).toContainText('Check them before saving again');
+  await expect(error.locator('details')).not.toHaveAttribute('open');
+  await expect(error.locator('details p')).toHaveText('Error: Fixture failure: set_project_feedback_settings');
+  await expect(error.locator('details p')).not.toBeVisible();
+  await expect(field(page, 'feedback-save')).toBeDisabled();
+});
+
+test('guide workflow failure shows restart guidance without concatenated diagnostic copy', async ({ page }) => {
+  await open(page, { config: { connection_guide_version: 0 } });
+  await expect(field(page, 'guide-dialog')).toBeVisible();
+  await page.evaluate(() => { window.failNext = 'finish_ui_operation'; });
+  await field(page, 'guide-skip').click(); await idle(page);
+  const error = field(page, 'guide-error');
+  await expect(error.locator(':scope > p')).toHaveText('Close and reopen Hub before continuing. Earlier completed changes are kept.');
+  await expect(error.locator('details')).not.toHaveAttribute('open');
+  await expect(error.locator('details p')).toHaveText('Operation state is unknown. Restart Hub before continuing. Error: Fixture failure: finish_ui_operation');
+  await expect(error.locator('details p')).not.toBeVisible();
+  await controlsLocked(page, true);
+  await field(page, 'guide-skip').click(); await idle(page);
+  expect((await commands(page, 'save_config')).length).toBe(1);
 });
 
 for (const invalid of [null, [null], [{ ...record(), clients: ['../../settings'] }]]) test(`invalid recovery DTO clears old eligibility: ${JSON.stringify(invalid)}`, async ({ page }) => {

@@ -1,7 +1,8 @@
 const { test, expect } = require('@playwright/test');
 
-async function load(page, { openProjects = true, registryHelper } = {}) {
-  await page.addInitScript(() => {
+async function load(page, { openProjects = true, registryHelper, integrated = false } = {}) {
+  await page.addInitScript(integrated => {
+    if (integrated) window.__CREATOR_HUB_FEATURE_PROTOCOL__ = 1;
     localStorage.setItem('creator-usage-terms.hub', JSON.stringify({ policyVersion: '2026-09-28-v1', acceptedAt: '2026-09-28T00:00:00.000Z' }));
     window.calls = [];
     window.projects = { projects: [
@@ -16,6 +17,11 @@ async function load(page, { openProjects = true, registryHelper } = {}) {
         window.calls.push({ command, args });
         if (command === 'get_launch_request') return { view: 'hub', revision: 0 };
         if (command === 'app_inventory') return { supported: true, apps: ['mcp', 'setup'].map(app => ({ app, installed: false, availableVersion: '1.0.0', updateAvailable: false })) };
+        if (command === 'feature_call' && args.feature === 'setup' && args.command === 'launch_hub') {
+          if (window.holdHub) await new Promise(resolve => { window.finishHub = resolve; });
+          if (window.hubFailure) throw window.hubFailure;
+          return null;
+        }
         if (window.failure) throw window.failure;
         if (command === 'project_inventory') {
           if (window.holdInventory) {
@@ -33,7 +39,7 @@ async function load(page, { openProjects = true, registryHelper } = {}) {
         }
       } },
     };
-  });
+  }, integrated);
   if (registryHelper !== undefined) await page.addInitScript(state => {
     window.projects = { projects: [], warnings: [], registryHelperPreparationAvailable: state };
     const invoke = window.__TAURI__.core.invoke;
@@ -48,6 +54,11 @@ async function load(page, { openProjects = true, registryHelper } = {}) {
   }, registryHelper);
   await page.goto('http://127.0.0.1:4188');
   await expect(page.locator('#catalog-status')).toContainText('Update check complete');
+  if (integrated) {
+    await expect(page.locator('#view-projects')).toBeVisible();
+    await expect(page.locator('#project-status')).toContainText('4 known projects');
+    return;
+  }
   await expect(page.locator('#view-hub')).toBeVisible();
   if (!openProjects) return;
   await page.locator('#hub-pages [data-view="projects"]').click();
@@ -57,6 +68,52 @@ async function load(page, { openProjects = true, registryHelper } = {}) {
 }
 
 const projectNames = page => page.locator('.project-info > strong');
+
+for (const width of [320, 940]) test(`missing Unity offers only the fixed Hub launch after a click at ${width}px`, async ({ page }, testInfo) => {
+  await page.setViewportSize({ width, height: 720 });
+  await load(page, { integrated: true });
+  await page.evaluate(() => { window.failure = 'Unity 6000.3.21f1 is not available. Install this exact version in Unity Hub, then retry. No project upgrade was attempted.'; });
+  await page.getByRole('button', { name: 'Open Creator Forest', exact: true }).click();
+  const hub = page.getByRole('button', { name: 'Open Unity Hub', exact: true });
+  await expect(hub).toBeVisible();
+  await expect(page.locator('#project-status')).toContainText('Unity 6000.3.21f1 is needed');
+  expect(await page.evaluate(() => calls.filter(c => c.command === 'feature_call'))).toEqual([]);
+  await expect(page.locator('#project-status-detail')).toBeHidden();
+  await page.locator('#project-details summary').click();
+  await expect(page.locator('#project-status-detail')).toContainText('No project upgrade was attempted');
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath('missing-unity-recovery.png'), fullPage: true });
+  await page.evaluate(() => { window.holdHub = true; });
+  await hub.click();
+  await expect(hub).toBeDisabled();
+  await page.evaluate(() => document.getElementById('open-project-unity-hub').click());
+  expect(await page.evaluate(() => calls.filter(c => c.command === 'feature_call'))).toEqual([
+    { command: 'feature_call', args: { feature: 'setup', command: 'launch_hub', args: {} } },
+  ]);
+  await page.evaluate(() => window.finishHub());
+  await expect(hub).toBeEnabled();
+  await expect(page.locator('#project-status')).toContainText('Install Unity 6000.3.21f1');
+  expect(await page.evaluate(() => calls.filter(c => c.command === 'open_unity_project').length)).toBe(1);
+  expect(await page.evaluate(() => calls.some(c => /install|create_project|run_existing_project/.test(c.command)))).toBe(false);
+});
+
+test('only the exact missing-Editor response offers Hub launch and launch errors preserve recovery', async ({ page }) => {
+  await load(page, { integrated: true });
+  const open = page.getByRole('button', { name: 'Open Creator Forest', exact: true });
+  const hub = page.locator('#open-project-unity-hub');
+  for (const failure of ['This project is in use.', 'Unity 2022.3.39f1 is not available. Install this exact version in Unity Hub, then retry. No project upgrade was attempted.', '<img src=x onerror="window.injected=true">']) {
+    await page.evaluate(failure => { window.failure = failure; }, failure);
+    await open.click(); await expect(hub).toBeHidden();
+  }
+  await page.evaluate(() => { window.failure = 'Unity 6000.3.21f1 is not available. Install this exact version in Unity Hub, then retry. No project upgrade was attempted.'; window.hubFailure = 'Unity Hub is not installed.'; });
+  await open.click(); await hub.click();
+  await expect(page.locator('#project-status')).toContainText('Could not open Unity Hub');
+  await expect(hub).toBeEnabled();
+  await expect(page.locator('#retry-project-open')).toBeVisible();
+  await page.locator('#project-details summary').click();
+  await expect(page.locator('#project-status-detail')).toContainText('Unity Hub is not installed');
+  expect(await page.evaluate(() => window.injected)).toBeUndefined();
+});
 
 test('fresh Linux Projects offers one explicit helper preparation without a saved project', async ({ page }) => {
   await load(page, { registryHelper: true });
@@ -81,14 +138,16 @@ test('declined or failed Linux preparation retains the explicit action without a
   for (const failure of ['Unity registry helper download was declined.', 'Helper download failed.']) {
     await page.evaluate(failure => { window.preparationFailure = failure; }, failure);
     await prepare.click();
-    await expect(page.locator('#project-status')).toHaveText(failure);
+    await expect(page.locator('#project-status')).toHaveText('Could not prepare project discovery. Check the technical details, then try again.');
+    await expect(page.locator('#project-status-detail')).toHaveText(failure);
     await expect(prepare).toBeEnabled();
     await expect(prepare).toBeVisible();
   }
   expect(await page.evaluate(() => calls.filter(c => c.command === 'prepare_project_registry').length)).toBe(2);
   await page.evaluate(() => { window.failure = 'Inventory unavailable'; });
   await page.locator('#refresh-projects').click();
-  await expect(page.locator('#project-status')).toHaveText('Inventory unavailable');
+  await expect(page.locator('#project-status')).toHaveText('Could not refresh the project list. Your saved projects are kept. Try again or check the technical details.');
+  await expect(page.locator('#project-status-detail')).toHaveText('Inventory unavailable');
   await expect(prepare).toBeVisible();
 });
 
@@ -133,9 +192,14 @@ test('a project-opening warning already in the inventory is shown once and keeps
   await page.evaluate(warning => { window.projects.warnings = [warning, warning]; }, warning);
   await page.locator('#refresh-projects').click();
   await expect(page.locator('#project-warnings')).toHaveText(warning);
+  await expect(page.locator('#project-warnings')).toBeHidden();
+  await page.locator('#project-details summary').click();
+  await expect(page.locator('#project-warnings')).toBeVisible();
   await page.evaluate(warning => { window.failure = warning; }, warning);
   await page.getByRole('button', { name: 'Open Creator Forest', exact: true }).click();
-  await expect(page.locator('#project-status')).toHaveText(warning);
+  await expect(page.locator('#project-status')).toHaveText('Could not open this project. Check the technical details, then try again.');
+  await expect(page.locator('#project-status-detail')).toHaveText(warning);
+  await expect(page.locator('#project-status-detail')).toBeHidden();
   await expect(page.locator('#project-warnings')).toBeHidden();
   await expect(projectNames(page)).toHaveText(['Creator Forest', 'Banter Playground']);
 });
@@ -323,7 +387,8 @@ test('project invalidation is read-only, coalesces until shown and retries faile
   await expect(page.locator('#project-search')).toHaveValue('Forest');
   expect(await page.evaluate(() => calls.filter(call => call.command === 'project_inventory').length)).toBe(2);
   await page.evaluate(() => { CreatorProjects.show(); window.failure = 'Read unavailable'; CreatorProjects.invalidate(); CreatorProjects.show(); });
-  await expect(page.locator('#project-status')).toHaveText('Read unavailable');
+  await expect(page.locator('#project-status-detail')).toHaveText('Read unavailable');
+  await expect(page.locator('#project-status')).toContainText('Could not refresh the project list');
   await expect(page.locator('.project-row')).toHaveCount(1);
   expect(await page.evaluate(() => calls.filter(call => call.command === 'project_inventory').length)).toBe(3);
   await page.evaluate(() => { window.failure = null; window.projects.projects[0].bridge = { installed: true, current: false }; CreatorProjects.show(); });
@@ -346,7 +411,8 @@ for (const failReload of [false, true]) test(`an invalidation during inventory q
   }, failReload);
   await expect.poll(() => page.evaluate(() => calls.filter(call => call.command === 'project_inventory').length)).toBe(3);
   if (failReload) {
-    await expect(page.locator('#project-status')).toHaveText('Fresh read unavailable');
+    await expect(page.locator('#project-status-detail')).toHaveText('Fresh read unavailable');
+    await expect(page.locator('#project-status')).toContainText('Could not refresh the project list');
     await expect(page.locator('.project-row[data-mcp-selected="true"]')).toHaveCount(0);
     await page.evaluate(() => { window.failure = null; CreatorProjects.show(); });
   }
@@ -375,7 +441,8 @@ test('failed lookup keeps old rows; cancel and removal do not delete projects', 
   await expect(page.locator('.project-row')).toHaveCount(1);
   await page.evaluate(() => window.failure = 'Project operation busy.');
   await page.locator('#refresh-projects').click();
-  await expect(page.locator('#project-status')).toHaveText('Project operation busy.');
+  await expect(page.locator('#project-status-detail')).toHaveText('Project operation busy.');
+  await expect(page.locator('#project-status')).toContainText('Could not refresh the project list');
   await expect(page.locator('.project-row')).toHaveCount(1);
   expect(await page.evaluate(() => window.calls.some(c => /delete|install|open_unity/.test(c.command)))).toBe(false);
 });

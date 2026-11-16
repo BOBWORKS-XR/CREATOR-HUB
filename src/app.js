@@ -72,6 +72,14 @@
   retryPreferences.className = 'text-button hidden'; retryPreferences.hidden = true;
   retryPreferences.innerHTML = '<span class="icon icon-refresh" aria-hidden="true"></span>Retry loading preferences';
   byId('preferences-status').after(retryPreferences);
+  const retryStartup = document.createElement('button');
+  retryStartup.id = 'retry-startup'; retryStartup.type = 'button';
+  retryStartup.className = 'text-button hidden'; retryStartup.hidden = true;
+  retryStartup.innerHTML = '<span class="icon icon-refresh" aria-hidden="true"></span>Try starting Hub again';
+  error.after(retryStartup);
+  retryStartup.addEventListener('click', () => {
+    if (!retryStartup.disabled && startupRecoveryRetry) void beginStartup({ readOnly: true });
+  });
   const platformLabel = () => {
     const platform = navigator.userAgentData?.platform || navigator.platform || navigator.userAgent;
     if (/mac/i.test(platform)) return 'macOS';
@@ -217,6 +225,7 @@
     if (Object.hasOwn(tools, view)) void openHostedWhenReady(view);
   }
   for (const button of document.querySelectorAll('[data-view]')) button.addEventListener('click', () => selectView(button.dataset.view));
+  window.addEventListener('creator-feature-home', () => { if (!window.CreatorFeaturePages.busy()) selectView('hub'); });
   trigger.addEventListener('click', () => {
     if (trigger.getAttribute('aria-expanded') === 'true') return close(true);
     shell.classList.add('suite-expanded');
@@ -303,6 +312,9 @@
   function renderState() {
     renderToolView();
     const featureBusy = directFeatures && window.CreatorFeaturePages?.busy() === true;
+    retryStartup.hidden = !startupRecoveryRetry;
+    retryStartup.classList.toggle('hidden', retryStartup.hidden);
+    retryStartup.disabled = busy || featureBusy || startupRunning;
     byId('check-updates').disabled = busy || featureBusy || startupRunning;
     byId('retry-inventory').disabled = busy;
     byId('inventory-error').classList.toggle('hidden', !inventoryError);
@@ -731,7 +743,7 @@
   byId('open-button').addEventListener('click', () => action('open_app'));
   byId('adopt-button').addEventListener('click', () => action('use_existing_app'));
   for (const id of ['disconnect-mcp-row', 'disconnect-mcp-detail']) byId(id).addEventListener('click', () => action('disconnect_mcp', 'mcp'));
-  byId('check-updates').addEventListener('click', () => startupRecoveryRetry ? beginStartup() : refresh(true));
+  byId('check-updates').addEventListener('click', () => startupRecoveryRetry ? beginStartup({ readOnly: true }) : refresh(true));
   byId('retry-inventory').addEventListener('click', () => refresh(false));
   byId('recheck-app').addEventListener('click', async () => {
     if (busy) return;
@@ -776,7 +788,7 @@
       if (id === 'preview-channel') refresh(true);
     });
   }
-  async function start() {
+  async function start({ readOnly = false } = {}) {
     if (directFeatures) show(current);
     function applyLaunch(request) {
       if (!request || !['hub', 'mcp', 'setup'].includes(request.view) || !Number.isSafeInteger(request.revision) || request.revision <= launchRevision) return;
@@ -797,14 +809,25 @@
     await restoreHostedViews();
     window.CreatorHosted.updating(false); busy = false;
     await refresh(false);
-    await refresh(true);
+    if (!readOnly) await refresh(true);
     directReady = true;
     renderState();
   }
-  async function beginStartup() {
-    if (startupRunning) return;
+  function startupFailed(reason) {
+    startupRecoveryRetry = true;
+    const message = document.createElement('p');
+    message.textContent = 'Hub could not finish starting. Try again to check its status; your existing apps and settings are kept.';
+    const details = document.createElement('details');
+    const summary = document.createElement('summary'); summary.textContent = 'Technical details';
+    const description = document.createElement('p'); description.textContent = String(reason);
+    details.append(summary, description); error.replaceChildren(message, details);
+    error.classList.remove('hidden');
+  }
+  async function beginStartup({ readOnly = false } = {}) {
+    if (startupRunning || busy || window.CreatorFeaturePages?.busy()) return;
     startupRunning = true; renderState(); error.classList.add('hidden');
     try {
+      if (readOnly) await window.CreatorUsageTerms.requireAcceptance();
       if (updateRecovery) {
         try {
           acceptRecovery(await invoke('hub_update_recovery_status'));
@@ -814,23 +837,22 @@
           if (retainedUpdate.retained) return;
         } catch (reason) {
           startupRecoveryRetry = true;
-          error.textContent = `Retained update state could not be read: ${String(reason)}. Use Check for updates to review it again.`;
-          error.classList.remove('hidden');
+          startupFailed(reason);
           return;
         }
       }
-      await loadPreferences();
+      if (readOnly) await loadPreferences({ readOnly: true });
+      else await loadPreferences();
       await window.CreatorConvergence?.run();
-      await start();
+      await start({ readOnly });
+      startupRecoveryRetry = false;
     } catch (reason) {
-      error.textContent = `Startup paused: ${String(reason)}. Existing apps and settings were kept.`;
-      error.classList.remove('hidden');
+      startupFailed(reason);
     } finally {
       startupRunning = false; renderState();
     }
   }
   window.CreatorUsageTerms.requireAcceptance().then(beginStartup).catch(reason => {
-    error.textContent = `Startup paused: ${String(reason)}. Existing apps and settings were kept.`;
-    error.classList.remove('hidden');
+    startupFailed(reason); renderState();
   });
 })();

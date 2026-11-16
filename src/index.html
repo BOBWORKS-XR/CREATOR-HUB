@@ -187,13 +187,14 @@
     </ul>
     <p id="convergence-progress" role="status" aria-live="polite" hidden></p>
     <details id="convergence-backups"><summary>Backup and retained-state details</summary><ul id="convergence-details"></ul></details>
-    <p id="convergence-error" role="alert" hidden></p>
-    <section id="convergence-recovery" hidden>
-      <label for="convergence-recovery-text">Recovery options</label>
+    <div id="convergence-error" role="alert" hidden></div>
+    <details id="convergence-recovery" hidden>
+      <summary>Technical details for support</summary>
+      <label for="convergence-recovery-text">Saved recovery information</label>
       <textarea id="convergence-recovery-text" rows="6" readonly spellcheck="false"></textarea>
       <button id="convergence-copy-recovery" class="text-button" type="button"><span class="recovery-copy-icon" aria-hidden="true"></span>Copy recovery details</button>
       <p id="convergence-copy-status" role="status" aria-live="polite"></p>
-    </section>
+    </details>
     <div class="convergence-actions">
       <button id="convergence-later" class="text-button" type="button">Keep existing apps for now</button>
       <button id="convergence-refresh" class="text-button" type="button" hidden>Check again</button>

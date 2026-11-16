@@ -100,7 +100,12 @@
       error.hidden = true; error.textContent = '';
 
       function showError(reason) {
-        error.textContent = `Migration could not continue: ${String(reason).slice(0, 2000)}`;
+        const message = document.createElement('p');
+        message.textContent = 'Setup stopped. Keep the saved files and backups. Check setup again, or choose Not now to return to Hub. Earlier completed changes may remain.';
+        const diagnostic = document.createElement('details');
+        const heading = document.createElement('summary'); heading.textContent = 'Technical details';
+        const detail = document.createElement('p'); detail.textContent = `Migration could not continue: ${String(reason).slice(0, 2000)}`;
+        diagnostic.append(heading, detail); error.replaceChildren(message, diagnostic);
         error.hidden = false;
       }
       function render() {
@@ -142,9 +147,9 @@
         }
         if (importExplanation) importExplanation.hidden = !settingsOnly || stage !== 'review';
         if (streamlined && !settingsOnly) {
-          title.textContent = stage === 'complete' ? 'Move complete' : current?.recoveryHelp ? 'Migration needs review' : 'Move to Hub';
+          title.textContent = stage === 'complete' ? 'Move complete' : current?.recoveryHelp ? 'Finish setting up Hub' : 'Move to Hub';
           summary.textContent = stage === 'complete' ? 'Your existing setup is now managed in Creator Hub.'
-            : current?.recoveryHelp ? 'Settings and backups are kept. Migration has not completed.'
+            : current?.recoveryHelp ? 'Your settings are safe. A previous setup did not finish. Check it again, or use Hub and return to this later.'
             : 'Move existing settings and AI connections into Creator Hub.';
           explanation.hidden = Boolean(current?.recoveryHelp);
           if (backupDetails) backupDetails.hidden = !details.childElementCount;
@@ -153,10 +158,11 @@
           move.disabled = busy || !writable || stopped || !current?.moveAvailable;
           later.textContent = stage === 'complete' ? 'Continue in Hub' : 'Not now';
           refresh.hidden = busy || stage === 'complete' || (!stopped && stage === 'review' && current?.moveAvailable);
-          refresh.textContent = 'Review retained state';
+          refresh.textContent = 'Check setup again';
           const phases = { review: 'Waiting for native review...', backup: 'Backing up settings and adding missing projects...',
             connections: 'Moving existing connections...', cleanup: 'Checking standalone app cleanup...' };
           progress.textContent = busy ? phases[phase] || phases.review : stopped ? '' : result || (stage !== 'review' || !current?.moveAvailable ? current?.message || '' : '');
+          if (!busy && current?.recoveryHelp) progress.textContent = 'Checking again will not reset your settings or remove an app.';
           progress.hidden = !progress.textContent;
         }
         if (settingsOnly) {

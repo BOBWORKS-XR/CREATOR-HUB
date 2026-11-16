@@ -309,6 +309,11 @@ test('load false does no API work; repeated true boot initializes once, failed b
   expect(await page.evaluate(() => calls.length)).toBe(0);
   await page.evaluate(() => Promise.all(Array.from({ length: 5 }, () => CreatorFeaturePages.show('setup', { load: true }))));
   await expect(field(page, 'setup', 'error')).toContainText('probe_environment');
+  await expect(field(page, 'setup', 'error').locator('details')).not.toHaveAttribute('open');
+  await expect(field(page, 'setup', 'error').locator('details p')).not.toBeVisible();
+  await expect(field(page, 'setup', 'error')).toContainText('Check the details before trying again');
+  await field(page, 'setup', 'error').locator('summary').click();
+  await expect(field(page, 'setup', 'error').locator('details p')).toBeVisible();
   expect((await commands(page, 'probe_environment')).length).toBe(1);
   await field(page, 'setup', 'retry').click();
   await expect(field(page, 'setup', 'create')).toBeEnabled();
@@ -715,8 +720,8 @@ for (const width of [1100, 390]) test(`Setup reports each independent blocker an
   await field(page, 'setup', 'inspect').click();
   await expect(field(page, 'setup', 'status')).toHaveText('Review findings');
   await expect(field(page, 'setup', 'findings')).toContainText('Unity version: Ready');
-  await expect(field(page, 'setup', 'findings')).toContainText('Creator SDK: Blocked');
-  await expect(field(page, 'setup', 'findings')).toContainText('Visual Scripting package: Blocked');
+  await expect(field(page, 'setup', 'findings')).toContainText('Creator SDK: Needs attention');
+  await expect(field(page, 'setup', 'findings')).toContainText('Visual Scripting package: Needs attention');
   await expect(field(page, 'setup', 'inspection-summary')).toContainText('3 items need review');
   await expect(field(page, 'setup', 'inspection-summary')).toContainText('No project files were changed');
   await expect(field(page, 'setup', 'review-hub')).toBeVisible();
@@ -961,7 +966,7 @@ for (const issue of ['conflict', 'legacy-only', 'recovery']) test(`a cancelled r
   await field(page, 'mcp', 'product-review-advanced').click();
   await expect(field(page, 'mcp', 'setup')).toBeDisabled();
   await expect(field(page, 'mcp', 'product-panel')).toBeVisible();
-  await expect(field(page, 'mcp', 'product-status')).toContainText('without explicit approval');
+  await expect(field(page, 'mcp', 'product-status')).toContainText('Review stopped. Earlier completed changes may remain.');
   expect((await commands(page, 'load_config')).length).toBe(1);
   expect((await commands(page, 'save_config')).length).toBe(0);
 });
@@ -971,7 +976,8 @@ test('a healthy cancelled review never unlocks an uncertain workflow release', a
   await page.getByText('Advanced settings', { exact: true }).click();
   await page.evaluate(() => { window.failNext = 'finish_ui_operation'; });
   await field(page, 'mcp', 'product-review-advanced').click();
-  await expect(field(page, 'mcp', 'error')).toContainText('Operation state is unknown');
+  await expect(field(page, 'mcp', 'error')).toContainText('Close and reopen Hub');
+  await expect(field(page, 'mcp', 'product-diagnostic')).toContainText('Operation state is unknown');
   await expect(field(page, 'mcp', 'setup')).toBeDisabled();
   await expect(field(page, 'mcp', 'product-panel')).toBeVisible();
   expect((await commands(page, 'load_config')).length).toBe(1);
@@ -1004,9 +1010,34 @@ test('saved-settings status failures expose recovery actions outside the disable
   await expect(field(page, 'mcp', 'product-panel')).toBeVisible();
   await expect(field(page, 'mcp', 'setup')).toBeDisabled();
   await expect(field(page, 'mcp', 'product-review')).toBeEnabled();
-  await expect(field(page, 'mcp', 'product-status')).toContainText('product_settings_status');
+  await expect(field(page, 'mcp', 'product-status')).toContainText('We could not finish checking');
+  await expect(field(page, 'mcp', 'product-diagnostic')).toContainText('product_settings_status');
+  await expect(field(page, 'mcp', 'product-diagnostic')).not.toBeVisible();
   await expect(field(page, 'mcp', 'retry')).toBeVisible();
   expect((await commands(page, 'load_config')).length).toBe(0);
+});
+
+for (const width of [390, 940]) test(`saved setup has clear actions and optional technical detail at ${width}px`, async ({ page }, testInfo) => {
+  await page.setViewportSize({ width, height: 800 });
+  await open(page, { shell: true, productStatus: 'conflict' });
+  await selectSuiteView(page, 'mcp');
+  await expect(field(page, 'mcp', 'product-title')).toHaveText('Use your saved MCP setup');
+  await expect(field(page, 'mcp', 'product-review')).toHaveText('Back up and continue');
+  await expect(field(page, 'mcp', 'product-status')).toContainText('current preferences and projects');
+  await expect(field(page, 'mcp', 'product-evidence')).not.toBeVisible();
+  await expect(field(page, 'mcp', 'product-details')).not.toHaveAttribute('open');
+  expect(await commands(page, 'review_product_settings')).toEqual([]);
+  await page.screenshot({ path: testInfo.outputPath(`saved-setup-${width}.png`) });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
+  await field(page, 'mcp', 'product-details').locator('summary').click();
+  await expect(field(page, 'mcp', 'product-evidence')).toBeVisible();
+  await field(page, 'mcp', 'product-details').locator('summary').click();
+  await field(page, 'mcp', 'product-later').click();
+  await expect(page.locator('#view-projects')).toBeVisible();
+  await expect(page.locator('#view-native-features')).toBeHidden();
+  expect(await commands(page, 'review_product_settings')).toEqual([]);
+  expect(await commands(page, 'load_config')).toEqual([]);
+  expect(await commands(page, 'save_config')).toEqual([]);
 });
 
 for (const settings of [{ productStatus: 'conflict' }, { productStatus: 'legacy-only' }, { productRecovery: true }]) test(`retained settings review stays outside locked form: ${JSON.stringify(settings)}`, async ({ page }) => {
@@ -1018,7 +1049,7 @@ for (const settings of [{ productStatus: 'conflict' }, { productStatus: 'legacy-
   await expect(field(page, 'mcp', 'product-evidence')).toContainText('/retained/evidence.json');
   expect((await commands(page, 'load_config')).length).toBe(0);
   await field(page, 'mcp', 'product-review').click();
-  await expect(field(page, 'mcp', 'product-status')).toContainText('without explicit approval');
+  await expect(field(page, 'mcp', 'product-status')).toContainText('Review stopped. Earlier completed changes may remain.');
   await expect(field(page, 'mcp', 'setup')).toBeDisabled();
   expect(await page.evaluate(() => lastProductReview)).toMatchObject({ approved: false, status: settings.productStatus || 'current' });
   expect((await commands(page, 'load_config')).length).toBe(0);
@@ -1026,14 +1057,15 @@ for (const settings of [{ productStatus: 'conflict' }, { productStatus: 'legacy-
   await page.evaluate(() => { window.approveProduct = true; }); await field(page, 'mcp', 'product-review').click();
   await expect(field(page, 'mcp', 'setup')).toBeEnabled();
   expect(await page.evaluate(() => lastProductReview)).toMatchObject({ approved: true, status: settings.productStatus || 'current' });
-  await expect(field(page, 'mcp', 'product-status')).toContainText('existing store');
+  await expect(field(page, 'mcp', 'product-status')).toContainText('Your saved setup is ready.');
   expect((await commands(page, 'load_config')).length).toBe(1);
   expect(await page.evaluate(() => savedConfig.unrelatedSetting)).toBe('preserve');
   expect((await commands(page, 'save_config')).length).toBe(0);
   if (settings.productStatus) {
+    await field(page, 'mcp', 'product-details').locator('summary').click();
     await field(page, 'mcp', 'product-check').click();
     await expect(field(page, 'mcp', 'setup')).toBeEnabled();
-    await expect(field(page, 'mcp', 'product-status')).toContainText('Reviewed settings remain in use');
+    await expect(field(page, 'mcp', 'product-status')).toContainText('Your saved setup is ready.');
     expect((await commands(page, 'review_product_settings')).length).toBe(2);
     expect((await commands(page, 'load_config')).length).toBe(1);
     expect((await commands(page, 'save_config')).length).toBe(0);
@@ -1045,9 +1077,10 @@ test('a new pending recovery after approved conflict still locks the form for ex
   await page.evaluate(() => { window.approveProduct = true; }); await field(page, 'mcp', 'product-review').click();
   await expect(field(page, 'mcp', 'setup')).toBeEnabled();
   await page.evaluate(() => { window.productRecovery = [{ journal: '/retained/new-recovery', historical_completed: false, completed: false, files: [] }]; });
+  await field(page, 'mcp', 'product-details').locator('summary').click();
   await field(page, 'mcp', 'product-check').click();
   await expect(field(page, 'mcp', 'setup')).toBeDisabled();
-  await expect(field(page, 'mcp', 'product-status')).toContainText('recovery review');
+  await expect(field(page, 'mcp', 'product-status')).toContainText('An earlier settings change did not finish');
   await expect(field(page, 'mcp', 'product-review')).toBeEnabled();
   expect((await commands(page, 'review_product_settings')).length).toBe(1);
   expect((await commands(page, 'load_config')).length).toBe(1);
@@ -1057,7 +1090,8 @@ test('a new pending recovery after approved conflict still locks the form for ex
 test('protected load refusal leaves settings review reachable and does not replace retained configuration', async ({ page }) => {
   await open(page, { fail: 'load_config' }); await show(page, 'mcp');
   await expect(field(page, 'mcp', 'setup')).toBeDisabled();
-  await expect(field(page, 'mcp', 'error')).toContainText('load_config');
+  await expect(field(page, 'mcp', 'product-diagnostic')).toContainText('load_config');
+  await expect(field(page, 'mcp', 'error')).toContainText('Your saved setup could not be checked');
   await expect(field(page, 'mcp', 'product-panel')).toBeVisible();
   await expect(field(page, 'mcp', 'product-review')).toBeEnabled();
   await field(page, 'mcp', 'product-review').click();
@@ -1333,7 +1367,12 @@ test('feature-load mount error cannot break other pages or survive disposal as a
     body: 'export function mount() { throw new Error("Fixture mount failure"); }' }));
   await open(page);
   expect(await show(page, 'setup')).toBe(false);
-  await expect(page.locator('#feature-setup').getByRole('alert')).toContainText('Fixture mount failure');
+  await expect(page.locator('#feature-setup').getByRole('alert')).toContainText('Close and reopen Hub');
+  await expect(page.locator('#feature-setup details')).not.toHaveAttribute('open');
+  await expect(page.locator('#feature-setup details p')).not.toBeVisible();
+  await expect(page.locator('#feature-setup').getByRole('button', { name: 'Back to Home' })).toBeVisible();
+  await page.locator('#feature-setup summary').click();
+  await expect(page.locator('#feature-setup details p')).toHaveText('Error: Fixture mount failure');
   expect(await show(page, 'mcp')).toBe(true);
   await expect(page.locator('#feature-setup')).toBeHidden();
   expect(await page.evaluate(() => CreatorFeaturePages.dispose())).toBe(true);

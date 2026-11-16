@@ -12,13 +12,16 @@ const report = (changes = {}) => ({ enabled: true, required: true, stage: 'revie
 function fixture(handler = () => report(), capability = true, storage = new Map()) {
   class Element {
     constructor() { this.listeners = new Map(); this.children = []; this.hidden = false; this.disabled = false; this.inert = false;
-      this.open = false; this.textContent = ''; this.attributes = {}; this.isConnected = true; this.shown = 0; this.closed = 0; }
+      this.open = false; this._textContent = ''; this.attributes = {}; this.isConnected = true; this.shown = 0; this.closed = 0; }
+    set textContent(value) { this._textContent = value; this.children = []; }
+    get textContent() { return this._textContent + this.children.map(child => child.textContent).join(''); }
     set innerHTML(_) { assert.fail('Native strings must never enter HTML'); }
     addEventListener(type, listener) { const set = this.listeners.get(type) || new Set(); set.add(listener); this.listeners.set(type, set); }
     removeEventListener(type, listener) { this.listeners.get(type)?.delete(listener); }
     dispatch(type) { const event = { prevented: false, preventDefault() { this.prevented = true; } };
       for (const listener of [...(this.listeners.get(type) || [])]) listener(event); return event; }
-    replaceChildren(...children) { this.children = children; }
+    replaceChildren(...children) { this._textContent = ''; this.children = children; }
+    append(...children) { this.children.push(...children); }
     get childElementCount() { return this.children.length; }
     setAttribute(key, value) { this.attributes[key] = value; }
     showModal() { this.open = true; this.shown++; }
@@ -31,7 +34,7 @@ function fixture(handler = () => report(), capability = true, storage = new Map(
   const calls = []; let lookups = 0;
   const document = { body: { children: [main, elements.dialog, alreadyLocked] }, activeElement: focus,
     querySelector(selector) { lookups++; return elements[selector.replace('#convergence-', '')] || null; },
-    createElement(name) { assert.equal(name, 'li'); return new Element(); } };
+    createElement(name) { assert.ok(['li', 'p', 'details', 'summary'].includes(name)); const element = new Element(); element.tagName = name.toUpperCase(); return element; } };
   const native = { invoke(command, ...args) {
     assert.ok(['convergence_status', 'refresh_convergence', 'prepare_convergence', 'migrate_convergence_connections', 'retire_convergence_apps', 'move_to_hub', 'inspect_convergence_outcome'].includes(command), 'Only bounded native migration phases');
     assert.deepEqual(args, [], 'No renderer paths, reports or client selections are native arguments');
@@ -424,7 +427,7 @@ for (const stage of ['review', 'complete']) test(`rejected streamlined ${stage} 
   f.click('refresh'); await tick();
   assert.match(f.elements.error.textContent, /Native migration support changed/);
   assert.equal(f.elements.move.hidden, true, 'A rejected inspection must not restore mutation controls');
-  assert.equal(f.elements.title.textContent, 'Migration needs review', 'A rejected inspection must not imply completion');
+  assert.equal(f.elements.title.textContent, 'Finish setting up Hub', 'A rejected inspection must not imply completion');
   assert.equal(f.elements.recovery.hidden, false);
   assert.equal(f.elements['recovery-text'].value, retained.recoveryHelp);
   assert.ok(f.elements.details.children.some(item => item.textContent === 'Backup: exact-original.bak'));
