@@ -76,6 +76,34 @@ async function continueMcpGuide(page) {
     await guide.waitFor({ state: 'hidden' });
   }
 }
+async function checkSdkLookup(page,report,phase) {
+  const snapshot=()=>page.evaluate(()=>{
+    const root=document.querySelector('#feature-mcp'),field=name=>root?.querySelector('[data-field="'+name+'"]');
+    return {text:field('sdk-latest')?.textContent,status:field('status')?.textContent,
+      controlsDisabled:field('controls')?.disabled,buttonDisabled:field('sdk-check')?.disabled,
+      busy:root?.getAttribute('aria-busy'),errorVisible:field('error')?.hidden===false};
+  });
+  const evidence={phase,before:await snapshot(),manualRetry:false};
+  (report.sdkLookups ||= []).push(evidence);
+  try {
+    if(evidence.before.text==='Latest Creator SDK not checked.') {
+      await page.locator('#feature-mcp [data-field="sdk-check"]').click();evidence.manualRetry=true;
+    }
+    await page.waitForFunction(()=>{
+      const root=document.querySelector('#feature-mcp'),text=root?.querySelector('[data-field="sdk-latest"]')?.textContent;
+      return text!=='Latest Creator SDK not checked.'&&text!=='Checking latest Creator SDK...'
+        &&root?.querySelector('[data-field="sdk-check"]')?.disabled===false;
+    },null,{timeout:25000});
+    const state=await snapshot();
+    assert.equal(state.status,'Ready');assert.equal(state.controlsDisabled,false);
+    assert.equal(state.busy,'false');assert.equal(state.errorVisible,false);assert.equal(state.buttonDisabled,false);
+    if(state.text==='Latest SDK could not be checked. Installed versions are still shown below.')evidence.mode='offline';
+    else {
+      assert.match(state.text,/^Latest Creator SDK: (0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/);
+      evidence.mode='live';evidence.version=state.text.slice('Latest Creator SDK: '.length);
+    }
+  } finally { evidence.after=await snapshot(); }
+}
 async function checkSdkMetadata(page,out,report,target,direct,show) {
   const checked=[];
   for(const [version,mismatch] of [['4.0.25',true],['4.0.27',false]]) {
@@ -95,9 +123,10 @@ async function checkSdkMetadata(page,out,report,target,direct,show) {
     assert.equal(fs.readFileSync(path.join(folder,'Packages/packages-lock.json'),'utf8'),lock);
     checked.push({version,mismatch,profile:value.profile,tested:value.creatorSdkTested,filesUnchanged:true});
   }
+  report.sdkMetadata={checked};
   await show('mcp');await continueMcpGuide(page);
-  await page.waitForFunction(()=>document.querySelector('#feature-mcp [data-field="sdk-latest"]')?.textContent.includes('Installed versions are still shown'),null,{timeout:25000});
-  report.sdkMetadata={checked,offlineLookupNonBlocking:true};await direct.showHome(page);
+  await checkSdkLookup(page,report,'after-automatic-update');
+  report.sdkMetadata.lookupNonBlocking=true;await direct.showHome(page);
 }
 async function main() {
   target.assertAdmission(); // Must precede config/profile reads, installers, policy and native probes.
@@ -430,8 +459,8 @@ async function main() {
     assert.equal(await page.evaluate(() => localStorage.getItem('outgoing-preserved')), 'direct23-to24');
     verifyClients();
     await show('mcp'); await continueMcpGuide(page);
-    await page.waitForFunction(()=>document.querySelector('#feature-mcp [data-field="sdk-latest"]')?.textContent.includes('Installed versions are still shown'),null,{timeout:25000});
-    report.sdkMetadata.afterNormalRestartOfflineNonBlocking=true; await direct.showHome(page);
+    await checkSdkLookup(page,report,'after-normal-restart');
+    report.sdkMetadata.afterNormalRestartLookupNonBlocking=true; await direct.showHome(page);
     report.normalRestartPreserved = true;
     report.manualCapabilityRetention = require('./sdk-retention-023.cjs').verify(
       lastTool, restore, fs.readFileSync(path.join(roaming, 'creator-works-mcp/launcher-config.json')),
@@ -479,5 +508,5 @@ async function main() {
   }
 }
 module.exports = { assertProtocol, assertTicket, observeAutomaticSuccessor, completeStartup, setUpdatePreferences,
-  assertSavedPreferences, assertFreshOldConnection, continueMcpGuide, main };
+  assertSavedPreferences, assertFreshOldConnection, continueMcpGuide, checkSdkLookup, main };
 if (require.main === module) main().catch(error => { console.error(String(error.message).slice(0, 1200)); process.exitCode = 1; });

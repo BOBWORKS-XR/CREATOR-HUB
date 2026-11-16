@@ -73,7 +73,15 @@ function checkMigrationReceipt(report) {
   target.assertFreshConnection(report.freshOldProcesses,report.reconnectedProcesses,profile);
   assert.equal(new Set([...report.heldProcessesBefore,...report.freshOldProcesses,...report.reconnectedProcesses].map(p=>p.pid)).size,6);
   assert.equal(report.freshOldServerVersion.version,'2.7.10');
-  assert.deepEqual(report.sdkMetadata,{checked:[{version:'4.0.25',mismatch:true,profile:'creator',tested:true,filesUnchanged:true},{version:'4.0.27',mismatch:false,profile:'creator',tested:false,filesUnchanged:true}],offlineLookupNonBlocking:true,afterNormalRestartOfflineNonBlocking:true});
+  assert.deepEqual(report.sdkMetadata,{checked:[{version:'4.0.25',mismatch:true,profile:'creator',tested:true,filesUnchanged:true},{version:'4.0.27',mismatch:false,profile:'creator',tested:false,filesUnchanged:true}],lookupNonBlocking:true,afterNormalRestartLookupNonBlocking:true});
+  assert.equal(report.sdkLookups?.length,2);
+  for(const [i,e] of report.sdkLookups.entries()) {
+    assert.equal(e.phase,['after-automatic-update','after-normal-restart'][i]);assert.equal(typeof e.manualRetry,'boolean');
+    assert.equal(typeof e.before?.text,'string');assert.equal(e.after?.status,'Ready');assert.equal(e.after.controlsDisabled,false);
+    assert.equal(e.after.busy,'false');assert.equal(e.after.errorVisible,false);assert.equal(e.after.buttonDisabled,false);
+    if(e.mode==='offline') {assert.equal(e.after.text,'Latest SDK could not be checked. Installed versions are still shown below.');assert.equal(e.version,undefined);}
+    else {assert.equal(e.mode,'live');assert.match(e.version,/^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/);assert.equal(e.after.text,'Latest Creator SDK: '+e.version);}
+  }
 }
 function checkReceipt(report, rows, config, env = process.env) {
   target.assertBound(config); assert.equal(report.kind, target.KIND); assert.equal(report.sourceCommit, binding.target.source.commit);

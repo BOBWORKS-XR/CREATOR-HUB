@@ -78,7 +78,46 @@ test('reader requires unchanged clients and removes migration-success claims',()
   assert.doesNotMatch(code,/assertReviewedClientMigration|assertMigrationEvidence/);
   const driver=read('windows-outgoing-019-driver.cjs');
   assert.doesNotMatch(driver,/direct\.migrateExistingClaude|direct\.assertReviewedClientMigration|direct\.assertMigrationEvidence/);
-  assert.match(driver,/sdkMetadata=/);assert.match(driver,/offlineLookupNonBlocking:true/);
+  assert.match(driver,/sdkMetadata=/);assert.match(driver,/lookupNonBlocking=true/);
+});
+
+test('SDK lookup accepts strict live or offline outcomes and retries only an unstarted check',async()=>{
+  const {checkSdkLookup}=load('windows-outgoing-019-driver.cjs');
+  const state=text=>({text,status:'Ready',controlsDisabled:false,buttonDisabled:false,busy:'false',errorVisible:false});
+  async function check(initial,terminal,failWait=false) {
+    let value=state(initial),clicks=0;const report={};
+    const field=selector=>({
+      '[data-field="sdk-latest"]':{textContent:value.text},'[data-field="status"]':{textContent:value.status},
+      '[data-field="controls"]':{disabled:value.controlsDisabled},'[data-field="sdk-check"]':{disabled:value.buttonDisabled},
+      '[data-field="error"]':{hidden:!value.errorVisible},
+    })[selector];
+    const context={document:{querySelector:selector=>selector==='#feature-mcp'?{querySelector:field,getAttribute:()=>value.busy}:null}};
+    const evaluate=fn=>require('node:vm').runInNewContext('('+fn.toString()+')()',context);
+    const page={evaluate:async fn=>evaluate(fn),locator:selector=>({click:async()=>{
+      assert.equal(selector,'#feature-mcp [data-field="sdk-check"]');clicks++;
+    }}),waitForFunction:async fn=>{
+      value=terminal;if(failWait){assert.equal(evaluate(fn),false);throw Error('fixture timeout');}
+      assert.equal(evaluate(fn),true);
+    }};
+    const pending=checkSdkLookup(page,report,'after-automatic-update');
+    return {pending,report,clicks:()=>clicks};
+  }
+  for(const text of ['Latest Creator SDK: 4.0.27','Latest SDK could not be checked. Installed versions are still shown below.']) {
+    const run=await check(text,state(text));await run.pending;
+    assert.equal(run.clicks(),0);assert.equal(run.report.sdkLookups[0].mode,text.startsWith('Latest Creator SDK:')?'live':'offline');
+  }
+  const retry=await check('Latest Creator SDK not checked.',state('Latest Creator SDK: 4.0.27'));
+  await retry.pending;assert.equal(retry.clicks(),1);assert.equal(retry.report.sdkLookups[0].manualRetry,true);
+  const inFlight=await check('Checking latest Creator SDK...',state('Latest Creator SDK: 4.0.27'));
+  await inFlight.pending;assert.equal(inFlight.clicks(),0);
+  for(const invalid of ['Latest Creator SDK: 4.0.27-beta','Latest Creator SDK: 04.0.27','Unknown response']) {
+    const bad=await check(invalid,state(invalid));await assert.rejects(bad.pending);
+    assert.equal(bad.report.sdkLookups[0].after.text,invalid);
+  }
+  const locked=await check('Latest Creator SDK: 4.0.27',{...state('Latest Creator SDK: 4.0.27'),controlsDisabled:true});
+  await assert.rejects(locked.pending);
+  const timeout=await check('Checking latest Creator SDK...',state('Checking latest Creator SDK...'),true);
+  await assert.rejects(timeout.pending,/fixture timeout/);assert.equal(timeout.report.sdkLookups[0].after.text,'Checking latest Creator SDK...');
 });
 test('generated scripts parse including full native PowerShell and inherited helper closures',()=>{
   for(const n of ['windows-outgoing-019-driver.cjs','windows-outgoing-019-target.cjs','windows-outgoing-019-input.cjs',
@@ -142,13 +181,20 @@ test('full receipt validates actual captured files and refuses mutation without 
     resourceProbe:{phase:'after-automatic-root',attempts:1,passed:true},heldProcessesBefore:processes(10),heldProcessesAfter:processes(10),
     reconnectedProcesses:processes(20),freshOldProcesses:processes(30),heldServerVersion:{version:'2.7.10'},reconnectedServerVersion:{version:'2.7.10'},freshOldServerVersion:{version:'2.7.10'},
     beforeRoute:{generation:binding.baseline.generation},afterRoute:{generation:binding.target.generation},
-    sdkMetadata:{checked:[{version:'4.0.25',mismatch:true,profile:'creator',tested:true,filesUnchanged:true},{version:'4.0.27',mismatch:false,profile:'creator',tested:false,filesUnchanged:true}],offlineLookupNonBlocking:true,afterNormalRestartOfflineNonBlocking:true},
+    sdkMetadata:{checked:[{version:'4.0.25',mismatch:true,profile:'creator',tested:true,filesUnchanged:true},{version:'4.0.27',mismatch:false,profile:'creator',tested:false,filesUnchanged:true}],lookupNonBlocking:true,afterNormalRestartLookupNonBlocking:true},
+    sdkLookups:['after-automatic-update','after-normal-restart'].map(phase=>({phase,manualRetry:false,
+      before:{text:'Checking latest Creator SDK...'},mode:'offline',after:{text:'Latest SDK could not be checked. Installed versions are still shown below.',
+        status:'Ready',controlsDisabled:false,buttonDisabled:false,busy:'false',errorVisible:false}})),
     publicDiscovery:false,liveAiAcceptance:false,releaseReady:false};
   for(const k of ['passed','nativeUpdateAccepted','automaticRestart','cancelPreserved','existingConnectionSurvived','newConnectionVerified','restorationVerified','policyRestored','settingsPreserved','acceptanceOnly','targetMcpRuntimeVerified','installedResourcesVerifiedBeforeAndAfter','heldGenerationRetained','activeRouteUnchangedAfterCancel','normalRestartPreserved','fixtureEvidencePreservedAfterCleanup'])report[k]=true;
   const lifecycle=[{kind:'lab-lifecycle-result',scenario:target.KIND,actualScope:'exact-direct23-to-qualified24-acceptance-fixture-lab-only',lifecycleSucceeded:true,cleanupVerified:true,systemTlsVerified:true,labDiscovery:true,publicDiscovery:false,productAcceptance:false,releaseReady:false,driverExitCode:0,servedRouteCount:5,rejectedRequestCount:0}];
   collector.checkReceipt(report,lifecycle,config,{CREATOR_OUTGOING_CASE:'mcp-restore'});
   assert.deepEqual(resourceChecks,['0.1.23','0.1.24','installed']);
-  for(const change of [r=>r.clientConnectionsUnchanged=false,r=>r.normalRestartRoot=r.afterRoot,r=>r.sdkMetadata.offlineLookupNonBlocking=false,r=>r.clientReview={approved:true}]){
+  const live=structuredClone(report);
+  for(const e of live.sdkLookups){e.mode='live';e.version='4.0.27';e.after.text='Latest Creator SDK: 4.0.27';}
+  collector.checkReceipt(live,lifecycle,config,{CREATOR_OUTGOING_CASE:'mcp-restore'});
+  for(const change of [r=>r.clientConnectionsUnchanged=false,r=>r.normalRestartRoot=r.afterRoot,r=>r.sdkMetadata.lookupNonBlocking=false,
+    r=>r.sdkLookups[0].mode='live',r=>r.sdkLookups[0].after.controlsDisabled=true,r=>r.sdkLookups[1].phase='after-automatic-update',r=>r.clientReview={approved:true}]){
     const bad=structuredClone(report);change(bad);assert.throws(()=>collector.checkReceipt(bad,lifecycle,config,{CREATOR_OUTGOING_CASE:'mcp-restore'}));}
   fs.writeFileSync(clients.selectedAfter.capture,'changed');
   assert.throws(()=>collector.checkReceipt(report,lifecycle,config,{CREATOR_OUTGOING_CASE:'mcp-restore'}));
