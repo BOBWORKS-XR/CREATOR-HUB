@@ -1,4 +1,4 @@
-name: Private signed 023 to 024 MCP restore
+name: Public Windows 023 to 024 acceptance
 on:
   workflow_dispatch:
     inputs:
@@ -7,7 +7,6 @@ on:
 permissions: {contents: read}
 jobs:
   preflight:
-    if: github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.ref == 'refs/heads/codex/windows-sdk-labels-024-update'
     runs-on: windows-latest
     timeout-minutes: 5
     steps:
@@ -17,25 +16,28 @@ jobs:
       - uses: actions/setup-node@v6
         with: {node-version: 24}
       - run: npm ci --ignore-scripts
-      - run: node --test scripts/update-024.test.cjs
-      - name: Parse actual native script
-        shell: pwsh
-        run: |
-          $tokens=$null; $errors=$null
-          [void][System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PWD 'scripts/native-self-update-outgoing-019.ps1'),[ref]$tokens,[ref]$errors)
-          if ($errors.Count) { throw 'Native runner parse failed' }
+      - run: node --test scripts/public-update-024.test.cjs
   acceptance:
     needs: preflight
-    if: github.event_name == 'workflow_dispatch'
+    if: github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.ref == 'refs/heads/codex/windows-public-sdk-labels-024'
     runs-on: windows-latest
     timeout-minutes: 20
-    permissions: {contents: write} # Existing private draft asset GET only.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {case: mcp-restore, tool: mcp, restore: 'true'}
+          - {case: setup-restore, tool: setup, restore: 'true'}
+          - {case: setup-no-restore, tool: setup, restore: 'false'}
     env:
       EXPECTED_HARNESS_COMMIT: ${{ inputs.expected_harness_commit }}
-      CREATOR_OUTGOING_REVIEW_SHA256: ${{ inputs.binding_sha256 }}
-      CREATOR_OUTGOING_CASE: mcp-restore
-      CREATOR_OUTGOING_LAST_TOOL: mcp
-      CREATOR_OUTGOING_RESTORE: 'true'
+      CREATOR_PUBLIC_BINDING_SHA256: ${{ inputs.binding_sha256 }}
+      CREATOR_OUTGOING_CASE: ${{ matrix.case }}
+      CREATOR_OUTGOING_LAST_TOOL: ${{ matrix.tool }}
+      CREATOR_OUTGOING_RESTORE: ${{ matrix.restore }}
+      CREATOR_SELF_UPDATE_TARGET_VERSION: '0.1.24'
+      CREATOR_SELF_UPDATE_INSTALLER_SHA256: 'ef8d0e3e59e25fbdfdc24ad3e739e568d4ddf8714dcd7bde6a0498045fe80db1'
+      CREATOR_SELF_UPDATE_EXECUTABLE_SHA256: '69a5a90fe30c0d23d5ef08f6ed7f0820ba3dfba1851b448205493cee2e595000'
     steps:
       - run: git config --global core.autocrlf false
       - uses: actions/checkout@v6
@@ -43,48 +45,35 @@ jobs:
       - uses: actions/setup-node@v6
         with: {node-version: 24}
       - run: npm ci --ignore-scripts
-      - name: Admit exact target source
-        id: source
-        shell: pwsh
-        run: |
-          $source=node scripts/windows-outgoing-019-input.cjs source | ConvertFrom-Json
-          if ($LASTEXITCODE -ne 0) { throw 'Pending target binding' }
-          "commit=$($source.commit)" | Add-Content -LiteralPath $env:GITHUB_OUTPUT
-          "tree=$($source.tree)" | Add-Content -LiteralPath $env:GITHUB_OUTPUT
       - uses: actions/checkout@v6
-        with:
-          ref: ${{ steps.source.outputs.commit }}
-          path: product
-          persist-credentials: false
+        with: {ref: 9e46f1a9212df4f56b4b7e1188e2afb8e33e264a, path: product, persist-credentials: false}
       - shell: pwsh
         run: |
-          if ((git -C product rev-parse HEAD) -cne '${{ steps.source.outputs.commit }}' -or (git -C product rev-parse 'HEAD^{tree}') -cne '${{ steps.source.outputs.tree }}') { throw 'Wrong product source' }
+          if ((git -C product rev-parse HEAD) -cne '9e46f1a9212df4f56b4b7e1188e2afb8e33e264a' -or (git -C product rev-parse 'HEAD^{tree}') -cne '6567eb46f1d3bc70f94131dcfef79d1251896fcf') { throw 'Product source differs' }
       - run: npm --prefix product/modules/mcp ci --ignore-scripts
-      - name: Acquire signed private target and public 023 baseline
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          $input=node scripts/windows-outgoing-019-input.cjs acquire | ConvertFrom-Json
-          if ($LASTEXITCODE -ne 0) { throw 'Input admission failed' }
-          "CREATOR_OUTGOING_CONFIG_SHA256=$($input.configSha256)" | Add-Content -LiteralPath $env:GITHUB_ENV
-      - name: Native cancel approve automatic and normal restart
+      - name: Anonymous public feed and exact assets
         shell: pwsh
         run: |
-          ./scripts/native-self-update-outgoing-019.ps1 -Outgoing019 -ContractPath (Join-Path $PWD artifacts/outgoing-019/runner-config.json) -BaselineInstallerPath (Join-Path $PWD artifacts/outgoing-019/data/Creator.Hub_0.1.23_x64-setup.exe) -TimeoutSeconds 480 | Tee-Object -FilePath artifacts/outgoing-019/lifecycle.jsonl
-          if ($LASTEXITCODE -ne 0) { throw 'Native update failed' }
-          $reports=@(Get-ChildItem artifacts/native-suite-*/outgoing-report.json)
-          if ($reports.Count -ne 1) { throw 'One native report required' }
-          node scripts/windows-outgoing-019-input.cjs receipt $reports[0].FullName (Join-Path $PWD artifacts/outgoing-019/lifecycle.jsonl)
-          if ($LASTEXITCODE -ne 0) { throw 'Receipt failed' }
+          node scripts/public-update-024.cjs prepare
+          if ($LASTEXITCODE -ne 0) { throw 'Public input admission refused' }
+          "CREATOR_PUBLIC_UPDATE_CONFIG=$((Join-Path $PWD artifacts/public-update-024-input/config.json))" | Add-Content -LiteralPath $env:GITHUB_ENV
+      - name: Native public cancel approve automatic and normal restart
+        shell: pwsh
+        run: |
+          node scripts/native-public-update-024.cjs
+          if ($LASTEXITCODE -ne 0) { throw 'Native public update failed' }
+          node scripts/public-evidence-024.cjs
+          if ($LASTEXITCODE -ne 0) { throw 'Public evidence refused' }
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: windows-024-mcp-restore-${{ github.run_id }}-${{ github.run_attempt }}
+          name: public-024-${{ matrix.case }}-${{ github.run_id }}-${{ github.run_attempt }}
           retention-days: 14
           path: |
-            artifacts/outgoing-019/*.json
-            artifacts/outgoing-019/*.jsonl
+            artifacts/public-update-024-input/*.json
+            artifacts/public-update-024-input/*.minisig
             artifacts/native-suite-*/*.json
+            artifacts/native-suite-*/*.toml
             artifacts/native-suite-*/*.png
             artifacts/native-suite-*/sdk-metadata-*/Packages/*.json
+            !artifacts/native-suite-*/startup.json
