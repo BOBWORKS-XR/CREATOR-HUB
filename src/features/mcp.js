@@ -1,5 +1,6 @@
 import { controller, node, lines, text, confirm } from './common.js';
 import { capabilityView } from './capability-profiles.js';
+import { recalledProductReview, rememberProductReview } from './product-review.js';
 
 const clients = [
   ['codex', 'Codex', 'codex'], ['claude', 'Claude Code', 'claude'],
@@ -120,12 +121,15 @@ export function mount(root, api) {
     $('error').hidden = false;
     productVisibility();
   }
-  function renderProductSettings(report) {
+  function renderProductSettings(report, recall = true) {
     if (!report || !['none', 'current', 'identical', 'legacy-only', 'conflict'].includes(report.status)
       || !Array.isArray(report.backups) || !Array.isArray(report.recovery)) throw new Error('Saved settings status is incomplete. Originals were not changed.');
     productReport = report;
     const interrupted = report.recovery.some(item => !item.historical_completed);
     if (interrupted) productReviewed = false;
+    else if (recall && ['legacy-only', 'conflict'].includes(report.status)) {
+      productReviewed = recalledProductReview(report, localStorage);
+    }
     const reviewMessage = productReviewed ? 'Your saved setup is ready. Your original files and backups are kept.' : '';
     const messages = { none: 'No previous MCP setup was found.', current: 'Your current MCP settings are ready.', identical: 'Your saved setups match. Both copies will be kept.',
       'legacy-only': 'Your previous MCP setup is available. Back it up to continue.',
@@ -419,7 +423,7 @@ export function mount(root, api) {
     productIssue = true; productVisibility();
     const reviewed = await run(async () => {
       const report = await page.call('review_product_settings');
-      renderProductSettings(report);
+      renderProductSettings(report, false);
       if (typeof report.approved !== 'boolean') throw new Error('Settings review outcome is unknown. Check retained settings before continuing.');
       // Report.status/backups alone cannot distinguish a native cancellation.
       if (report.approved !== true) {
@@ -437,6 +441,9 @@ export function mount(root, api) {
       productReviewed = wasReviewed; productIssue = false; productVisibility(); page.lock(false);
     }
     if (reviewed && productReport?.approved === true && !$('controls').disabled) {
+      try {
+        if (['legacy-only', 'conflict'].includes(productReport.status)) rememberProductReview(productReport, localStorage);
+      } catch (reason) { productError(reason); return; }
       productReviewed = true;
       $('product-title').textContent = 'Saved MCP setup';
       $('product-status').textContent = 'Your saved setup is ready. Your original files and backups are kept.';

@@ -26,8 +26,12 @@ async function open(page, options = {}) {
     window.pendingRestore = options.restore ? [options.restore] : [];
     window.productStatus = options.productStatus || 'current';
     window.productRecovery = options.productRecovery || options.productRecoveryCompleted ? [{ journal: '/retained/recovery', historical_completed: options.productRecoveryCompleted === true, completed: options.productRecoveryCompleted === true, files: [] }] : [];
+    const productBackups = () => window.productStatus === 'legacy-only'
+      ? [`/settings/.creator-hub-settings-backups/legacy.json.${'b'.repeat(64)}.bak`]
+      : options.productStatus ? [`/settings/.creator-hub-settings-backups/current.json.${'a'.repeat(64)}.bak`,
+        `/settings/.creator-hub-settings-backups/legacy.json.${'b'.repeat(64)}.bak`] : [];
     const productReport = () => ({ status: window.productStatus, currentPath: '/settings/current.json', legacyPath: '/settings/legacy.json',
-      evidencePath: '/retained/evidence.json', backups: options.productStatus ? ['/retained/exact-backup'] : [], recovery: structuredClone(window.productRecovery) });
+      evidencePath: '/retained/evidence.json', backups: productBackups(), recovery: structuredClone(window.productRecovery) });
     window.feedbackDocuments = structuredClone(options.feedbackDocuments || {});
     const feedback = project => {
       const document = window.feedbackDocuments[project] || {};

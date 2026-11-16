@@ -22,7 +22,7 @@ async function open(page, options = {}) {
       '/projects/Other': { profile: 'banter', label: 'Banter SDK', packages: [], recommendedToolGroups: 'core,banter' },
       ...options.profiles,
     };
-    const report = { status: options.productStatus || 'current', backups: [], recovery: options.productRecovery || [] };
+    window.productReport = { status: options.productStatus || 'current', backups: [], recovery: options.productRecovery || [], ...options.productReport };
     window.__TAURI__ = {
       event: { listen: async () => () => {} },
       core: { invoke: async (command, args = {}) => {
@@ -39,10 +39,10 @@ async function open(page, options = {}) {
         switch (name) {
           case 'begin_ui_operation': return 17;
           case 'finish_ui_operation': return null;
-          case 'product_settings_status': return report;
+          case 'product_settings_status': return window.productReport;
           case 'review_product_settings':
             if (options.partialProductReview) window.savedConfig.unrelated.recovered = true;
-            return options.productReviewResult || { ...report, approved: true };
+            return options.productReviewResult || { ...window.productReport, approved: true };
           case 'load_config': return structuredClone(window.savedConfig);
           case 'save_config':
             window.savedConfig = structuredClone(fields.config);
@@ -246,6 +246,66 @@ async function controlsLocked(page, locked) {
   }
 }
 async function navigateBack(page) { await page.evaluate(async () => { CreatorFeaturePages.hide(); await CreatorFeaturePages.show('mcp'); }); }
+
+const backedUpConflict = () => ({
+  status: 'conflict', currentPath: '/current/launcher-config.json', legacyPath: '/legacy/launcher-config.json',
+  backups: [`/current/.creator-hub-settings-backups/launcher-config.json.${'a'.repeat(64)}.bak`,
+    `/legacy/.creator-hub-settings-backups/launcher-config.json.${'b'.repeat(64)}.bak`], recovery: [],
+});
+
+test('approved backed-up settings remain usable after a full page restart without automatic writes', async ({ page }) => {
+  await open(page, { productReport: backedUpConflict() });
+  await controlsLocked(page, true);
+  await field(page, 'product-review').click(); await idle(page);
+  await controlsLocked(page, false);
+  await expect(field(page, 'project')).toHaveValue('/projects/Creator');
+  expect(await page.evaluate(() => localStorage.getItem('creator-hub.mcp-product-review.v1'))).not.toBeNull();
+  await page.reload();
+  await page.evaluate(async () => { await CreatorUsageTerms.requireAcceptance(); await CreatorFeaturePages.show('mcp'); });
+  await idle(page); await controlsLocked(page, false);
+  await expect(field(page, 'project')).toHaveValue('/projects/Creator');
+  expect(await mutationCalls(page)).toEqual([]);
+  expect(await page.evaluate(() => savedConfig.unrelated)).toEqual({ retain: ['exact', 'values'] });
+});
+
+test('a changed saved file or unfinished recovery invalidates the remembered settings review', async ({ page }) => {
+  await open(page, { productReport: backedUpConflict() });
+  await field(page, 'product-review').click(); await idle(page);
+  await page.evaluate(() => { productReport.backups[0] = productReport.backups[0].replace('a'.repeat(64), 'c'.repeat(64)); });
+  await field(page, 'product-check').dispatchEvent('click'); await idle(page); await controlsLocked(page, true);
+  await field(page, 'product-review').click(); await idle(page); await controlsLocked(page, false);
+  await page.evaluate(() => { productReport.recovery = [{ historical_completed: false, files: [] }]; });
+  await field(page, 'product-check').dispatchEvent('click'); await idle(page); await controlsLocked(page, true);
+  expect(await commands(page, 'save_config')).toEqual([]);
+});
+
+for (const fault of ['load_config', 'finish_ui_operation']) test(`failed ${fault} cannot persist setup approval`, async ({ page }) => {
+  await open(page, { productReport: backedUpConflict() });
+  await page.evaluate(fault => { failNext = fault; }, fault);
+  await field(page, 'product-review').click(); await idle(page);
+  await controlsLocked(page, true);
+  expect(await page.evaluate(() => localStorage.getItem('creator-hub.mcp-product-review.v1'))).toBeNull();
+});
+
+test('settings review storage failure keeps the form locked with a retryable explanation', async ({ page }) => {
+  await open(page, { productReport: backedUpConflict() });
+  await page.evaluate(() => { Storage.prototype.setItem = () => { throw new Error('Storage unavailable'); }; });
+  await field(page, 'product-review').click(); await idle(page);
+  await controlsLocked(page, true);
+  await expect(field(page, 'product-status')).toContainText('Your existing files are kept');
+  await expect(field(page, 'product-review')).toBeEnabled();
+});
+
+test('explicit review repairs a malformed remembered receipt after rechecking backups', async ({ page }) => {
+  await open(page, { productReport: backedUpConflict() });
+  await page.evaluate(() => localStorage.setItem('creator-hub.mcp-product-review.v1', '{broken'));
+  await field(page, 'product-check').dispatchEvent('click'); await idle(page);
+  await controlsLocked(page, true);
+  await field(page, 'product-review').click(); await idle(page);
+  await controlsLocked(page, false);
+  expect(await page.evaluate(() => JSON.parse(localStorage.getItem('creator-hub.mcp-product-review.v1')).version)).toBe(1);
+  expect(await commands(page, 'save_config')).toEqual([]);
+});
 
 test('completed history from another settings location is disclosed but never offered for resume', async ({ page }) => {
   await open(page, { productRecovery: [{ journal: '/retained/preview-history', files: [],
