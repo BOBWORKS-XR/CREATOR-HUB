@@ -1,5 +1,6 @@
 'use strict';
 const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path');
+const hash=bytes=>require('node:crypto').createHash('sha256').update(bytes).digest('hex');
 const {readBounded}=require('./read-bounded-input.cjs');
 const binding=require('./fixtures/public-update-023-binding.json');
 function readHash(file, expected, relativePath = path.basename(file)) {

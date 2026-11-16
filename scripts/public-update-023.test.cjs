@@ -21,3 +21,11 @@ test('anonymous download is bounded and carries no authorization',async()=>{let 
 test('public notes retain exact installer signature/url',()=>{assert.equal(binding.target.latest.sha256,'f33a4db80c4d9f3d0ce4b413b4f3485a7b529e6aa428026b6cf7aedc54e3ec32');assert.equal(binding.originalLatest.platforms['windows-x86_64'].url,target.url('0.1.23',target.ASSET));});
 test('driver remains parsed native flow without proxy or version fixture',()=>{const code=fs.readFileSync(path.join(__dirname,'native-public-update-023.cjs'),'utf8');new vm.Script(code);assert.doesNotMatch(code,/CREATOR_SELF_UPDATE_LAB_|startLabProxy/);for(const s of ["button('Not now')","button('Update Hub')","native('close')",'observeAutomaticSuccessor','codexBeforeSha256','codexAfterSha256',"page.locator('#check-updates').click()"] )assert.ok(code.includes(s),s);});
 test('normal restart remains separate from automatic replacement',()=>{const code=fs.readFileSync(path.join(__dirname,'native-public-update-023.cjs'),'utf8');assert.ok(code.indexOf('observeAutomaticSuccessor({ hub')<code.indexOf('report.beforeNormalRestart = rootRecord'));assert.equal((code.match(/child = spawn\(hub/g)||[]).length,2);});
+test('resource verifier hashes actual bytes and rejects mismatch',()=>{
+  const resources=require('./public-resources-023.cjs');
+  const folder=fs.mkdtempSync(path.join(require('node:os').tmpdir(),'public023-hash-'));
+  const file=path.join(folder,'bytes.txt'),bytes=Buffer.from('bounded public verifier regression');
+  try {fs.writeFileSync(file,bytes,{flag:'wx'});resources.readHash(file,target.hash(bytes));
+    assert.throws(()=>resources.readHash(file,'0'.repeat(64)));}
+  finally {fs.unlinkSync(file);fs.rmdirSync(folder);}
+});
