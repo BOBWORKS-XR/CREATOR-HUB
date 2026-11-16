@@ -51,7 +51,7 @@ async function open(page, options = {}) {
             return null;
           case 'discover_unity_projects': return channels.map(channel => ({ name: channel.name, path: channel.unity_project_path }));
           case 'get_onboarding_status': return window.invalidStatus ? { runtime: { ready: true }, clients: [] } : {
-            managedRouting: true, runtime: { ready: true, ...options.runtime },
+            managedRouting: options.managedRouting !== false, runtime: { ready: true, ...options.runtime },
             project: fields.unityProjectPath ? { valid: true, bridgeInstalled: true, bridgeCurrent: true, stateStatus: 'fresh', sdkProfile: window.profiles[fields.unityProjectPath] } : null,
             clients: ['codex', 'claude', 'claudeDesktop', 'antigravity', 'opencode'].map(id => ({ id, detected: true, configured: true, supported: true })),
             unityCli: { canEnable: true, enabled: false, message: 'Optional Unity CLI' },
@@ -308,8 +308,8 @@ test('explicit review repairs a malformed remembered receipt after rechecking ba
   expect(await commands(page, 'save_config')).toEqual([]);
 });
 
-test('runtime repair preserves every other setting and does not touch Unity or client configurations', async ({ page }) => {
-  await open(page, { runtime: { bundled: true, command: 'C:/Hub/mcp/server/runtime/node.exe' } });
+test('runtime repair before route binding preserves every other setting without Unity or client writes', async ({ page }) => {
+  await open(page, { managedRouting: false, runtime: { bundled: true, command: 'C:/Hub/mcp/server/runtime/node.exe' } });
   const before = await page.evaluate(() => structuredClone(savedConfig));
   await field(page, 'repair-runtime').click();
   await page.getByRole('button', { name: 'Use Hub runtime', exact: true }).click(); await idle(page);

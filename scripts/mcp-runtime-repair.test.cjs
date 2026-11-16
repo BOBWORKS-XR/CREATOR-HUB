@@ -25,9 +25,9 @@ test('verified managed bundled runtime maps only to its adjacent server', () => 
   assert.equal(bundledServerPath(status('e:\\Creator Hub/modules\\mcp/server\\RUNTIME/Node.EXE')),
     'e:/Creator Hub/modules/mcp/server/creator-works-mcp.mjs');
 });
-test('runtime readiness, bundled identity and managed routing must each be literal true', () => {
+test('runtime readiness and bundled identity must each be literal true', () => {
   for (const value of [false, null, undefined, 0, 1, 'true', {}, []]) {
-    for (const field of ['managedRouting', 'ready', 'bundled']) {
+    for (const field of ['ready', 'bundled']) {
       const input = status();
       if (field === 'managedRouting') input[field] = value;
       else input.runtime[field] = value;
@@ -37,6 +37,10 @@ test('runtime readiness, bundled identity and managed routing must each be liter
   for (const input of [null, undefined, {}, { managedRouting: true },
     { managedRouting: true, runtime: null }, { managedRouting: true, runtime: {} }])
     assert.equal(bundledServerPath(input), null);
+});
+test('a verified bundled runtime is repairable before any AI-client route is bound', () => {
+  const input = status(); input.managedRouting = false;
+  assert.equal(bundledServerPath(input), bundledServerPath(status()));
 });
 test('non-Windows, relative, UNC, extended and URL paths are refused', () => {
   for (const command of ['', 'runtime/node.exe', 'C:runtime/node.exe', '/runtime/node.exe', '\\runtime\\node.exe',

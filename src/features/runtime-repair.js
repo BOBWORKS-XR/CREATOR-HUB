@@ -1,5 +1,5 @@
 export function bundledServerPath(status) {
-  if (status?.managedRouting !== true || status?.runtime?.ready !== true || status?.runtime?.bundled !== true) return null;
+  if (status?.runtime?.ready !== true || status?.runtime?.bundled !== true) return null;
   const command = status.runtime.command;
   if (typeof command !== 'string' || command.length > 4096 || /[\x00-\x1f]/.test(command)) return null;
   const normalized = command.replaceAll('\\', '/');
