@@ -17,6 +17,11 @@ test('approval only changes the reviewed runtime path and preserves all other pr
  const {a,b,merged}=fixture();merged.mcp_server_path='C:\\approved.mjs';checkSettings(bytes(a),bytes(b),bytes(merged),bytes(merged),merged.mcp_server_path);
  assert.throws(()=>checkSettings(bytes(a),bytes(b),bytes(merged),bytes(b),merged.mcp_server_path));
 });
+test('Windows runtime separators may differ without admitting another path',()=>{
+ const {a,b,merged}=fixture();merged.mcp_server_path='C:\\managed\\mcp/server/creator.mjs';
+ checkSettings(bytes(a),bytes(b),bytes(merged),bytes(merged),'C:\\managed\\mcp\\server\\creator.mjs');
+ assert.throws(()=>checkSettings(bytes(a),bytes(b),bytes(merged),bytes(merged),'C:\\other\\mcp\\server\\creator.mjs'));
+});
 test('client review permits only routing fields and preserves unrelated connections',()=>{
  const before={mcpServers:{'creator-works':{command:'old',args:['old.mjs'],env:{KEEP:'exact'},timeout:37},other:{command:'keep'}},preferences:{keep:true}};
  const after=structuredClone(before);Object.assign(after.mcpServers['creator-works'],{command:'router',args:[],env:{KEEP:'exact',CREATOR_WORKS_CONFIG_OWNER:'creator-hub-v1',CREATOR_WORKS_LAUNCHER_CONFIG:'current'}});

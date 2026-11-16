@@ -1,5 +1,5 @@
 'use strict';
-const assert=require('node:assert/strict'),crypto=require('node:crypto');
+const assert=require('node:assert/strict'),crypto=require('node:crypto'),path=require('node:path');
 const hash=b=>crypto.createHash('sha256').update(b).digest('hex');
 const CASES=['mcp-restore','setup-restore','setup-no-restore','stopped-024-upgrade','fresh-025-cancel','fresh-025-approve'];
 function validateBinding(b){
@@ -15,7 +15,8 @@ function validateBinding(b){
 function checkStoppedRecord(bytes){const b=JSON.parse(bytes);assert.equal(b.phase,'connections');assert.equal(b.outcome,'stopped');assert.equal(b.retry_blocked,false);return b;}
 function checkSettings(beforeCurrent,beforeLegacy,afterCurrent,afterLegacy,server){
   const before=JSON.parse(beforeCurrent),legacy=JSON.parse(beforeLegacy),after=JSON.parse(afterCurrent),oldAfter=JSON.parse(afterLegacy);
-  const expected={...before,mcp_server_path:server,channels:[...before.channels]};
+  assert.equal(path.win32.normalize(after.mcp_server_path),path.win32.normalize(server),'Only the exact reviewed Windows path is allowed');
+  const expected={...before,mcp_server_path:after.mcp_server_path,channels:[...before.channels]};
   for(const channel of legacy.channels)if(!expected.channels.some(c=>c.unity_project_path===channel.unity_project_path))expected.channels.push(channel);
   assert.deepEqual(after,expected,'Only missing projects and the explicitly reviewed runtime path may change');
   assert.deepEqual(oldAfter,expected,'Merged legacy store must match the reviewed current preferences');
