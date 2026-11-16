@@ -1,0 +1,108 @@
+name: Windows public 022 to exact R17 023
+on:
+  push:
+    branches: [codex/windows-public-023-r17]
+  workflow_dispatch:
+    inputs:
+      expected_harness_commit:
+        type: string
+        required: true
+      binding_sha256:
+        type: string
+        required: true
+permissions:
+  contents: read
+jobs:
+  preflight:
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - run: npm ci --ignore-scripts
+      - run: node --test scripts/public-update-023.test.cjs
+      - shell: pwsh
+        run: |
+          $names=@('native-window.ps1','native-webview-policy.ps1','native-startup-diagnostics.ps1','native-outgoing-process-019.ps1')
+          foreach($name in $names) {
+            $t=$null; $e=$null
+            [void][System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PWD "scripts/$name"),[ref]$t,[ref]$e)
+            if($e.Count){throw 'Native parse failed'}
+          }
+  acceptance:
+    needs: preflight
+    if: github.event_name == 'workflow_dispatch' && github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.ref == 'refs/heads/codex/windows-public-023-r17'
+    runs-on: windows-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - case: mcp-restore
+            tool: mcp
+            restore: 'true'
+          - case: setup-restore
+            tool: setup
+            restore: 'true'
+          - case: setup-no-restore
+            tool: setup
+            restore: 'false'
+    env:
+      EXPECTED_HARNESS_COMMIT: ${{ inputs.expected_harness_commit }}
+      CREATOR_PUBLIC_BINDING_SHA256: ${{ inputs.binding_sha256 }}
+      CREATOR_OUTGOING_CASE: ${{ matrix.case }}
+      CREATOR_OUTGOING_LAST_TOOL: ${{ matrix.tool }}
+      CREATOR_OUTGOING_RESTORE: ${{ matrix.restore }}
+      CREATOR_SELF_UPDATE_TARGET_VERSION: '0.1.23'
+      CREATOR_SELF_UPDATE_INSTALLER_SHA256: '4c85dbf3064b136ada3ad20a24c5c6b25ddfb16fe8be941b9dd33058d916f456'
+      CREATOR_SELF_UPDATE_EXECUTABLE_SHA256: '966ef4bb22598927f18ec5afd7f75f068c6bb083ca89dd3aac4757afb8f17010'
+    steps:
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - run: npm ci --ignore-scripts
+      - uses: actions/checkout@v6
+        with:
+          ref: 117e92c958aac9cb421fe0a130040b775a0a56d4
+          path: product
+          persist-credentials: false
+      - shell: pwsh
+        run: |
+          if ((git -C product rev-parse HEAD) -cne '117e92c958aac9cb421fe0a130040b775a0a56d4' -or (git -C product rev-parse 'HEAD^{tree}') -cne '01988f5db2018b5803ce0c931301d89348ac3592') { throw 'Product source differs' }
+      - run: npm --prefix product/modules/mcp ci --ignore-scripts
+      - name: Anonymous exact public feed and asset admission
+        shell: pwsh
+        run: |
+          node scripts/public-update-023.cjs prepare
+          if($LASTEXITCODE -ne 0){throw 'Public input admission refused'}
+          "CREATOR_PUBLIC_UPDATE_CONFIG=$((Join-Path $PWD artifacts/public-update-023-input/config.json))" | Add-Content -LiteralPath $env:GITHUB_ENV
+      - name: Native public discovery cancel approve and two restarts
+        shell: pwsh
+        run: |
+          node scripts/native-public-update-023.cjs
+          if($LASTEXITCODE -ne 0){throw 'Native public update failed'}
+          node scripts/public-evidence-023.cjs
+          if($LASTEXITCODE -ne 0){throw 'Public evidence refused'}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: public-023-${{ matrix.case }}-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 14
+          if-no-files-found: warn
+          path: |
+            artifacts/public-update-023-input/*.json
+            artifacts/public-update-023-input/*.minisig
+            artifacts/native-suite-*/*.json
+            artifacts/native-suite-*/*.png
+            artifacts/native-suite-*/proof-files/*
+            artifacts/native-suite-*/*.toml
+            !artifacts/native-suite-*/startup.json

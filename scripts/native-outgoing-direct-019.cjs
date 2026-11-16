@@ -165,7 +165,7 @@ async function deferFixtureMigration({ page, readStatus, verifyFixture }) {
 }
 
 async function prepareManagedRoute(page, { clientConfig, active, approve }) {
-  assert.equal(fs.existsSync(clientConfig), false, 'Route smoke requires absent Codex settings; migration needs its own reviewed fixture');
+  const priorCodex = fs.existsSync(clientConfig) ? readEvidence(clientConfig) : null;
   const needsConsent = !fs.existsSync(active);
   // Use the real guarded batch-review service, not a GUI entrypoint or a route bypass.
   const pending = page.evaluate(async () => {
@@ -178,7 +178,8 @@ async function prepareManagedRoute(page, { clientConfig, active, approve }) {
   const result = await pending;
   if (result.error) throw result.error;
   assert.deepEqual(result.value, { status: 'unchanged', count: 0 }, 'No client migration is authorized by this smoke');
-  assert.equal(fs.existsSync(clientConfig), false, 'Empty client review must not create client settings');
+  if (priorCodex) assert.ok(readEvidence(clientConfig).equals(priorCodex), 'Unrelated Codex settings changed');
+  else assert.equal(fs.existsSync(clientConfig), false, 'Empty client review must not create client settings');
   assert.equal(fs.existsSync(active), true, 'Native signed route activation must finish before SDK reconnect');
   const status = await page.evaluate(() => window.CreatorHubNative.invoke('feature_call', {
     feature: 'mcp', command: 'get_onboarding_status', args: { unityProjectPath: null },
