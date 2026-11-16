@@ -8,8 +8,8 @@ const binding = require('./fixtures/windows-outgoing-019-binding.json');
 const KIND = 'direct-outgoing-022-023';
 const ASSET = 'Creator.Hub_0.1.23_x64-setup.exe';
 const BASELINE_ASSET = 'Creator.Hub_0.1.22_x64-setup.exe';
-const EXPECTED_TARGET_SOURCE = Object.freeze({ commit: 'f8b3ded9683a9cdc84e139cfddbe4020330aca93',
-  tree: '649451b196b7d4597f6375d4b1af253f9355295e' });
+const EXPECTED_TARGET_SOURCE = Object.freeze({ commit: 'af8b9b6844e7db1604b48ea2c9b6ab0da3511281',
+  tree: '0cb430fb4d9c6acbc25273a5bc14d1c84fcd336c' });
 const CASES = Object.freeze({ 'mcp-restore': ['mcp', 'true'], 'setup-restore': ['setup', 'true'], 'setup-no-restore': ['setup', 'false'] });
 const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 const generation = module => hash(JSON.stringify({ executable: module.executable, version: module.version,
@@ -81,7 +81,7 @@ function validateBindingShape(value) {
   assert.ok(release && Number.isSafeInteger(release.id) && release.id > 0);
   assert.notEqual(value.baseline.releaseId, release.id);
   assert.equal(release.source, value.target.source.commit);
-  assert.equal(release.tag, 'lab-windows-root-ui-023-20261116-r13b');
+  assert.equal(release.tag, 'lab-windows-root-ui-023-20261116-r14');
   const assetPins = { [ASSET]: value.target.installer, 'creator-hub-windows-x86_64.json': value.target.descriptor,
     'creator-hub-windows-x86_64.json.minisig': value.target.descriptorSignature, 'latest.json': value.target.latest };
   assert.deepEqual(Object.keys(release.assets).sort(), Object.keys(assetPins).sort());
@@ -92,7 +92,7 @@ function validateBindingShape(value) {
   }
   assert.equal(new Set(ids).size, ids.length);
   const q = value.fixtureQualification;
-  assert.equal(q.kind, 'root-ui-r13b-signed-candidate'); assert.deepEqual(q.source, value.target.source);
+  assert.equal(q.kind, 'root-ui-r14-signed-candidate'); assert.deepEqual(q.source, value.target.source);
   assert.equal(q.sha256, value.target.verificationReceiptSha256);
   assert.equal(q.sourceUnchanged, true); assert.equal(q.buildExitCode, 0);
   assert.ok(Number.isSafeInteger(q.inputCount) && q.inputCount > 0); assert.equal(q.payloadFiles, 15);
@@ -101,15 +101,15 @@ function validateBindingShape(value) {
 }
 function validateBinding(value = binding) {
   validateBindingShape(value);
-  assert.deepEqual(value.target.source, EXPECTED_TARGET_SOURCE, 'Only reviewed R13b source is admitted');
+  assert.deepEqual(value.target.source, EXPECTED_TARGET_SOURCE, 'Only reviewed R14 source is admitted');
   assert.deepEqual(value, binding, 'Only the exact independently reviewed checked-in binding is admitted');
 }
 function assertHost(env = process.env, platform = process.platform) {
   assert.equal(platform, 'win32');
   for (const [key, expected] of Object.entries({ GITHUB_ACTIONS: 'true', RUNNER_ENVIRONMENT: 'github-hosted', RUNNER_OS: 'Windows', RUNNER_ARCH: 'X64',
     GITHUB_REPOSITORY: 'BOBWORKS-XR/CREATOR-HUB', GITHUB_REPOSITORY_ID: '1364807512', GITHUB_EVENT_NAME: 'workflow_dispatch',
-    GITHUB_JOB: 'acceptance', GITHUB_REF: 'refs/heads/codex/windows-root-ui-023-20261116-r13b-ci1',
-    GITHUB_WORKFLOW_REF: 'BOBWORKS-XR/CREATOR-HUB/.github/workflows/windows-outgoing-019.yml@refs/heads/codex/windows-root-ui-023-20261116-r13b-ci1' })) assert.equal(env[key], expected, key);
+    GITHUB_JOB: 'acceptance', GITHUB_REF: 'refs/heads/codex/windows-root-ui-023-20261116-r14-ci1',
+    GITHUB_WORKFLOW_REF: 'BOBWORKS-XR/CREATOR-HUB/.github/workflows/windows-outgoing-019.yml@refs/heads/codex/windows-root-ui-023-20261116-r14-ci1' })) assert.equal(env[key], expected, key);
   assert.match(env.GITHUB_SHA || '', /^[a-f0-9]{40}$/); assert.equal(env.EXPECTED_HARNESS_COMMIT, env.GITHUB_SHA);
   assert.ok(Object.hasOwn(CASES, env.CREATOR_OUTGOING_CASE));
   assert.deepEqual([env.CREATOR_OUTGOING_LAST_TOOL, env.CREATOR_OUTGOING_RESTORE], CASES[env.CREATOR_OUTGOING_CASE]);

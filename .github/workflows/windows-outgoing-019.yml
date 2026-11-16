@@ -1,7 +1,7 @@
 name: Windows exact22 to private23 restore and qualified-MCP acceptance
 on:
   push:
-    branches: [codex/windows-root-ui-023-20261116-r13b-ci1]
+    branches: [codex/windows-root-ui-023-20261116-r14-ci1]
     paths:
       - .github/workflows/windows-outgoing-019.yml
       - scripts/windows-outgoing-019-*.cjs
@@ -40,7 +40,7 @@ permissions:
   contents: read
 jobs:
   preflight:
-    if: github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.ref == 'refs/heads/codex/windows-root-ui-023-20261116-r13b-ci1'
+    if: github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.ref == 'refs/heads/codex/windows-root-ui-023-20261116-r14-ci1'
     runs-on: windows-latest
     timeout-minutes: 5
     steps:
@@ -55,7 +55,7 @@ jobs:
       - run: npm ci --ignore-scripts
       - run: node --test scripts/sdk-retention-023.test.cjs scripts/connect-diagnostic-023.test.cjs scripts/connect-trace-023.test.cjs scripts/sdk-registry-denial-023.test.cjs scripts/windows-outgoing-019-test.cjs scripts/incoming-store-r11.test.cjs scripts/incoming-receipt-r11.test.cjs scripts/self-update-outgoing-019-feed.test.cjs
       - run: node --test scripts/native-windows-r12-fresh.test.cjs
-      - run: node --test scripts/native-windows-r13-review.test.cjs
+      - run: node --test scripts/native-windows-r13-review.test.cjs scripts/native-windows-r14-review.test.cjs scripts/native-windows-r14-client.test.cjs
       - name: Parse actual native script and probe its named parameters
         shell: pwsh
         run: |
@@ -171,6 +171,19 @@ jobs:
         with:
           node-version: 24
       - run: npm ci --ignore-scripts
+      - name: Bind reviewed SDK source for read-only repair probe
+        id: repair-source
+        shell: pwsh
+        run: |
+          $source = node -e "const t=require('./scripts/windows-outgoing-019-target.cjs');t.validateBinding();console.log(JSON.stringify(t.binding.target.source))" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $source.commit -cnotmatch '^[a-f0-9]{40}$') { throw 'Exact SDK source required' }
+          "source_commit=$($source.commit)" | Add-Content -LiteralPath $env:GITHUB_OUTPUT -Encoding utf8
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ steps.repair-source.outputs.source_commit }}
+          path: product
+          persist-credentials: false
+      - run: npm --prefix product/modules/mcp ci --ignore-scripts
       - name: Acquire the exact private R12 signed assets
         env:
           GH_TOKEN: ${{ github.token }}

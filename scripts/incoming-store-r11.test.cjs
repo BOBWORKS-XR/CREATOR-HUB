@@ -16,8 +16,8 @@ function processes(version, pid) {
       image: path.join(route.payload, 'mcp/server/runtime/node.exe') }];
 }
 test('R11 is source-bound and pending bytes cannot pass native admission', () => {
-  assert.deepEqual(target.EXPECTED_TARGET_SOURCE, { commit: 'f8b3ded9683a9cdc84e139cfddbe4020330aca93',
-    tree: '649451b196b7d4597f6375d4b1af253f9355295e' });
+  assert.deepEqual(target.EXPECTED_TARGET_SOURCE, { commit: 'af8b9b6844e7db1604b48ea2c9b6ab0da3511281',
+    tree: '0cb430fb4d9c6acbc25273a5bc14d1c84fcd336c' });
   const pending = structuredClone(require('./fixtures/windows-outgoing-019-test-fixture.cjs').binding);
   pending.enabled = false;
   assert.throws(() => target.validateBinding(pending), /Pending exact22\/private23 pins/);
