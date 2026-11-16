@@ -88,6 +88,29 @@ test('normal close approves only an exact returned-workflow dialog and never for
   const driver = fs.readFileSync(path.join(__dirname, 'native-windows-r12-fresh.cjs'), 'utf8');
   assert.doesNotMatch(driver, /taskkill|process\.kill|\.kill\(|Stop-Process|\/F['"]|\/T['"]/);
 });
+test('WM_CLOSE exit event is delivered before any process snapshot', async () => {
+  let code = null, requested = false, waits = 0;
+  await fresh.closeNormally({ request: () => { requested = true; }, exitCode: () => code,
+    snapshot: () => assert.fail('Exited process must not be inspected'), approve: () => assert.fail('No dialog'),
+    delay: async () => { assert.equal(requested, true); waits++; code = 0; }, attempts: 2 });
+  assert.equal(waits, 1);
+});
+test('snapshot race is accepted only after a bounded yield confirms successful exit', async () => {
+  let code = null, racing = false, snapshots = 0;
+  await fresh.closeNormally({ request() {}, exitCode: () => code,
+    snapshot: () => { snapshots++; racing = true; throw Error('Process vanished'); },
+    approve: () => assert.fail('No dialog'), delay: async () => { if (racing) code = 0; }, attempts: 2 });
+  assert.equal(snapshots, 1);
+});
+test('snapshot failure without confirmed zero exit still refuses close acceptance', async () => {
+  for (const finalCode of [null, 1]) {
+    let code = null, racing = false;
+    await assert.rejects(fresh.closeNormally({ request() {}, exitCode: () => code,
+      snapshot: () => { racing = true; throw Error('Snapshot unavailable'); }, approve() {},
+      delay: async () => { if (racing) code = finalCode; }, attempts: 2 }),
+    finalCode === null ? /Snapshot unavailable/ : /Normal Hub close failed/);
+  }
+});
 test('fresh job reuses exact binding and signed inputs without adding build or altering upgrade cases', () => {
   const job = workflow.jobs.fresh;
   assert.equal(job.needs, 'preflight'); assert.equal(job.if, "github.event_name == 'workflow_dispatch'");

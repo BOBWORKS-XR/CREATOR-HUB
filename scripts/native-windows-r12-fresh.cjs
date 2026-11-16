@@ -70,10 +70,20 @@ function closeDialog(windows) {
 async function closeNormally({ request, exitCode, snapshot: windows, approve, delay, attempts = 60 }) {
   request(); let approved = false;
   for (let i = 0; i < attempts; i++) {
+    await delay(); // Deliver a normal exit event before attempting another synchronous inventory.
     const code = exitCode();
     if (code !== null) { assert.equal(code, 0, 'Normal Hub close failed'); return; }
-    if (!approved && closeDialog(windows())) { approve(); approved = true; }
-    await delay();
+    if (!approved) {
+      let observed;
+      try { observed = windows(); }
+      catch (error) {
+        await delay();
+        const closed = exitCode();
+        if (closed === null) throw error;
+        assert.equal(closed, 0, 'Normal Hub close failed'); return;
+      }
+      if (closeDialog(observed)) { approve(); approved = true; }
+    }
   }
   throw Error('Normal Hub close timed out; no process was force-closed');
 }
