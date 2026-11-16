@@ -84,7 +84,8 @@ test('direct outgoing20 refuses version masquerade, drift and same target bytes'
     assert.throws(() => lab.createDirectOutgoing019Contract(data));
   }
   for (const change of [r => { r.minHubVersion = '0.1.14'; }, r => { r.assetName = 'generic.exe'; },
-    r => { r.version = '0.1.22'; }, r => { r.installerProtocol = 0; }]) {
+    r => { r.version = '0.1.22'; }, r => { r.installerProtocol = 0; },
+    r => { r.identityProtocol = 1; }, r => { r.lifecycleProtocol = 1; }]) {
     const data = directOutgoingInput(), release = JSON.parse(data.descriptor); change(release);
     data.descriptor = Buffer.from(JSON.stringify(release)); data.pins.descriptor = hash(data.descriptor);
     assert.throws(() => lab.createDirectOutgoing019Contract(data));

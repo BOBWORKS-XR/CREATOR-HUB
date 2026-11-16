@@ -61,6 +61,15 @@ async function completeStartup(page, version, report) {
   }
   await page.waitForFunction(() => document.querySelector('#convergence-dialog')?.open || !document.querySelector('#check-updates').disabled,
     null, { timeout: 120000 });
+  if (version === '0.1.23' && report.clients) {
+    // The seeded old clients change R11's review key; defer that new review without migrating them.
+    await guide.waitFor({ state: 'visible' });
+    const state = await page.evaluate(() => window.CreatorHubNative.invoke('convergence_status'));
+    assert.equal(state.required, true); assert.match(state.reviewKey || '', /^[a-f0-9]{64}$/);
+    (report.startupClientReviews ||= []).push({ reviewKey: state.reviewKey, deferred: true });
+    await page.locator('#convergence-later').click();
+    await guide.waitFor({ state: 'hidden' });
+  }
   assert.equal(await guide.isVisible(), false, 'The deferred unchanged review must stay deferred');
   if (version === '0.1.23' && !report.migratedContinuation) report.migrationDeferralPreserved = true;
 }
@@ -74,6 +83,12 @@ async function setUpdatePreferences(page, restore) {
 }
 function assertSavedPreferences(saved, restore) {
   assert.deepEqual(saved, { schemaVersion: 1, preview: false, autoDownload: false, restoreHostedViews: restore });
+}
+function assertFreshOldConnection(held, freshOld, freshNew, profile) {
+  target.assertFreshConnection(held, freshNew, profile);
+  target.assertFreshConnection(freshOld, freshNew, profile);
+  assert.equal(new Set([...held, ...freshOld, ...freshNew].map(row => row.pid)).size, 6,
+    'Fresh old-client connection must not reuse either observed connection');
 }
 async function continueMcpGuide(page) {
   const guide = page.locator('#feature-mcp [data-field="guide-dialog"]');
@@ -107,22 +122,29 @@ async function main() {
     migrated.guard.verify();
   }
   const { chromium } = require('@playwright/test');
-  const { managedLocations } = require('./native-managed-target.cjs');
   const { assertOwnedDebugging } = require('./windows-incoming-016.cjs');
   const local = process.env.LOCALAPPDATA, roaming = process.env.APPDATA, home = process.env.USERPROFILE;
-  for (const folder of [local, roaming, home]) assert.ok(path.isAbsolute(folder));
-  const hub = path.join(local, 'Creator Hub/creator-hub.exe'), route = managedLocations(local);
+  for (const folder of [local, roaming, home]) assert.ok(path.win32.isAbsolute(folder || ''));
+  const profile = { local, roaming, home };
+  const oldRoute = target.managedLocations(local, '0.1.22', home);
+  const newRoute = target.managedLocations(local, '0.1.23', home);
+  const hub = path.join(local, 'Creator Hub/creator-hub.exe');
   const ticket = path.join(local, 'CreatorHub/hub-updates/hosted-restore.json');
   const clientConfig = path.join(home, '.codex/config.toml');
+  const selectedPath = path.join(home, '.claude.json');
+  const oldClientPath = path.join(home, '.gemini/config/mcp_config.json');
+  const settingsPath = path.join(roaming, 'creator-works-mcp/launcher-config.json');
+  const oldSettingsPath = path.join(roaming, 'banter-mcp/launcher-config.json');
   if (!migrated) for (const file of [path.dirname(hub), path.join(local, 'CreatorHub'), path.join(roaming, 'creator-works-mcp'),
-    path.join(roaming, 'banter-mcp'), path.join(local, 'CreatorProjectSetup'), clientConfig, path.join(home, '.claude.json')]) {
+    path.join(roaming, 'banter-mcp'), path.join(local, 'CreatorProjectSetup'), clientConfig, selectedPath, oldClientPath,
+    oldRoute.base, newRoute.base, path.join(home, '.creator-hub-settings-backups')]) {
     assert.equal(fs.existsSync(file), false, 'Existing runner product/profile refused');
   }
   const out = path.join(ROOT, 'artifacts', `native-suite-${Date.now()}`); fs.mkdirSync(out);
   const lastTool = process.env.CREATOR_OUTGOING_LAST_TOOL || 'setup';
   const restore = (process.env.CREATOR_OUTGOING_RESTORE || 'true') === 'true';
   const report = { passed: false, kind: target.KIND, sourceCommit: config.sourceCommit, baseline: config.baseline,
-    pins: config.pins, lastTool, restore, labDiscovery: true, publicDiscovery: false, acceptanceOnly: true,
+    pins: config.pins, lastTool, restore, profile, labDiscovery: true, publicDiscovery: false, acceptanceOnly: true,
     nativeUpdateAccepted: false, liveAiAcceptance: false, releaseReady: false };
   if (migrated) Object.assign(report, { migratedContinuation: true, migrationRunId: migrated.runId,
     migrationRunAttempt: migrated.runAttempt, migratedFixtureFilesChecked: migrated.guard.fileCount,
@@ -144,6 +166,7 @@ async function main() {
   };
   let child, browser, page, rootRecord, sentinel, sentinelRecord, sdkClient, sdkTransport, policyEnabled = false, watch;
   let observedTicket, requests = [], settingsBefore, preferencesBefore, sdkRecords = [];
+  let selectedBefore, selectedAfter, oldClientBefore, settingsReview;
   const stopFile = path.join(out, 'stop-owned-sentinel'), protectedFiles = [];
   const native = action => {
     sameProcess(rootRecord);
@@ -158,6 +181,14 @@ async function main() {
     assert.equal(fs.existsSync(file), false); fs.mkdirSync(path.dirname(file), { recursive: true });
     fs.writeFileSync(file, bytes, { flag: 'wx' }); protectedFiles.push({ file, sha256: hashFile(file) });
   };
+  const capture = (name, file) => {
+    const bytes = direct.readEvidence(file), saved = path.join(out, name);
+    fs.writeFileSync(saved, bytes, { flag: 'wx' });
+    protectedFiles.push({ file: saved, sha256: target.hash(bytes) });
+    return { file, capture: saved, bytes: bytes.length, sha256: target.hash(bytes) };
+  };
+  const verifyClients = () => direct.assertClientBytes({ selectedPath, oldClientPath,
+    selectedBefore: selectedAfter || selectedBefore, oldClientBefore });
   const preferences = () => page.evaluate(() => Object.fromEntries(['auto-download', 'preview-channel', 'restore-hosted-views']
     .map(id => [id, document.getElementById(id).checked])));
   const show = async feature => {
@@ -175,7 +206,9 @@ async function main() {
     page.setDefaultTimeout(30000); requests = direct.watchRequests(page);
     page.on('pageerror', error => { (report.pageErrors ||= []).push(String(error)); });
     await page.waitForFunction(() => window.CreatorHubNative);
+    if (selectedBefore) verifyClients();
     await completeStartup(page, version, report);
+    if (selectedBefore) verifyClients();
     assertProtocol(await page.evaluate(async () => ({ version: window.CreatorHubNative.version,
       protocol: window.__CREATOR_HUB_FEATURE_PROTOCOL__, integrated: window.CreatorHubNative.integratedFeatures,
       services: await window.CreatorHubNative.invoke('feature_status') })), version);
@@ -188,13 +221,27 @@ async function main() {
     assert.notEqual(result.isError, true); assert.equal(JSON.parse(result.content[0].text).success, true);
   }
   function active(version) {
+    const route = version === '0.1.22' ? oldRoute : newRoute;
     const value = JSON.parse(target.readBounded(route.active, 4096));
     const expected = config.runtime[version === '0.1.22' ? 'baselineDescriptor' : 'targetDescriptor'];
     assert.equal(value.descriptorSha256, expected); assert.match(value.generation, /^[a-f0-9]{64}$/);
     const body = target.readBounded(path.join(path.dirname(route.active), 'descriptors', expected, 'runtime.json'), target.LIMITS.metadata);
     assert.equal(target.hash(body), expected); assert.equal(JSON.parse(body).hubVersion, version);
-    target.assertActiveResources(local, version, value);
+    target.assertActiveResources(local, version, value, true, home);
     return value;
+  }
+  function connectionProcesses(transport, route, version) {
+    const rows = inventory(), router = rows.find(p => p.pid === transport.pid);
+    assert.ok(router); assert.equal(router.image.toLowerCase(), route.command.toLowerCase());
+    const nodes = rows.filter(p => p.parentPid === router.pid && /node\.exe$/i.test(p.image));
+    assert.equal(nodes.length, 1);
+    for (const row of [router, nodes[0]]) {
+      assert.equal(row.kernelIdentityVerified, true);
+      assert.match(row.startTicks, /^[0-9]+$/); assert.ok(BigInt(row.startTicks) > 0n);
+      sameProcess(row);
+    }
+    target.assertGenerationProcess(nodes[0].image, local, version, home);
+    return [router, nodes[0]];
   }
   async function preserved() {
     if (migrated) migrated.guard.verify();
@@ -202,6 +249,9 @@ async function main() {
     assert.deepEqual(direct.settingsSnapshot(roaming, local), settingsBefore);
     assert.deepEqual(await preferences(), preferencesBefore);
     if (!migrated) assert.equal(fs.existsSync(clientConfig), false);
+    verifyClients();
+    assert.deepEqual(active('0.1.22'), report.beforeRoute, 'Old active route must never advance');
+    assert.equal(sdkClient.getServerVersion().version, target.binding.baseline.manifest.modules.mcp.version);
     sameProcess(sentinelRecord); for (const p of sdkRecords) sameProcess(p);
     await roundTrip(sdkClient); assert.deepEqual(moduleGuis(), []);
   }
@@ -212,10 +262,9 @@ async function main() {
     target.assertInstalledResources(path.dirname(hub), '0.1.22');
     if (!migrated) {
       const settings = require('./sdk-retention-023.cjs').settings(lastTool, restore);
-      protect(path.join(roaming, 'creator-works-mcp/launcher-config.json'), settings);
-      protect(path.join(roaming, 'banter-mcp/launcher-config.json'), settings.replaceAll('\n', '\r\n'));
+      protect(settingsPath, settings);
+      protect(oldSettingsPath, settings.replaceAll('\n', '\r\n'));
       protect(path.join(local, 'CreatorProjectSetup/editor-roots.json'), '[]\n');
-      protect(path.join(home, '.claude.json'), '{"mcpServers":{},"outgoingSentinel":"keep"}\n');
       protect(path.join(path.dirname(hub), 'outgoing-preservation.txt'), 'Keep unmanaged installation content.\n');
       protect(path.join(out, 'synthetic-project/Assets/untouched.txt'), 'Synthetic project content; never opened or repaired.\n');
     } else migrated.guard.verify();
@@ -225,9 +274,30 @@ async function main() {
     await connect('0.1.22');
     await direct.checkPages({ page, showApp: show, processes: moduleGuis, requests, expectedVersion: target.binding.baseline.version,
       screenshot: name => page.screenshot({ path: path.join(out, `baseline-${name}.png`) }) });
-    if (!migrated) await direct.prepareManagedRoute(page, { clientConfig, active: route.active,
+    if (!migrated) await direct.prepareManagedRoute(page, { clientConfig, active: oldRoute.active,
       approve: () => retry(() => button('Enable managed routing')) });
     report.beforeRoute = active('0.1.22');
+    const entry = { command: oldRoute.command, args: [],
+      env: { CREATOR_WORKS_CONFIG_OWNER: 'creator-hub-v1' }, disabled: false };
+    const selected = { mcpServers: { 'creator-works': entry, other: { command: 'keep' } },
+      preferences: { outgoingSentinel: 'keep' } };
+    assert.equal(fs.existsSync(selectedPath), false);
+    fs.writeFileSync(selectedPath, JSON.stringify(selected, null, 2) + '\n', { flag: 'wx' });
+    const oldEntry = { ...entry, env: { ...entry.env, CREATOR_WORKS_LAUNCHER_CONFIG: oldSettingsPath } };
+    protect(oldClientPath, JSON.stringify({ mcpServers: { 'creator-works': oldEntry }, outgoingSentinel: 'keep-old' }, null, 2) + '\r\n');
+    selectedBefore = direct.readEvidence(selectedPath); oldClientBefore = direct.readEvidence(oldClientPath);
+    report.clients = { selectedBefore: capture('claude-before.json', selectedPath),
+      oldBefore: capture('old-client-before.json', oldClientPath),
+      currentSettingsBefore: capture('settings-before.json', settingsPath),
+      oldSettingsBefore: capture('old-settings-before.json', oldSettingsPath) };
+    settingsReview = direct.reviewedSettings(settingsPath, newRoute.base);
+    report.settingsReview = { source: settingsReview.source, path: settingsReview.path };
+    report.settingsViewExistedBeforeReview = fs.existsSync(settingsReview.path);
+    if (report.settingsViewExistedBeforeReview) {
+      direct.assertSettingsView(settingsReview);
+      report.settingsViewBefore = capture('settings-view-before.json', settingsReview.path);
+      protectedFiles.push({ file: settingsReview.path, sha256: report.settingsViewBefore.sha256 });
+    }
     if (migrated) {
       assert.equal(report.beforeRoute.descriptorSha256, migrated.activeRoute.descriptorSha256);
       assert.equal(report.beforeRoute.generation, migrated.activeRoute.generation);
@@ -236,14 +306,12 @@ async function main() {
     const { Client } = sdk('@modelcontextprotocol/sdk/client/index.js');
     const { StdioClientTransport } = sdk('@modelcontextprotocol/sdk/client/stdio.js');
     sdkClient = new Client({ name: 'outgoing-direct-existing-connection', version: '1' });
-    sdkTransport = new StdioClientTransport({ command: route.command, args: [], stderr: 'ignore' });
+    sdkTransport = new StdioClientTransport({ command: oldEntry.command, args: oldEntry.args,
+      env: { ...process.env, ...oldEntry.env }, stderr: 'ignore' });
     await sdkClient.connect(sdkTransport); await roundTrip(sdkClient);
     sdkRecords = await retry(() => {
-      const rows = inventory(), router = rows.find(p => p.pid === sdkTransport.pid);
-      assert.ok(router); assert.equal(router.image.toLowerCase(), route.command.toLowerCase());
-      const node = rows.filter(p => p.parentPid === router.pid && /node\.exe$/i.test(p.image));
-      assert.equal(node.length, 1); target.assertGenerationProcess(node[0].image, local, '0.1.22');
-      assert.equal(sdkClient.getServerVersion().version, target.binding.baseline.manifest.modules.mcp.version); return [router, node[0]];
+      const rows = connectionProcesses(sdkTransport, oldRoute, '0.1.22');
+      assert.equal(sdkClient.getServerVersion().version, target.binding.baseline.manifest.modules.mcp.version); return rows;
     });
     report.heldProcessesBefore = sdkRecords;
     sentinel = spawn(process.execPath, [path.join(ROOT, 'scripts/owned-hub-fixture.cjs'), stopFile], { windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] });
@@ -266,7 +334,9 @@ async function main() {
     await page.locator('#hub-update-button').click(); await retry(() => button('Not now'));
     await retry(async () => assert.equal(await page.locator('#hub-update-button').isEnabled(), true));
     sameProcess(rootRecord); assert.equal(hashFile(hub), config.baseline.exe); await preserved();
-    if (migrated) { assert.deepEqual(active('0.1.22'), report.beforeRoute); report.activeRouteUnchangedAfterCancel = true; }
+    assert.deepEqual(active('0.1.22'), report.beforeRoute); report.activeRouteUnchangedAfterCancel = true;
+    report.clients.afterUpdateCancel = { selected: capture('claude-update-cancel.json', selectedPath),
+      old: capture('old-client-update-cancel.json', oldClientPath) };
     assert.equal(await page.locator('#feature-setup [data-field="name"]').inputValue(), draft);
     assert.equal(fs.existsSync(ticket), false); report.cancelPreserved = true;
     watch = setInterval(() => { try { observedTicket = JSON.parse(target.readBounded(ticket, 32768)); } catch {} }, 20);
@@ -306,26 +376,89 @@ async function main() {
       }), feature);
       direct.assertService(feature, service);
     }
-    if (!migrated) await direct.prepareManagedRoute(page, { clientConfig, active: route.active, approve: () => { throw Error('Existing route must not require new consent'); } });
+    if (!migrated) await direct.prepareManagedRoute(page, { clientConfig, active: newRoute.active,
+      approve: () => retry(() => button('Enable managed routing')) });
     report.afterRoute = active('0.1.23');
     assert.equal(report.afterRoute.generation, target.binding.target.generation);
-    target.assertActiveResources(local, '0.1.22', report.beforeRoute, false);
+    target.assertActiveResources(local, '0.1.22', report.beforeRoute, true, home);
+    verifyClients();
+    report.clientReview = await direct.migrateExistingClaude(page, {
+      verifyBeforeApproval: () => {
+        verifyClients();
+        assert.ok(direct.readEvidence(settingsReview.source).equals(settingsReview.bytes));
+        if (!report.settingsViewExistedBeforeReview) assert.equal(fs.existsSync(settingsReview.path), false);
+      },
+      choose: label => retry(() => { verifyClients(); return button(label); }),
+      captureCancelled: async () => {
+        await preserved();
+        report.clients.afterReviewCancel = { selected: capture('claude-review-cancel.json', selectedPath),
+          old: capture('old-client-review-cancel.json', oldClientPath) };
+      },
+    });
+    selectedAfter = direct.readEvidence(selectedPath);
+    direct.assertReviewedClientMigration({ before: JSON.parse(selectedBefore), after: JSON.parse(selectedAfter),
+      oldClientBefore, oldClientAfter: direct.readEvidence(oldClientPath),
+      oldCommand: oldRoute.command, newCommand: newRoute.command, settingsPath: settingsReview.path, approved: true });
+    report.clientReview.evidence = direct.assertMigrationEvidence({ result: report.clientReview.approved,
+      local, selectedPath, before: selectedBefore, after: selectedAfter });
+    report.settingsView = direct.assertSettingsView(settingsReview);
+    for (const receipt of [...report.clientReview.evidence.files, report.settingsView]) protectedFiles.push(receipt);
+    report.clients.selectedAfter = capture('claude-after.json', selectedPath);
+    report.clients.oldAfter = capture('old-client-after.json', oldClientPath);
+    report.clients.currentSettingsAfter = capture('settings-after.json', settingsPath);
+    report.clients.oldSettingsAfter = capture('old-settings-after.json', oldSettingsPath);
     assert.equal(sdkClient.getServerVersion().version, target.binding.baseline.manifest.modules.mcp.version);
     const reconnect = new Client({ name: 'outgoing-direct-new-connection', version: '1' });
     try {
-      const transport = new StdioClientTransport({ command: route.command, args: [], stderr: 'ignore' });
+      const migratedEntry = JSON.parse(selectedAfter).mcpServers['creator-works'];
+      assert.equal(migratedEntry.command, newRoute.command);
+      const transport = new StdioClientTransport({ command: newRoute.command, args: migratedEntry.args,
+        env: { ...process.env, ...migratedEntry.env }, stderr: 'ignore' });
       await reconnect.connect(transport); await roundTrip(reconnect);
-      const router = record(transport.pid); assert.notEqual(router.pid, sdkRecords[0].pid);
-      assert.equal(router.image.toLowerCase(), route.command.toLowerCase());
-      const nodes = inventory().filter(p => p.parentPid === router.pid && /node\.exe$/i.test(p.image));
-      assert.equal(nodes.length, 1); target.assertGenerationProcess(nodes[0].image, local, '0.1.23');
-      target.assertFreshConnection(sdkRecords, [router, nodes[0]]);
+      const rows = await retry(() => connectionProcesses(transport, newRoute, '0.1.23'));
+      target.assertFreshConnection(sdkRecords, rows, profile);
       assert.equal(reconnect.getServerVersion().version, target.binding.target.manifest.modules.mcp.version);
-      report.reconnectedProcesses = [router, nodes[0]];
+      report.reconnectedProcesses = rows;
       report.reconnectedServerVersion = reconnect.getServerVersion();
+      const oldReconnect = new Client({ name: 'outgoing-direct-fresh-old-client', version: '1' });
+      try {
+        const retainedEntry = JSON.parse(direct.readEvidence(oldClientPath)).mcpServers['creator-works'];
+        assert.equal(retainedEntry.command, oldRoute.command);
+        const oldTransport = new StdioClientTransport({ command: oldRoute.command, args: retainedEntry.args,
+          env: { ...process.env, ...retainedEntry.env }, stderr: 'ignore' });
+        await oldReconnect.connect(oldTransport); await roundTrip(oldReconnect);
+        const oldRows = await retry(() => connectionProcesses(oldTransport, oldRoute, '0.1.22'));
+        assertFreshOldConnection(sdkRecords, oldRows, rows, profile);
+        assert.equal(oldReconnect.getServerVersion().version, target.binding.baseline.manifest.modules.mcp.version);
+        report.freshOldProcesses = oldRows; report.freshOldServerVersion = oldReconnect.getServerVersion();
+        await preserved();
+      } finally { await oldReconnect.close(); }
     }
     finally { await reconnect.close(); }
     await preserved(); await direct.checkCleanDocument(page, requests);
+    // The automatic replacement was already observed. This is a separate normal restart check.
+    report.beforeNormalRestart = rootRecord;
+    native('close');
+    await retry(() => assert.equal(inventory().some(p => p.pid === rootRecord.pid && p.startTicks === rootRecord.startTicks), false));
+    await browser.close(); browser = null; page = null;
+    child = spawn(hub, [], { windowsHide: true, stdio: 'ignore',
+      env: { ...process.env, WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: '--remote-debugging-port=9238' } });
+    rootRecord = await retry(() => record(child.pid));
+    assert.equal(rootRecord.kernelIdentityVerified, true); assert.notEqual(rootRecord.pid, report.beforeNormalRestart.pid);
+    report.normalRestartRoot = rootRecord;
+    assert.equal(hashFile(hub), config.pins.executable); peVersion(23);
+    target.assertInstalledResources(path.dirname(hub), '0.1.23');
+    await connect('0.1.23');
+    assert.equal(fs.existsSync(ticket), false);
+    await direct.checkHome(page);
+    await direct.checkPages({ page, showApp: show, processes: moduleGuis, requests, expectedVersion: '0.1.23',
+      screenshot: name => page.screenshot({ path: path.join(out, `normal-restart-${name}.png`) }) });
+    await preserved(); assert.deepEqual(active('0.1.23'), report.afterRoute);
+    assert.equal(await page.evaluate(() => localStorage.getItem('outgoing-preserved')), 'direct22-to23');
+    direct.assertSettingsView(settingsReview);
+    direct.assertMigrationEvidence({ result: report.clientReview.approved, local, selectedPath,
+      before: selectedBefore, after: selectedAfter });
+    report.normalRestartPreserved = true;
     report.manualCapabilityRetention = require('./sdk-retention-023.cjs').verify(
       lastTool, restore, fs.readFileSync(path.join(roaming, 'creator-works-mcp/launcher-config.json')),
       fs.readFileSync(path.join(roaming, 'banter-mcp/launcher-config.json')));
@@ -346,6 +479,10 @@ async function main() {
   } finally {
     if (watch) clearInterval(watch);
     try { if (sdkClient) await sdkClient.close(); } catch { report.passed = false; report.sdkCleanupFailed = true; }
+    try {
+      await retry(() => { for (const saved of [...sdkRecords, ...(report.reconnectedProcesses || []), ...(report.freshOldProcesses || [])])
+        assert.equal(inventory().some(p => p.pid === saved.pid && p.startTicks === saved.startTicks), false); });
+    } catch { report.passed = false; report.sdkCleanupFailed = true; }
     try { if (rootRecord) { native('close'); await retry(() => assert.equal(inventory().some(p => p.pid === rootRecord.pid && p.startTicks === rootRecord.startTicks), false)); } }
     catch { report.passed = false; report.rootCleanupFailed = true; }
     if (browser) await browser.close().catch(() => {});
@@ -356,10 +493,17 @@ async function main() {
     }
     if (migrated) { try { migrated.guard.verify(); report.migratedFixtureFilesUnchangedAfterDriverCleanup = true; }
       catch (error) { report.passed = false; report.preservationError = String(error); } }
+    try {
+      if (selectedBefore) verifyClients();
+      for (const { file, sha256 } of protectedFiles) assert.equal(hashFile(file), sha256);
+      if (report.beforeRoute) assert.deepEqual(active('0.1.22'), report.beforeRoute);
+      report.fixtureEvidencePreservedAfterCleanup = true;
+    } catch (error) { report.passed = false; report.preservationError = String(error); }
     if (!report.passed) process.exitCode = 1;
     fs.writeFileSync(path.join(out, 'outgoing-report.json'), JSON.stringify(report, null, 2), { flag: 'wx' });
     console.log(JSON.stringify({ out, passed: report.passed, releaseReady: false }));
   }
 }
-module.exports = { assertProtocol, assertTicket, observeAutomaticSuccessor, completeStartup, setUpdatePreferences, assertSavedPreferences, continueMcpGuide, main };
+module.exports = { assertProtocol, assertTicket, observeAutomaticSuccessor, completeStartup, setUpdatePreferences,
+  assertSavedPreferences, assertFreshOldConnection, continueMcpGuide, main };
 if (require.main === module) main().catch(error => { console.error(String(error.message).slice(0, 1200)); process.exitCode = 1; });

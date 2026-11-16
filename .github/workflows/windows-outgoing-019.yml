@@ -1,7 +1,7 @@
 name: Windows exact22 to private23 restore and qualified-MCP acceptance
 on:
   push:
-    branches: [codex/windows-warning-023-20261113-r4-ci2]
+    branches: [codex/windows-routing-023-20261116-r11-ci1]
     paths:
       - .github/workflows/windows-outgoing-019.yml
       - scripts/windows-outgoing-019-*.cjs
@@ -10,6 +10,8 @@ on:
       - scripts/self-update-outgoing-019-feed.test.cjs
       - scripts/native-self-update-outgoing-019.ps1
       - scripts/native-outgoing-direct-019.cjs
+      - scripts/incoming-store-r11.test.cjs
+      - scripts/incoming-receipt-r11.test.cjs
       - scripts/native-outgoing-process-019.ps1
       - scripts/fixtures/windows-outgoing-019-test-fixture.cjs
       - scripts/fixtures/windows-outgoing-019-binding.json
@@ -32,7 +34,7 @@ permissions:
   contents: read
 jobs:
   preflight:
-    if: github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.ref == 'refs/heads/codex/windows-warning-023-20261113-r4-ci2'
+    if: github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.ref == 'refs/heads/codex/windows-routing-023-20261116-r11-ci1'
     runs-on: windows-latest
     timeout-minutes: 5
     steps:
@@ -45,7 +47,7 @@ jobs:
         with:
           node-version: 24
       - run: npm ci --ignore-scripts
-      - run: node --test scripts/sdk-retention-023.test.cjs scripts/connect-diagnostic-023.test.cjs scripts/connect-trace-023.test.cjs scripts/sdk-registry-denial-023.test.cjs scripts/windows-outgoing-019-test.cjs scripts/self-update-outgoing-019-feed.test.cjs
+      - run: node --test scripts/sdk-retention-023.test.cjs scripts/connect-diagnostic-023.test.cjs scripts/connect-trace-023.test.cjs scripts/sdk-registry-denial-023.test.cjs scripts/windows-outgoing-019-test.cjs scripts/incoming-store-r11.test.cjs scripts/incoming-receipt-r11.test.cjs scripts/self-update-outgoing-019-feed.test.cjs
       - name: Parse actual native script and probe its named parameters
         shell: pwsh
         run: |

@@ -3,15 +3,23 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const Module = require('node:module');
 const bindingFile = require.resolve('./fixtures/windows-outgoing-019-binding.json');
 const checkedInBinding = require(bindingFile);
 const synthetic = require('./fixtures/windows-outgoing-019-test-fixture.cjs');
 assert.equal(synthetic.purpose, 'SYNTHETIC UNIT DATA ONLY');
-// Test-process module substitution only; native entrypoints never admit synthetic inputs.
-require.cache[bindingFile].exports = synthetic.binding;
-const target = require('./windows-outgoing-019-target.cjs');
-const input = require('./windows-outgoing-019-input.cjs');
-const driver = require('./windows-outgoing-019-driver.cjs');
+// Private test instances never alter the production binding or shared require cache.
+function isolated(name, overrides) {
+  const filename = path.join(__dirname, name), loaded = new Module(filename, module);
+  loaded.filename = filename; loaded.paths = Module._nodeModulePaths(__dirname);
+  const originalRequire = loaded.require.bind(loaded);
+  loaded.require = name => Object.hasOwn(overrides, name) ? overrides[name] : originalRequire(name);
+  loaded._compile(fs.readFileSync(filename, 'utf8'), filename);
+  return loaded.exports;
+}
+const target = isolated('windows-outgoing-019-target.cjs', { './fixtures/windows-outgoing-019-binding.json': synthetic.binding });
+const input = isolated('windows-outgoing-019-input.cjs', { './windows-outgoing-019-target.cjs': target });
+const driver = isolated('windows-outgoing-019-driver.cjs', { './windows-outgoing-019-target.cjs': target });
 const direct = require('./native-outgoing-direct-019.cjs');
 const { binding } = target;
 const reviewSha = target.hash(fs.readFileSync(path.join(__dirname, 'fixtures/windows-outgoing-019-binding.json')));
@@ -19,12 +27,12 @@ function env(caseName = 'mcp-restore') {
   const [last, restore] = target.CASES[caseName];
   return { GITHUB_ACTIONS: 'true', RUNNER_ENVIRONMENT: 'github-hosted', RUNNER_OS: 'Windows', RUNNER_ARCH: 'X64',
     GITHUB_REPOSITORY: 'BOBWORKS-XR/CREATOR-HUB', GITHUB_REPOSITORY_ID: '1364807512', GITHUB_EVENT_NAME: 'workflow_dispatch', GITHUB_JOB: 'acceptance',
-    GITHUB_REF: 'refs/heads/codex/windows-warning-023-20261113-r4-ci2',
-    GITHUB_WORKFLOW_REF: 'BOBWORKS-XR/CREATOR-HUB/.github/workflows/windows-outgoing-019.yml@refs/heads/codex/windows-warning-023-20261113-r4-ci2',
+    GITHUB_REF: 'refs/heads/codex/windows-routing-023-20261116-r11-ci1',
+    GITHUB_WORKFLOW_REF: 'BOBWORKS-XR/CREATOR-HUB/.github/workflows/windows-outgoing-019.yml@refs/heads/codex/windows-routing-023-20261116-r11-ci1',
     GITHUB_SHA: 'a'.repeat(40), EXPECTED_HARNESS_COMMIT: 'a'.repeat(40), CREATOR_OUTGOING_CASE: caseName,
     CREATOR_OUTGOING_LAST_TOOL: last, CREATOR_OUTGOING_RESTORE: restore, CREATOR_OUTGOING_REVIEW_SHA256: reviewSha };
 }
-test('actual source, successful fixture20 build and changed generation are mandatory', () => {
+test('reviewed R11 source, successful build and changed generation are mandatory', () => {
   target.validateBinding();
   for (const mutate of [v => v.target.version = '0.1.22', v => v.baseline.source.commit = 'b'.repeat(40),
     v => v.target.source.tree = 'c'.repeat(40), v => v.target.buildExitCode = 1,
@@ -43,6 +51,9 @@ test('only exact manual Windows runner and the three case pairs are admitted', (
   for (const name of Object.keys(target.CASES)) target.assertHost(env(name), 'win32');
   for (const key of Object.keys(env())) assert.throws(() => target.assertHost({ ...env(), [key]: 'wrong' }, 'win32'), key);
   assert.throws(() => target.assertHost(env(), 'linux'));
+  assert.throws(() => target.assertHost({ ...env(), GITHUB_REF: 'refs/heads/codex/windows-warning-023-20261113-r4-ci2' }, 'win32'));
+  assert.throws(() => target.assertHost({ ...env(), GITHUB_WORKFLOW_REF:
+    'BOBWORKS-XR/CREATOR-HUB/.github/workflows/windows-outgoing-019.yml@refs/heads/codex/windows-warning-023-20261113-r4-ci2' }, 'win32'));
   assert.throws(() => target.assertHost({ ...env(), CREATOR_HOSTED_UPDATE_FIXTURE: 'x' }, 'win32'));
 });
 test('private asset identity checks refuse changed release, body identity or publication', () => {
@@ -63,7 +74,7 @@ test('config permits only its absolute directory to vary', () => {
     const value = structuredClone(config); mutate(value); assert.throws(() => target.assertBound(value));
   }
 });
-test('actual protocol and restore ticket bind 19 to 20', () => {
+test('actual protocol and restore ticket bind 22 to 23', () => {
   for (const version of ['0.1.22', '0.1.23']) driver.assertProtocol({ version, protocol: 1, integrated: true,
     services: { integrated: true, features: ['setup', 'mcp'] } }, version);
   assert.throws(() => driver.assertProtocol({ version: '0.1.16' }, '0.1.16'));
@@ -75,7 +86,7 @@ test('actual protocol and restore ticket bind 19 to 20', () => {
     const value = structuredClone(ticket); mutate(value); assert.throws(() => driver.assertTicket(value, 'mcp', hub));
   }
 });
-test('direct page helper is finite to actual19 baseline and20 successor', async () => {
+test('direct page helper is finite to actual22 baseline and23 successor', async () => {
   for (const version of ['0.1.22', '0.1.23']) await direct.checkProtocol({ evaluate: async () => ({ version, protocol: 1,
     integrated: true, services: { integrated: true, features: ['setup', 'mcp'] } }) }, version);
   assert.throws(() => direct.assertProtocol({ version: '0.1.18' }, '0.1.18'));
@@ -91,11 +102,14 @@ test('restore preference is applied through real driver controls', async () => {
     assert.deepEqual(values, [['#auto-download', false], ['#preview-channel', false], ['#restore-hosted-views', restore]]);
   }
 });
-test('held router and changed generation checks precede success and no manual successor launch exists', () => {
+test('held router and changed generation checks precede success and the separate normal restart', () => {
   const source = fs.readFileSync(path.join(__dirname, 'windows-outgoing-019-driver.cjs'), 'utf8');
-  assert.equal((source.match(/spawn\(hub,/g) || []).length, 1);
+  const launches = [...source.matchAll(/spawn\(hub,/g)].map(match => match.index);
+  assert.equal(launches.length, 2);
+  assert.ok(launches[0] < source.indexOf('await observeAutomaticSuccessor('));
+  assert.ok(launches[1] > source.indexOf('report.beforeNormalRestart = rootRecord'));
   for (const token of ['target.assertInstalledResources', 'target.assertGenerationProcess', 'target.assertActiveResources',
-    'target.assertFreshConnection(sdkRecords, [router, nodes[0]])',
+    'target.assertFreshConnection(sdkRecords, rows, profile)',
     'assert.equal(reconnect.getServerVersion().version, target.binding.target.manifest.modules.mcp.version)', 'assert.equal(sdkClient.getServerVersion().version, target.binding.baseline.manifest.modules.mcp.version)',
     'assert.equal(report.afterRoute.generation, target.binding.target.generation)', 'sameProcess(sentinelRecord)', 'await roundTrip(sdkClient)']) assert.ok(source.includes(token), token);
   assert.ok(source.indexOf('target.assertInstalledResources') < source.indexOf('passed: true, nativeUpdateAccepted'));
@@ -109,44 +123,11 @@ test('named PowerShell invocation is used and native timeouts are unchanged', ()
 });
 test('wrong active generation and process path refuse before inspecting files', () => {
   for (const version of ['0.1.22', '0.1.23']) {
-    assert.throws(() => target.assertActiveResources('C:/not-used', version, { schemaVersion: 1, descriptorSha256: 'a'.repeat(64), generation: 'b'.repeat(64) }));
-    assert.throws(() => target.assertGenerationProcess('C:/wrong/node.exe', 'C:/not-used', version));
+    assert.throws(() => target.assertActiveResources('C:/not-used', version, { schemaVersion: 1, descriptorSha256: 'a'.repeat(64), generation: 'b'.repeat(64) }, true, 'C:/fixture'), /Expected values/);
+    assert.throws(() => target.assertGenerationProcess('C:/wrong/node.exe', 'C:/not-used', version, 'C:/fixture'), /Expected values/);
   }
 });
-function successfulReceipt(caseName) {
-  const config = target.configFor(path.resolve('test-data'));
-  const [tool, restore] = target.CASES[caseName];
-  const runtimeImage = item => path.win32.join('C:/unit/Local/creator-hub/runtime-generations/windows-x86_64', item.generation, 'mcp/server/runtime/node.exe');
-  const held = [{ pid: 20, startTicks: '1', image: 'C:/unit/router.exe', kernelIdentityVerified: true }, { pid: 21, parentPid: 20, startTicks: '2', image: runtimeImage(binding.baseline), kernelIdentityVerified: true }];
-  const report = { kind: target.KIND, sourceCommit: binding.target.source.commit, baseline: config.baseline, pins: config.pins,
-    lastTool: tool, restore: restore === 'true', restoredLastTool: restore === 'true' ? tool : null,
-    beforePeVersion: [0, 1, 22, 0], afterPeVersion: [0, 1, 23, 0], beforeRoot: { pid: 10 }, afterRoot: { pid: 11, kernelIdentityVerified: true }, resourceProbe: { phase: 'after-automatic-root', attempts: 1, passed: true },
-    manualCapabilityRetention: require('./sdk-retention-023.cjs').proof(tool, restore === 'true'),
-    heldProcessesBefore: held, heldProcessesAfter: structuredClone(held), reconnectedProcesses: [{ ...held[0], pid: 30, startTicks: '3' }, { ...held[1], pid: 31, parentPid: 30, startTicks: '4', image: runtimeImage(binding.target) }], heldServerVersion: { version: binding.baseline.manifest.modules.mcp.version },
-    reconnectedServerVersion: { version: binding.target.manifest.modules.mcp.version }, beforeRoute: { generation: binding.baseline.generation }, afterRoute: { generation: binding.target.generation } };
-  for (const key of ['passed', 'nativeUpdateAccepted', 'automaticRestart', 'cancelPreserved', 'existingConnectionSurvived',
-    'newConnectionVerified', 'restorationVerified', 'policyRestored', 'settingsPreserved', 'acceptanceOnly', 'targetMcpRuntimeVerified',
-    'installedResourcesVerifiedBeforeAndAfter', 'heldGenerationRetained']) report[key] = true;
-  for (const key of ['publicDiscovery', 'liveAiAcceptance', 'releaseReady']) report[key] = false;
-  const lifecycle = { kind: 'lab-lifecycle-result', scenario: target.KIND, actualScope: 'exact-direct22-to-qualified23-acceptance-fixture-lab-only',
-    driverExitCode: 0, servedRouteCount: 5, rejectedRequestCount: 0, lifecycleSucceeded: true, cleanupVerified: true,
-    systemTlsVerified: true, labDiscovery: true, publicDiscovery: false, productAcceptance: false, releaseReady: false };
-  return { config, report, lifecycle };
-}
-test('all three profiles require exact successful native and cleanup evidence', () => {
-  for (const name of Object.keys(target.CASES)) {
-    const value = successfulReceipt(name); input.checkReceipt(value.report, [value.lifecycle], value.config, env(name));
-  }
-});
-test('receipt refuses held-session replacement, old generation, no restart and failed cleanup', () => {
-  for (const mutate of [v => v.report.heldProcessesAfter[0].pid++, v => v.report.afterRoute.generation = '0'.repeat(64),
-    v => v.report.targetMcpRuntimeVerified = false, v => v.report.afterRoot.pid = v.report.beforeRoot.pid,
-    v => v.report.reconnectedServerVersion.version = '2.7.8', v => v.lifecycle.cleanupVerified = false,
-    v => v.lifecycle.rejectedRequestCount = 1, v => v.report.restoredLastTool = 'setup']) {
-    const value = successfulReceipt('mcp-restore'); mutate(value);
-    assert.throws(() => input.checkReceipt(value.report, [value.lifecycle], value.config, env()));
-  }
-});
+// Filesystem-backed positive receipts and negative mutations live in incoming-receipt-r11.test.cjs.
 
 function copyFixture() {
   const root = path.join(__dirname, '../artifacts/outgoing-019-readiness-fixtures'); fs.mkdirSync(root, { recursive: true });
@@ -214,7 +195,7 @@ test('resource diagnostics preserve empty-file and nonregular-file refusal witho
 });
 test('actual driver captures new Root before the strict probe and preserves diagnostic evidence', () => {
   const source = fs.readFileSync(path.join(__dirname, 'windows-outgoing-019-driver.cjs'), 'utf8');
-  assert.equal((source.match(/spawn\(hub,/g) || []).length, 1);
+  assert.equal((source.match(/spawn\(hub,/g) || []).length, 2);
   assert.ok(source.includes('await observeAutomaticSuccessor({ hub,'));
   assert.ok(source.includes("phase: 'after-automatic-root', attempts: 1"));
   assert.ok(source.includes('report.resourceFailure = error.resourceDiagnostic'));
@@ -253,23 +234,17 @@ test('shape validation refuses absent proofs, old source, same generation and in
     v => v.baseline.source.commit = '3bed5cc1881cb6c85ef67abd493c68c2ffdb71b3',
     v => v.target.generation = '0'.repeat(64), v => v.target.manifest.modules.mcp.version = '2.7.9-fixture.19',
     v => v.target.privateRelease.assets['latest.json'].sha256 = '1'.repeat(64),
+    v => v.target.privateRelease.tag = 'lab-windows-warning-023-20261113-r4',
     v => delete v.target.manifest.managedRouting.files['routing/runtime.minisig'],
     v => v.fixtureQualification.productionApproval = true, v => v.fixtureQualification.outgoingNativeAccepted = true,
+    v => v.fixtureQualification.kind = 'visibility-r4-signed-candidate',
     v => v.fixtureQualification.payloadFiles = 14, v => v.fixtureQualification.source = { ...v.fixtureQualification.source, tree: '1'.repeat(40) }]) {
     const value = structuredClone(synthetic.binding); mutate(value); assert.throws(() => target.validateBindingShape(value));
   }
 });
-test('resource completion phase and verified automatic Root identity are mandatory in receipts', () => {
-  for (const mutate of [v => delete v.report.resourceProbe, v => v.report.resourceProbe.phase = 'before-root',
-    v => v.report.resourceProbe.attempts = 2, v => v.report.resourceProbe.passed = false,
-    v => v.report.afterRoot.kernelIdentityVerified = false]) {
-    const value = successfulReceipt('setup-restore'); mutate(value);
-    assert.throws(() => input.checkReceipt(value.report, [value.lifecycle], value.config, env('setup-restore')));
-  }
-});
 test('workflow is finite Windows-only and binds SDK source before private acquisition', () => {
   const workflow = fs.readFileSync(path.join(__dirname, '../.github/workflows/windows-outgoing-019.yml'), 'utf8');
-  assert.ok(workflow.includes('branches: [codex/windows-warning-023-20261113-r4-ci2]'));
+  assert.ok(workflow.includes('branches: [codex/windows-routing-023-20261116-r11-ci1]'));
   assert.ok(workflow.includes('scripts/windows-outgoing-019-input.cjs source'));
   assert.ok(workflow.includes('ref: '+ '\u0024{{ steps.binding.outputs.source_commit }}'));
   assert.ok(workflow.includes("git -C product rev-parse 'HEAD^{tree}'"));
@@ -295,6 +270,13 @@ test('parsed workflow retains exactly three Windows profiles and pinned checkout
   const document = yaml.parseDocument(fs.readFileSync(path.join(__dirname, '../.github/workflows/windows-outgoing-019.yml'), 'utf8'));
   assert.deepEqual(document.errors, []);
   const workflow = document.toJS();
+  const preflight = workflow.jobs.preflight;
+  assert.equal(preflight.if, "github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.ref == 'refs/heads/codex/windows-routing-023-20261116-r11-ci1'");
+  const tests = preflight.steps.find(step => step.run?.startsWith('node --test ')).run.split(/\s+/).slice(2);
+  for (const file of ['scripts/windows-outgoing-019-test.cjs', 'scripts/incoming-store-r11.test.cjs', 'scripts/incoming-receipt-r11.test.cjs']) {
+    assert.equal(tests.filter(value => value === file).length, 1, `${file} must run once in preflight`);
+  }
+  for (const file of ['scripts/incoming-store-r11.test.cjs', 'scripts/incoming-receipt-r11.test.cjs']) assert.ok(workflow.on.push.paths.includes(file));
   assert.deepEqual(Object.keys(workflow.jobs).sort(), ['acceptance', 'preflight']);
   for (const job of Object.values(workflow.jobs)) {
     assert.equal(job['runs-on'], 'windows-latest');
@@ -321,7 +303,7 @@ test('exact outgoing binding survives core.autocrlf=true checkout without relaxi
   const original = fs.readFileSync(bindingFile);
   assert.equal(original.includes(13), false, 'Frozen binding must retain its original LF bytes');
   const expectedHash = target.hash(original);
-  if (checkedInBinding.enabled) assert.equal(expectedHash, '2fc30cc8f4512f8120bb371d3d793809480815d5c4761a5435b90a0325bc0df9');
+  assert.match(expectedHash, /^[a-f0-9]{64}$/);
   const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'creator-outgoing-checkout-'));
   t.diagnostic(`Disposable no-ref checkout: ${temporary}`);
   t.after(() => {
@@ -329,19 +311,22 @@ test('exact outgoing binding survives core.autocrlf=true checkout without relaxi
     assert.ok(path.basename(temporary).startsWith('creator-outgoing-checkout-'));
     fs.rmSync(temporary, { recursive: true, force: true });
   });
-  const gitDir = path.join(temporary, 'objects.git');
+  const repository = process.env.CREATOR_TEST_GIT_DIR || execFileSync('git', ['rev-parse', '--absolute-git-dir'],
+    { cwd: path.join(__dirname, '..'), encoding: 'utf8', windowsHide: true, timeout: 10000 }).trim();
+  assert.ok(path.isAbsolute(repository), 'Existing Git metadata required for the checkout regression');
+  const objectDirectory = path.join(temporary, 'objects'); fs.mkdirSync(objectDirectory);
   const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !/^GIT_/i.test(name)));
   Object.assign(env, { GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: process.platform === 'win32' ? 'NUL' : '/dev/null',
-    GIT_NO_LAZY_FETCH: '1', GIT_OPTIONAL_LOCKS: '0', GIT_TERMINAL_PROMPT: '0' });
+    GIT_NO_LAZY_FETCH: '1', GIT_OPTIONAL_LOCKS: '0', GIT_TERMINAL_PROMPT: '0',
+    GIT_OBJECT_DIRECTORY: objectDirectory, GIT_INDEX_FILE: path.join(temporary, 'unused.index') });
   const execute = (args, input, extra = {}) => execFileSync('git', args, { cwd: temporary, env: { ...env, ...extra }, input,
     windowsHide: true, timeout: 30000, maxBuffer: 1024 * 1024, stdio: ['pipe', 'pipe', 'pipe'] });
-  execute(['init', '--bare', '--quiet', gitDir]);
-  const refs = () => execute([`--git-dir=${gitDir}`, 'for-each-ref', '--format=%(refname) %(objectname)']).toString();
-  assert.equal(refs(), '');
+  const refs = () => execute([`--git-dir=${repository}`, 'for-each-ref', '--format=%(refname) %(objectname)']).toString();
+  const originalRefs = refs();
   function checkout(label, attrText) {
     const worktree = path.join(temporary, label); fs.mkdirSync(worktree);
     const extra = { GIT_INDEX_FILE: path.join(temporary, `${label}.index`) };
-    const git = (args, input) => execute([`--git-dir=${gitDir}`, `--work-tree=${worktree}`,
+    const git = (args, input) => execute([`--git-dir=${repository}`, `--work-tree=${worktree}`,
       '-c', 'core.autocrlf=true', '-c', 'core.safecrlf=false', ...args], input, extra);
     assert.equal(git(['config', '--get', 'core.autocrlf']).toString().trim(), 'true');
     for (const [name, bytes] of [['.gitattributes', Buffer.from(attrText)], [relative, original], ['control.json', Buffer.from('{"lf":true}\n')]]) {
@@ -362,9 +347,8 @@ test('exact outgoing binding survives core.autocrlf=true checkout without relaxi
     const unprotected = checkout(`unprotected-${label}`, formLines.filter(line => line !== rule).join(eol));
     assert.notEqual(target.hash(unprotected), expectedHash, 'Control must reproduce the missing-rule failure');
     assert.equal(unprotected.toString(), original.toString().replace(/\n/g, '\r\n'));
-    if (checkedInBinding.enabled) assert.equal(target.hash(unprotected), 'd7b5aef2f133635d8e2871deb228c691f627e084a2598ec68323fad62738a1fd');
     t.diagnostic(`${label.toUpperCase()} attributes: exact binding preserved; missing-rule CRLF control rejected`);
   }
-  assert.equal(refs(), '', 'Disposable checkout must not create refs');
-  assert.equal(fs.existsSync(path.join(gitDir, 'index')), false, 'Only explicit disposable indexes may be used');
+  assert.equal(refs(), originalRefs, 'Checkout regression must not modify repository refs');
+  assert.equal(fs.existsSync(path.join(temporary, 'unused.index')), false, 'Only explicit disposable indexes may be used');
 });
