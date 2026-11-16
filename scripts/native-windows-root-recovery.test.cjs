@@ -50,6 +50,23 @@ test('synthetic record is explicitly stopped connections, never a fabricated suc
   assert.equal(record.policy, 1); assert.equal(record.phase, 'connections'); assert.equal(record.outcome, 'stopped');
   assert.equal(record.retry_blocked, true); assert.match(record.review_key, /^[a-f0-9]{64}$/);
 });
+
+test('inventory preserves empty native lock files without weakening nonempty reads', t => {
+  const root = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'root-recovery-empty-'));
+  t.after(() => { assert.ok(path.basename(root).startsWith('root-recovery-empty-')); fs.rmSync(root, { recursive: true }); });
+  const lock = path.join(root, 'launcher-gui.lock'), settings = path.join(root, 'settings.json');
+  fs.writeFileSync(lock, Buffer.alloc(0), { flag: 'wx' });
+  fs.writeFileSync(settings, '{}', { flag: 'wx' });
+  const reader = require('./read-bounded-input.cjs').readBounded, read = [];
+  const before = recovery.inventory([root], file => { read.push(file); return reader(file, 2 * 1024 * 1024); });
+  assert.deepEqual(read, [settings]);
+  assert.deepEqual(before.find(row => row.file === lock), { file: lock, bytes: 0,
+    sha256: crypto.createHash('sha256').update(Buffer.alloc(0)).digest('hex') });
+  assert.deepEqual(recovery.inventory([root], file => reader(file, 2 * 1024 * 1024)), before);
+  fs.writeFileSync(lock, 'changed');
+  assert.throws(() => recovery.verifyAdditions(before, recovery.inventory([root], file => reader(file, 2 * 1024 * 1024)), []));
+  assert.throws(() => recovery.inventory([root], () => { throw Error('Nonempty read refused'); }), /Nonempty read refused/);
+});
 function dialog(approve) {
   return { title: recovery.TITLE, class: '#32770', handle: 900, controls: [
     { id: 'ContentText', name: recovery.MESSAGE, processId: 55 },

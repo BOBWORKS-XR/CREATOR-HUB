@@ -94,7 +94,14 @@ function inventory(roots, read) {
     if (stat.isDirectory()) for (const name of fs.readdirSync(file).sort()) visit(path.join(file, name));
     else {
       assert.ok(stat.isFile() && stat.nlink === 1 && stat.size <= 2 * 1024 * 1024, 'Bounded independent fixture file required');
-      const bytes = read(file); total += bytes.length;
+      // Native lock files may be empty; preserve their membership and exact hash.
+      const bytes = stat.size === 0 ? Buffer.alloc(0) : read(file);
+      const after = fs.lstatSync(file);
+      for (const key of ['dev', 'ino', 'size', 'mtimeMs', 'ctimeMs', 'nlink'])
+        assert.equal(after[key], stat[key], 'Fixture changed during inventory');
+      assert.equal(after.isSymbolicLink(), false);
+      assert.equal(bytes.length, stat.size, 'Fixture size changed during inventory');
+      total += bytes.length;
       assert.ok(total <= 16 * 1024 * 1024 && rows.length < 1024, 'Fixture inventory limit');
       rows.push({ file, bytes: bytes.length, sha256: hash(bytes) });
     }
