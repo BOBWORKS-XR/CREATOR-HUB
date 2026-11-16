@@ -436,6 +436,7 @@ fn main() {
         convergence::retire_convergence_apps,
         convergence::move_to_hub,
         convergence::inspect_convergence_outcome,
+        convergence::keep_current_convergence,
         plugins_retirement::open_plugins_website,
         open_resource,
         community_catalogue,

@@ -347,10 +347,37 @@ fn require_no_convergence_recovery() -> Result<(), String> {
     } else {
         Some(crate::integration_context::Scope::enter()?)
     };
-    if !crate::client_recovery_ui::pending_client_recovery()?.is_empty() {
+    require_clear_convergence_recovery(crate::client_recovery_ui::pending_client_recovery()?.is_empty())
+}
+
+fn require_clear_convergence_recovery(clear: bool) -> Result<(), String> {
+    if !clear {
         return Err("Existing client changes need recovery review. Nothing was retried.".into());
     }
     Ok(())
+}
+
+/// Read-only startup check for retaining the current setup after an abandoned move.
+/// No historical success, connection acceptance or permission to replay is implied.
+pub fn verify_convergence_recovery_clear() -> Result<(), String> {
+    available()?;
+    require_no_convergence_recovery()?;
+    let base = dirs::config_dir().ok_or("Cannot locate MCP configuration directory.")?;
+    verify_abandoned_settings_at(&base)
+}
+
+fn verify_abandoned_settings_at(base: &std::path::Path) -> Result<(), String> {
+    hosted_commands::product_settings::verify_recovery_clear(base)
+}
+
+/// Root retains exclusive admission and repeats this check before publishing its receipt.
+/// An absent service is not initialized; an existing service must be demonstrably idle.
+pub fn verify_abandoned_convergence(app: &AppHandle) -> Result<(), String> {
+    available()?;
+    if app.try_state::<Context>().is_some() && !is_idle(app)? {
+        return Err("MCP still has active or unresolved work. Keep the current files for review.".into());
+    }
+    verify_convergence_recovery_clear()
 }
 
 impl ConvergenceReview {
@@ -629,6 +656,196 @@ impl<'a> Session<'a> {
 mod tests {
     use super::*;
     use std::cell::Cell;
+
+    #[test]
+    fn abandoned_convergence_checks_are_read_only_and_not_renderer_commands() {
+        let _: fn() -> Result<(), String> = verify_convergence_recovery_clear;
+        let _: fn(&AppHandle) -> Result<(), String> = verify_abandoned_convergence;
+        let source = include_str!("service.rs");
+        let checks = source
+            .split("pub fn verify_convergence_recovery_clear()")
+            .nth(1)
+            .unwrap()
+            .split("impl ConvergenceReview")
+            .next()
+            .unwrap();
+        assert!(checks.contains("available()?"));
+        assert!(checks.contains("require_no_convergence_recovery()?"));
+        assert!(checks.contains("hosted_commands::product_settings::verify_recovery_clear(base)"));
+        assert!(checks.contains("app.try_state::<Context>().is_some() && !is_idle(app)?"));
+        for forbidden in [
+            "initialize(",
+            "bind_managed_route(",
+            "managed_route(",
+            ".resume(",
+            ".execute(",
+            ".dialog()",
+            "save(",
+            "write(",
+            "Journal::open",
+        ] {
+            assert!(!checks.contains(forbidden), "{forbidden}");
+        }
+        for command in ["verify_abandoned_convergence", "verify_convergence_recovery_clear"] {
+            assert!(validate(command, &json!({})).is_err());
+            assert!(!needs_managed_route(command));
+        }
+        let recovery = include_str!("client_recovery_ui.rs");
+        let scanner = recovery.split("pub(crate) fn pending_client_recovery()").nth(1).unwrap()
+            .split("#[tauri::command]").next().unwrap();
+        assert!(scanner.contains("records.extend(collect(client, name, &path)?);"));
+        assert!(scanner.contains("&central_root()?"));
+        let compact: String = source.split_whitespace().collect();
+        assert!(compact.contains("require_clear_convergence_recovery(crate::client_recovery_ui::pending_client_recovery()?.is_empty())"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn abandoned_client_recovery_adjacent_and_central_survive_reopen() {
+        use crate::client_migration::recovery::{ReviewedWrite, Transaction};
+        for central in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let client = temp.path().join("client").join("config.json");
+            std::fs::create_dir_all(client.parent().unwrap()).unwrap();
+            std::fs::write(&client, b"before").unwrap();
+            let root = if central { temp.path().join("client-migrations-v1") }
+                else { client.parent().unwrap().join(".creator-hub-migrations") };
+            let transaction = Transaction::prepare(&root,
+                vec![ReviewedWrite::new("Codex", &client, b"before", b"after")]).unwrap();
+            let journal = transaction.inspect().unwrap().journal;
+            drop(transaction);
+            let pending = std::fs::read(journal.join("pending.json")).unwrap();
+            let inspect = || {
+                let reopened = if central { Transaction::open_allowlisted(&journal, &[client.clone()]) }
+                    else { Transaction::open(&journal, &[client.clone()]) }?;
+                let report = reopened.inspect()?;
+                require_clear_convergence_recovery(report.historical_completed)
+            };
+            assert!(inspect().is_err(), "central={central}");
+            if !central { assert!(crate::client_recovery_ui::require_no_pending_adjacent(&client).is_err()); }
+            assert_eq!(std::fs::read(&client).unwrap(), b"before");
+            assert_eq!(std::fs::read(journal.join("pending.json")).unwrap(), pending);
+            assert!(!journal.join("completed.json").exists());
+            let reopened = if central { Transaction::open_allowlisted(&journal, &[client.clone()]) }
+                else { Transaction::open(&journal, &[client.clone()]) }.unwrap();
+            assert!(reopened.resume(|_| true).unwrap().completed);
+            inspect().unwrap();
+            if !central { crate::client_recovery_ui::require_no_pending_adjacent(&client).unwrap(); }
+            assert_eq!(std::fs::read(&client).unwrap(), b"after");
+        }
+    }
+
+    #[test]
+    fn abandoned_client_recovery_malformed_central_and_adjacent_fail_closed() {
+        use crate::client_migration::recovery::Transaction;
+        for central in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let client = temp.path().join("client").join("config.json");
+            std::fs::create_dir_all(client.parent().unwrap()).unwrap();
+            std::fs::write(&client, b"unchanged").unwrap();
+            let root = if central { temp.path().join("client-migrations-v1") }
+                else { client.parent().unwrap().join(".creator-hub-migrations") };
+            let journal = root.join("a".repeat(64));
+            std::fs::create_dir_all(&journal).unwrap();
+            std::fs::write(journal.join("pending.json"), b"malformed").unwrap();
+            let report = if central { Transaction::open_allowlisted(&journal, &[client.clone()]) }
+                else { Transaction::open(&journal, &[client.clone()]) }.and_then(|t| t.inspect());
+            assert!(report.is_err(), "central={central}");
+            require_clear_convergence_recovery(false).unwrap_err();
+            if !central { assert!(crate::client_recovery_ui::require_no_pending_adjacent(&client).is_err()); }
+            assert_eq!(std::fs::read(&client).unwrap(), b"unchanged");
+            assert_eq!(std::fs::read(journal.join("pending.json")).unwrap(), b"malformed");
+        }
+    }
+
+    #[test]
+    fn abandoned_settings_accept_differing_valid_stores_without_writes() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = temp.path().to_path_buf();
+        verify_abandoned_settings_at(&base).unwrap();
+        assert_eq!(std::fs::read_dir(&base).unwrap().count(), 0);
+        let current = base.join(crate::APP_CONFIG_DIR).join("launcher-config.json");
+        let legacy = base.join(crate::LEGACY_APP_CONFIG_DIR).join("launcher-config.json");
+        let before = br#"{"channels":[],"auto_start":false,"future":{"keep":[1,true]}}"#;
+        let old = br#"{"channels":[],"auto_start":true,"future":{"keep":[2,false]}}"#;
+        for (file, bytes) in [(&current, before.as_slice()), (&legacy, old.as_slice())] {
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, bytes).unwrap();
+        }
+        verify_abandoned_settings_at(&base).unwrap();
+        assert_eq!(std::fs::read(&current).unwrap(), before);
+        assert_eq!(std::fs::read(&legacy).unwrap(), old);
+        for directory in [current.parent().unwrap(), legacy.parent().unwrap()] {
+            assert_eq!(std::fs::read_dir(directory).unwrap().count(), 1);
+        }
+    }
+
+    #[test]
+    fn abandoned_settings_refuse_malformed_either_store_and_unknown_recovery() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = temp.path().to_path_buf();
+        let current = base.join(crate::APP_CONFIG_DIR).join("launcher-config.json");
+        let legacy = base.join(crate::LEGACY_APP_CONFIG_DIR).join("launcher-config.json");
+        let valid = br#"{"channels":[],"auto_start":false}"#;
+        for file in [&current, &legacy] {
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, valid).unwrap();
+        }
+        for invalid in [
+            "{",
+            "null",
+            r#"{"channels":[],"auto_start":"false"}"#,
+            r#"{"channels":[],"auto_start":false,"future":{"a":1,"a":2}}"#,
+        ] {
+            for file in [&current, &legacy] {
+                std::fs::write(file, invalid).unwrap();
+                assert!(verify_abandoned_settings_at(&base).is_err());
+                assert_eq!(std::fs::read_to_string(file).unwrap(), invalid);
+                std::fs::write(file, valid).unwrap();
+            }
+        }
+        let journal = current.parent().unwrap().join(".creator-hub-product-settings");
+        std::fs::create_dir_all(journal.join("a".repeat(64))).unwrap();
+        assert!(verify_abandoned_settings_at(&base).is_err());
+        assert_eq!(std::fs::read(&current).unwrap(), valid);
+        assert_eq!(std::fs::read(&legacy).unwrap(), valid);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn abandoned_settings_refuse_pending_then_accept_completed_history_without_replay() {
+        use crate::client_migration::recovery::{ReviewedWrite, Transaction};
+        let temp = tempfile::tempdir().unwrap();
+        let base = temp.path().to_path_buf();
+        let current = base.join(crate::APP_CONFIG_DIR).join("launcher-config.json");
+        std::fs::create_dir_all(current.parent().unwrap()).unwrap();
+        let before = br#"{"channels":[],"auto_start":false}"#;
+        let after = br#"{"channels":[],"auto_start":false,"future":"first"}"#;
+        let later = br#"{"channels":[],"auto_start":false,"future":"later"}"#;
+        std::fs::write(&current, before).unwrap();
+        let root = current.parent().unwrap().join(".creator-hub-product-settings");
+        let first = Transaction::prepare(
+            &root,
+            vec![ReviewedWrite::new("MCP settings", &current, before, after)],
+        ).unwrap();
+        let journal = first.inspect().unwrap().journal;
+        let pending = std::fs::read(journal.join("pending.json")).unwrap();
+        assert!(verify_abandoned_settings_at(&base).is_err());
+        assert_eq!(std::fs::read(&current).unwrap(), before);
+        assert_eq!(std::fs::read(journal.join("pending.json")).unwrap(), pending);
+        assert!(!journal.join("completed.json").exists());
+        assert!(first.resume(|_| true).unwrap().completed);
+        verify_abandoned_settings_at(&base).unwrap();
+        let completed = std::fs::read(journal.join("completed.json")).unwrap();
+        let second = Transaction::prepare(
+            &root,
+            vec![ReviewedWrite::new("MCP settings", &current, after, later)],
+        ).unwrap();
+        assert!(second.resume(|_| true).unwrap().completed);
+        verify_abandoned_settings_at(&base).unwrap();
+        assert_eq!(std::fs::read(&current).unwrap(), later);
+        assert_eq!(std::fs::read(journal.join("completed.json")).unwrap(), completed);
+    }
 
     #[test]
     fn convergence_cancel_and_changes_during_native_review_never_issue_a_receipt() {

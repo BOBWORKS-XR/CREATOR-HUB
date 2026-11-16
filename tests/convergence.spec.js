@@ -1,7 +1,7 @@
 const { test, expect } = require('@playwright/test');
 
-async function load(page, { required = true, failPrepare = false, holdPrepare = false, retirementReady = false, pauseRetirement = false, reviewKey = 'a'.repeat(64), streamlined = false, failPhase = '', nativeCancel = false, holdMove = false, uncertain = false, invalidComplete = false, initialRecovery = null, settingsImportAvailable = false } = {}) {
-  await page.addInitScript(({ required, failPrepare, holdPrepare, retirementReady, pauseRetirement, reviewKey, streamlined, failPhase, nativeCancel, holdMove, uncertain, invalidComplete, initialRecovery, settingsImportAvailable }) => {
+async function load(page, { required = true, failPrepare = false, holdPrepare = false, retirementReady = false, pauseRetirement = false, reviewKey = 'a'.repeat(64), streamlined = false, failPhase = '', nativeCancel = false, holdMove = false, uncertain = false, invalidComplete = false, initialRecovery = null, settingsImportAvailable = false, keepCurrentAvailable, cancelKeepCurrent = false, holdKeepCurrent = false } = {}) {
+  await page.addInitScript(({ required, failPrepare, holdPrepare, retirementReady, pauseRetirement, reviewKey, streamlined, failPhase, nativeCancel, holdMove, uncertain, invalidComplete, initialRecovery, settingsImportAvailable, keepCurrentAvailable, cancelKeepCurrent, holdKeepCurrent }) => {
     localStorage.setItem('creator-usage-terms.hub', JSON.stringify({ policyVersion: '2026-09-28-v1', acceptedAt: '2026-09-28T00:00:00.000Z' }));
     localStorage.setItem('creator-hub.auto-download', 'false');
     window.__CREATOR_HUB_CONVERGENCE_PROTOCOL__ = 1;
@@ -13,6 +13,7 @@ async function load(page, { required = true, failPrepare = false, holdPrepare = 
       backups: [], retirementAvailable: false, message: 'Your saved projects and settings stay where they are.',
       reviewKey,
       streamlined, moveAvailable: !initialRecovery, recoveryHelp: initialRecovery, settingsImportAvailable,
+      ...(keepCurrentAvailable !== undefined ? { keepCurrentAvailable } : {}),
     };
     window.__TAURI__ = {
       event: { listen: async (name, callback) => {
@@ -22,6 +23,16 @@ async function load(page, { required = true, failPrepare = false, holdPrepare = 
       core: { invoke: async (command, args) => {
         window.calls.push({ command, args });
         if (command === 'convergence_status') return window.report;
+        if (command === 'keep_current_convergence') {
+          if (holdKeepCurrent) await new Promise(resolve => { window.releaseKeepCurrent = resolve; });
+          if (cancelKeepCurrent) throw Error('Keep current setup cancelled. Retained records were not changed.');
+          if (window.keepCurrentOverride) return window.keepCurrentOverride;
+          window.report = { ...window.report, required: false, stage: 'review', recoveryHelp: null,
+            keepCurrentAvailable: false, moveAvailable: false,
+            backups: ['C:/fixture-only/current-settings.bak'],
+            message: 'Your current settings were backed up. The old attempt was not replayed. Existing apps and connections were kept.' };
+          return window.report;
+        }
         if (command === 'move_to_hub') {
           window.phases = [];
           if (holdMove) await new Promise(resolve => { window.releaseMove = resolve; });
@@ -75,7 +86,7 @@ async function load(page, { required = true, failPrepare = false, holdPrepare = 
         return null;
       } },
     };
-  }, { required, failPrepare, holdPrepare, retirementReady, pauseRetirement, reviewKey, streamlined, failPhase, nativeCancel, holdMove, uncertain, invalidComplete, initialRecovery, settingsImportAvailable });
+  }, { required, failPrepare, holdPrepare, retirementReady, pauseRetirement, reviewKey, streamlined, failPhase, nativeCancel, holdMove, uncertain, invalidComplete, initialRecovery, settingsImportAvailable, keepCurrentAvailable, cancelKeepCurrent, holdKeepCurrent });
   await page.goto('http://127.0.0.1:4188');
 }
 
@@ -457,4 +468,130 @@ for (const dismiss of ['Not now', 'Escape']) test(`integrated ${dismiss} before 
   else await page.locator('#convergence-later').click();
   await expect(page.locator('#convergence-dialog')).not.toBeVisible();
   expect(await page.evaluate(() => window.calls.some(call => /move_to_hub|prepare_convergence|migrate_convergence_connections|retire_convergence_apps/.test(call.command)))).toBe(false);
+});
+
+const stoppedRecovery = 'Retained phase record: C:/fixture-only/move-v1.json\nThe earlier connection move stopped.';
+
+for (const width of [1100, 390]) test(`keep current setup acknowledges only the stopped attempt at ${width}px`, async ({ page }, testInfo) => {
+  await page.setViewportSize({ width, height: 844 });
+  await load(page, { streamlined: true, initialRecovery: stoppedRecovery, keepCurrentAvailable: true });
+  const keep = page.getByRole('button', { name: 'Keep my current setup', exact: true });
+  await expect(keep).toBeVisible();
+  await expect(page.locator('#convergence-move')).toBeHidden();
+  await page.screenshot({ path: testInfo.outputPath('keep-current-offer.png') });
+  await keep.click();
+  await expect(page.locator('#convergence-title')).toHaveText('Current setup kept');
+  await expect(page.locator('#convergence-summary')).toContainText('settings were backed up');
+  await expect(page.locator('#convergence-summary')).toContainText('old attempt was not replayed');
+  await expect(page.locator('#convergence-dialog')).not.toContainText(/Migration complete|Move complete/);
+  for (const id of ['keep-current', 'move', 'prepare', 'connections', 'retire', 'refresh', 'recovery', 'reopen']) {
+    await expect(page.locator(`#convergence-${id}`)).toBeHidden();
+  }
+  expect(await page.locator('#convergence-dialog').evaluate(node => node.scrollWidth > node.clientWidth)).toBe(false);
+  expect(await page.evaluate(() => window.report.stage)).toBe('review');
+  expect(await page.evaluate(() => window.calls.filter(call => /convergence|move_to_hub/.test(call.command))))
+    .toEqual([{ command: 'convergence_status', args: {} }, { command: 'keep_current_convergence', args: {} }]);
+  await page.screenshot({ path: testInfo.outputPath('current-setup-kept.png') });
+  await page.getByRole('button', { name: 'Continue in Hub', exact: true }).click();
+  await expect(page.locator('#convergence-dialog')).toBeHidden();
+  expect(await page.evaluate(() => localStorage.getItem('creator-hub.convergence-reminder-v1'))).toBeNull();
+  await page.evaluate(() => window.CreatorConvergence.run());
+  await expect(page.locator('#convergence-dialog')).toBeHidden();
+  await expect(page.locator('#convergence-reopen')).toBeHidden();
+  expect(await page.evaluate(() => window.calls.filter(call => call.command === 'keep_current_convergence').length)).toBe(1);
+});
+
+for (const keepCurrentAvailable of [undefined, false]) test(`keep current setup requires explicit native availability: ${keepCurrentAvailable}`, async ({ page }) => {
+  await load(page, { streamlined: true, initialRecovery: stoppedRecovery, keepCurrentAvailable });
+  await expect(page.locator('#convergence-dialog')).toBeVisible();
+  await expect(page.locator('#convergence-keep-current')).toBeHidden();
+  await page.evaluate(() => document.querySelector('#convergence-keep-current').dispatchEvent(new MouseEvent('click')));
+  expect(await page.evaluate(() => window.calls.filter(call => call.command === 'keep_current_convergence'))).toEqual([]);
+});
+
+test('invalid native availability fails closed', async ({ page }) => {
+  await load(page, { streamlined: true, initialRecovery: stoppedRecovery, keepCurrentAvailable: 'true' });
+  await expect(page.locator('#convergence-error')).toContainText('report could not be verified');
+  await expect(page.locator('#convergence-keep-current')).toBeHidden();
+  expect(await page.evaluate(() => window.calls.filter(call => call.command === 'keep_current_convergence'))).toEqual([]);
+});
+
+test('keep current cancellation preserves the recovery view without another native action', async ({ page }) => {
+  await load(page, { streamlined: true, initialRecovery: stoppedRecovery, keepCurrentAvailable: true, cancelKeepCurrent: true });
+  await page.locator('#convergence-keep-current').click();
+  await expect(page.locator('#convergence-error')).toContainText('Your current setup was not confirmed');
+  await expect(page.locator('#convergence-error')).toContainText('cancelled');
+  await expect(page.locator('#convergence-error')).toContainText('No automatic retry');
+  await expect(page.locator('#convergence-title')).toHaveText('Finish setting up Hub');
+  await expect(page.locator('#convergence-recovery-text')).toHaveValue(stoppedRecovery);
+  await expect(page.locator('#convergence-reopen')).toBeVisible();
+  await expect(page.locator('#convergence-keep-current')).toBeEnabled();
+  expect(await page.evaluate(() => window.calls.map(call => call.command))).toEqual(['convergence_status', 'keep_current_convergence']);
+  await page.locator('#convergence-later').click();
+  await expect(page.locator('#convergence-dialog')).toBeHidden();
+});
+
+test('keep current in flight blocks duplicate calls, inspection and dismissal', async ({ page }) => {
+  await load(page, { streamlined: true, initialRecovery: stoppedRecovery, keepCurrentAvailable: true, holdKeepCurrent: true });
+  await page.locator('#convergence-keep-current').click();
+  await expect.poll(() => page.evaluate(() => typeof window.releaseKeepCurrent)).toBe('function');
+  await expect(page.locator('#convergence-keep-current')).toBeDisabled();
+  await expect(page.locator('#convergence-later')).toBeDisabled();
+  await page.evaluate(() => {
+    for (const id of ['keep-current', 'refresh', 'move']) document.querySelector(`#convergence-${id}`).dispatchEvent(new MouseEvent('click'));
+  });
+  await page.keyboard.press('Escape');
+  await expect(page.locator('#convergence-dialog')).toBeVisible();
+  expect(await page.evaluate(() => window.calls.map(call => call.command))).toEqual(['convergence_status', 'keep_current_convergence']);
+  await page.evaluate(() => window.releaseKeepCurrent());
+  await expect(page.locator('#convergence-title')).toHaveText('Current setup kept');
+});
+
+test('keeping the current setup does not claim a separate connection review is complete', async ({ page }) => {
+  await load(page, { streamlined: true, initialRecovery: stoppedRecovery, keepCurrentAvailable: true });
+  await page.evaluate(() => {
+    window.keepCurrentOverride = { ...window.report, required: true, recoveryHelp: null,
+      keepCurrentAvailable: false, message: 'The old attempt was not replayed. Current settings were backed up. A separate connection review remains.' };
+  });
+  await page.locator('#convergence-keep-current').click();
+  await expect(page.locator('#convergence-title')).toHaveText('Current setup kept');
+  await expect(page.locator('#convergence-summary')).toContainText('separate connection review remains');
+  await expect(page.locator('#convergence-dialog')).not.toContainText(/Migration complete|Move complete/);
+  await expect(page.locator('#convergence-recovery')).toBeHidden();
+  await expect(page.locator('#convergence-reopen')).toBeHidden();
+  await page.getByRole('button', { name: 'Continue in Hub', exact: true }).click();
+  await expect(page.locator('#convergence-dialog')).toBeHidden();
+  expect(await page.evaluate(() => localStorage.getItem('creator-hub.convergence-reminder-v1'))).toBeNull();
+  expect(await page.evaluate(() => window.calls.filter(call => /convergence|move_to_hub/.test(call.command)).map(call => call.command)))
+    .toEqual(['convergence_status', 'keep_current_convergence']);
+});
+
+for (const [label, override] of [
+  ['still blocked', { recoveryHelp: stoppedRecovery }],
+  ['missing recovery acknowledgement', { recoveryHelp: undefined }],
+  ['still available', { keepCurrentAvailable: true }],
+  ['missing acknowledgement', { keepCurrentAvailable: undefined }],
+  ['wrong stage', { stage: 'backed-up' }],
+  ['migration completion', { stage: 'complete', legacyApps: [] }],
+  ['changed native mode', { streamlined: false }],
+]) test(`unverified keep current result stays in recovery: ${label}`, async ({ page }) => {
+  await load(page, { streamlined: true, initialRecovery: stoppedRecovery, keepCurrentAvailable: true });
+  await page.evaluate(override => {
+    window.keepCurrentOverride = { ...window.report, required: false, stage: 'review', recoveryHelp: null,
+      keepCurrentAvailable: false, ...override };
+  }, override);
+  await page.locator('#convergence-keep-current').click();
+  await expect(page.locator('#convergence-error')).toContainText('keep-current outcome could not be verified');
+  await expect(page.locator('#convergence-title')).toHaveText('Finish setting up Hub');
+  await expect(page.locator('#convergence-recovery-text')).toHaveValue(stoppedRecovery);
+  await expect(page.locator('#convergence-reopen')).toBeVisible();
+  expect(await page.evaluate(() => window.calls.map(call => call.command))).toEqual(['convergence_status', 'keep_current_convergence']);
+});
+
+test('replaced native bridge cannot receive keep-current approval', async ({ page }) => {
+  await load(page, { streamlined: true, initialRecovery: stoppedRecovery, keepCurrentAvailable: true });
+  await page.evaluate(() => { window.CreatorHubNative = { ...window.CreatorHubNative }; });
+  await page.locator('#convergence-keep-current').click();
+  await expect(page.locator('#convergence-error')).toContainText('Native migration support changed');
+  expect(await page.evaluate(() => window.calls.filter(call => call.command === 'keep_current_convergence'))).toEqual([]);
 });

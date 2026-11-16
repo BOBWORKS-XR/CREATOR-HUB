@@ -298,8 +298,11 @@ mod settings_profiles {
         );
         assert!(source.contains("restore_settings_import_recovery(&mut plan, &base)?;"));
         assert!(source.contains(
-            "if !import_needs_review && !inspection_can_admit(prior_blocked, record.as_ref())"
+            "if !import_needs_review && !kept && !inspection_can_admit(prior_blocked, record.as_ref())"
         ));
+        let inspection = source.split("pub async fn inspect_convergence_outcome(").nth(1).unwrap();
+        assert!(inspection.find("preserve_settings_import_recovery").unwrap()
+            < inspection.find("let kept = kept_setup_at").unwrap());
     }
 
     #[test]

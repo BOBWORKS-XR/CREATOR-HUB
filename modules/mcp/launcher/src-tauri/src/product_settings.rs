@@ -202,6 +202,13 @@ fn inspect_paths(paths: &Paths) -> Result<Report, String> {
         recovery,
     })
 }
+pub(crate) fn verify_recovery_clear(base: &Path) -> Result<(), String> {
+    if inspect(base)?.recovery.iter().any(|record| !record.completed && !record.historical_completed) {
+        return Err("Existing MCP settings need recovery review. Nothing was retried.".into());
+    }
+    Ok(())
+}
+
 pub(super) fn inspect(base: &Path) -> Result<Report, String> {
     inspect_paths(&Paths::new(base)?)
 }

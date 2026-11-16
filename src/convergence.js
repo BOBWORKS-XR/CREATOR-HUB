@@ -15,6 +15,7 @@
       || (value.streamlined !== undefined && typeof value.streamlined !== 'boolean')
       || (value.moveAvailable !== undefined && typeof value.moveAvailable !== 'boolean')
       || (value.settingsImportAvailable !== undefined && typeof value.settingsImportAvailable !== 'boolean')
+      || (value.keepCurrentAvailable !== undefined && typeof value.keepCurrentAvailable !== 'boolean')
       || (value.recoveryHelp != null && !text(value.recoveryHelp, 16384))
       || (value.reviewKey != null && (typeof value.reviewKey !== 'string' || !/^[a-f0-9]{64}$/.test(value.reviewKey)))
       || (value.stage === 'complete' && (value.required || value.retirementAvailable === true || value.legacyApps.length))) {
@@ -24,6 +25,7 @@
       streamlined: value.streamlined === true,
       moveAvailable: value.moveAvailable !== false,
       settingsImportAvailable: value.settingsImportAvailable === true,
+      keepCurrentAvailable: value.keepCurrentAvailable === true,
       settings: [...value.settings], backups: [...value.backups], message: value.message,
       reviewKey: value.reviewKey || null,
       recoveryHelp: value.recoveryHelp || null,
@@ -54,7 +56,7 @@
       let current, initialError;
       try { current = report(await native.invoke('convergence_status')); }
       catch (reason) { initialError = reason; }
-      if (!initialError && (!current.enabled || (!current.required && !current.settingsImportAvailable && !current.recoveryHelp))) {
+      if (!initialError && (!current.enabled || (!current.required && !current.settingsImportAvailable && !current.recoveryHelp && !current.keepCurrentAvailable))) {
         const reopen = resumeButton || (current.streamlined && document.querySelector('#convergence-reopen'));
         if (reopen) { reopen.hidden = true; reopen.style?.setProperty('display', 'none'); }
         active = undefined; resolve(); return;
@@ -89,19 +91,21 @@
       const recoveryText = document.querySelector('#convergence-recovery-text');
       const copyRecovery = document.querySelector('#convergence-copy-recovery');
       const copyStatus = document.querySelector('#convergence-copy-status');
+      const keepCurrent = document.querySelector('#convergence-keep-current');
       if (streamlined && (!move || !progress || !explanation || !backupDetails)) throw new Error('The migration guide is unavailable. Existing apps are kept.');
       if (explanation) explanation.hidden = !streamlined;
       const locked = [...document.body.children].filter(node => node !== dialog && !node.inert);
       const previousFocus = document.activeElement;
       let busy = false, ended = false, reminderSaveFailed = false, stopped = false, phase = '', result = '', unlisten;
+      let currentKept = false;
       prepare.textContent = 'Back up and continue';
       connections.textContent = 'Move existing connections';
       later.textContent = 'Keep existing apps for now';
       error.hidden = true; error.textContent = '';
 
-      function showError(reason) {
+      function showError(reason, explanation = 'Setup stopped. Keep the saved files and backups. Check setup again, or choose Not now to return to Hub. Earlier completed changes may remain.') {
         const message = document.createElement('p');
-        message.textContent = 'Setup stopped. Keep the saved files and backups. Check setup again, or choose Not now to return to Hub. Earlier completed changes may remain.';
+        message.textContent = explanation;
         const diagnostic = document.createElement('details');
         const heading = document.createElement('summary'); heading.textContent = 'Technical details';
         const detail = document.createElement('p'); detail.textContent = `Migration could not continue: ${String(reason).slice(0, 2000)}`;
@@ -182,6 +186,21 @@
           refresh.textContent = 'Check again';
           later.textContent = imported ? 'Continue in Hub' : reminderSaveFailed ? 'Continue without saving reminder' : 'Not now';
         }
+        if (keepCurrent) {
+          keepCurrent.hidden = currentKept || current?.keepCurrentAvailable !== true;
+          keepCurrent.disabled = busy || current?.enabled !== true || keepCurrent.hidden;
+        }
+        if (currentKept) {
+          title.textContent = 'Current setup kept';
+          summary.textContent = current.message;
+          prepare.hidden = connections.hidden = retire.hidden = refresh.hidden = true;
+          if (move) move.hidden = true;
+          if (progress) progress.hidden = true;
+          if (explanation) explanation.hidden = true;
+          if (importExplanation) importExplanation.hidden = true;
+          if (recovery) recovery.hidden = true;
+          later.textContent = 'Continue in Hub';
+        }
       }
       function release() {
         dialog.removeEventListener('cancel', cancel);
@@ -191,6 +210,7 @@
         refresh.removeEventListener('click', refreshClick);
         later.removeEventListener('click', laterClick);
         if (move) move.removeEventListener('click', moveClick);
+        keepCurrent?.removeEventListener('click', keepCurrentClick);
         copyRecovery?.removeEventListener('click', copyRecoveryClick);
         if (typeof unlisten === 'function') unlisten();
         locked.forEach(node => { node.inert = false; });
@@ -204,7 +224,7 @@
         event.preventDefault();
         if (ended || busy || later.disabled || !dialog.open) return;
         const imported = settingsOnly && current?.stage === 'backed-up' && !current.settingsImportAvailable;
-        if (current?.stage !== 'complete' && !imported && current?.reviewKey && reopen && !reminderSaveFailed) {
+        if (!currentKept && current?.stage !== 'complete' && !imported && current?.reviewKey && reopen && !reminderSaveFailed) {
           try {
             window.localStorage.setItem(REMINDER, JSON.stringify({ schemaVersion: 1, reviewKey: current.reviewKey }));
             if (!reminderMatches(current.reviewKey)) throw new Error('Reminder readback failed');
@@ -214,7 +234,7 @@
             render(); return;
           }
         }
-        if ((current?.stage === 'complete' || imported) && reopen) {
+        if ((currentKept || current?.stage === 'complete' || imported) && reopen) {
           reopen.hidden = true;
           reopen.style?.setProperty('display', 'none');
         }
@@ -292,6 +312,27 @@
         catch (reason) { showError(reason); }
         finally { busy = false; render(); }
       }
+      async function keepCurrentClick(event) {
+        event.preventDefault();
+        if (ended || busy || currentKept || !dialog.open || keepCurrent?.disabled
+          || current?.enabled !== true || current.keepCurrentAvailable !== true) return;
+        if (window.CreatorHubNative !== native || native.convergencePersistence !== true) {
+          showError('Native migration support changed. Existing data are kept.'); return;
+        }
+        busy = true; phase = 'review'; error.hidden = true; error.textContent = ''; render();
+        try {
+          const value = await native.invoke('keep_current_convergence');
+          const next = report(value);
+          if (value.recoveryHelp !== null || value.keepCurrentAvailable !== false
+            || next.stage !== 'review' || next.streamlined !== streamlined) {
+            throw new Error('The native keep-current outcome could not be verified. Check the retained state before continuing.');
+          }
+          current = next; currentKept = true;
+          if (reopen) { reopen.hidden = true; reopen.style?.setProperty('display', 'none'); }
+        } catch (reason) {
+          showError(reason, 'Your current setup was not confirmed. Keep the saved files and recovery records. Check again, or choose Not now to return to Hub. No automatic retry was started.');
+        } finally { busy = false; render(); }
+      }
       async function copyRecoveryClick(event) {
         event.preventDefault();
         if (ended || busy || !dialog.open || copyRecovery.disabled || !current?.recoveryHelp) return;
@@ -312,6 +353,7 @@
       refresh.addEventListener('click', refreshClick);
       later.addEventListener('click', laterClick);
       if (move) move.addEventListener('click', moveClick);
+      keepCurrent?.addEventListener('click', keepCurrentClick);
       copyRecovery?.addEventListener('click', copyRecoveryClick);
       if (streamlined && typeof window.__TAURI__?.event?.listen === 'function') {
         try {

@@ -48,6 +48,7 @@ fn main() {
             "retire_convergence_apps",
             "move_to_hub",
             "inspect_convergence_outcome",
+            "keep_current_convergence",
             "open_resource",
             "open_plugins_website",
             "community_catalogue",

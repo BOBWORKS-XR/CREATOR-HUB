@@ -37,6 +37,7 @@ pub struct Report {
     message: String,
     review_key: Option<String>,
     recovery_help: Option<String>,
+    keep_current_available: bool,
 }
 
 fn recovery_help(phase: Option<&str>, path: &std::path::Path) -> String {
@@ -86,6 +87,7 @@ fn mark_settings_import_recovery(plan: &mut Plan, evidence: SettingsImportRecove
     plan.report.move_available = false;
     plan.report.settings_import_available = false;
     plan.report.retirement_available = false;
+    plan.report.keep_current_available = false;
     // A reminder for the pre-import snapshot is not a recovery decision.
     plan.report.review_key = None;
     plan.report.message = "Saved MCP project import needs recovery review. Keep current settings and original backups; no automatic retry was started.".into();
@@ -201,6 +203,86 @@ fn read_batch_at(path: &std::path::Path) -> Result<Option<BatchRecord>, String> 
 
 fn batch_needs_review(record: &BatchRecord) -> bool {
     record.outcome == "started" || record.retry_blocked
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct KeptSetup {
+    policy: u32,
+    active: bool,
+    batch_sha256: String,
+    store_sha256: Vec<Option<String>>,
+}
+
+fn kept_setup_path() -> Result<PathBuf, String> {
+    Ok(manager::child_dir("convergence")?.join("kept-setup-v1.json"))
+}
+
+fn image_hash(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+fn retained_path(path: &std::path::Path, hash: &str) -> Result<PathBuf, String> {
+    Ok(path.parent().ok_or("Missing backup folder.")?
+        .join(".creator-hub-settings-backups")
+        .join(format!("{}.{hash}.bak", path.file_name().and_then(|n| n.to_str())
+            .ok_or("Invalid backup name.")?)))
+}
+
+fn read_kept_setup(path: &std::path::Path) -> Result<Option<KeptSetup>, String> {
+    let Some(bytes) = stores::storage::read_bytes(path)? else { return Ok(None); };
+    if bytes.len() > 4096 { return Err("The saved setup decision is too large to verify.".into()); }
+    let saved: KeptSetup = serde_json::from_slice(&bytes)
+        .map_err(|_| "The saved setup decision needs review; no migration was retried.")?;
+    let hash_valid = |hash: &str| hash.len() == 64
+        && hash.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+    if saved.policy != POLICY || !hash_valid(&saved.batch_sha256)
+        || saved.store_sha256.len() != stores::STORES.len()
+        || saved.store_sha256.iter().flatten().any(|hash| !hash_valid(hash)) {
+        return Err("Unknown saved setup decision; keep the recovery records.".into());
+    }
+    Ok(Some(saved))
+}
+
+fn kept_setup_at(path: &std::path::Path, batch: &std::path::Path,
+    base: &stores::Roots) -> Result<bool, String> {
+    let Some(saved) = read_kept_setup(path)? else { return Ok(false); };
+    if !saved.active { return Ok(false); }
+    let Some(bytes) = stores::storage::read_bytes(batch)? else { return Ok(false); };
+    if image_hash(&bytes) != saved.batch_sha256 { return Ok(false); }
+    let record = read_batch_at(batch)?.ok_or("Missing migration record.")?;
+    if !keep_current_phase(&record) { return Ok(false); }
+    let backup = retained_path(batch, &saved.batch_sha256)?;
+    if stores::storage::read_bytes(&backup)?.as_deref() != Some(bytes.as_slice()) {
+        return Err("The original migration backup is missing or changed.".into());
+    }
+    for (store, hash) in stores::STORES.iter().zip(&saved.store_sha256) {
+        if let Some(hash) = hash {
+            let backup = retained_path(&store.path(base)?, hash)?;
+            if stores::storage::read_bytes(&backup)?.is_none_or(|bytes| image_hash(&bytes) != *hash) {
+                return Err("A saved settings backup is missing or changed.".into());
+            }
+        }
+    }
+    Ok(true)
+}
+
+fn keep_current_phase(record: &BatchRecord) -> bool {
+    batch_needs_review(record) && matches!(record.phase.as_str(), "backup" | "connections")
+}
+
+// Invalidate before a new attempt: its small phase record may otherwise repeat
+// the exact bytes of an older attempt that the user chose to abandon.
+fn invalidate_kept_setup(path: &std::path::Path) -> Result<(), String> {
+    if let Some(mut saved) = read_kept_setup(path)? {
+        saved.active = false;
+        manager::atomic_write(path, &serde_json::to_vec(&saved)
+            .map_err(|_| "Cannot retain the previous setup decision.")?)?;
+        if read_kept_setup(path)?.is_none_or(|saved| saved.active) {
+            return Err("The previous setup decision could not be closed.".into());
+        }
+    }
+    Ok(())
 }
 
 #[cfg(any(feature = "integrated-features", test))]
@@ -371,11 +453,18 @@ fn inspect() -> Result<Plan, String> {
     let already_reviewed = reviewed_snapshots_at(&record_path()?, &snapshots)?;
     let phase_path = batch_path()?;
     let pending_batch = read_batch_at(&phase_path)?;
-    let uncertain_batch = pending_batch.as_ref().is_some_and(batch_needs_review);
+    let kept_setup = kept_setup_at(&kept_setup_path()?, &phase_path, &base)?
+        && !retirement_pending()?
+        && !snapshots.iter().any(stores::Snapshot::needs_outcome_review);
+    #[cfg(feature = "integrated-features")]
+    if kept_setup {
+        creator_works_mcp_launcher::service::verify_convergence_recovery_clear()?;
+    }
+    let uncertain_batch = !kept_setup && pending_batch.as_ref().is_some_and(batch_needs_review);
     let pending_retirement = retirement_pending()?
-        || pending_batch
+        || (!kept_setup && pending_batch
             .as_ref()
-            .is_some_and(|record| record.outcome != "complete");
+            .is_some_and(|record| record.outcome != "complete"));
     let review_key = prompt_review_key(&snapshots, &legacy_apps, pending_retirement)?;
     let already_using_hub = legacy_apps.is_empty()
         && !pending_retirement
@@ -384,14 +473,14 @@ fn inspect() -> Result<Plan, String> {
             .and_then(|store| store.resolve())
             .is_ok_and(|runtime| settings_use_verified_runtime(&snapshots, &runtime.server));
     let connection_update = connection_update_key()?.is_some();
-    let required = connection_update || migration_required(
+    let required = connection_update || (!kept_setup && migration_required(
         legacy_apps.len(),
         settings.len(),
         already_reviewed || already_using_hub,
         pending_retirement,
-    );
+    ));
     let settings_import_available =
-        settings_import_available(&snapshots, "review", !uncertain_batch);
+        !kept_setup && settings_import_available(&snapshots, "review", !uncertain_batch);
     let mut plan = Plan {
         stores: snapshots,
         retained_images: Vec::new(),
@@ -417,8 +506,13 @@ fn inspect() -> Result<Plan, String> {
                 pending_batch.as_ref().map(|record| record.phase.as_str()),
                 &phase_path,
             )),
+            keep_current_available: cfg!(feature = "integrated-features") && uncertain_batch
+                && pending_batch.as_ref().is_some_and(keep_current_phase)
+                && !retirement_pending()?,
             message: if uncertain_batch {
                 "An earlier Move to Hub operation has an uncertain or partial outcome. Settings, backups and recovery records were kept. Review the native phase record before repeating any operation."
+            } else if kept_setup {
+                "Your current setup was kept. The old migration was not replayed."
             } else if pending_batch.as_ref().is_some_and(|record| record.outcome != "complete") {
                 "An earlier Move to Hub stopped before completion. Retained state can be inspected before a fresh native review. No transaction is replayed."
             } else if pending_retirement {
@@ -433,6 +527,10 @@ fn inspect() -> Result<Plan, String> {
         },
     };
     restore_settings_import_recovery(&mut plan, &base)?;
+    if plan.settings_import_recovery.is_some()
+        || plan.stores.iter().any(stores::Snapshot::needs_outcome_review) {
+        plan.report.keep_current_available = false;
+    }
     Ok(plan)
 }
 
@@ -1127,7 +1225,8 @@ pub async fn inspect_convergence_outcome(handle: tauri::AppHandle) -> Result<Rep
         let prior_blocked = saved.as_ref().is_some_and(|plan| !plan.retry_allowed);
         // An unrelated completed Move to Hub record cannot clear an import failure.
         let import_needs_review = preserve_settings_import_recovery(&mut fresh, saved.as_ref());
-        if !import_needs_review && !inspection_can_admit(prior_blocked, record.as_ref()) {
+        let kept = kept_setup_at(&kept_setup_path()?, &batch_path()?, &roots()?)?;
+        if !import_needs_review && !kept && !inspection_can_admit(prior_blocked, record.as_ref()) {
             fresh.retry_allowed = false;
             fresh.report.settings_import_available = false;
             fresh.report.move_available = false;
@@ -1146,6 +1245,95 @@ fn inspection_can_admit(prior_blocked: bool, record: Option<&BatchRecord>) -> bo
         Some(record) => !batch_needs_review(record),
         None => !prior_blocked,
     }
+}
+
+fn verify_keep_current(plan: &Plan, batch: &std::path::Path, before: &[u8]) -> Result<(), String> {
+    let record = read_batch_at(batch)?.ok_or("The previous setup record is missing.")?;
+    if !keep_current_phase(&record) || retirement_pending()? || plan.settings_import_recovery.is_some()
+        || plan.stores.iter().any(stores::Snapshot::needs_outcome_review) {
+        return Err("An unfinished change needs review first. Your settings and backups were kept.".into());
+    }
+    recheck(plan)?;
+    if stores::storage::read_bytes(batch)?.as_deref() != Some(before) {
+        return Err("Setup changed during review. Check it again; no settings were overwritten.".into());
+    }
+    Ok(())
+}
+
+fn retain_current_setup(plan: &Plan, batch: &std::path::Path, before: &[u8],
+    receipt: &std::path::Path, verify: impl Fn() -> Result<(), String>) -> Result<(), String> {
+    verify()?;
+    let receipt_before = stores::storage::read_bytes(receipt)?;
+    read_kept_setup(receipt)?;
+    let mut hashes = Vec::new();
+    let mut backups = Vec::new();
+    for snapshot in &plan.stores {
+        hashes.push(snapshot.bytes().map(image_hash));
+        if snapshot.bytes().is_some() { backups.push(snapshot.retain_reviewed()?); }
+    }
+    let retained = stores::storage::retain_image(batch, before)?;
+    if stores::storage::read_bytes(&retained)?.as_deref() != Some(before) {
+        return Err("The setup record backup could not be verified.".into());
+    }
+    verify()?;
+    for backup in &backups { backup.recheck()?; }
+    recheck(plan)?;
+    if stores::storage::read_bytes(batch)?.as_deref() != Some(before) {
+        return Err("The setup record changed; the old attempt remains paused.".into());
+    }
+    // Preserve any previous decision before replacing it. This records only
+    // abandonment of this attempt, never successful migration or retirement.
+    if let Some(previous) = receipt_before.as_ref() {
+        stores::storage::retain_image(receipt, &previous)?;
+    }
+    let saved = KeptSetup { policy: POLICY, active: true,
+        batch_sha256: image_hash(before), store_sha256: hashes };
+    let bytes = serde_json::to_vec(&saved).map_err(|_| "Cannot record your setup choice.")?;
+    if stores::storage::read_bytes(receipt)? != receipt_before {
+        return Err("The setup decision changed during review. Nothing was overwritten.".into());
+    }
+    manager::atomic_write(receipt, &bytes)?;
+    if stores::storage::read_bytes(receipt)?.as_deref() != Some(bytes.as_slice()) {
+        return Err("Your setup choice could not be verified. Keep the backups.".into());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn keep_current_convergence(handle: tauri::AppHandle) -> Result<Report, String> {
+    #[cfg(not(feature = "integrated-features"))]
+    { let _ = handle; Err("This build cannot review interrupted setup.".into()) }
+    #[cfg(feature = "integrated-features")]
+    tauri::async_runtime::spawn_blocking(move || {
+        require_builtin()?;
+        let _operation = handle.state::<manager::Manager>().begin()?;
+        let state = handle.state::<Convergence>();
+        let mut saved = state.0.try_lock().map_err(|_| "Setup is busy. Try again when it finishes.")?;
+        let plan = inspect()?;
+        if !plan.report.keep_current_available {
+            return Err("An unfinished change needs review first. Nothing was replaced.".into());
+        }
+        let batch = batch_path()?;
+        let before = stores::storage::read_bytes(&batch)?.ok_or("The old setup record is missing.")?;
+        let verify = || {
+            verify_keep_current(&plan, &batch, &before)?;
+            creator_works_mcp_launcher::service::verify_abandoned_convergence(&handle)
+        };
+        verify()?;
+        if !handle.dialog().message("Keep the setup you have now?\n\n- Back up your current settings and the old setup record.\n- Keep your projects, preferences and AI connections unchanged.\n- Stop reminding you about this old attempt. Nothing is replayed or uninstalled.\n\nThis does not finish the old migration. You can set up MCP normally from the menu.")
+            .title("Keep my current setup")
+            .kind(MessageDialogKind::Info)
+            .buttons(MessageDialogButtons::OkCancelCustom("Keep my current setup".into(), "Not now".into()))
+            .blocking_show() {
+            return Err("Nothing was changed. Your current setup was kept.".into());
+        }
+        retain_current_setup(&plan, &batch, &before, &kept_setup_path()?, verify)?;
+        let mut fresh = inspect()?;
+        fresh.report.message = "Your current setup was kept and backed up. The old attempt was not replayed. Open MCP to review or set up your connection.".into();
+        let report = fresh.report.clone();
+        *saved = Some(fresh);
+        Ok(report)
+    }).await.map_err(|_| "Setup review stopped. Your settings and old records were kept.")?
 }
 
 fn prepare_confirmation(
@@ -1199,6 +1387,7 @@ pub async fn prepare_convergence(handle: tauri::AppHandle) -> Result<Report, Str
             return Err("Migration was cancelled. Existing apps and settings were kept.".into());
         }
         can_prepare(plan)?;
+        invalidate_kept_setup(&kept_setup_path()?)?;
         close_reviewed_guis(plan)?;
         can_prepare(plan)?;
         let mut backups = Vec::new();
@@ -1914,7 +2103,8 @@ pub async fn move_to_hub(handle: tauri::AppHandle) -> Result<MoveOutcome, String
         let result = (|| {
             can_prepare(plan)?;
             let base = roots()?;
-            if read_batch_at(&batch_path()?)?.as_ref().is_some_and(batch_needs_review) {
+            if read_batch_at(&batch_path()?)?.as_ref().is_some_and(batch_needs_review)
+                && !kept_setup_at(&kept_setup_path()?, &batch_path()?, &base)? {
                 return Err("The previous native migration outcome needs review. No write was repeated.".into());
             }
             check_settings_recovery(&base)?;
@@ -1959,6 +2149,7 @@ pub async fn move_to_hub(handle: tauri::AppHandle) -> Result<MoveOutcome, String
             if let Some(originals) = &originals { originals.recheck()?; }
             approved_key = consent.review_key.clone();
             phase = "backup";
+            invalidate_kept_setup(&kept_setup_path()?)?;
             journal.record(&BatchRecord { policy: POLICY, phase: phase.into(), outcome: "started".into(), review_key: approved_key.clone(), retry_blocked: true })?;
             journal_started = true;
             let _ = handle.emit("convergence-progress", phase);
@@ -2432,6 +2623,75 @@ mod tests {
         record.outcome = "started".into();
         record.retry_blocked = false;
         assert!(!inspection_can_admit(false, Some(&record)));
+    }
+
+    fn interrupted_fixture() -> (tempfile::TempDir, stores::Roots, Plan, PathBuf, PathBuf, Vec<u8>) {
+        let (temp, base, plan) = conflicting_plan();
+        let batch = temp.path().join("move-v1.json");
+        let receipt = temp.path().join("kept-setup-v1.json");
+        let bytes = serde_json::to_vec(&BatchRecord { policy: POLICY,
+            phase: "connections".into(), outcome: "stopped".into(),
+            review_key: "a".repeat(64), retry_blocked: true }).unwrap();
+        fs::write(&batch, &bytes).unwrap();
+        (temp, base, plan, batch, receipt, bytes)
+    }
+
+    #[test]
+    fn keeping_current_setup_preserves_both_configs_and_original_interrupted_record() {
+        let (_temp, base, plan, batch, receipt, bytes) = interrupted_fixture();
+        let before: Vec<_> = plan.stores.iter().map(|s| s.bytes().map(Vec::from)).collect();
+        retain_current_setup(&plan, &batch, &bytes, &receipt, || Ok(())).unwrap();
+        assert!(kept_setup_at(&receipt, &batch, &base).unwrap());
+        assert_eq!(fs::read(&batch).unwrap(), bytes);
+        assert!(batch_needs_review(&read_batch_at(&batch).unwrap().unwrap()));
+        for (store, expected) in stores::STORES.iter().zip(before) {
+            assert_eq!(stores::Snapshot::inspect(*store, &base).unwrap().bytes(), expected.as_deref());
+        }
+        // A normal preference change does not resurrect an abandoned attempt.
+        let current = stores::Store::McpCurrent.path(&base).unwrap();
+        fs::write(current, br#"{"channels":[],"auto_start":true}"#).unwrap();
+        assert!(kept_setup_at(&receipt, &batch, &base).unwrap());
+        invalidate_kept_setup(&receipt).unwrap();
+        // Even byte-identical future attempt records cannot inherit this choice.
+        fs::write(&batch, &bytes).unwrap();
+        assert!(!kept_setup_at(&receipt, &batch, &base).unwrap());
+    }
+
+    #[test]
+    fn keeping_current_setup_refuses_failed_recheck_or_changed_settings() {
+        let (_temp, base, plan, batch, receipt, bytes) = interrupted_fixture();
+        let calls = std::cell::Cell::new(0);
+        assert!(retain_current_setup(&plan, &batch, &bytes, &receipt, || {
+            calls.set(calls.get() + 1);
+            if calls.get() == 2 { Err("new pending work".into()) } else { Ok(()) }
+        }).is_err());
+        assert!(!receipt.exists());
+        assert_eq!(fs::read(&batch).unwrap(), bytes);
+        let current = stores::Store::McpCurrent.path(&base).unwrap();
+        fs::write(&current, br#"{"channels":[],"auto_start":true}"#).unwrap();
+        assert!(retain_current_setup(&plan, &batch, &bytes, &receipt, || Ok(())).is_err());
+        assert!(!receipt.exists());
+        assert_eq!(fs::read(current).unwrap(), br#"{"channels":[],"auto_start":true}"#);
+    }
+
+    #[test]
+    fn kept_setup_rejects_changed_records_missing_backups_and_unknown_receipts() {
+        let (_temp, base, plan, batch, receipt, bytes) = interrupted_fixture();
+        retain_current_setup(&plan, &batch, &bytes, &receipt, || Ok(())).unwrap();
+        let mut changed = bytes.clone(); changed.push(b' ');
+        fs::write(&batch, changed).unwrap();
+        assert!(!kept_setup_at(&receipt, &batch, &base).unwrap());
+        fs::write(&batch, &bytes).unwrap();
+        let backup = retained_path(&batch, &image_hash(&bytes)).unwrap();
+        fs::remove_file(backup).unwrap();
+        assert!(kept_setup_at(&receipt, &batch, &base).is_err());
+        fs::write(&receipt, b"{\"policy\":2}").unwrap();
+        assert!(kept_setup_at(&receipt, &batch, &base).is_err());
+        for phase in ["backup", "connections", "cleanup"] {
+            let record = BatchRecord { policy: POLICY, phase: phase.into(),
+                outcome: "stopped".into(), review_key: "a".repeat(64), retry_blocked: true };
+            assert_eq!(keep_current_phase(&record), phase != "cleanup");
+        }
     }
 
     #[test]
@@ -3328,6 +3588,7 @@ mod tests {
                 message: String::new(),
                 review_key: None,
                 recovery_help: None,
+                keep_current_available: false,
             },
         };
         (temp, roots, plan)
