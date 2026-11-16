@@ -8,12 +8,13 @@ const target = require('./windows-outgoing-019-target.cjs');
 const direct = require('./native-outgoing-direct-019.cjs');
 const input = require('./windows-outgoing-019-input.cjs');
 const { assertOwnedDebugging, showPage } = require('./windows-incoming-016.cjs');
-const BRANCH = 'codex/windows-root-ui-023-20261116-r12-ci1';
+const BRANCH = 'codex/windows-root-ui-023-20261116-r13b-ci1';
 const WORKFLOW = '.github/workflows/windows-outgoing-019.yml';
 const ROOT = path.resolve(__dirname, '..');
 const NAMES = [target.ASSET, 'creator-hub-windows-x86_64.json', 'creator-hub-windows-x86_64.json.minisig', 'latest.json'];
 const CLOSE_MESSAGE = 'MCP has an unfinished interface workflow, but its native operation has returned.\n\nClose Hub anyway? Earlier completed changes and recovery records will be kept. Nothing will be rolled back or marked successful. Existing AI connections, Unity and unrelated processes will not be stopped. Check the last outcome before repeating work.';
 const POLICY = '2026-09-28-v1';
+const reviewModule = require('./native-windows-r13-review.cjs');
 function admission(env = process.env, platform = process.platform) {
   assert.equal(platform, 'win32'); target.validateBinding();
   for (const [name, value] of Object.entries({ GITHUB_ACTIONS: 'true', RUNNER_ENVIRONMENT: 'github-hosted',
@@ -125,7 +126,8 @@ function checkReceipt(report) {
     assert.deepEqual(matches[0], { file: proof.file, bytes: proof.bytes, sha256: proof.sha256 });
   }
   assert.deepEqual(report.consentBeforeReopen, report.consentAfterReopen);
-  assert.equal(report.normalCloses.length, 2); assert.equal(new Set(report.normalCloses.map(row => row.pid)).size, 2);
+  reviewModule.validateProof(report.productReview);
+  assert.equal(report.normalCloses.length, 4); assert.equal(new Set(report.normalCloses.map(row => row.pid)).size, 4);
   for (const row of report.normalCloses) { assert.ok(Number.isSafeInteger(row.pid) && row.pid > 0); assert.equal(row.exitCode, 0); }
 }
 async function acquire() {
@@ -192,7 +194,7 @@ async function main() {
   async function retry(action, seconds = 30) { let last; for (const end = Date.now() + seconds * 1000; Date.now() < end;) {
     try { return await action(); } catch (error) { last = error; await delay(250); }
   } throw last || Error('Bounded wait expired'); }
-  let child, browser, page, owned, policyEnabled = false, closeAttempted = false;
+  let child, browser, page, owned, reviewCase, policyEnabled = false, closeAttempted = false;
   const record = pid => { const rows = inventory().filter(row => row.pid === pid); assert.equal(rows.length, 1); return rows[0]; };
   const same = () => assert.deepEqual(record(owned.pid), owned);
   async function close() {
@@ -207,7 +209,7 @@ async function main() {
     report.normalCloses.push({ pid: owned.pid, exitCode: child.exitCode });
     await browser.close(); browser = null; page = null; child = null; owned = null; assert.deepEqual(moduleRows(), []);
   }
-  async function launch(first) {
+  async function launch(first, reviewReopen = null) {
     closeAttempted = false;
     target.assertInstalledResources(path.dirname(hub), '0.1.23');
     child = spawn(hub, [], { env: { ...env, WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: '--remote-debugging-port=9238' }, windowsHide: true, stdio: 'ignore' });
@@ -224,9 +226,18 @@ async function main() {
       await page.locator('#usage-terms-checkbox').check(); await page.locator('#usage-terms-continue').click();
       await page.locator('#usage-terms-dialog').waitFor({ state: 'hidden' });
     } else assert.equal(await page.locator('#usage-terms-dialog').isVisible(), false);
+    if (reviewReopen !== null) {
+      await page.waitForFunction(() => document.querySelector('#convergence-dialog')?.open || !document.querySelector('#check-updates').disabled, null, { timeout: 90000 });
+      if (await page.locator('#convergence-dialog').isVisible()) {
+        await page.locator('#convergence-later').click(); await page.locator('#convergence-dialog').waitFor({ state: 'hidden' });
+      }
+    }
     await page.waitForFunction(() => !document.querySelector('#check-updates').disabled, null, { timeout: 90000 });
     assert.equal(await page.locator('#usage-terms-dialog').isVisible(), false, 'Terms must remain accepted');
     assert.equal(await page.evaluate(() => window.CreatorHubNative.invoke('usage_terms_status')), true, 'Native consent status required');
+    if (reviewReopen !== null) {
+      await reviewCase.session(page, reviewReopen); assert.deepEqual(errors, []); return;
+    }
     assert.equal(await page.locator('#convergence-dialog').isVisible(), false, 'Clean runner must not offer migration');
     await direct.checkHome(page);
     const services = await direct.checkPages({ page, expectedVersion: '0.1.23', requests, processes: moduleRows,
@@ -254,7 +265,14 @@ async function main() {
     report.settingsAfterReopen = snapshot(settingsFiles(profile)); assert.deepEqual(report.settingsAfterReopen, report.settingsBeforeReopen);
     report.consentAfterReopen = readConsent(); assert.deepEqual(report.consentAfterReopen, report.consentBeforeReopen);
     target.assertInstalledResources(path.dirname(hub), '0.1.23');
-    report.normalRestartAccepted = true; report.settingsUnchanged = true; report.installedResourcesVerified = true; report.passed = true;
+    report.normalRestartAccepted = true; report.settingsUnchanged = true; report.installedResourcesVerified = true;
+    reviewCase = reviewModule.createCase({ profile, out, hub, read: file => target.readBounded(file, 2 * 1024 * 1024),
+      psCommand: command => execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', command],
+        { env, encoding: 'utf8', windowsHide: true, timeout: 30000, maxBuffer: 1024 * 1024 }),
+      windows: () => { same(); return JSON.parse(ps('native-window.ps1', ['-TargetPid', String(owned.pid), '-ExpectedExecutable', hub, '-Action', 'snapshot'])); },
+      pid: () => owned.pid, same });
+    reviewCase.seed(); await launch(false, false); await close();
+    await launch(false, true); await close(); report.productReview = reviewCase.verify(); report.passed = true;
   } catch (error) { report.errorSha256 = target.hash(String(error.stack || error)); report.error = String(error.message).slice(0, 600); report.passed = false; }
   finally {
     if (child?.exitCode === null && owned) {

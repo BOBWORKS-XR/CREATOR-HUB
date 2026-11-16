@@ -42,7 +42,12 @@ function receipt() {
   migrationAccepted: false, signedUpdateAccepted: false, publicDiscovery: false, liveAiAcceptance: false, releaseReady: false, cleanupForced: false,
   profile, consentBeforeReopen: { ...pin, record }, consentAfterReopen: { ...pin, record: { ...record } },
   settingsBeforeReopen: [pin], settingsAfterReopen: [{ ...pin }],
-  normalCloses: [{ pid: 10, exitCode: 0 }, { pid: 20, exitCode: 0 }] }; }
+  normalCloses: [{ pid: 10, exitCode: 0 }, { pid: 20, exitCode: 0 }, { pid: 30, exitCode: 0 }, { pid: 40, exitCode: 0 }],
+  productReview: { cancelPreserved: true, approvalObserved: true, backupsVerified: true, controlsEnabledBeforeClose: true,
+    controlsEnabledAfterReopen: true, settingsUnchanged: true, markerUnchanged: true, noRepeatedApproval: true,
+    decisions: [false, true], statusBefore: 'conflict', statusAfter: 'conflict', currentBefore: 'a'.repeat(64), currentAfter: 'a'.repeat(64),
+    legacyBefore: 'b'.repeat(64), legacyAfter: 'b'.repeat(64), markerSha256: 'c'.repeat(64),
+    backups: [{ file: 'current', sha256: 'a'.repeat(64) }, { file: 'legacy', sha256: 'b'.repeat(64) }] } }; }
 test('fresh acceptance refuses cleanup, restart, resource, source and settings mismatches', () => {
   fresh.checkReceipt(receipt());
   for (const change of [r => r.cleanupVerified = false, r => r.cleanupForced = true, r => r.normalCloses[1].pid = 10,
@@ -138,9 +143,9 @@ test('optional fresh_only skips only upgrade execution and defaults to the full 
   assert.equal(workflow.jobs.fresh.if, "github.event_name == 'workflow_dispatch'");
   assert.equal(workflow.jobs.fresh.needs, 'preflight');
   assert.equal(workflow.jobs.acceptance.needs, 'preflight');
-  assert.equal(workflow.jobs.preflight.if, "github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.ref == 'refs/heads/codex/windows-root-ui-023-20261116-r12-ci1'");
+  assert.equal(workflow.jobs.preflight.if, "github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.ref == 'refs/heads/codex/windows-root-ui-023-20261116-r13b-ci1'");
   const preflight = workflow.jobs.preflight.steps.filter(step => step.run?.startsWith('node --test '));
-  assert.equal(preflight.length, 2);
+  assert.equal(preflight.length, 3);
   assert.ok(preflight[0].run.includes('scripts/windows-outgoing-019-test.cjs'));
   assert.ok(preflight[0].run.includes('scripts/incoming-receipt-r11.test.cjs'));
   assert.equal(preflight[1].run, 'node --test scripts/native-windows-r12-fresh.test.cjs');
