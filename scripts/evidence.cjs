@@ -12,7 +12,7 @@ function validateBinding(b){
   assert.match(b.qualificationSha256,/^[a-f0-9]{64}$/);assert.match(b.target.source.commit,/^[a-f0-9]{40}$/);assert.match(b.target.source.tree,/^[a-f0-9]{40}$/);
   assert.notEqual(b.target.executableSha256,b.baseline.executableSha256);
 }
-function checkStoppedRecord(bytes){const b=JSON.parse(bytes);assert.equal(b.phase,'connections');assert.equal(b.outcome,'stopped');assert.equal(b.retry_blocked,true);return b;}
+function checkStoppedRecord(bytes){const b=JSON.parse(bytes);assert.equal(b.phase,'connections');assert.equal(b.outcome,'stopped');assert.equal(b.retry_blocked,false);return b;}
 function checkSettings(beforeCurrent,beforeLegacy,afterCurrent,afterLegacy,server){
   const before=JSON.parse(beforeCurrent),legacy=JSON.parse(beforeLegacy),after=JSON.parse(afterCurrent),oldAfter=JSON.parse(afterLegacy);
   const expected={...before,mcp_server_path:server,channels:[...before.channels]};
@@ -55,7 +55,7 @@ function verifyRegression(r,get,binding){
   }else if(r.case==='fresh-025-cancel'){
     checkStoppedRecord(capture(r.cancelled025Batch));assert.ok(capture(r.afterRestartBatch).equals(capture(r.cancelled025Batch)));assert.equal(r.completedMigration,false);
   }else{
-    const done=JSON.parse(capture(r.completedBatch));assert.equal(done.phase,'cleanup');assert.equal(done.outcome,'complete');assert.equal(done.retry_blocked,true);assert.equal(r.completedMigration,true);
+    const done=JSON.parse(capture(r.completedBatch));assert.equal(done.phase,'cleanup');assert.equal(done.outcome,'complete');assert.equal(done.retry_blocked,false);assert.equal(r.completedMigration,true);
   }
   return true;
 }

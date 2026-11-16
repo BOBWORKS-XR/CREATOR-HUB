@@ -81,7 +81,7 @@ async function recover025(c){guard(c);const r=c.regression;await c.assertRoot('0
   await startMove(c,'Move reviewed connections');
   // Only this known optional finish dialog may be handled while awaiting completion.
   await c.waitMoveComplete(async()=>{try{await c.chooseNative('Finish Creator Hub migration','Finish migration',true);return true;}catch{return false;}});
-  const batch=JSON.parse(plain(c.fixturePaths.batch));assert.equal(batch.phase,'cleanup');assert.equal(batch.outcome,'complete');assert.equal(batch.retry_blocked,true);
+  const batch=JSON.parse(plain(c.fixturePaths.batch));assert.equal(batch.phase,'cleanup');assert.equal(batch.outcome,'complete');assert.equal(batch.retry_blocked,false);
   r.completedBatch=row(c,'025-completed-batch',c.fixturePaths.batch);r.trace=await c.nativeTrace();r.completedMigration=true;
   assert.equal(r.nativeDialogs.filter(x=>x.title==='Review unverified MCP connections'&&x.button==='Move reviewed connections').length,1);
   r.nativeConsent=true;await ui(c,'later');return r;

@@ -30,8 +30,8 @@ async function main(){
   c.assertRoot=async(version,pin)=>{assert.equal(currentVersion,version);assert.deepEqual(record(processRecord.pid),processRecord);assert.equal(hashFile(hub),pin);target.assertInstalledResources(path.dirname(hub),version);assert.equal(await page.evaluate(()=>CreatorHubNative.version),version);};
   c.nativeTrace=()=>page.evaluate(()=>window.__missingNativeCalls);
   c.chooseNative=async(title,button,optional=false)=>{
-    const choose=()=>{const windows=JSON.parse(native('snapshot'));const match=windows.filter(w=>w.title===title);assert.equal(match.length,1,'Missing exact dialog: '+title);assert.ok(match[0].controls.some(r=>r.name===button));native('button',button);};
-    if(optional){choose();return;}await retry(choose,50);
+    const choose=async()=>{if(await page.locator('#convergence-error').isVisible())throw Error(await page.locator('#convergence-error').textContent());const windows=JSON.parse(native('snapshot'));const match=windows.filter(w=>w.title===title);assert.equal(match.length,1,'Missing exact dialog: '+title);assert.ok(match[0].controls.some(r=>r.name===button));native('button',button);};
+    if(optional){await choose();return;}await retry(choose,50);
   };
   c.waitMoveComplete=async()=>{await page.waitForFunction(()=>{const d=document.querySelector('#convergence-dialog');return d?.open&&d.getAttribute('aria-busy')==='false'&&document.querySelector('#convergence-title')?.textContent==='Move complete';},null,{timeout:90000});};
   async function launch(version){
@@ -66,7 +66,7 @@ async function main(){
     await launch('0.1.25');await hooks.recover025(c);await hooks.finish(c);
     proof.verifyRegression(c.regression,name=>hooks.plain(path.join(out,name)),{baseline:{executableSha256:binding.baseline.executable.sha256}});
     report.regression=c.regression;report.passed=true;
-  }catch(e){report.error=String(e.stack||e);report.regression=c.regression;try{if(page)await page.screenshot({path:path.join(out,'failure.png')});}catch{}}
+  }catch(e){report.error=String(e.stack||e);report.regression=c.regression;try{if(page){report.screenError=await page.locator('#convergence-error').textContent();report.trace=await c.nativeTrace();await page.screenshot({path:path.join(out,'failure.png')});}if(fs.existsSync(c.fixturePaths.batch))report.batch=JSON.parse(hooks.plain(c.fixturePaths.batch));}catch{}}
   finally{
     try{if(processRecord)await close();report.rootClosed=true;}catch(e){report.passed=false;report.cleanupError=String(e);}
     try{if(policyEnabled)ps('native-webview-policy.ps1',['-Action','Restore','-StateFile',path.join(out,'webview-policy.json')]);report.policyRestored=true;}catch(e){report.passed=false;report.policyError=String(e);}
