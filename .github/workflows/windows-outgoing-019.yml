@@ -7,7 +7,7 @@ on:
 permissions: {contents: read}
 jobs:
   preflight:
-    if: github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.ref == 'refs/heads/codex/windows-missing-server-025-acceptance-r3'
+    if: github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.ref == 'refs/heads/codex/windows-missing-server-025-acceptance-r5'
     runs-on: windows-latest
     timeout-minutes: 5
     steps:
@@ -71,7 +71,7 @@ jobs:
         run: |
           if ((git -C product rev-parse HEAD) -cne '${{ steps.source.outputs.commit }}' -or (git -C product rev-parse 'HEAD^{tree}') -cne '${{ steps.source.outputs.tree }}') { throw 'Wrong product source' }
       - run: npm --prefix product/modules/mcp ci --ignore-scripts
-      - name: Acquire signed private target and public 023 baseline
+      - name: Acquire signed private target and public 024 baseline
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}

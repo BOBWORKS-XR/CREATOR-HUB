@@ -68,16 +68,16 @@
     "version": "0.1.25",
     "asset": "Creator.Hub_0.1.25_x64-setup.exe",
     "source": {
-      "commit": "392b423604dca249e8c23f943c54c722cb948f37",
-      "tree": "ddbb073e289e7e7185e17145a5d6dfd982f4e917"
+      "commit": "46e610c51bb525e868e7caf4a21a2a7c2fcb3160",
+      "tree": "0cf5954df3d40d9c7ee073fb06e9c61f401e908a"
     },
     "installer": {
-      "bytes": 38697986,
-      "sha256": "dbcf3ee71166b87e3cc512a919e2379e499ef16035427cd6becf542efc698de4"
+      "bytes": 38708024,
+      "sha256": "8521ed72e9fbee31c8a379bce0204288926862939dced9b4153164a1c7c71b6c"
     },
     "executable": {
-      "bytes": 19935744,
-      "sha256": "8db035fd84130281968008fa3b77fccee4b364bd79eda07dca5db7a299b7c3fe"
+      "bytes": 19940352,
+      "sha256": "9fc2da9340995f4fe5b7f1f4dfb1a6b28449970934d6aaca4c8ab971e791b27c"
     },
     "manifest": {
       "schemaVersion": 1,
@@ -121,53 +121,53 @@
     "generation": "df0ec83365a0ed5e235c784243531676467e56bfeafce43c818d5309022c2b54",
     "sourceUnchanged": true,
     "buildExitCode": 0,
-    "verificationReceiptSha256": "ffb16c5965bedc464a15e7f7fc99608db0d763d1bb8357b5a1cbac07d130db13",
+    "verificationReceiptSha256": "472a956ade47ada940fc512dffa9595b124f1bb3f0d8151e1aa33e6dc8d1b29a",
     "descriptor": {
       "bytes": 505,
-      "sha256": "386d4e80fd0642bd1eaad87fc19b5e35b6d78111ba68f969babf49e317a0ab1d"
+      "sha256": "e38dc5fb40acd07712c4ddced0af82e849c363570b32a6a55954cc17d028dc6f"
     },
     "descriptorSignature": {
       "bytes": 300,
-      "sha256": "75240dbe231fc76b0ccc4749b09132dba715a497c4cd3a3e8215439740bc9959"
+      "sha256": "628b0c43414a36e57fd1b7d9791c70d4679112a28648d3ae7865e6f301e928d9"
     },
     "latest": {
       "bytes": 705,
-      "sha256": "a19202a998cc42e7a82be0388865400a39a23dc9d73f618737b6977d56d8efb2"
+      "sha256": "36f6be558b5058be6453c389ce3c25c279438f4b810728f55cef21d7fabc64a4"
     },
     "privateRelease": {
-      "id": 447684026,
-      "tag": "lab-windows-missing-server-025-20261116",
-      "source": "392b423604dca249e8c23f943c54c722cb948f37",
+      "id": 447706960,
+      "tag": "lab-windows-missing-server-025-storage-20261116",
+      "source": "46e610c51bb525e868e7caf4a21a2a7c2fcb3160",
       "assets": {
         "Creator.Hub_0.1.25_x64-setup.exe": {
-          "id": 756651154,
-          "bytes": 38697986,
-          "sha256": "dbcf3ee71166b87e3cc512a919e2379e499ef16035427cd6becf542efc698de4"
+          "id": 756728129,
+          "bytes": 38708024,
+          "sha256": "8521ed72e9fbee31c8a379bce0204288926862939dced9b4153164a1c7c71b6c"
         },
         "creator-hub-windows-x86_64.json": {
-          "id": 756653116,
+          "id": 756731634,
           "bytes": 505,
-          "sha256": "386d4e80fd0642bd1eaad87fc19b5e35b6d78111ba68f969babf49e317a0ab1d"
+          "sha256": "e38dc5fb40acd07712c4ddced0af82e849c363570b32a6a55954cc17d028dc6f"
         },
         "creator-hub-windows-x86_64.json.minisig": {
-          "id": 756653226,
+          "id": 756731748,
           "bytes": 300,
-          "sha256": "75240dbe231fc76b0ccc4749b09132dba715a497c4cd3a3e8215439740bc9959"
+          "sha256": "628b0c43414a36e57fd1b7d9791c70d4679112a28648d3ae7865e6f301e928d9"
         },
         "latest.json": {
-          "id": 756653365,
+          "id": 756731857,
           "bytes": 705,
-          "sha256": "a19202a998cc42e7a82be0388865400a39a23dc9d73f618737b6977d56d8efb2"
+          "sha256": "36f6be558b5058be6453c389ce3c25c279438f4b810728f55cef21d7fabc64a4"
         }
       }
     }
   },
   "fixtureQualification": {
-    "sha256": "ffb16c5965bedc464a15e7f7fc99608db0d763d1bb8357b5a1cbac07d130db13",
+    "sha256": "472a956ade47ada940fc512dffa9595b124f1bb3f0d8151e1aa33e6dc8d1b29a",
     "kind": "missing-server-025-signed-candidate",
     "source": {
-      "commit": "392b423604dca249e8c23f943c54c722cb948f37",
-      "tree": "ddbb073e289e7e7185e17145a5d6dfd982f4e917"
+      "commit": "46e610c51bb525e868e7caf4a21a2a7c2fcb3160",
+      "tree": "0cf5954df3d40d9c7ee073fb06e9c61f401e908a"
     },
     "sourceUnchanged": true,
     "sourceProof": {
@@ -200,7 +200,10 @@
         ],
         "moduleSourceChanges": [
           "modules/mcp/launcher/src-tauri/src/product_settings.rs",
-          "modules/mcp/launcher/src-tauri/src/product_settings_tests.rs"
+          "modules/mcp/launcher/src-tauri/src/product_settings_tests.rs",
+          "modules/mcp/launcher/src-tauri/src/client_recovery_ui.rs",
+          "modules/mcp/launcher/src-tauri/src/client_setup_write.rs",
+          "modules/mcp/launcher/src-tauri/src/lib.rs"
         ],
         "nativeSourceUnchanged": false,
         "rootRustSourceChanges": [],
@@ -215,6 +218,9 @@
         ]
       },
       "overlays": [
+        "modules/mcp/launcher/src-tauri/src/client_recovery_ui.rs",
+        "modules/mcp/launcher/src-tauri/src/client_setup_write.rs",
+        "modules/mcp/launcher/src-tauri/src/lib.rs",
         "modules/mcp/launcher/src-tauri/src/product_settings_tests.rs",
         "modules/mcp/launcher/src-tauri/src/product_settings.rs",
         "package-lock.json",
@@ -241,8 +247,8 @@
       "runtimeReceiptSha256": "44912a006516a6288aa7aa7b2122464e195e180dfcd2cc288eb86403f91ef8f3",
       "retainedPayloadFiles": 13
     },
-    "sourceReceiptSha256": "d42ccef9340c454e135ccb49ab0525cf88f9a489fa23ee2fa4395e22d855b80f",
-    "buildReportSha256": "dc99ecaa5bfb69e1dd2c7666e203ececba5400a60226121258cac533164fb723",
+    "sourceReceiptSha256": "31ff21e630d284b57536d0e4fd2be40e85e72cebc0044a55375f9fdaefb5857f",
+    "buildReportSha256": "9a69a2219d7caa6d16653056f8a99750dce3d4b6afa210ee7ff163882dddcf13",
     "buildExitCode": 0,
     "inputCount": 1605,
     "payloadFiles": 15,

@@ -33,7 +33,16 @@ async function main(){
     const choose=async()=>{if(await page.locator('#convergence-error').isVisible())throw Error(await page.locator('#convergence-error').textContent());const windows=JSON.parse(native('snapshot'));const match=windows.filter(w=>w.title===title);assert.equal(match.length,1,'Missing exact dialog: '+title);assert.ok(match[0].controls.some(r=>r.name===button));native('button',button);};
     if(optional){await choose();return;}await retry(choose,50);
   };
-  c.waitMoveComplete=async()=>{await page.waitForFunction(()=>{const d=document.querySelector('#convergence-dialog');return d?.open&&d.getAttribute('aria-busy')==='false'&&document.querySelector('#convergence-title')?.textContent==='Move complete';},null,{timeout:90000});};
+  c.waitMoveComplete=async()=>{
+    for(let attempt=0;attempt<180;attempt++){
+      if(await page.evaluate(()=>{const d=document.querySelector('#convergence-dialog');return d?.open&&d.getAttribute('aria-busy')==='false'&&document.querySelector('#convergence-title')?.textContent==='Move complete';}))return;
+      if(await page.locator('#convergence-error').isVisible())throw Error(await page.locator('#convergence-error').textContent());
+      const windows=JSON.parse(native('snapshot'));
+      if(windows.some(w=>w.title==='Finish Creator Hub migration'))await c.chooseNative('Finish Creator Hub migration','Finish migration');
+      await page.waitForTimeout(500);
+    }
+    throw Error('Migration did not complete within 90 seconds');
+  };
   async function launch(version){
     const child=spawn(hub,[],{windowsHide:true,stdio:'ignore',env:{...process.env,WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS:'--remote-debugging-port=9238'}});
     processRecord=await retry(()=>record(child.pid));currentVersion=version;
@@ -47,7 +56,11 @@ async function main(){
     await page.waitForFunction(()=>document.querySelector('#convergence-dialog')?.open||!document.querySelector('#check-updates')?.disabled,null,{timeout:90000});
     await c.assertRoot(version,version==='0.1.24'?binding.baseline.executable.sha256:binding.target.executable.sha256);
   }
-  async function close(){const before=processRecord;native('close');await retry(()=>assert.equal(inventory().some(p=>p.pid===before.pid&&p.startTicks===before.startTicks),false));processRecord=null;await browser.close();browser=null;page=null;return before;}
+  async function close(){const before=processRecord;
+    await page.waitForFunction(()=>!document.querySelector('#check-updates')?.disabled,null,{timeout:180000});
+    native('close');
+    await retry(()=>{const present=inventory().some(p=>p.pid===before.pid&&p.startTicks===before.startTicks);if(present){const windows=JSON.parse(native('snapshot'));if(windows.some(w=>w.title==='Close Creator Hub?'))native('button','CloseCreatorHub');}assert.equal(present,false);},90);
+    processRecord=null;await browser.close();browser=null;page=null;return before;}
   c.normalRestart=async()=>{const before=await close();await launch('0.1.25');const after=processRecord;assert.notEqual(before.pid,after.pid);return{before,after};};
   c.readOnlyHandshake=async entry=>{
     assert.equal(entry.command,c.router);assert.deepEqual(entry.args,[]);

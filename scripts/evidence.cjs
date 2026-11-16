@@ -37,21 +37,23 @@ function verifyRegression(r,get,binding){
   const capture=row=>{const b=get(row.file);assert.equal(b.length,row.bytes);assert.equal(hash(b),row.sha256);return b;};
   const current=capture(r.currentBefore),legacy=capture(r.legacyBefore),client=capture(r.clientBefore);
   assert.notDeepEqual(JSON.parse(current).channels,JSON.parse(legacy).channels);
-  if(r.case==='fresh-025-approve'){
+  if(r.case!=='fresh-025-cancel'){
     checkSettings(current,legacy,capture(r.currentAfter),capture(r.legacyAfter),r.server);
     checkClient(client,capture(r.clientAfter),r.router);assert.ok(capture(r.clientBackup).equals(client),'Exact client before backup missing');
     assert.equal(r.mcpReadOnly,true);assert.equal(r.handshake.source,'saved-client');
-  }else assert.ok(capture(r.clientAfter).equals(client),'Stopped/kept case changed the client');
+  }else{
+    assert.ok(capture(r.clientAfter).equals(client),'Stopped/kept case changed the client');
+    checkSettings(current,legacy,capture(r.currentAfter),capture(r.legacyAfter),JSON.parse(current).mcp_server_path);
+  }
   assert.ok(capture(r.currentBackup).equals(current));assert.ok(capture(r.legacyBackup).equals(legacy));
   for(const row of r.projectFiles){const a=capture(row.before),b=capture(row.after);assert.ok(a.equals(b),'Disposable project file changed');}
-  assert.equal(r.trace.filter(e=>e.command==='move_to_hub').length,1,'Exactly one explicit Move per fresh fixture');
+  assert.equal(r.trace.filter(e=>e.command==='move_to_hub').length,1,'Exactly one explicit Move per running build');
   if(r.case==='stopped-024-upgrade'){
     assert.equal(r.baselineRootSha256,binding.baseline.executableSha256);assert.equal(r.baselineVersion,'0.1.24');assert.match(r.baselineFailure,/previous MCP server is missing/);
     const batch=capture(r.stopped024Batch);checkStoppedRecord(batch);assert.ok(capture(r.afterUpdateBatch).equals(batch),'Update rewrote historical stopped journal');
-    assert.ok(capture(r.retainedStoppedBatch).equals(batch),'Historical batch backup missing');
-    assert.equal(r.keepCurrentApproved,true);assert.equal(r.baselineMoveCount,1);
+    assert.equal(r.retryApproved,true);assert.equal(r.baselineMoveCount,1);
     assert.deepEqual(r.afterUpdateTrace.filter(e=>['move_to_hub','prepare_convergence','migrate_convergence_connections','retire_convergence_apps','keep_current_convergence'].includes(e.command)),[],'Automatic startup replayed a mutation');
-    assert.equal(r.completedMigration,false);
+    const done=JSON.parse(capture(r.completedBatch));assert.equal(r.completedMigration,true);assert.equal(done.phase,'cleanup');assert.equal(done.outcome,'complete');assert.equal(done.retry_blocked,false);
   }else if(r.case==='fresh-025-cancel'){
     checkStoppedRecord(capture(r.cancelled025Batch));assert.ok(capture(r.afterRestartBatch).equals(capture(r.cancelled025Batch)));assert.equal(r.completedMigration,false);
   }else{

@@ -2,7 +2,7 @@
 const path = require('node:path');
 const { execFile } = require('node:child_process');
 const MAX = 8;
-const BRANCH = 'refs/heads/codex/windows-missing-server-025-acceptance-r3';
+const BRANCH = 'refs/heads/codex/windows-missing-server-025-acceptance-r5';
 function target(value) {
   if (typeof value !== 'string' || value.length > 272) return { kind: 'redacted' };
   const match = /^(\[[0-9a-fA-F:]+\]|[A-Za-z0-9.-]+):([1-9][0-9]{0,4})$/.exec(value);

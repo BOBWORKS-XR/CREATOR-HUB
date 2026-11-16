@@ -68,10 +68,8 @@ async function recover025(c){guard(c);const r=c.regression;await c.assertRoot('0
     r.afterUpdateBatch=row(c,'after-update-batch',c.fixturePaths.batch);assert.ok(captureBytes(c,r.afterUpdateBatch).equals(captureBytes(c,r.stopped024Batch)));
     assert.ok(plain(c.fixturePaths.jsonClient).equals(captureBytes(c,r.clientBefore)));r.afterUpdateTrace=await c.nativeTrace();
     assert.deepEqual(r.afterUpdateTrace.filter(e=>['move_to_hub','prepare_convergence','migrate_convergence_connections','retire_convergence_apps','keep_current_convergence'].includes(e.command)),[]);
-    // The explicit native decision backs up this historical attempt; it is not success.
-    await keep(c,'kept-024-attempt');r.keepCurrentApproved=true;
-    const retained=findRetained(c,c.fixturePaths.batch,captureBytes(c,r.stopped024Batch));r.retainedStoppedBatch=row(c,'retained-024-batch',retained);
-    r.completedMigration=false;r.nativeConsent=true;return r;
+    // This cleanly stopped record permits a new explicit review, not automatic replay.
+    r.retryApproved=true;
   }
   if(c.case==='fresh-025-cancel'){
     await startMove(c,'Keep existing');await stopped(c);r.clientAfterCancel=row(c,'client-after-cancel',c.fixturePaths.jsonClient);
@@ -88,19 +86,21 @@ async function recover025(c){guard(c);const r=c.regression;await c.assertRoot('0
 }
 async function finish(c){const r=c.regression,p=c.fixturePaths;assert.equal(fs.existsSync(p.old),false);assert.equal(fs.existsSync(p.node),false);
   r.server=c.server;r.router=c.router;r.currentAfter=row(c,'current-after',p.current);r.legacyAfter=row(c,'legacy-after',p.legacy);r.clientAfter=row(c,'client-after',p.jsonClient);
-  if(c.case==='fresh-025-approve'){checkSettings(captureBytes(c,r.currentBefore),captureBytes(c,r.legacyBefore),captureBytes(c,r.currentAfter),captureBytes(c,r.legacyAfter),c.server);
+  if(c.case!=='fresh-025-cancel'){checkSettings(captureBytes(c,r.currentBefore),captureBytes(c,r.legacyBefore),captureBytes(c,r.currentAfter),captureBytes(c,r.legacyAfter),c.server);
     checkClient(captureBytes(c,r.clientBefore),captureBytes(c,r.clientAfter),c.router);}
-  else assert.ok(captureBytes(c,r.clientAfter).equals(captureBytes(c,r.clientBefore)));
+  else{
+    assert.ok(captureBytes(c,r.clientAfter).equals(captureBytes(c,r.clientBefore)));
+    checkSettings(captureBytes(c,r.currentBefore),captureBytes(c,r.legacyBefore),captureBytes(c,r.currentAfter),captureBytes(c,r.legacyAfter),JSON.parse(captureBytes(c,r.currentBefore)).mcp_server_path);
+  }
   r.currentBackup=row(c,'current-backup',findRetained(c,p.current,captureBytes(c,r.currentBefore)));
   r.legacyBackup=row(c,'legacy-backup',findRetained(c,p.legacy,captureBytes(c,r.legacyBefore)));
-  if(c.case==='fresh-025-approve')r.clientBackup=row(c,'client-backup',findRetained(c,p.jsonClient,captureBytes(c,r.clientBefore)));
+  if(c.case!=='fresh-025-cancel')r.clientBackup=row(c,'client-backup',findRetained(c,p.jsonClient,captureBytes(c,r.clientBefore)));
   assert.ok(plain(p.client).equals(captureBytes(c,r.codexBefore)));
   for(const item of r.projectFiles){item.after=row(c,'project-'+r.projectFiles.indexOf(item)+'-after',item.path);assert.ok(captureBytes(c,item.before).equals(captureBytes(c,item.after)));}
   const before={current:plain(p.current),legacy:plain(p.legacy),client:plain(p.jsonClient),batch:plain(p.batch)};
   const restart=await c.normalRestart();assert.notEqual(restart.before.pid,restart.after.pid);assert.ok(BigInt(restart.after.startTicks)>BigInt(restart.before.startTicks));r.restart=restart;
   for(const[k,file]of Object.entries({current:p.current,legacy:p.legacy,client:p.jsonClient,batch:p.batch}))assert.ok(plain(file).equals(before[k]));
   r.normalRestart=true;if(c.case==='fresh-025-cancel'){r.afterRestartBatch=row(c,'after-restart-batch',p.batch);return r;}
-  if(c.case==='stopped-024-upgrade')return r;
   const handshake=await c.readOnlyHandshake(JSON.parse(plain(p.jsonClient)).mcpServers['creator-works']);
   assert.equal(handshake.serverVersion,'2.7.10');assert.equal(handshake.tool,'get_mcp_reference');assert.equal(handshake.success,true);r.handshake=handshake;r.mcpReadOnly=true;
   return r;
