@@ -1,7 +1,7 @@
 name: Windows exact22 to private23 restore and qualified-MCP acceptance
 on:
   push:
-    branches: [codex/windows-root-ui-023-20261116-r15-ci1]
+    branches: [codex/windows-root-ui-023-20261116-r17-ci1]
     paths:
       - .github/workflows/windows-outgoing-019.yml
       - scripts/windows-outgoing-019-*.cjs
@@ -40,7 +40,7 @@ permissions:
   contents: read
 jobs:
   preflight:
-    if: github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.ref == 'refs/heads/codex/windows-root-ui-023-20261116-r15-ci1'
+    if: github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.ref == 'refs/heads/codex/windows-root-ui-023-20261116-r17-ci1'
     runs-on: windows-latest
     timeout-minutes: 5
     steps:
@@ -53,9 +53,11 @@ jobs:
         with:
           node-version: 24
       - run: npm ci --ignore-scripts
+      - name: Require exact root-recovery candidate pins
+        run: node scripts/native-windows-root-recovery.cjs candidate
       - run: node --test scripts/sdk-retention-023.test.cjs scripts/connect-diagnostic-023.test.cjs scripts/connect-trace-023.test.cjs scripts/sdk-registry-denial-023.test.cjs scripts/windows-outgoing-019-test.cjs scripts/incoming-store-r11.test.cjs scripts/incoming-receipt-r11.test.cjs scripts/self-update-outgoing-019-feed.test.cjs
       - run: node --test scripts/native-windows-r12-fresh.test.cjs
-      - run: node --test scripts/native-windows-r13-review.test.cjs scripts/native-windows-r14-review.test.cjs scripts/native-windows-r14-client.test.cjs scripts/native-windows-r15-review.test.cjs
+      - run: node --test scripts/native-windows-r13-review.test.cjs scripts/native-windows-r14-review.test.cjs scripts/native-windows-r14-client.test.cjs scripts/native-windows-r15-review.test.cjs scripts/native-windows-root-recovery.test.cjs
       - name: Parse actual native script and probe its named parameters
         shell: pwsh
         run: |

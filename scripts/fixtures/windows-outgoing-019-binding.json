@@ -66,18 +66,18 @@
   },
   "target": {
     "source": {
-      "commit": "05bcaa5417b86792e37ef64f346f7a20c42a3996",
-      "tree": "2d3fc4edef3fe0466b91cec53bdc4e9825dbc47e"
+      "commit": "117e92c958aac9cb421fe0a130040b775a0a56d4",
+      "tree": "01988f5db2018b5803ce0c931301d89348ac3592"
     },
     "version": "0.1.23",
     "asset": "Creator.Hub_0.1.23_x64-setup.exe",
     "installer": {
-      "bytes": 38596634,
-      "sha256": "b3a762a9358f5988909e86665d023ebfa177b5ebbbe14b8b472016ae686b3eb8"
+      "bytes": 38687807,
+      "sha256": "4c85dbf3064b136ada3ad20a24c5c6b25ddfb16fe8be941b9dd33058d916f456"
     },
     "executable": {
-      "bytes": 19734528,
-      "sha256": "fa25ca808f516962260d54e9ff8cff02f36dda8c24a92fc532f9451bb80c2a3b"
+      "bytes": 19920384,
+      "sha256": "966ef4bb22598927f18ec5afd7f75f068c6bb083ca89dd3aac4757afb8f17010"
     },
     "manifest": {
       "schemaVersion": 1,
@@ -121,53 +121,53 @@
     "generation": "df0ec83365a0ed5e235c784243531676467e56bfeafce43c818d5309022c2b54",
     "sourceUnchanged": true,
     "buildExitCode": 0,
-    "verificationReceiptSha256": "8d86c48ed4b92e0270c70aafd99f837d424062587170f4907cd6492ed41f4315",
+    "verificationReceiptSha256": "0a022ae88d72b22e63da0920c99c5baeb0465e45d58c72b98b2ad971a61866e6",
     "descriptor": {
       "bytes": 505,
-      "sha256": "c0ce6bccb328a785dc79276cedcbcc7cafad7fc77647c58eefa2480a136805a4"
+      "sha256": "be1110c7dca3d17e65486d75f3c13f3d9513186c3f368d22d76cfe4346a3355e"
     },
     "descriptorSignature": {
       "bytes": 300,
-      "sha256": "423abc22db63a1fbd24e6c1b0de97077eab91aa797265629d072de1a4a97909a"
+      "sha256": "1284e2a5648687c7dd9a271275571e484a429dab93f6977749be2d710b6cccc0"
     },
     "latest": {
       "bytes": 704,
-      "sha256": "580a8f41a0d1238d420310a1e9a433ba5b515aeae26971fed48d044fcac87a46"
+      "sha256": "5dd6b2ba2b1cbef4de15acfce33a6caf890499d7ab49fd432ef16e5709321abf"
     },
     "privateRelease": {
-      "id": 446947804,
-      "tag": "lab-windows-root-ui-023-20261116-r15",
-      "source": "05bcaa5417b86792e37ef64f346f7a20c42a3996",
+      "id": 447044552,
+      "tag": "lab-windows-root-ui-023-20261116-r17",
+      "source": "117e92c958aac9cb421fe0a130040b775a0a56d4",
       "assets": {
         "Creator.Hub_0.1.23_x64-setup.exe": {
-          "id": 754589411,
-          "bytes": 38596634,
-          "sha256": "b3a762a9358f5988909e86665d023ebfa177b5ebbbe14b8b472016ae686b3eb8"
+          "id": 754867070,
+          "bytes": 38687807,
+          "sha256": "4c85dbf3064b136ada3ad20a24c5c6b25ddfb16fe8be941b9dd33058d916f456"
         },
         "creator-hub-windows-x86_64.json": {
-          "id": 754592265,
+          "id": 754869175,
           "bytes": 505,
-          "sha256": "c0ce6bccb328a785dc79276cedcbcc7cafad7fc77647c58eefa2480a136805a4"
+          "sha256": "be1110c7dca3d17e65486d75f3c13f3d9513186c3f368d22d76cfe4346a3355e"
         },
         "creator-hub-windows-x86_64.json.minisig": {
-          "id": 754592388,
+          "id": 754869301,
           "bytes": 300,
-          "sha256": "423abc22db63a1fbd24e6c1b0de97077eab91aa797265629d072de1a4a97909a"
+          "sha256": "1284e2a5648687c7dd9a271275571e484a429dab93f6977749be2d710b6cccc0"
         },
         "latest.json": {
-          "id": 754592543,
+          "id": 754869423,
           "bytes": 704,
-          "sha256": "580a8f41a0d1238d420310a1e9a433ba5b515aeae26971fed48d044fcac87a46"
+          "sha256": "5dd6b2ba2b1cbef4de15acfce33a6caf890499d7ab49fd432ef16e5709321abf"
         }
       }
     }
   },
   "fixtureQualification": {
-    "sha256": "8d86c48ed4b92e0270c70aafd99f837d424062587170f4907cd6492ed41f4315",
-    "kind": "root-ui-r15-signed-candidate",
+    "sha256": "0a022ae88d72b22e63da0920c99c5baeb0465e45d58c72b98b2ad971a61866e6",
+    "kind": "root-ui-r17-signed-candidate",
     "source": {
-      "commit": "05bcaa5417b86792e37ef64f346f7a20c42a3996",
-      "tree": "2d3fc4edef3fe0466b91cec53bdc4e9825dbc47e"
+      "commit": "117e92c958aac9cb421fe0a130040b775a0a56d4",
+      "tree": "01988f5db2018b5803ce0c931301d89348ac3592"
     },
     "sourceUnchanged": true,
     "sourceProof": {
@@ -191,6 +191,37 @@
         }
       ],
       "inputCount": 1605,
+      "sourceContract": {
+        "modulePayloadUnchanged": true,
+        "modulesAndNativeUnchanged": false,
+        "nativeSourceUnchanged": true,
+        "moduleSourceChanges": [
+          "modules/mcp/launcher/src-tauri/src/product_settings.rs",
+          "modules/mcp/launcher/src-tauri/src/service.rs"
+        ],
+        "rootRustSourceChanges": [
+          "src-tauri/build.rs",
+          "src-tauri/src/convergence.rs",
+          "src-tauri/src/convergence_profiles_tests.rs",
+          "src-tauri/src/main.rs"
+        ],
+        "rootCapabilityChanges": [
+          "src-tauri/capabilities/default.json"
+        ],
+        "versionFilesUnchanged": true
+      },
+      "overlays": [
+        "modules/mcp/launcher/src-tauri/src/product_settings.rs",
+        "modules/mcp/launcher/src-tauri/src/service.rs",
+        "src-tauri/build.rs",
+        "src-tauri/capabilities/default.json",
+        "src-tauri/src/convergence_profiles_tests.rs",
+        "src-tauri/src/convergence.rs",
+        "src-tauri/src/main.rs",
+        "src/convergence.js",
+        "src/index.html",
+        "tests/convergence.spec.js"
+      ],
       "payloadFilesUnchanged": 15
     },
     "payloadSource": {
@@ -200,8 +231,8 @@
       "runtimeSha256": "f17a97854e9c900f22961edd80d0033acbacf6673187d0485c7b2ef0d830aacb",
       "generation": "df0ec83365a0ed5e235c784243531676467e56bfeafce43c818d5309022c2b54"
     },
-    "sourceReceiptSha256": "b9d1546298e8efba8f1743e309fdeca80861675cacc8bc5e7f805d2757f6ae23",
-    "buildReportSha256": "bd7cd3aedb7b45682e4bc38a09f38e789ca8403f5fd07d70565edcb239ce8944",
+    "sourceReceiptSha256": "9f5b3f08c5d7f7c7a56e35dc6f6a98c14d9e79e113954f144dfdde6a4d1bbe4c",
+    "buildReportSha256": "bd6e0c7a424bb6a3a3783366b772abae92d56a426570db39829d9e015d6ba2bc",
     "buildExitCode": 0,
     "inputCount": 1605,
     "payloadFiles": 15,

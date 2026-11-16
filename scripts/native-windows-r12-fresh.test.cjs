@@ -30,6 +30,21 @@ test('native subprocess environment excludes credentials and runtime injection',
   assert.deepEqual(fresh.environment({ PATH: 'keep', USERPROFILE: 'keep', GH_TOKEN: 'drop', SECRET: 'drop',
     NODE_OPTIONS: 'drop', NODE_PATH: 'drop', HTTPS_PROXY: 'drop', TAURI_SIGNING_PRIVATE_KEY: 'drop' }), { PATH: 'keep', USERPROFILE: 'keep' });
 });
+function rootRecovery() {
+  const helper = require('./native-windows-root-recovery.cjs');
+  const root = path.resolve('root-recovery-test-only');
+  const journal = path.join(root, 'move-v1.json'), receiptFile = path.join(root, 'kept-setup-v1.json');
+  const storeFiles = ['current', 'legacy', 'outcomes', 'editors'].map(name => path.join(root, name));
+  const before = [{ file: journal, bytes: 10, sha256: 'a'.repeat(64) }, { file: storeFiles[0], bytes: 20, sha256: 'b'.repeat(64) }];
+  const after = [...before, ...before.map(row => ({ ...row, file: helper.backupName(row.file, row.sha256) })),
+    { file: receiptFile, bytes: 30, sha256: 'c'.repeat(64) }];
+  return { kind: 'root-stopped-connections-keep-current', syntheticStoppedRecord: true, inspectionPreserved: true,
+    cancelPreserved: true, approved: true, backupsVerified: true, journalUnchanged: true, settingsRoutesProjectsUnchanged: true,
+    reopened: true, noRepeatedApproval: true, receiptUnchanged: true, migrationComplete: false, standaloneRetirement: false,
+    liveAiAcceptance: false, releaseReady: false, decisions: [false, true], journal, receiptFile, storeFiles,
+    originalJournalSha256: 'a'.repeat(64), receiptSha256: 'c'.repeat(64), before, after, reopen: structuredClone(after),
+    receipt: { policy: 1, active: true, batch_sha256: 'a'.repeat(64), store_sha256: ['b'.repeat(64), null, null, null] } };
+}
 function receipt() {
   const profile = { local: 'C:/Users/runneradmin/AppData/Local' };
   const file = path.join(profile.local, 'CreatorHub/consent/hub-usage-terms.json');
@@ -42,7 +57,9 @@ function receipt() {
   migrationAccepted: false, signedUpdateAccepted: false, publicDiscovery: false, liveAiAcceptance: false, releaseReady: false, cleanupForced: false,
   profile, consentBeforeReopen: { ...pin, record }, consentAfterReopen: { ...pin, record: { ...record } },
   settingsBeforeReopen: [pin], settingsAfterReopen: [{ ...pin }],
-  normalCloses: [{ pid: 10, exitCode: 0 }, { pid: 20, exitCode: 0 }, { pid: 30, exitCode: 0 }, { pid: 40, exitCode: 0 }],
+  normalCloses: [{ pid: 10, exitCode: 0 }, { pid: 20, exitCode: 0 }, { pid: 30, exitCode: 0 }, { pid: 40, exitCode: 0 },
+    { pid: 50, exitCode: 0 }, { pid: 60, exitCode: 0 }],
+  rootRecovery: rootRecovery(),
   productReview: { cancelPreserved: true, approvalObserved: true, backupsVerified: true, controlsEnabledBeforeClose: true,
     controlsEnabledAfterReopen: true, settingsUnchanged: true, markerUnchanged: true, noRepeatedApproval: true,
     runtimeRepairApproved: true, runtimeRepairCancelled: true, initialRouteUnbound: true, repairVisibleBeforeBinding: true, onlyServerChanged: true, oldServerAbsent: true, renewedReview: true, managedRouteUnchanged: true, decisions: [false, true, true], statusBefore: 'conflict', statusAfter: 'conflict', currentBefore: 'a'.repeat(64), currentAfter: 'd'.repeat(64),
@@ -143,7 +160,7 @@ test('optional fresh_only skips only upgrade execution and defaults to the full 
   assert.equal(workflow.jobs.fresh.if, "github.event_name == 'workflow_dispatch'");
   assert.equal(workflow.jobs.fresh.needs, 'preflight');
   assert.equal(workflow.jobs.acceptance.needs, 'preflight');
-  assert.equal(workflow.jobs.preflight.if, "github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.ref == 'refs/heads/codex/windows-root-ui-023-20261116-r15-ci1'");
+  assert.equal(workflow.jobs.preflight.if, "github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.ref == 'refs/heads/codex/windows-root-ui-023-20261116-r17-ci1'");
   const preflight = workflow.jobs.preflight.steps.filter(step => step.run?.startsWith('node --test '));
   assert.equal(preflight.length, 3);
   assert.ok(preflight[0].run.includes('scripts/windows-outgoing-019-test.cjs'));

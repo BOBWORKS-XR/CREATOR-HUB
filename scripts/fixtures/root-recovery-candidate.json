@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "ready": true,
+  "source": {
+    "commit": "117e92c958aac9cb421fe0a130040b775a0a56d4",
+    "tree": "01988f5db2018b5803ce0c931301d89348ac3592"
+  },
+  "sourceReceiptSha256": "9f5b3f08c5d7f7c7a56e35dc6f6a98c14d9e79e113954f144dfdde6a4d1bbe4c",
+  "sourceOverlays": [
+    "modules/mcp/launcher/src-tauri/src/product_settings.rs",
+    "modules/mcp/launcher/src-tauri/src/service.rs",
+    "src-tauri/build.rs",
+    "src-tauri/capabilities/default.json",
+    "src-tauri/src/convergence_profiles_tests.rs",
+    "src-tauri/src/convergence.rs",
+    "src-tauri/src/main.rs",
+    "src/convergence.js",
+    "src/index.html",
+    "tests/convergence.spec.js"
+  ],
+  "qualificationSha256": "0a022ae88d72b22e63da0920c99c5baeb0465e45d58c72b98b2ad971a61866e6",
+  "buildReportSha256": "bd6e0c7a424bb6a3a3783366b772abae92d56a426570db39829d9e015d6ba2bc",
+  "bindingSha256": "50cce84bc8775373a1ec9048de176e91127e0256c52f95a24418a07f7913e25a"
+}

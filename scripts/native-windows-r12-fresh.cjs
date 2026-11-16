@@ -8,13 +8,14 @@ const target = require('./windows-outgoing-019-target.cjs');
 const direct = require('./native-outgoing-direct-019.cjs');
 const input = require('./windows-outgoing-019-input.cjs');
 const { assertOwnedDebugging, showPage } = require('./windows-incoming-016.cjs');
-const BRANCH = 'codex/windows-root-ui-023-20261116-r15-ci1';
+const BRANCH = 'codex/windows-root-ui-023-20261116-r17-ci1';
 const WORKFLOW = '.github/workflows/windows-outgoing-019.yml';
 const ROOT = path.resolve(__dirname, '..');
 const NAMES = [target.ASSET, 'creator-hub-windows-x86_64.json', 'creator-hub-windows-x86_64.json.minisig', 'latest.json'];
 const CLOSE_MESSAGE = 'MCP has an unfinished interface workflow, but its native operation has returned.\n\nClose Hub anyway? Earlier completed changes and recovery records will be kept. Nothing will be rolled back or marked successful. Existing AI connections, Unity and unrelated processes will not be stopped. Check the last outcome before repeating work.';
 const POLICY = '2026-09-28-v1';
 const reviewModule = require('./native-windows-r15-review.cjs');
+const recoveryModule = require('./native-windows-root-recovery.cjs');
 function admission(env = process.env, platform = process.platform) {
   assert.equal(platform, 'win32'); target.validateBinding();
   for (const [name, value] of Object.entries({ GITHUB_ACTIONS: 'true', RUNNER_ENVIRONMENT: 'github-hosted',
@@ -127,10 +128,12 @@ function checkReceipt(report) {
   }
   assert.deepEqual(report.consentBeforeReopen, report.consentAfterReopen);
   reviewModule.validateProof(report.productReview);
-  assert.equal(report.normalCloses.length, 4); assert.equal(new Set(report.normalCloses.map(row => row.pid)).size, 4);
+  recoveryModule.validateProof(report.rootRecovery);
+  assert.equal(report.normalCloses.length, 6); assert.equal(new Set(report.normalCloses.map(row => row.pid)).size, 6);
   for (const row of report.normalCloses) { assert.ok(Number.isSafeInteger(row.pid) && row.pid > 0); assert.equal(row.exitCode, 0); }
 }
 async function acquire() {
+  recoveryModule.assertCandidate();
   admission();
   const directory = path.join(ROOT, 'artifacts/fresh-r12-inputs'); assert.equal(fs.existsSync(directory), false);
   const release = target.binding.target.privateRelease;
@@ -166,6 +169,7 @@ function validateInputs(directory) {
     descriptor: bytes[NAMES[1]], descriptorSignature: bytes[NAMES[2]], installer: bytes[NAMES[0]], manifest: bytes[NAMES[3]] });
 }
 async function main() {
+  recoveryModule.assertCandidate();
   admission(); const directory = path.join(ROOT, 'artifacts/fresh-r12-inputs'); validateInputs(directory);
   const env = environment();
   const ps = (name, args = []) => execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-File', path.join(__dirname, name), ...args],
@@ -194,7 +198,7 @@ async function main() {
   async function retry(action, seconds = 30) { let last; for (const end = Date.now() + seconds * 1000; Date.now() < end;) {
     try { return await action(); } catch (error) { last = error; await delay(250); }
   } throw last || Error('Bounded wait expired'); }
-  let child, browser, page, owned, reviewCase, policyEnabled = false, closeAttempted = false;
+  let child, browser, page, owned, reviewCase, recoveryCase, policyEnabled = false, closeAttempted = false;
   const record = pid => { const rows = inventory().filter(row => row.pid === pid); assert.equal(rows.length, 1); return rows[0]; };
   const same = () => assert.deepEqual(record(owned.pid), owned);
   async function close() {
@@ -209,7 +213,7 @@ async function main() {
     report.normalCloses.push({ pid: owned.pid, exitCode: child.exitCode });
     await browser.close(); browser = null; page = null; child = null; owned = null; assert.deepEqual(moduleRows(), []);
   }
-  async function launch(first, reviewReopen = null) {
+  async function launch(first, reviewReopen = null, recoveryReopen = null) {
     closeAttempted = false;
     target.assertInstalledResources(path.dirname(hub), '0.1.23');
     child = spawn(hub, [], { env: { ...env, WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: '--remote-debugging-port=9238' }, windowsHide: true, stdio: 'ignore' });
@@ -226,6 +230,12 @@ async function main() {
       await page.locator('#usage-terms-checkbox').check(); await page.locator('#usage-terms-continue').click();
       await page.locator('#usage-terms-dialog').waitFor({ state: 'hidden' });
     } else assert.equal(await page.locator('#usage-terms-dialog').isVisible(), false);
+    if (recoveryReopen !== null) {
+      // Root recovery owns the initial dialog; never auto-dismiss it first.
+      await recoveryCase.session(page, recoveryReopen);
+      assert.equal(await page.evaluate(() => window.CreatorHubNative.invoke('usage_terms_status')), true);
+      assert.deepEqual(errors, []); return;
+    }
     if (reviewReopen !== null) {
       await page.waitForFunction(() => document.querySelector('#convergence-dialog')?.open || !document.querySelector('#check-updates').disabled, null, { timeout: 90000 });
       if (await page.locator('#convergence-dialog').isVisible()) {
@@ -272,7 +282,20 @@ async function main() {
       windows: () => { same(); return JSON.parse(ps('native-window.ps1', ['-TargetPid', String(owned.pid), '-ExpectedExecutable', hub, '-Action', 'snapshot'])); },
       pid: () => owned.pid, same, env, inventory });
     reviewCase.seed(); await launch(false, false); await close();
-    await launch(false, true); await close(); report.productReview = reviewCase.verify(); report.passed = true;
+    await launch(false, true); await close(); report.productReview = reviewCase.verify();
+    recoveryCase = recoveryModule.createCase({ profile, out, hub,
+      read: file => target.readBounded(file, 2 * 1024 * 1024),
+      psCommand: command => execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', command],
+        { env, encoding: 'utf8', windowsHide: true, timeout: 30000, maxBuffer: 1024 * 1024 }),
+      windows: () => { same(); return JSON.parse(ps('native-window.ps1', ['-TargetPid', String(owned.pid), '-ExpectedExecutable', hub, '-Action', 'snapshot'])); },
+      pid: () => owned.pid, same });
+    recoveryCase.seed(); await launch(false, null, false); await close();
+    await launch(false, null, true); await close(); report.rootRecovery = recoveryCase.verify();
+    fs.writeFileSync(path.join(out, 'root-recovery-report.json'), JSON.stringify({
+      sourceCommit: report.sourceCommit, bindingSha256: report.bindingSha256,
+      installer: report.installer, executable: report.executable, ...report.rootRecovery,
+    }, null, 2) + '\n', { flag: 'wx' });
+    report.passed = true;
   } catch (error) { report.errorSha256 = target.hash(String(error.stack || error)); report.error = String(error.message).slice(0, 600); report.passed = false; }
   finally {
     if (child?.exitCode === null && owned) {

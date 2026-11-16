@@ -27,8 +27,8 @@ function env(caseName = 'mcp-restore') {
   const [last, restore] = target.CASES[caseName];
   return { GITHUB_ACTIONS: 'true', RUNNER_ENVIRONMENT: 'github-hosted', RUNNER_OS: 'Windows', RUNNER_ARCH: 'X64',
     GITHUB_REPOSITORY: 'BOBWORKS-XR/CREATOR-HUB', GITHUB_REPOSITORY_ID: '1364807512', GITHUB_EVENT_NAME: 'workflow_dispatch', GITHUB_JOB: 'acceptance',
-    GITHUB_REF: 'refs/heads/codex/windows-root-ui-023-20261116-r15-ci1',
-    GITHUB_WORKFLOW_REF: 'BOBWORKS-XR/CREATOR-HUB/.github/workflows/windows-outgoing-019.yml@refs/heads/codex/windows-root-ui-023-20261116-r15-ci1',
+    GITHUB_REF: 'refs/heads/codex/windows-root-ui-023-20261116-r17-ci1',
+    GITHUB_WORKFLOW_REF: 'BOBWORKS-XR/CREATOR-HUB/.github/workflows/windows-outgoing-019.yml@refs/heads/codex/windows-root-ui-023-20261116-r17-ci1',
     GITHUB_SHA: 'a'.repeat(40), EXPECTED_HARNESS_COMMIT: 'a'.repeat(40), CREATOR_OUTGOING_CASE: caseName,
     CREATOR_OUTGOING_LAST_TOOL: last, CREATOR_OUTGOING_RESTORE: restore, CREATOR_OUTGOING_REVIEW_SHA256: reviewSha };
 }
@@ -244,7 +244,7 @@ test('shape validation refuses absent proofs, old source, same generation and in
 });
 test('workflow is finite Windows-only and binds SDK source before private acquisition', () => {
   const workflow = fs.readFileSync(path.join(__dirname, '../.github/workflows/windows-outgoing-019.yml'), 'utf8');
-  assert.ok(workflow.includes('branches: [codex/windows-root-ui-023-20261116-r15-ci1]'));
+  assert.ok(workflow.includes('branches: [codex/windows-root-ui-023-20261116-r17-ci1]'));
   assert.ok(workflow.includes('scripts/windows-outgoing-019-input.cjs source'));
   assert.ok(workflow.includes('ref: '+ '\u0024{{ steps.binding.outputs.source_commit }}'));
   assert.ok(workflow.includes("git -C product rev-parse 'HEAD^{tree}'"));
@@ -271,7 +271,7 @@ test('parsed workflow retains exactly three Windows profiles and pinned checkout
   assert.deepEqual(document.errors, []);
   const workflow = document.toJS();
   const preflight = workflow.jobs.preflight;
-  assert.equal(preflight.if, "github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.ref == 'refs/heads/codex/windows-root-ui-023-20261116-r15-ci1'");
+  assert.equal(preflight.if, "github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.ref == 'refs/heads/codex/windows-root-ui-023-20261116-r17-ci1'");
   const tests = preflight.steps.find(step => step.run?.startsWith('node --test ')).run.split(/\s+/).slice(2);
   for (const file of ['scripts/windows-outgoing-019-test.cjs', 'scripts/incoming-store-r11.test.cjs', 'scripts/incoming-receipt-r11.test.cjs']) {
     assert.equal(tests.filter(value => value === file).length, 1, `${file} must run once in preflight`);
