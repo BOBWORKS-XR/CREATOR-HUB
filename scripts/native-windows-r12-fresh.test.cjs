@@ -3,6 +3,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('node:path');
 const fs = require('node:fs');
+const vm = require('node:vm');
 const { yaml } = require('playwright-core/lib/utilsBundle');
 const fresh = require('./native-windows-r12-fresh.cjs');
 const target = require('./windows-outgoing-019-target.cjs');
@@ -139,4 +140,45 @@ test('fresh output obeys the unchanged native policy guard and is collected by i
   assert.ok(driver.includes("path.join(out, 'webview-policy.json')"));
   const upload = workflow.jobs.fresh.steps.find(step => step.uses === 'actions/upload-artifact@v4');
   assert.equal(upload.with.path, 'artifacts/native-suite-*/*.json\nartifacts/native-suite-*/*.png\n');
+});
+function configPage(fault) {
+  const calls = []; let owned = false;
+  return { calls, page: { evaluate(fn) {
+    return vm.runInNewContext(`(${fn.toString()})()`, { window: { CreatorHubNative: {
+      async invoke(name, value) {
+        assert.equal(name, 'feature_call'); assert.equal(value.feature, 'mcp');
+        const { command } = value; calls.push(command);
+        if (command === 'begin_ui_operation') {
+          if (fault === 'begin') throw Error('Begin refused');
+          owned = true; return 17;
+        }
+        assert.equal(owned, true, 'Owned workflow required');
+        if (command === 'finish_ui_operation') {
+          assert.equal(value.args.id, 17); owned = false;
+          if (fault === 'finish') throw Error('Finish refused');
+          return;
+        }
+        assert.equal(command, 'load_config');
+        if (fault === 'load') throw Error('Read refused');
+        return { channels: [], active_channel_id: null };
+      },
+    } } });
+  } } };
+}
+test('fresh config inspection follows the actual begin/load/finally-finish contract', async () => {
+  const success = configPage();
+  const value = await fresh.loadConfigInWorkflow(success.page);
+  assert.deepEqual(JSON.parse(JSON.stringify(value)), { channels: [], active_channel_id: null });
+  assert.deepEqual(success.calls, ['begin_ui_operation', 'load_config', 'finish_ui_operation']);
+  const failedRead = configPage('load');
+  await assert.rejects(fresh.loadConfigInWorkflow(failedRead.page), /Read refused/);
+  assert.deepEqual(failedRead.calls, success.calls);
+});
+test('fresh config inspection never loads after begin refusal or accepts finish failure', async () => {
+  const begin = configPage('begin');
+  await assert.rejects(fresh.loadConfigInWorkflow(begin.page), /Begin refused/);
+  assert.deepEqual(begin.calls, ['begin_ui_operation']);
+  const finish = configPage('finish');
+  await assert.rejects(fresh.loadConfigInWorkflow(finish.page), /Finish refused/);
+  assert.deepEqual(finish.calls, ['begin_ui_operation', 'load_config', 'finish_ui_operation']);
 });

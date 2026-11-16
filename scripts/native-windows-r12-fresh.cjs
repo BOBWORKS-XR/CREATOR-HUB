@@ -98,6 +98,14 @@ function outputDirectory(root, stamp = Date.now(), paths = path) {
   assert.ok(Number.isSafeInteger(stamp) && stamp > 0);
   return paths.join(root, 'artifacts', `native-suite-${stamp}`);
 }
+async function loadConfigInWorkflow(page) {
+  return page.evaluate(async () => {
+    const call = (command, args = {}) => window.CreatorHubNative.invoke('feature_call', { feature: 'mcp', command, args });
+    const id = await call('begin_ui_operation');
+    try { return await call('load_config'); }
+    finally { await call('finish_ui_operation', { id }); }
+  });
+}
 function checkReceipt(report) {
   assert.equal(report.kind, 'r12-fresh-install'); assert.equal(report.sourceCommit, target.binding.target.source.commit);
   assert.equal(report.bindingSha256, target.hash(fs.readFileSync(path.join(__dirname, 'fixtures/windows-outgoing-019-binding.json'))));
@@ -225,7 +233,7 @@ async function main() {
       showApp: feature => showPage(page, feature), screenshot: feature => page.screenshot({ path: path.join(out, `${first ? 'first' : 'reopen'}-${feature}.png`) }) });
     assert.equal(services.mcp.project, null); assert.deepEqual(errors, []);
     assert.equal((await page.locator('.footer-version').innerText()).trim(), '0.1.23');
-    const settings = await page.evaluate(() => window.CreatorHubNative.invoke('feature_call', { feature: 'mcp', command: 'load_config', args: {} }));
+    const settings = await loadConfigInWorkflow(page);
     assert.deepEqual(settings.channels, []); assert.equal(settings.active_channel_id, null);
     report.mcpAvailable = true; return services;
   }
@@ -264,7 +272,7 @@ async function main() {
   }
   console.log(JSON.stringify({ passed: report.passed, releaseReady: false, out })); process.exitCode = report.passed ? 0 : 1;
 }
-module.exports = { BRANCH, admission, freshPaths, assertFresh, environment, snapshot, outputDirectory, checkReceipt, consentRecord, closeDialog, closeNormally, CLOSE_MESSAGE };
+module.exports = { BRANCH, admission, freshPaths, assertFresh, environment, snapshot, outputDirectory, loadConfigInWorkflow, checkReceipt, consentRecord, closeDialog, closeNormally, CLOSE_MESSAGE };
 if (require.main === module) {
   const action = process.argv[2]; assert.ok(action === 'acquire' || action === 'run');
   (action === 'acquire' ? acquire() : main()).then(result => { if (result) console.log(JSON.stringify(result)); })
