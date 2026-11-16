@@ -10,7 +10,7 @@ function verifyRelease(release, expected) {
   assert.equal(release.id, expected.id); assert.equal(release.tag_name, expected.tag);
   const publicBaseline = expected.id === binding.baseline.releaseId;
   assert.equal(release.draft, !publicBaseline);
-  assert.equal(release.target_commitish, publicBaseline ? '75358cf4a783f51a359898b1d4f9bfe2e256b35f' : expected.source);
+  assert.equal(release.target_commitish, publicBaseline ? binding.baseline.source.commit : expected.source);
   for (const [name, pin] of Object.entries(expected.assets)) {
     const matches = release.assets.filter(asset => asset.id === pin.id); assert.equal(matches.length, 1);
     const asset = matches[0]; assert.equal(asset.name, name); assert.equal(asset.state, 'uploaded');
@@ -21,7 +21,7 @@ async function acquire() {
   target.assertHost();
   const base = path.resolve('artifacts/outgoing-019');
   assert.equal(fs.existsSync(base), false, 'Refusing to reuse input directory');
-  const baseline = { id: binding.baseline.releaseId, tag: 'v0.1.22', source: binding.baseline.source.commit,
+  const baseline = { id: binding.baseline.releaseId, tag: 'v0.1.23', source: binding.baseline.source.commit,
     assets: { [target.BASELINE_ASSET]: { id: binding.baseline.assetId, ...binding.baseline.installer } } };
   const successor = binding.target.privateRelease;
   const headers = { Authorization: `Bearer ${process.env.GH_TOKEN}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2026-03-10' };
@@ -51,81 +51,34 @@ async function acquire() {
   return { configSha256 };
 }
 function checkMigrationReceipt(report) {
-  const { profile, clients, clientReview } = report;
-  assert.deepEqual(Object.keys(profile || {}).sort(), ['home', 'local', 'roaming'], 'Explicit captured profile required');
-  for (const folder of Object.values(profile)) {
-    assert.ok(path.win32.isAbsolute(folder || ''), 'Absolute Windows profile roots required');
-    assert.ok(!folder.split(/[\\/]/).includes('..'), 'Ambiguous profile root refused');
+  const {profile,clients}=report;
+  assert.deepEqual(Object.keys(profile).sort(),['home','local','roaming']);
+  for(const folder of Object.values(profile))assert.ok(path.win32.isAbsolute(folder)&&!folder.split(/[\\/]/).includes('..'));
+  const captures=path.dirname(clients.selectedBefore.capture);
+  assert.equal(path.dirname(captures),path.resolve(__dirname,'../artifacts'));
+  const capture=(row,file,name)=>{assert.equal(row.file,file);assert.equal(row.capture,path.join(captures,name));const bytes=direct.readEvidence(row.capture);assert.equal(bytes.length,row.bytes);assert.equal(hash(bytes),row.sha256);return bytes;};
+  const pairs=[['selected',path.join(profile.home,'.claude.json'),'claude'],['old',path.join(profile.home,'.gemini/config/mcp_config.json'),'old-client'],['currentSettings',path.join(profile.roaming,'creator-works-mcp/launcher-config.json'),'settings'],['oldSettings',path.join(profile.roaming,'banter-mcp/launcher-config.json'),'old-settings']];
+  for(const [key,file,name] of pairs) {
+    const before=capture(clients[key+'Before'],file,name+'-before.json'),after=capture(clients[key+'After'],file,name+'-after.json');
+    assert.ok(before.equals(after));assert.ok(direct.readEvidence(file).equals(before));
+    if(key==='selected'||key==='old')assert.ok(capture(clients.afterUpdateCancel[key],file,name+'-update-cancel.json').equals(before));
   }
-  const oldRoute = target.managedLocations(profile.local, '0.1.22', profile.home);
-  const newRoute = target.managedLocations(profile.local, '0.1.23', profile.home);
-  const selectedPath = path.join(profile.home, '.claude.json');
-  const oldClientPath = path.join(profile.home, '.gemini/config/mcp_config.json');
-  const currentSettingsPath = path.join(profile.roaming, 'creator-works-mcp/launcher-config.json');
-  const oldSettingsPath = path.join(profile.roaming, 'banter-mcp/launcher-config.json');
-  const captures = path.dirname(clients?.selectedBefore?.capture || '');
-  assert.equal(path.dirname(captures), path.resolve(__dirname, '../artifacts'), 'Owned driver capture directory required');
-  assert.match(path.basename(captures), /^native-suite-[0-9]+$/);
-  const readCapture = (receipt, file, name) => {
-    assert.deepEqual(Object.keys(receipt || {}).sort(), ['bytes', 'capture', 'file', 'sha256']);
-    assert.equal(receipt.file, file); assert.equal(receipt.capture, path.join(captures, name));
-    const bytes = direct.readEvidence(receipt.capture);
-    assert.equal(receipt.bytes, bytes.length); assert.equal(receipt.sha256, hash(bytes));
-    return bytes;
-  };
-  const selectedBefore = readCapture(clients.selectedBefore, selectedPath, 'claude-before.json');
-  const oldBefore = readCapture(clients.oldBefore, oldClientPath, 'old-client-before.json');
-  for (const [key, selectedName, oldName] of [
-    ['afterUpdateCancel', 'claude-update-cancel.json', 'old-client-update-cancel.json'],
-    ['afterReviewCancel', 'claude-review-cancel.json', 'old-client-review-cancel.json'],
-  ]) {
-    assert.ok(readCapture(clients[key]?.selected, selectedPath, selectedName).equals(selectedBefore), `${key}: selected client changed`);
-    assert.ok(readCapture(clients[key]?.old, oldClientPath, oldName).equals(oldBefore), `${key}: unselected client changed`);
-  }
-  const selectedAfter = readCapture(clients.selectedAfter, selectedPath, 'claude-after.json');
-  const oldAfter = readCapture(clients.oldAfter, oldClientPath, 'old-client-after.json');
-  direct.assertClientBytes({ selectedPath, oldClientPath, selectedBefore: selectedAfter, oldClientBefore: oldBefore });
-  const currentBefore = readCapture(clients.currentSettingsBefore, currentSettingsPath, 'settings-before.json');
-  const currentAfter = readCapture(clients.currentSettingsAfter, currentSettingsPath, 'settings-after.json');
-  const legacyBefore = readCapture(clients.oldSettingsBefore, oldSettingsPath, 'old-settings-before.json');
-  const legacyAfter = readCapture(clients.oldSettingsAfter, oldSettingsPath, 'old-settings-after.json');
-  for (const [file, before, after] of [[currentSettingsPath, currentBefore, currentAfter], [oldSettingsPath, legacyBefore, legacyAfter]]) {
-    assert.ok(before.equals(after), 'Original settings changed');
-    assert.ok(direct.readEvidence(file).equals(before), 'Original settings changed after capture');
-  }
-  assert.deepEqual(report.manualCapabilityRetention,
-    require('./sdk-retention-023.cjs').verify(report.lastTool, report.restore, currentAfter, legacyAfter));
-  const review = direct.reviewedSettings(currentSettingsPath, newRoute.base);
-  assert.deepEqual(report.settingsReview, { source: review.source, path: review.path });
-  assert.deepEqual(report.settingsView, direct.assertSettingsView(review));
-  assert.equal(typeof report.settingsViewExistedBeforeReview, 'boolean');
-  if (report.settingsViewExistedBeforeReview) {
-    assert.ok(readCapture(report.settingsViewBefore, review.path, 'settings-view-before.json').equals(direct.readEvidence(review.path)),
-      'Existing settings view changed');
-  } else assert.equal(report.settingsViewBefore, undefined);
-  assert.deepEqual(Object.keys(clientReview || {}).sort(), ['approved', 'cancelled', 'evidence']);
-  assert.deepEqual(clientReview.cancelled, { status: 'cancelled', count: 0 });
-  direct.assertReviewedClientMigration({ before: JSON.parse(selectedBefore), after: JSON.parse(selectedAfter),
-    oldClientBefore: oldBefore, oldClientAfter: oldAfter, oldCommand: oldRoute.command, newCommand: newRoute.command,
-    settingsPath: review.path, approved: clientReview.approved?.status === 'migrated' && clientReview.approved?.count === 1 });
-  const oldEntry = JSON.parse(oldBefore).mcpServers['creator-works'];
-  assert.equal(oldEntry.command, oldRoute.command); assert.deepEqual(oldEntry.args, []);
-  assert.equal(oldEntry.env.CREATOR_WORKS_CONFIG_OWNER, 'creator-hub-v1');
-  assert.equal(oldEntry.env.CREATOR_WORKS_LAUNCHER_CONFIG, oldSettingsPath);
-  assert.deepEqual(clientReview.evidence, direct.assertMigrationEvidence({ result: clientReview.approved,
-    local: profile.local, selectedPath, before: selectedBefore, after: selectedAfter }));
-  target.assertActiveResources(profile.local, '0.1.22', report.beforeRoute, true, profile.home);
-  target.assertActiveResources(profile.local, '0.1.23', report.afterRoute, true, profile.home);
-  target.assertInstalledResources(path.join(profile.local, 'Creator Hub'), '0.1.23');
-  target.assertFreshConnection(report.heldProcessesBefore, report.reconnectedProcesses, profile);
-  target.assertFreshConnection(report.freshOldProcesses, report.reconnectedProcesses, profile);
-  assert.equal(new Set([...report.heldProcessesBefore, ...report.freshOldProcesses, ...report.reconnectedProcesses]
-    .map(row => row.pid)).size, 6, 'Fresh old-client connection must be distinct');
-  assert.equal(report.freshOldServerVersion.version, binding.baseline.manifest.modules.mcp.version);
+  assert.equal(report.clientReview,undefined);assert.equal(report.clientConnectionsUnchanged,true);
+  const old=target.managedLocations(profile.local,'0.1.23',profile.home),next=target.managedLocations(profile.local,'0.1.24',profile.home);
+  assert.equal(old.command,next.command);assert.equal(old.active,next.active);assert.equal(old.payload,next.payload);
+  target.assertActiveResources(profile.local,'0.1.23',report.beforeRoute,false,profile.home);
+  target.assertActiveResources(profile.local,'0.1.24',report.afterRoute,true,profile.home);
+  target.assertInstalledResources(path.join(profile.local,'Creator Hub'),'0.1.24');
+  target.assertFreshConnection(report.heldProcessesBefore,report.reconnectedProcesses,profile);
+  target.assertFreshConnection(report.freshOldProcesses,report.reconnectedProcesses,profile);
+  assert.equal(new Set([...report.heldProcessesBefore,...report.freshOldProcesses,...report.reconnectedProcesses].map(p=>p.pid)).size,6);
+  assert.equal(report.freshOldServerVersion.version,'2.7.10');
+  assert.deepEqual(report.sdkMetadata,{checked:[{version:'4.0.25',mismatch:true,profile:'creator',tested:true,filesUnchanged:true},{version:'4.0.27',mismatch:false,profile:'creator',tested:false,filesUnchanged:true}],offlineLookupNonBlocking:true,afterNormalRestartOfflineNonBlocking:true});
 }
 function checkReceipt(report, rows, config, env = process.env) {
   target.assertBound(config); assert.equal(report.kind, target.KIND); assert.equal(report.sourceCommit, binding.target.source.commit);
   assert.deepEqual(report.baseline, config.baseline); assert.deepEqual(report.pins, config.pins);
+  assert.equal(env.CREATOR_OUTGOING_CASE,'mcp-restore');
   const [tool, restore] = target.CASES[env.CREATOR_OUTGOING_CASE];
   assert.equal(report.lastTool, tool); assert.equal(report.restore, restore === 'true');
   assert.equal(report.restoredLastTool, restore === 'true' ? tool : null);
@@ -135,8 +88,13 @@ function checkReceipt(report, rows, config, env = process.env) {
     'targetMcpRuntimeVerified', 'installedResourcesVerifiedBeforeAndAfter', 'heldGenerationRetained',
     'activeRouteUnchangedAfterCancel', 'normalRestartPreserved', 'fixtureEvidencePreservedAfterCleanup']) assert.equal(report[key], true, key);
   for (const key of ['publicDiscovery', 'liveAiAcceptance', 'releaseReady']) assert.equal(report[key], false, key);
-  assert.deepEqual(report.beforePeVersion, [0, 1, 22, 0]); assert.deepEqual(report.afterPeVersion, [0, 1, 23, 0]);
+  assert.deepEqual(report.beforePeVersion, [0, 1, 23, 0]); assert.deepEqual(report.afterPeVersion, [0, 1, 24, 0]);
   assert.notEqual(report.beforeRoot.pid, report.afterRoot.pid);
+  const roots=[report.beforeRoot,report.afterRoot,report.normalRestartRoot];
+  assert.equal(new Set(roots.map(r=>r.pid)).size,3);
+  for(const r of roots){assert.equal(r.kernelIdentityVerified,true);assert.match(r.startTicks,/^[1-9][0-9]*$/);assert.equal(r.image.toLowerCase(),roots[0].image.toLowerCase());}
+  assert.ok(BigInt(roots[0].startTicks)<BigInt(roots[1].startTicks)&&BigInt(roots[1].startTicks)<BigInt(roots[2].startTicks));
+  assert.deepEqual(report.beforeNormalRestart,report.afterRoot);
   assert.equal(report.afterRoot.kernelIdentityVerified, true);
   assert.deepEqual(report.resourceProbe, { phase: 'after-automatic-root', attempts: 1, passed: true });
   assert.deepEqual(report.heldProcessesAfter, report.heldProcessesBefore);
@@ -145,12 +103,12 @@ function checkReceipt(report, rows, config, env = process.env) {
   assert.equal(report.beforeRoute.generation, binding.baseline.generation); assert.equal(report.afterRoute.generation, binding.target.generation);
   const finals = rows.filter(row => row.kind === 'lab-lifecycle-result'); assert.equal(finals.length, 1);
   const last = finals[0]; assert.equal(last.scenario, target.KIND);
-  assert.equal(last.actualScope, 'exact-direct22-to-qualified23-acceptance-fixture-lab-only');
+  assert.equal(last.actualScope, 'exact-direct23-to-qualified24-acceptance-fixture-lab-only');
   for (const key of ['lifecycleSucceeded', 'cleanupVerified', 'systemTlsVerified', 'labDiscovery']) assert.equal(last[key], true, key);
   for (const key of ['publicDiscovery', 'productAcceptance', 'releaseReady']) assert.equal(last[key], false, key);
   assert.equal(last.driverExitCode, 0); assert.equal(last.servedRouteCount, 5); require('./sdk-registry-denial-023.cjs').verifySdkRegistryDenial(last, report);
 }
-module.exports = { FILES, verifyRelease, acquire, checkReceipt };
+module.exports = { FILES, verifyRelease, acquire, checkMigrationReceipt, checkReceipt };
 if (require.main === module) (async () => {
   if (process.argv[2] === 'source') {
     target.assertHost(); console.log(JSON.stringify(binding.target.source));
