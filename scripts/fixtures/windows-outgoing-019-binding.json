@@ -66,18 +66,18 @@
   },
   "target": {
     "source": {
-      "commit": "af8b9b6844e7db1604b48ea2c9b6ab0da3511281",
-      "tree": "0cb430fb4d9c6acbc25273a5bc14d1c84fcd336c"
+      "commit": "05bcaa5417b86792e37ef64f346f7a20c42a3996",
+      "tree": "2d3fc4edef3fe0466b91cec53bdc4e9825dbc47e"
     },
     "version": "0.1.23",
     "asset": "Creator.Hub_0.1.23_x64-setup.exe",
     "installer": {
-      "bytes": 38615499,
-      "sha256": "260f78314c1429a302792f516b57138ed8b62478059e22f28ef25d1c641793ea"
+      "bytes": 38596634,
+      "sha256": "b3a762a9358f5988909e86665d023ebfa177b5ebbbe14b8b472016ae686b3eb8"
     },
     "executable": {
-      "bytes": 19738112,
-      "sha256": "d46652020760555167a163ece200c30a1ee9489405e7d6b16926e330ead6a0ae"
+      "bytes": 19734528,
+      "sha256": "fa25ca808f516962260d54e9ff8cff02f36dda8c24a92fc532f9451bb80c2a3b"
     },
     "manifest": {
       "schemaVersion": 1,
@@ -121,53 +121,53 @@
     "generation": "df0ec83365a0ed5e235c784243531676467e56bfeafce43c818d5309022c2b54",
     "sourceUnchanged": true,
     "buildExitCode": 0,
-    "verificationReceiptSha256": "857a1825400fa5b7d3c22fb6c3c81b39ef3b3595339bbfb56e03fec4177bbd7b",
+    "verificationReceiptSha256": "8d86c48ed4b92e0270c70aafd99f837d424062587170f4907cd6492ed41f4315",
     "descriptor": {
       "bytes": 505,
-      "sha256": "3432dad3201580c49a1f5d21735bd30ff9364350cecb1e5df923ccf4e65c6e69"
+      "sha256": "c0ce6bccb328a785dc79276cedcbcc7cafad7fc77647c58eefa2480a136805a4"
     },
     "descriptorSignature": {
       "bytes": 300,
-      "sha256": "83e7de2f69c18654986caca3c673fca70390e9378e31d1d04a65c8898d847b79"
+      "sha256": "423abc22db63a1fbd24e6c1b0de97077eab91aa797265629d072de1a4a97909a"
     },
     "latest": {
       "bytes": 704,
-      "sha256": "a1b07b46b32ae818e3532264c43d66a52a2c78d0c74bf48cc897b0485748f090"
+      "sha256": "580a8f41a0d1238d420310a1e9a433ba5b515aeae26971fed48d044fcac87a46"
     },
     "privateRelease": {
-      "id": 446928740,
-      "tag": "lab-windows-root-ui-023-20261116-r14",
-      "source": "af8b9b6844e7db1604b48ea2c9b6ab0da3511281",
+      "id": 446947804,
+      "tag": "lab-windows-root-ui-023-20261116-r15",
+      "source": "05bcaa5417b86792e37ef64f346f7a20c42a3996",
       "assets": {
         "Creator.Hub_0.1.23_x64-setup.exe": {
-          "id": 754532158,
-          "bytes": 38615499,
-          "sha256": "260f78314c1429a302792f516b57138ed8b62478059e22f28ef25d1c641793ea"
+          "id": 754589411,
+          "bytes": 38596634,
+          "sha256": "b3a762a9358f5988909e86665d023ebfa177b5ebbbe14b8b472016ae686b3eb8"
         },
         "creator-hub-windows-x86_64.json": {
-          "id": 754534120,
+          "id": 754592265,
           "bytes": 505,
-          "sha256": "3432dad3201580c49a1f5d21735bd30ff9364350cecb1e5df923ccf4e65c6e69"
+          "sha256": "c0ce6bccb328a785dc79276cedcbcc7cafad7fc77647c58eefa2480a136805a4"
         },
         "creator-hub-windows-x86_64.json.minisig": {
-          "id": 754534295,
+          "id": 754592388,
           "bytes": 300,
-          "sha256": "83e7de2f69c18654986caca3c673fca70390e9378e31d1d04a65c8898d847b79"
+          "sha256": "423abc22db63a1fbd24e6c1b0de97077eab91aa797265629d072de1a4a97909a"
         },
         "latest.json": {
-          "id": 754534402,
+          "id": 754592543,
           "bytes": 704,
-          "sha256": "a1b07b46b32ae818e3532264c43d66a52a2c78d0c74bf48cc897b0485748f090"
+          "sha256": "580a8f41a0d1238d420310a1e9a433ba5b515aeae26971fed48d044fcac87a46"
         }
       }
     }
   },
   "fixtureQualification": {
-    "sha256": "857a1825400fa5b7d3c22fb6c3c81b39ef3b3595339bbfb56e03fec4177bbd7b",
-    "kind": "root-ui-r14-signed-candidate",
+    "sha256": "8d86c48ed4b92e0270c70aafd99f837d424062587170f4907cd6492ed41f4315",
+    "kind": "root-ui-r15-signed-candidate",
     "source": {
-      "commit": "af8b9b6844e7db1604b48ea2c9b6ab0da3511281",
-      "tree": "0cb430fb4d9c6acbc25273a5bc14d1c84fcd336c"
+      "commit": "05bcaa5417b86792e37ef64f346f7a20c42a3996",
+      "tree": "2d3fc4edef3fe0466b91cec53bdc4e9825dbc47e"
     },
     "sourceUnchanged": true,
     "sourceProof": {
@@ -200,8 +200,8 @@
       "runtimeSha256": "f17a97854e9c900f22961edd80d0033acbacf6673187d0485c7b2ef0d830aacb",
       "generation": "df0ec83365a0ed5e235c784243531676467e56bfeafce43c818d5309022c2b54"
     },
-    "sourceReceiptSha256": "67b05b21cc78f2a7a6e035c2571c94e6869bde47f45c032d3b7c647476e3b255",
-    "buildReportSha256": "d0fcf883a73a212f7aace7ce0271850f151899f6749f6bc841b109e3b1e26c67",
+    "sourceReceiptSha256": "b9d1546298e8efba8f1743e309fdeca80861675cacc8bc5e7f805d2757f6ae23",
+    "buildReportSha256": "bd7cd3aedb7b45682e4bc38a09f38e789ca8403f5fd07d70565edcb239ce8944",
     "buildExitCode": 0,
     "inputCount": 1605,
     "payloadFiles": 15,

@@ -8,13 +8,13 @@ const target = require('./windows-outgoing-019-target.cjs');
 const direct = require('./native-outgoing-direct-019.cjs');
 const input = require('./windows-outgoing-019-input.cjs');
 const { assertOwnedDebugging, showPage } = require('./windows-incoming-016.cjs');
-const BRANCH = 'codex/windows-root-ui-023-20261116-r14-ci1';
+const BRANCH = 'codex/windows-root-ui-023-20261116-r15-ci1';
 const WORKFLOW = '.github/workflows/windows-outgoing-019.yml';
 const ROOT = path.resolve(__dirname, '..');
 const NAMES = [target.ASSET, 'creator-hub-windows-x86_64.json', 'creator-hub-windows-x86_64.json.minisig', 'latest.json'];
 const CLOSE_MESSAGE = 'MCP has an unfinished interface workflow, but its native operation has returned.\n\nClose Hub anyway? Earlier completed changes and recovery records will be kept. Nothing will be rolled back or marked successful. Existing AI connections, Unity and unrelated processes will not be stopped. Check the last outcome before repeating work.';
 const POLICY = '2026-09-28-v1';
-const reviewModule = require('./native-windows-r14-review.cjs');
+const reviewModule = require('./native-windows-r15-review.cjs');
 function admission(env = process.env, platform = process.platform) {
   assert.equal(platform, 'win32'); target.validateBinding();
   for (const [name, value] of Object.entries({ GITHUB_ACTIONS: 'true', RUNNER_ENVIRONMENT: 'github-hosted',

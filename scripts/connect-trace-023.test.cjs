@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const { test } = require('node:test');
 const trace = require('./connect-trace-023.cjs');
 const env = { GITHUB_ACTIONS: 'true', RUNNER_ENVIRONMENT: 'github-hosted', RUNNER_OS: 'Windows',
-  GITHUB_REPOSITORY: 'BOBWORKS-XR/CREATOR-HUB', GITHUB_REF: 'refs/heads/codex/windows-root-ui-023-20261116-r14-ci1', GITHUB_JOB: 'acceptance' };
+  GITHUB_REPOSITORY: 'BOBWORKS-XR/CREATOR-HUB', GITHUB_REF: 'refs/heads/codex/windows-root-ui-023-20261116-r15-ci1', GITHUB_JOB: 'acceptance' };
 test('captures validated DNS and loopback targets, not URLs, credentials or private IPs', () => {
   for (const host of ['api.github.com', 'example.invalid', 'example.co.uk'])
     assert.deepEqual(trace.target(host + ':443'), { kind: 'dns', host, port: 443 });
@@ -84,7 +84,7 @@ test('actual workflow branch authorizes both exact diagnostic helpers and reject
   const fs = require('node:fs'), path = require('node:path');
   const { yaml } = require('playwright-core/lib/utilsBundle');
   const workflow = yaml.parseDocument(fs.readFileSync(path.join(__dirname, '../.github/workflows/windows-outgoing-019.yml'), 'utf8')).toJSON();
-  assert.deepEqual(workflow.on.push.branches, ['codex/windows-root-ui-023-20261116-r14-ci1']);
+  assert.deepEqual(workflow.on.push.branches, ['codex/windows-root-ui-023-20261116-r15-ci1']);
   const actualRef = 'refs/heads/' + workflow.on.push.branches[0];
   assert.equal(trace.enabled({ ...env, GITHUB_REF: actualRef }, 'win32'), true);
   const helper = fs.readFileSync(path.join(__dirname, 'connect-owner-023.ps1'), 'utf8');
