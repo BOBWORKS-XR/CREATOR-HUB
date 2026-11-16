@@ -16,10 +16,10 @@ jobs:
       - uses: actions/setup-node@v6
         with: {node-version: 24}
       - run: npm ci --ignore-scripts
-      - run: node --test scripts/public-update-024.test.cjs
+      - run: node --test scripts/public-update-025.test.cjs
   acceptance:
     needs: preflight
-    if: github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.ref == 'refs/heads/codex/windows-public-sdk-labels-024'
+    if: github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.ref == 'refs/heads/codex/windows-public-missing-server-025'
     runs-on: windows-latest
     timeout-minutes: 20
     strategy:
@@ -35,9 +35,9 @@ jobs:
       CREATOR_OUTGOING_CASE: ${{ matrix.case }}
       CREATOR_OUTGOING_LAST_TOOL: ${{ matrix.tool }}
       CREATOR_OUTGOING_RESTORE: ${{ matrix.restore }}
-      CREATOR_SELF_UPDATE_TARGET_VERSION: '0.1.24'
-      CREATOR_SELF_UPDATE_INSTALLER_SHA256: 'ef8d0e3e59e25fbdfdc24ad3e739e568d4ddf8714dcd7bde6a0498045fe80db1'
-      CREATOR_SELF_UPDATE_EXECUTABLE_SHA256: '69a5a90fe30c0d23d5ef08f6ed7f0820ba3dfba1851b448205493cee2e595000'
+      CREATOR_SELF_UPDATE_TARGET_VERSION: '0.1.25'
+      CREATOR_SELF_UPDATE_INSTALLER_SHA256: '8521ed72e9fbee31c8a379bce0204288926862939dced9b4153164a1c7c71b6c'
+      CREATOR_SELF_UPDATE_EXECUTABLE_SHA256: '9fc2da9340995f4fe5b7f1f4dfb1a6b28449970934d6aaca4c8ab971e791b27c'
     steps:
       - run: git config --global core.autocrlf false
       - uses: actions/checkout@v6
@@ -46,32 +46,32 @@ jobs:
         with: {node-version: 24}
       - run: npm ci --ignore-scripts
       - uses: actions/checkout@v6
-        with: {ref: 9e46f1a9212df4f56b4b7e1188e2afb8e33e264a, path: product, persist-credentials: false}
+        with: {ref: 46e610c51bb525e868e7caf4a21a2a7c2fcb3160, path: product, persist-credentials: false}
       - shell: pwsh
         run: |
-          if ((git -C product rev-parse HEAD) -cne '9e46f1a9212df4f56b4b7e1188e2afb8e33e264a' -or (git -C product rev-parse 'HEAD^{tree}') -cne '6567eb46f1d3bc70f94131dcfef79d1251896fcf') { throw 'Product source differs' }
+          if ((git -C product rev-parse HEAD) -cne '46e610c51bb525e868e7caf4a21a2a7c2fcb3160' -or (git -C product rev-parse 'HEAD^{tree}') -cne '0cf5954df3d40d9c7ee073fb06e9c61f401e908a') { throw 'Product source differs' }
       - run: npm --prefix product/modules/mcp ci --ignore-scripts
       - name: Anonymous public feed and exact assets
         shell: pwsh
         run: |
-          node scripts/public-update-024.cjs prepare
+          node scripts/public-update-025.cjs prepare
           if ($LASTEXITCODE -ne 0) { throw 'Public input admission refused' }
-          "CREATOR_PUBLIC_UPDATE_CONFIG=$((Join-Path $PWD artifacts/public-update-024-input/config.json))" | Add-Content -LiteralPath $env:GITHUB_ENV
+          "CREATOR_PUBLIC_UPDATE_CONFIG=$((Join-Path $PWD artifacts/public-update-025-input/config.json))" | Add-Content -LiteralPath $env:GITHUB_ENV
       - name: Native public cancel approve automatic and normal restart
         shell: pwsh
         run: |
-          node scripts/native-public-update-024.cjs
+          node scripts/native-public-update-025.cjs
           if ($LASTEXITCODE -ne 0) { throw 'Native public update failed' }
-          node scripts/public-evidence-024.cjs
+          node scripts/public-evidence-025.cjs
           if ($LASTEXITCODE -ne 0) { throw 'Public evidence refused' }
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: public-024-${{ matrix.case }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: public-025-${{ matrix.case }}-${{ github.run_id }}-${{ github.run_attempt }}
           retention-days: 14
           path: |
-            artifacts/public-update-024-input/*.json
-            artifacts/public-update-024-input/*.minisig
+            artifacts/public-update-025-input/*.json
+            artifacts/public-update-025-input/*.minisig
             artifacts/native-suite-*/*.json
             artifacts/native-suite-*/*.toml
             artifacts/native-suite-*/*.png
