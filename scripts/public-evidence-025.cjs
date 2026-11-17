@@ -14,14 +14,14 @@ function checkReport(report,name=process.env.CREATOR_OUTGOING_CASE,harness=proce
   for(const flag of ['labDiscovery','liveAiAcceptance','releaseReady'])assert.equal(report[flag],false,flag);
   assert.deepEqual(report.pageErrors||[],[]);assert.equal(report.error,undefined);
   assert.equal(report.installedSha256,target.binding.target.executable.sha256);
-  assert.deepEqual(report.beforePeVersion,[0,1,24,0]);assert.deepEqual(report.afterPeVersion,[0,1,25,0]);
+  assert.deepEqual(report.beforePeVersion,[0,1,25,0]);assert.deepEqual(report.afterPeVersion,[0,1,26,0]);
   assert.deepEqual(report.resourceProbe,{phase:'after-automatic-root',attempts:1,passed:true});
   const roots=[report.beforeRoot,report.afterRoot,report.normalRestartRoot];assert.equal(new Set(roots.map(r=>r.pid)).size,3);
   for(const r of roots){assert.equal(r.kernelIdentityVerified,true);assert.match(r.startTicks,/^[1-9][0-9]*$/);assert.equal(r.image.toLowerCase(),roots[0].image.toLowerCase());}
   assert.ok(BigInt(roots[0].startTicks)<BigInt(report.approvalLowerBoundTicks));assert.ok(BigInt(roots[1].startTicks)>BigInt(report.approvalLowerBoundTicks));
   assert.ok(BigInt(roots[2].startTicks)>BigInt(roots[1].startTicks));assert.deepEqual(report.beforeNormalRestart,report.afterRoot);
-  for(const [version,route]of [['0.1.24',report.beforeRoute],['0.1.25',report.afterRoute]]){
-    const item=version==='0.1.24'?target.binding.baseline:target.binding.target;
+  for(const [version,route]of [['0.1.25',report.beforeRoute],['0.1.26',report.afterRoute]]){
+    const item=version==='0.1.25'?target.binding.baseline:target.binding.target;
     assert.deepEqual(route,{schemaVersion:1,generation:item.generation,descriptorSha256:item.manifest.managedRouting.files['routing/runtime.json']});
   }
   for(const key of ['heldServerVersion','reconnectedServerVersion','freshOldServerVersion'])assert.equal(report[key].version,'2.7.10');

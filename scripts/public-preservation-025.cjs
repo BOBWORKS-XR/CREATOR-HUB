@@ -16,11 +16,11 @@ function checkMigrationReceipt(report) {
     if(key==='selected'||key==='old')assert.ok(capture(clients.afterUpdateCancel[key],file,name+'-update-cancel.json').equals(before));
   }
   assert.equal(report.clientReview,undefined);assert.equal(report.clientConnectionsUnchanged,true);
-  const old=target.managedLocations(profile.local,'0.1.24',profile.home),next=target.managedLocations(profile.local,'0.1.25',profile.home);
+  const old=target.managedLocations(profile.local,'0.1.25',profile.home),next=target.managedLocations(profile.local,'0.1.26',profile.home);
   assert.equal(old.command,next.command);assert.equal(old.active,next.active);assert.equal(old.payload,next.payload);
-  target.assertActiveResources(profile.local,'0.1.24',report.beforeRoute,false,profile.home);
-  target.assertActiveResources(profile.local,'0.1.25',report.afterRoute,true,profile.home);
-  target.assertInstalledResources(path.join(profile.local,'Creator Hub'),'0.1.25');
+  target.assertActiveResources(profile.local,'0.1.25',report.beforeRoute,false,profile.home);
+  target.assertActiveResources(profile.local,'0.1.26',report.afterRoute,true,profile.home);
+  target.assertInstalledResources(path.join(profile.local,'Creator Hub'),'0.1.26');
   target.assertFreshConnection(report.heldProcessesBefore,report.reconnectedProcesses,profile);
   target.assertFreshConnection(report.freshOldProcesses,report.reconnectedProcesses,profile);
   assert.equal(new Set([...report.heldProcessesBefore,...report.freshOldProcesses,...report.reconnectedProcesses].map(p=>p.pid)).size,6);

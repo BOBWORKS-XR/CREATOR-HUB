@@ -1,4 +1,4 @@
-name: Public Windows 023 to 024 acceptance
+name: Public Windows 025 to 026 acceptance
 on:
   workflow_dispatch:
     inputs:
@@ -19,7 +19,7 @@ jobs:
       - run: node --test scripts/public-update-025.test.cjs
   acceptance:
     needs: preflight
-    if: github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.ref == 'refs/heads/codex/windows-public-missing-server-025'
+    if: github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.ref == 'refs/heads/codex/windows-public-unity-hub-026'
     runs-on: windows-latest
     timeout-minutes: 20
     strategy:
@@ -35,9 +35,9 @@ jobs:
       CREATOR_OUTGOING_CASE: ${{ matrix.case }}
       CREATOR_OUTGOING_LAST_TOOL: ${{ matrix.tool }}
       CREATOR_OUTGOING_RESTORE: ${{ matrix.restore }}
-      CREATOR_SELF_UPDATE_TARGET_VERSION: '0.1.25'
-      CREATOR_SELF_UPDATE_INSTALLER_SHA256: '8521ed72e9fbee31c8a379bce0204288926862939dced9b4153164a1c7c71b6c'
-      CREATOR_SELF_UPDATE_EXECUTABLE_SHA256: '9fc2da9340995f4fe5b7f1f4dfb1a6b28449970934d6aaca4c8ab971e791b27c'
+      CREATOR_SELF_UPDATE_TARGET_VERSION: '0.1.26'
+      CREATOR_SELF_UPDATE_INSTALLER_SHA256: '57dc7721d51611a8f26873b3d5f5f9dcab28ac27d5b53e40a43785e10c72b264'
+      CREATOR_SELF_UPDATE_EXECUTABLE_SHA256: '15a8b677b3b7e17965248a6f689c16cd01531ebb15dc6984d566c4587f93439a'
     steps:
       - run: git config --global core.autocrlf false
       - uses: actions/checkout@v6
@@ -46,10 +46,10 @@ jobs:
         with: {node-version: 24}
       - run: npm ci --ignore-scripts
       - uses: actions/checkout@v6
-        with: {ref: 46e610c51bb525e868e7caf4a21a2a7c2fcb3160, path: product, persist-credentials: false}
+        with: {ref: f7f2fd17965985de68ac29cc5c2fe3820c8f905f, path: product, persist-credentials: false}
       - shell: pwsh
         run: |
-          if ((git -C product rev-parse HEAD) -cne '46e610c51bb525e868e7caf4a21a2a7c2fcb3160' -or (git -C product rev-parse 'HEAD^{tree}') -cne '0cf5954df3d40d9c7ee073fb06e9c61f401e908a') { throw 'Product source differs' }
+          if ((git -C product rev-parse HEAD) -cne 'f7f2fd17965985de68ac29cc5c2fe3820c8f905f' -or (git -C product rev-parse 'HEAD^{tree}') -cne '4f6026e6a252df8856a3e9ef87ee374eb8da3eb0') { throw 'Product source differs' }
       - run: npm --prefix product/modules/mcp ci --ignore-scripts
       - name: Anonymous public feed and exact assets
         shell: pwsh
