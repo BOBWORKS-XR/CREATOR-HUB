@@ -398,7 +398,14 @@ fn versioned_tool(parent: &Path, tool: &str) -> bool {
 }
 
 pub fn probe_environment() -> EnvironmentReport {
-    let hub = hub_candidates().into_iter().find(|path| path.exists());
+    let packaged = crate::hub::packaged_hub_version();
+    let hub = if packaged.is_some() {
+        None
+    } else {
+        hub_candidates().into_iter().find(|path| path.exists())
+    };
+    let hub_installed = packaged.is_some() || hub.is_some();
+    let hub_version = packaged.or_else(crate::hub::legacy_hub_version);
     let unity_cli = find_unity_cli();
     let mut editors = Vec::new();
     for parent in editor_roots() {
@@ -417,7 +424,7 @@ pub fn probe_environment() -> EnvironmentReport {
     editors.dedup_by(|a, b| a.root == b.root);
     let exact = editors.iter().find(|editor| editor.exact_recipe);
     let mut blockers = Vec::new();
-    if hub.is_none() && unity_cli.is_none() {
+    if !hub_installed && unity_cli.is_none() {
         blockers
             .push("Unity Hub or Unity CLI is required to manage the Editor and license.".into());
     }
@@ -440,12 +447,10 @@ pub fn probe_environment() -> EnvironmentReport {
     }
     EnvironmentReport {
         platform: platform_name().into(),
-        hub_installed: hub.is_some(),
+        hub_installed,
         hub_path: hub.map(|path| path.to_string_lossy().to_string()),
-        hub_version: crate::hub::detected_hub_version(),
-        hub_auto_registration: crate::hub::supports_registration(
-            crate::hub::detected_hub_version().as_deref(),
-        ),
+        hub_auto_registration: crate::hub::supports_registration(hub_version.as_deref()),
+        hub_version,
         unity_cli_installed: unity_cli.is_some(),
         unity_cli_path: unity_cli.map(|path| path.to_string_lossy().to_string()),
         recipe: recipe(),
@@ -1152,8 +1157,14 @@ pub fn open_project(path: &str) -> Result<(), String> {
 }
 
 pub fn launch_hub() -> Result<(), String> {
-    let report = probe_environment();
-    let path = report.hub_path.ok_or("Unity Hub is not installed.")?;
+    #[cfg(windows)]
+    if crate::hub::packaged_hub_version().is_some() {
+        return crate::hub_package::launch();
+    }
+    let path = hub_candidates()
+        .into_iter()
+        .find(|path| path.exists())
+        .ok_or("Unity Hub is not installed.")?;
     let mut command = if cfg!(target_os = "macos") {
         let mut command = Command::new("open");
         command.arg(path);

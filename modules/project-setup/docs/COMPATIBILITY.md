@@ -93,6 +93,20 @@ Hub failure gate that stops before any helper operation. Live native visibility
 after upgrading Hub remains an acceptance check; source compatibility alone is
 not recorded as a passed UI test.
 
+## Windows Unity Hub 4 and Later
+
+- Setup detects Unity Hub's registered Windows package for the current user.
+  It opens the registered app without invoking the removed Hub headless CLI
+  or relying on a versioned WindowsApps path. Legacy EXE installs still work.
+- Creator Hub uses the verified helper to find the project's exact installed
+  Editor version. If the Editor cannot be resolved, use **Open Unity Hub**
+  and open or add the project there.
+- Automatic project discovery and registration still depend on the verified
+  standalone Unity CLI and its registry contract. A future registry change
+  does not prevent adding known project folders manually. If registration
+  fails, use **Add project from disk** in Unity Hub. Setup does not terminate
+  the packaged app to refresh its list.
+
 ## 0.2.2 Running Hub Refresh (2026-09-10)
 
 - Hub 3.21.1 visibly omitted `F:\UnityTest\hubtest2`, although the official CLI

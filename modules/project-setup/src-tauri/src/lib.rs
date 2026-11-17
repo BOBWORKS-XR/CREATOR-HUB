@@ -10,6 +10,8 @@ mod hosted;
 mod hub;
 #[cfg(windows)]
 mod hub_installer;
+#[cfg(windows)]
+mod hub_package;
 mod hub_restart;
 mod lifecycle;
 mod logic;

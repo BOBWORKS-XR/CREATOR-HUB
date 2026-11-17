@@ -25,7 +25,14 @@ pub struct HubRegistration {
     pub refresh_pending: bool,
 }
 
-pub fn detected_hub_version() -> Option<String> {
+pub(crate) fn packaged_hub_version() -> Option<String> {
+    #[cfg(windows)]
+    return crate::hub_package::version();
+    #[cfg(not(windows))]
+    None
+}
+
+pub(crate) fn legacy_hub_version() -> Option<String> {
     let config = dirs::config_dir()?;
     let path = if config.join("unityhub/hubInfo.json").is_file() {
         config.join("unityhub/hubInfo.json")
@@ -293,14 +300,23 @@ fn register(project: &Path, progress: &impl Fn(&str)) -> Result<(), String> {
 }
 
 pub fn register_project(project: &Path, progress: impl Fn(&str)) -> HubRegistration {
-    let version = detected_hub_version();
-    register_for_hub_version(project, progress, version.as_deref())
+    let packaged = packaged_hub_version();
+    let legacy = packaged.is_none().then(legacy_hub_version).flatten();
+    register_for_hub_version(
+        project,
+        progress,
+        packaged.as_deref().or(legacy.as_deref()),
+        packaged.is_some(),
+    )
 }
 
 pub fn restart_hub() -> Result<(), String> {
     let _lock = HUB_OPERATION
         .try_lock()
         .map_err(|_| "Another Hub operation is running. Please wait before restarting Hub.")?;
+    if packaged_hub_version().is_some() {
+        return Err("Close Unity Hub normally and open it again from the Windows Start menu.".into());
+    }
     let path = crate::logic::probe_environment()
         .hub_path
         .ok_or("Unity Hub is not installed.")?;
@@ -311,6 +327,7 @@ fn register_for_hub_version(
     project: &Path,
     progress: impl Fn(&str),
     version: Option<&str>,
+    packaged: bool,
 ) -> HubRegistration {
     // Older Hubs read projects-v1.json; the current CLI writes hub.db instead.
     // A CLI readback alone cannot prove registration with those desktop versions.
@@ -325,15 +342,22 @@ fn register_for_hub_version(
         Ok(()) => HubRegistration {
             registered: true,
             requires_hub_update: false,
-            refresh_pending: true,
-            message: "Project registered. A running Unity Hub may need a full restart to show it in Projects. Your Unity project is ready to open."
-                .into(),
+            refresh_pending: !packaged,
+            message: if packaged {
+                "Project registered. Check Projects in Unity Hub. If it isn't listed yet, close and reopen Unity Hub from Start. Your Unity project is ready to open."
+            } else {
+                "Project registered. A running Unity Hub may need a full restart to show it in Projects. Your Unity project is ready to open."
+            }.into(),
         },
         Err(message) => HubRegistration {
             registered: false,
             requires_hub_update: false,
             refresh_pending: false,
-            message,
+            message: if packaged {
+                format!("{message} Open Unity Hub and choose Add > Add project from disk to add it manually.")
+            } else {
+                message
+            },
         },
     }
 }
@@ -356,6 +380,8 @@ mod tests {
         }
         assert!(supports_registration(Some("3.21.1")));
         assert!(supports_registration(Some("3.21.2")));
+        assert!(supports_registration(Some("4.0.1")));
+        assert!(supports_registration(Some("5.12.1")));
     }
     #[test]
     fn legacy_hub_cannot_report_registration_even_if_cli_could_succeed() {
@@ -363,6 +389,7 @@ mod tests {
             Path::new("not-a-project"),
             |_| panic!("Legacy registration must stop before helper operations"),
             Some("3.14.4"),
+            false,
         );
         assert!(!result.registered);
         assert!(result.requires_hub_update);

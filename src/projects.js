@@ -5,6 +5,7 @@
   let retryProject = null;
   let lastError = '';
   let missingUnity = null;
+  let registryUnavailable = false;
   let revision = 0, loadedRevision = -1;
   let refreshQueued = false;
   const diagnostics = document.createElement('details');
@@ -41,7 +42,7 @@
     byId('retry-project-open').disabled = busy || Boolean(failedProject?.issue);
     byId('retry-project-open').title = failedProject ? `Try opening ${failedProject.name} again` : '';
     byId('refresh-project-recovery').disabled = busy;
-    openHub.hidden = !missingUnity || !failedProject || window.CreatorHubNative?.integratedFeatures !== true;
+    openHub.hidden = (!missingUnity && !registryUnavailable) || !failedProject || window.CreatorHubNative?.integratedFeatures !== true;
     openHub.classList.toggle('hidden', openHub.hidden);
     openHub.disabled = busy || window.CreatorFeaturePages?.busy() === true;
     byId('view-projects').setAttribute('aria-busy', String(busy));
@@ -109,7 +110,7 @@
     if (busy) return;
     const requestedRevision = revision;
     if (command !== 'open_unity_project' || retryProject !== args.id) retryProject = null;
-    lastError = ''; missingUnity = null; diagnostics.open = false;
+    lastError = ''; missingUnity = null; registryUnavailable = false; diagnostics.open = false;
     busy = true; render();
     byId('project-status').textContent = command === 'project_inventory' ? 'Reading known project locations...' : command === 'prepare_project_registry' ? 'Preparing verified Unity registry discovery...' : command === 'open_unity_project' ? 'Checking Unity version and project lock...' : 'Updating saved list...';
     try {
@@ -128,9 +129,11 @@
         const version = snapshot?.projects.find(project => project.id === args.id)?.unityVersion;
         const expected = `Unity ${version} is not available. Install this exact version in Unity Hub, then retry. No project upgrade was attempted.`;
         if (typeof version === 'string' && /^[0-9]+\.[0-9]+\.[0-9]+[abfp][0-9]+$/.test(version) && lastError === expected) missingUnity = version;
+        registryUnavailable = /^(?:Unity registry |Cannot read Unity(?:'s project registry| registry response)|(?:The verified )?Unity (?:registry )?helper |Hub needs a one-time Unity helper download)/.test(lastError);
       }
       byId('project-status').textContent = missingUnity
         ? `Unity ${missingUnity} is needed. Install this version in Unity Hub, then try opening again. Your project version has not changed.`
+        : registryUnavailable && window.CreatorHubNative?.integratedFeatures === true ? 'Could not find the Editor for this project. Try opening the project in Unity Hub.'
         : command === 'open_unity_project' ? 'Could not open this project. Check the technical details, then try again.'
         : command === 'prepare_project_registry' ? 'Could not prepare project discovery. Check the technical details, then try again.'
         : 'Could not refresh the project list. Your saved projects are kept. Try again or check the technical details.';
@@ -148,7 +151,9 @@
     busy = true; render();
     try {
       await window.CreatorHubNative.invoke('feature_call', { feature: 'setup', command: 'launch_hub', args: {} });
-      byId('project-status').textContent = `Unity Hub launch requested. Install Unity ${missingUnity}, then try opening the project again.`;
+      byId('project-status').textContent = missingUnity
+        ? `Unity Hub launch requested. Install Unity ${missingUnity}, then try opening the project again.`
+        : 'Unity Hub launch requested. Open the project from its Projects list, or add it from disk.';
     } catch (reason) {
       lastError = String(reason); diagnostics.open = false;
       byId('project-status').textContent = 'Could not open Unity Hub. Check the technical details, then try again.';

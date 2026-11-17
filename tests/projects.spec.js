@@ -97,7 +97,7 @@ for (const width of [320, 940]) test(`missing Unity offers only the fixed Hub la
   expect(await page.evaluate(() => calls.some(c => /install|create_project|run_existing_project/.test(c.command)))).toBe(false);
 });
 
-test('only the exact missing-Editor response offers Hub launch and launch errors preserve recovery', async ({ page }) => {
+test('unrelated open failures do not offer Hub launch and launch errors preserve recovery', async ({ page }) => {
   await load(page, { integrated: true });
   const open = page.getByRole('button', { name: 'Open Creator Forest', exact: true });
   const hub = page.locator('#open-project-unity-hub');
@@ -113,6 +113,19 @@ test('only the exact missing-Editor response offers Hub launch and launch errors
   await page.locator('#project-details summary').click();
   await expect(page.locator('#project-status-detail')).toContainText('Unity Hub is not installed');
   expect(await page.evaluate(() => window.injected)).toBeUndefined();
+});
+
+test('a changed registry response offers manual Unity Hub opening without an install or upgrade', async ({ page }) => {
+  await load(page, { integrated: true });
+  await page.evaluate(() => { window.failure = 'Unity registry returned invalid JSON.'; });
+  await page.getByRole('button', { name: 'Open Creator Forest', exact: true }).click();
+  await expect(page.locator('#project-status')).toHaveText('Could not find the Editor for this project. Try opening the project in Unity Hub.');
+  expect(await page.evaluate(() => calls.filter(c => c.command === 'feature_call'))).toEqual([]);
+  await page.getByRole('button', { name: 'Open Unity Hub', exact: true }).click();
+  await expect(page.locator('#project-status')).toContainText('or add it from disk');
+  expect(await page.evaluate(() => calls.filter(c => c.command === 'feature_call'))).toEqual([
+    { command: 'feature_call', args: { feature: 'setup', command: 'launch_hub', args: {} } },
+  ]);
 });
 
 test('fresh Linux Projects offers one explicit helper preparation without a saved project', async ({ page }) => {
