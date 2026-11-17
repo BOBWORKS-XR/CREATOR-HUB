@@ -7,7 +7,7 @@ Set-StrictMode -Version Latest
 if (-not $IsWindows -or $env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or
     $env:GITHUB_ACTIONS -cne 'true' -or $env:RUNNER_ARCH -cne 'X64' -or
     $env:GITHUB_REPOSITORY -cne 'BOBWORKS-XR/CREATOR-HUB' -or
-    $env:GITHUB_REF -cne 'refs/heads/codex/windows-unity-hub-026-acceptance') {
+    $env:GITHUB_REF -cne 'refs/heads/codex/windows-unity-hub-026-registry-recheck') {
     throw 'Use only the reviewed, disposable Windows CI job.'
 }
 
@@ -31,10 +31,19 @@ if ($Version -eq '4.0.1') {
         $pkg[0].PackageFamilyName -cne 'UnityTechnologies.UnityHub_2vrhnee42bhxm') { throw 'Wrong installed Hub 4 package.' }
 } else {
     $hub = Join-Path $env:ProgramFiles 'Unity Hub\Unity Hub.exe'
-    if (Test-Path -LiteralPath $hub) { throw 'Expected a clean Hub 3 runner.' }
-    $process = Start-Process -FilePath $installer -ArgumentList '/S' -WindowStyle Hidden -Wait -PassThru
+    $versionPattern = '^3\.21\.1(?:\.65535)?$'
+    $existing = if (Test-Path -LiteralPath $hub -PathType Leaf) { (Get-Item -LiteralPath $hub).VersionInfo.ProductVersion }
+    if ($existing) { Write-Output "Disposable runner already has Unity Hub $existing." }
+    if ($existing -notmatch $versionPattern) {
+        $process = Start-Process -FilePath $installer -ArgumentList '/S' -WindowStyle Hidden -Wait -PassThru
+        if ($process.ExitCode -ne 0) { throw 'Pinned Hub 3 installer failed.' }
+    }
     $installedVersion = (Get-Item -LiteralPath $hub).VersionInfo.ProductVersion
-    if ($process.ExitCode -ne 0 -or $installedVersion -notmatch '^3\.21\.1(?:\.65535)?$') { throw 'Wrong installed Hub 3 executable.' }
+    $hubSignature = Get-AuthenticodeSignature -LiteralPath $hub
+    if ($installedVersion -notmatch $versionPattern -or $hubSignature.Status -ne 'Valid' -or
+        $hubSignature.SignerCertificate.Subject -notmatch 'CN=Unity Technologies') {
+        throw 'Wrong or unsigned Hub 3 executable after installation.'
+    }
 }
 
 $helper = Join-Path $root 'unity-windows-x64.exe'

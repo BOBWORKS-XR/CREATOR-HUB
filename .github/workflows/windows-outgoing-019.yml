@@ -1,4 +1,4 @@
-name: Private Windows 025 to 026 update acceptance
+name: Private Windows Hub 3 registry recheck
 on:
   workflow_dispatch:
     inputs:
@@ -7,7 +7,7 @@ on:
 permissions: {contents: read}
 jobs:
   preflight:
-    if: github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.ref == 'refs/heads/codex/windows-unity-hub-026-acceptance'
+    if: github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.ref == 'refs/heads/codex/windows-unity-hub-026-registry-recheck'
     runs-on: windows-latest
     timeout-minutes: 5
     steps:
@@ -24,81 +24,6 @@ jobs:
           $tokens=$null; $errors=$null
           [void][System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PWD 'scripts/native-self-update-outgoing-019.ps1'),[ref]$tokens,[ref]$errors)
           if ($errors.Count) { throw 'Native runner parse failed' }
-  acceptance:
-    needs: preflight
-    if: github.event_name == 'workflow_dispatch'
-    runs-on: windows-latest
-    timeout-minutes: 20
-    permissions: {contents: write} # Existing private draft asset GET only.
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - {case: mcp-restore, tool: mcp, restore: 'true', regression: ''}
-          - {case: setup-restore, tool: setup, restore: 'true', regression: ''}
-          - {case: setup-no-restore, tool: setup, restore: 'false', regression: ''}
-    env:
-      EXPECTED_HARNESS_COMMIT: ${{ inputs.expected_harness_commit }}
-      CREATOR_OUTGOING_REVIEW_SHA256: ${{ inputs.binding_sha256 }}
-      CREATOR_OUTGOING_CASE: ${{ matrix.case }}
-      CREATOR_MISSING_CASE: ${{ matrix.regression }}
-      CREATOR_OUTGOING_LAST_TOOL: ${{ matrix.tool }}
-      CREATOR_OUTGOING_RESTORE: ${{ matrix.restore }}
-    steps:
-      - run: git config --global core.autocrlf false
-      - uses: actions/checkout@v6
-        with: {persist-credentials: false}
-      - uses: actions/setup-node@v6
-        with: {node-version: 24}
-      - run: npm ci --ignore-scripts
-      - name: Admit exact target source
-        id: source
-        shell: pwsh
-        run: |
-          $source=node scripts/windows-outgoing-019-input.cjs source | ConvertFrom-Json
-          if ($LASTEXITCODE -ne 0) { throw 'Pending target binding' }
-          "commit=$($source.commit)" | Add-Content -LiteralPath $env:GITHUB_OUTPUT
-          "tree=$($source.tree)" | Add-Content -LiteralPath $env:GITHUB_OUTPUT
-      - uses: actions/checkout@v6
-        with:
-          ref: ${{ steps.source.outputs.commit }}
-          path: product
-          persist-credentials: false
-      - shell: pwsh
-        run: |
-          if ((git -C product rev-parse HEAD) -cne '${{ steps.source.outputs.commit }}' -or (git -C product rev-parse 'HEAD^{tree}') -cne '${{ steps.source.outputs.tree }}') { throw 'Wrong product source' }
-      - run: npm --prefix product/modules/mcp ci --ignore-scripts
-      - name: Acquire signed private target and public 025 baseline
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          $input=node scripts/windows-outgoing-019-input.cjs acquire | ConvertFrom-Json
-          if ($LASTEXITCODE -ne 0) { throw 'Input admission failed' }
-          "CREATOR_OUTGOING_CONFIG_SHA256=$($input.configSha256)" | Add-Content -LiteralPath $env:GITHUB_ENV
-      - name: Native cancel approve automatic and normal restart
-        if: matrix.regression == ''
-        shell: pwsh
-        run: |
-          ./scripts/native-self-update-outgoing-019.ps1 -Outgoing019 -ContractPath (Join-Path $PWD artifacts/outgoing-019/runner-config.json) -BaselineInstallerPath (Join-Path $PWD artifacts/outgoing-019/data/Creator.Hub_0.1.25_x64-setup.exe) -TimeoutSeconds 480 | Tee-Object -FilePath artifacts/outgoing-019/lifecycle.jsonl
-          if ($LASTEXITCODE -ne 0) { throw 'Native update failed' }
-          $reports=@(Get-ChildItem artifacts/native-suite-*/outgoing-report.json)
-          if ($reports.Count -ne 1) { throw 'One native report required' }
-          node scripts/windows-outgoing-019-input.cjs receipt $reports[0].FullName (Join-Path $PWD artifacts/outgoing-019/lifecycle.jsonl)
-          if ($LASTEXITCODE -ne 0) { throw 'Receipt failed' }
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: windows-025-${{ matrix.case }}-${{ matrix.regression }}-${{ github.run_id }}-${{ github.run_attempt }}
-          retention-days: 14
-          path: |
-            artifacts/outgoing-019/*.json
-            artifacts/outgoing-019/*.jsonl
-            artifacts/native-suite-*/*.json
-            artifacts/native-suite-*/*.png
-            artifacts/native-suite-*/sdk-metadata-*/Packages/*.json
-            artifacts/native-suite-*/*.bin
-            artifacts/native-suite-*/*.toml
   unity-install-and-cli-registry:
     needs: preflight
     runs-on: windows-latest
@@ -106,7 +31,7 @@ jobs:
     permissions: {contents: read}
     strategy:
       fail-fast: false
-      matrix: {hub: ['4.0.1', '3.21.1']}
+      matrix: {hub: ['3.21.1']}
     steps:
       - uses: actions/checkout@v6
         with: {persist-credentials: false}
