@@ -128,6 +128,12 @@ async function checkSdkMetadata(page,out,report,target,direct,show) {
   await checkSdkLookup(page,report,'after-automatic-update');
   report.sdkMetadata.lookupNonBlocking=true;await direct.showHome(page);
 }
+async function showFeature(page,feature) {
+  assert.ok(['setup','mcp'].includes(feature));
+  if (await page.locator('#feature-'+feature).isVisible()) return;
+  await page.locator('#suite-trigger').click();
+  await page.locator('#suite-menu [data-view="'+feature+'"]').click();
+}
 async function main() {
   target.assertAdmission(); // Must precede config/profile reads, installers, policy and native probes.
   const config = target.readConfig(process.env.CREATOR_SELF_UPDATE_LAB_CONFIG);
@@ -222,9 +228,7 @@ async function main() {
     selectedBefore: selectedAfter || selectedBefore, oldClientBefore });
   const preferences = () => page.evaluate(() => Object.fromEntries(['auto-download', 'preview-channel', 'restore-hosted-views']
     .map(id => [id, document.getElementById(id).checked])));
-  const show = async feature => {
-    await page.locator('#suite-trigger').click(); await page.locator(`#suite-menu [data-view="${feature}"]`).click();
-  };
+  const show = feature => showFeature(page,feature);
   async function connect(version) {
     const debugging = () => {
       sameProcess(rootRecord);
@@ -508,5 +512,5 @@ async function main() {
   }
 }
 module.exports = { assertProtocol, assertTicket, observeAutomaticSuccessor, completeStartup, setUpdatePreferences,
-  assertSavedPreferences, assertFreshOldConnection, continueMcpGuide, checkSdkLookup, main };
+  assertSavedPreferences, assertFreshOldConnection, continueMcpGuide, checkSdkLookup, showFeature, main };
 if (require.main === module) main().catch(error => { console.error(String(error.message).slice(0, 1200)); process.exitCode = 1; });

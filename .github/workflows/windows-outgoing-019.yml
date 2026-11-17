@@ -1,4 +1,4 @@
-name: Private Windows 025 to 026 update acceptance
+name: Private Windows 025 to 026 no-restore recheck
 on:
   workflow_dispatch:
     inputs:
@@ -7,7 +7,7 @@ on:
 permissions: {contents: read}
 jobs:
   preflight:
-    if: github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.ref == 'refs/heads/codex/windows-unity-hub-026-acceptance'
+    if: github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.ref == 'refs/heads/codex/windows-unity-hub-026-restart-recheck'
     runs-on: windows-latest
     timeout-minutes: 5
     steps:
@@ -34,8 +34,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - {case: mcp-restore, tool: mcp, restore: 'true', regression: ''}
-          - {case: setup-restore, tool: setup, restore: 'true', regression: ''}
           - {case: setup-no-restore, tool: setup, restore: 'false', regression: ''}
     env:
       EXPECTED_HARNESS_COMMIT: ${{ inputs.expected_harness_commit }}
@@ -99,27 +97,3 @@ jobs:
             artifacts/native-suite-*/sdk-metadata-*/Packages/*.json
             artifacts/native-suite-*/*.bin
             artifacts/native-suite-*/*.toml
-  unity-install-and-cli-registry:
-    needs: preflight
-    runs-on: windows-latest
-    timeout-minutes: 12
-    permissions: {contents: read}
-    strategy:
-      fail-fast: false
-      matrix: {hub: ['4.0.1', '3.21.1']}
-    steps:
-      - uses: actions/checkout@v6
-        with: {persist-credentials: false}
-      - name: Admit exact disposable test commit
-        env: {EXPECTED_HARNESS_COMMIT: '${{ inputs.expected_harness_commit }}'}
-        shell: pwsh
-        run: if ($env:GITHUB_SHA -cne $env:EXPECTED_HARNESS_COMMIT) { throw 'Wrong smoke test commit' }
-      - name: Verify Unity Hub install and independent CLI readback
-        shell: pwsh
-        run: ./scripts/native-unity-026/Install-PinnedHub.ps1 -Version '${{ matrix.hub }}'
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: unity-cli-registry-${{ matrix.hub }}-${{ github.run_id }}
-          retention-days: 14
-          path: C:/CreatorHub026RegistryProbe/registry-only.json

@@ -7,3 +7,5 @@ test('automatic replacement checks new process and exact PE version',async()=>{c
 test('native host restriction rejects personal machines before operations',()=>{assert.throws(()=>target.assertHost({},'win32'));});
 test('managed stores remain stable across update',()=>{assert.deepEqual(target.managedLocations('C:\\Local','0.1.25','C:\\Home'),target.managedLocations('C:\\Local','0.1.26','C:\\Home'));});
 test('native output and restart ordering meet retained helper contracts',()=>{const runner=fs.readFileSync(path.join(__dirname,'native-missing-runner.cjs'),'utf8');assert.ok(runner.includes("'native-suite-'+Date.now()"));assert.ok(!runner.includes("'native-suite-'+caseName"));const d=fs.readFileSync(path.join(__dirname,'windows-outgoing-019-driver.cjs'),'utf8');assert.ok(d.includes("await show(lastTool); await direct.showHome(page)"));});
+
+test('already visible feature does not click through its guide', async()=>{ const selectors=[]; const page={locator(s){selectors.push(s);return {isVisible:async()=>true,click:async()=>{throw Error('dialog would intercept click');}};}}; await driver.showFeature(page,'mcp'); assert.deepEqual(selectors,['#feature-mcp']); });
