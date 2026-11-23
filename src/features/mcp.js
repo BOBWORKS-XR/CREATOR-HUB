@@ -201,7 +201,10 @@ export function mount(root, api) {
     $('checks').replaceChildren(...rows.map(([name, value, ready]) => { const row = node('div', null, 'feature-row'); row.append(node('span', name), node('span', value, ready ? 'feature-good' : 'feature-warn')); return row; }));
     for (const [id, ui] of clientUi) {
       const state = value.clients.find(client => client.id === id);
-      ui.status.textContent = state?.supported === false ? 'Not available on this OS' : `${state?.detected ? 'Detected' : 'Not detected'} · ${state?.configured ? 'Configured' : 'Not configured'}${state?.issue ? ` · ${state.issue}` : ''}`;
+      const scopeStatus = id === 'claude'
+        ? (state?.configured ? 'Configured for your user' : 'No user-level setup found')
+        : (state?.configured ? 'Configured' : 'Not configured');
+      ui.status.textContent = state?.supported === false ? 'Not available on this OS' : `${state?.detected ? 'Detected' : 'Not detected'} · ${scopeStatus}${state?.issue ? ` · ${state.issue}` : ''}`;
       if (!chosen) ui.checkbox.checked = state?.supported !== false && Boolean(state?.detected || state?.configured);
       if (state?.supported === false) ui.checkbox.checked = false;
     }

@@ -420,6 +420,14 @@ pub fn probe_environment() -> EnvironmentReport {
             }));
         }
     }
+    #[cfg(windows)]
+    if let Some(config) = dirs::config_dir() {
+        for root in crate::windows_editors::registered_roots(&config.join("UnityHub")) {
+            if !editors.iter().any(|editor| Path::new(&editor.root) == root) {
+                editors.extend(inspect_editor(root));
+            }
+        }
+    }
     editors.sort_by(|a, b| b.version.cmp(&a.version));
     editors.dedup_by(|a, b| a.root == b.root);
     let exact = editors.iter().find(|editor| editor.exact_recipe);

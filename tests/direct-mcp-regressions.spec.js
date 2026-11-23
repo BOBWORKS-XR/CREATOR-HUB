@@ -57,7 +57,9 @@ async function open(page, options = {}) {
           case 'get_onboarding_status': return window.invalidStatus ? { runtime: { ready: true }, clients: [] } : {
             managedRouting: options.managedRouting !== false, runtime: { ready: true, ...options.runtime },
             project: fields.unityProjectPath ? { valid: true, bridgeInstalled: true, bridgeCurrent: true, stateStatus: 'fresh', sdkProfile: window.profiles[fields.unityProjectPath] } : null,
-            clients: ['codex', 'claude', 'claudeDesktop', 'antigravity', 'opencode'].map(id => ({ id, detected: true, configured: true, supported: true })),
+            clients: ['codex', 'claude', 'claudeDesktop', 'antigravity', 'opencode'].map(id => ({
+              id, detected: true, configured: id !== 'claude' || options.claudeUserConfigured !== false, supported: true,
+            })),
             unityCli: { canEnable: true, enabled: false, message: 'Optional Unity CLI' },
           };
           case 'get_unity_extension_status': return window.bridgeStatuses[fields.unityProjectPath];
@@ -106,6 +108,15 @@ const mutationCalls = page => page.evaluate(() => calls.filter(call => call.comm
   && /^(?:save_|one_click_setup$|add_project$|install_|update_|set_|remove_|review_|recover_)/.test(call.args.command)));
 const row = (page, name) => field(page, 'projects').locator(`[data-project-path="/projects/${name}"]`);
 const idle = page => expect(page.locator('#feature-mcp')).toHaveAttribute('aria-busy', 'false');
+
+test('Claude Code reports user-level configuration without judging or changing project setup', async ({ page }) => {
+  await open(page, { claudeUserConfigured: false });
+  const client = page.locator('.feature-client').filter({ has: page.locator('[data-client="claude"]') });
+  await expect(client).toContainText('Detected · No user-level setup found');
+  await expect(page.locator('.feature-client').filter({ has: page.locator('[data-client="codex"]') }))
+    .toContainText('Detected · Configured');
+  expect(await mutationCalls(page)).toEqual([]);
+});
 
 test('latest SDK lookup is independent of the installed future SDK and never changes settings', async ({ page }) => {
   await open(page, { latestSdkVersion: '100.42.8', profiles: {

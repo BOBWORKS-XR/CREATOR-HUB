@@ -23,6 +23,8 @@ mod sdk_requirements;
 pub mod service;
 #[cfg(unix)]
 mod unix_editors;
+#[cfg(windows)]
+mod windows_editors;
 
 use logic::{CreateRequest, CreationResult, EnvironmentReport, Recipe};
 use tauri::{Emitter, Manager};
