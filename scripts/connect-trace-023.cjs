@@ -2,7 +2,7 @@
 const path = require('node:path');
 const { execFile } = require('node:child_process');
 const MAX = 8;
-const BRANCH = 'refs/heads/codex/windows-unity-hub-026-acceptance';
+const BRANCH = 'refs/heads/codex/windows-field-027-wizard-finish';
 function target(value) {
   if (typeof value !== 'string' || value.length > 272) return { kind: 'redacted' };
   const match = /^(\[[0-9a-fA-F:]+\]|[A-Za-z0-9.-]+):([1-9][0-9]{0,4})$/.exec(value);
