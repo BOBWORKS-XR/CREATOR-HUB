@@ -2,69 +2,8 @@
   "schemaVersion": 1,
   "enabled": true,
   "privateOnly": true,
-  "kind": "direct-outgoing-025-026",
+  "kind": "direct-outgoing-026-027",
   "baseline": {
-    "version": "0.1.25",
-    "asset": "Creator.Hub_0.1.25_x64-setup.exe",
-    "source": {
-      "commit": "46e610c51bb525e868e7caf4a21a2a7c2fcb3160",
-      "tree": "0cf5954df3d40d9c7ee073fb06e9c61f401e908a"
-    },
-    "installer": {
-      "bytes": 38708024,
-      "sha256": "8521ed72e9fbee31c8a379bce0204288926862939dced9b4153164a1c7c71b6c"
-    },
-    "executable": {
-      "bytes": 19940352,
-      "sha256": "9fc2da9340995f4fe5b7f1f4dfb1a6b28449970934d6aaca4c8ab971e791b27c"
-    },
-    "manifest": {
-      "schemaVersion": 1,
-      "platform": "windows",
-      "arch": "x86_64",
-      "modules": {
-        "mcp": {
-          "executable": "mcp/creator-works-mcp-launcher.exe",
-          "version": "2.7.10",
-          "files": {
-            "mcp/creator-works-mcp-launcher.exe": "ed654b669dd094ccd2bca373e42932ae5f58607b05db39286f2bc8579ebff4e2",
-            "mcp/server/creator-works-mcp.mjs": "fb1958548f3c071b2b595e98946452c53b5a1b9fa1e419e06f4ec87f0c72f412",
-            "mcp/server/runtime/node.exe": "c6335d08331c23d68b9f2b18adb102002d76ef150b47248e954c507e0d033664",
-            "mcp/server/runtime/LICENSE": "8efdacdc1cfa3460aeb7fe98e3c54337b971d5da70e6eee292b73b981acb220c",
-            "mcp/server/runtime/VERSION": "98182b41c9ce3357797985cf12dc3b0124490ef88bc918a905373e7688e6aec9",
-            "mcp/server/unity-extension/Editor/BanterMCPBridge.cs": "fe21aefe30c7b48e3b9c487905a75a807371397006138852701bc287fc7570cd",
-            "mcp/server/unity-extension/Editor/CreatorWorksMCPLogo.png": "f3f68baa0d887de92e6cf7aba8beae7ff8ea5c44b13444f018413041ade19ea7",
-            "mcp/server/LICENSE": "b1cfe8ff7191d3e9c6c6b0f832adcd2ebece8e6070ef72d2f7afc1c082fb757f",
-            "mcp/server/THIRD_PARTY_NOTICES.md": "3596f4ad9f49cd460fa4da49ce3f1b92ad2f67113270b96d361e7e27ae0460af"
-          }
-        },
-        "setup": {
-          "executable": "setup/creator-project-setup.exe",
-          "version": "0.3.7",
-          "files": {
-            "setup/creator-project-setup.exe": "abafc45e89f6688284bc306d6da62775dbb194662dc369976becb48e5c09156f"
-          }
-        }
-      },
-      "managedRouting": {
-        "protocol": 1,
-        "files": {
-          "routing/creator-hub-mcp-router.exe": "6f959f6f8919538084d26c1800868aaa3b7b18545cba96de3e0b04782115a967",
-          "routing/router.json": "5760ee356aa49fc79f9fba3db281e0e628d0a187491d26312aa6cdb604b5e2e3",
-          "routing/router.minisig": "8c8a3d64532900a6079eb5d164b0706777a420450db78d053269d7840372fa00",
-          "routing/runtime.json": "d4349430fb0f884d51981ffd5d520893c49035433dd22536389eac7d5093ce53",
-          "routing/runtime.minisig": "20919231cf1808c9b9fef33fb8c6ba8ebd1aa3f70d723efa04ac80e0040108fa"
-        }
-      }
-    },
-    "generation": "df0ec83365a0ed5e235c784243531676467e56bfeafce43c818d5309022c2b54",
-    "sourceUnchanged": true,
-    "buildExitCode": 0,
-    "verificationReceiptSha256": "472a956ade47ada940fc512dffa9595b124f1bb3f0d8151e1aa33e6dc8d1b29a",
-    "releaseId": 447715382,
-    "assetId": 756757028
-  },
-  "target": {
     "version": "0.1.26",
     "asset": "Creator.Hub_0.1.26_x64-setup.exe",
     "source": {
@@ -122,136 +61,133 @@
     "sourceUnchanged": true,
     "buildExitCode": 0,
     "verificationReceiptSha256": "4088036a6b6d5c9e031178be4d912cb91f640bbaecc83928acc0848e3628b897",
+    "releaseId": 449231020,
+    "assetId": 760739191
+  },
+  "target": {
+    "version": "0.1.27",
+    "asset": "Creator.Hub_0.1.27_x64-setup.exe",
+    "source": {
+      "commit": "1598962f4edefd1831e973b0b069bcd8b725df93",
+      "tree": "8363e87e58a03bc91d8ea660d9c444fd27d5eddb"
+    },
+    "installer": {
+      "bytes": 38744117,
+      "sha256": "3ef9ce5cc25a00e59b466dee216a8c7d20d63c5c981796f2e2318380af6d37b0"
+    },
+    "executable": {
+      "bytes": 19987968,
+      "sha256": "6233f80b86b70ca8e965e81724a2ff3f7daf8aaaef58d6a06fad528f30715ccb"
+    },
+    "manifest": {
+      "schemaVersion": 1,
+      "platform": "windows",
+      "arch": "x86_64",
+      "modules": {
+        "mcp": {
+          "executable": "mcp/creator-works-mcp-launcher.exe",
+          "version": "2.7.10",
+          "files": {
+            "mcp/creator-works-mcp-launcher.exe": "ed654b669dd094ccd2bca373e42932ae5f58607b05db39286f2bc8579ebff4e2",
+            "mcp/server/creator-works-mcp.mjs": "fb1958548f3c071b2b595e98946452c53b5a1b9fa1e419e06f4ec87f0c72f412",
+            "mcp/server/runtime/node.exe": "c6335d08331c23d68b9f2b18adb102002d76ef150b47248e954c507e0d033664",
+            "mcp/server/runtime/LICENSE": "8efdacdc1cfa3460aeb7fe98e3c54337b971d5da70e6eee292b73b981acb220c",
+            "mcp/server/runtime/VERSION": "98182b41c9ce3357797985cf12dc3b0124490ef88bc918a905373e7688e6aec9",
+            "mcp/server/unity-extension/Editor/BanterMCPBridge.cs": "fe21aefe30c7b48e3b9c487905a75a807371397006138852701bc287fc7570cd",
+            "mcp/server/unity-extension/Editor/CreatorWorksMCPLogo.png": "f3f68baa0d887de92e6cf7aba8beae7ff8ea5c44b13444f018413041ade19ea7",
+            "mcp/server/LICENSE": "b1cfe8ff7191d3e9c6c6b0f832adcd2ebece8e6070ef72d2f7afc1c082fb757f",
+            "mcp/server/THIRD_PARTY_NOTICES.md": "3596f4ad9f49cd460fa4da49ce3f1b92ad2f67113270b96d361e7e27ae0460af"
+          }
+        },
+        "setup": {
+          "executable": "setup/creator-project-setup.exe",
+          "version": "0.3.7",
+          "files": {
+            "setup/creator-project-setup.exe": "abafc45e89f6688284bc306d6da62775dbb194662dc369976becb48e5c09156f"
+          }
+        }
+      },
+      "managedRouting": {
+        "protocol": 1,
+        "files": {
+          "routing/creator-hub-mcp-router.exe": "6f959f6f8919538084d26c1800868aaa3b7b18545cba96de3e0b04782115a967",
+          "routing/router.json": "5760ee356aa49fc79f9fba3db281e0e628d0a187491d26312aa6cdb604b5e2e3",
+          "routing/router.minisig": "8c8a3d64532900a6079eb5d164b0706777a420450db78d053269d7840372fa00",
+          "routing/runtime.json": "dd0c1928cc14b9e5d8f5347a3f501e92d106d424da64b972199841ea9fe1584d",
+          "routing/runtime.minisig": "e3575febdee81d4e76d603ef33ea8421ef72e7ad7472a94a583a646af3081759"
+        }
+      }
+    },
+    "generation": "df0ec83365a0ed5e235c784243531676467e56bfeafce43c818d5309022c2b54",
+    "sourceUnchanged": true,
+    "buildExitCode": 0,
+    "verificationReceiptSha256": "ce7986d0fdd6bc74822ef24839cea67391d7c61c1a226c0df414262ae07ccbb9",
     "descriptor": {
       "bytes": 505,
-      "sha256": "6c6d6b9a8d06e0d7ef54b5fdd8bf85538e6a35e97dfcf1606e0be25fecf75686"
+      "sha256": "0b080b7de2e1548962fa62efbc86fe4a39a708e05173633f4f35894d1dfb637f"
     },
     "descriptorSignature": {
-      "bytes": 300,
-      "sha256": "e08baf90f2c95cbbf6cd0cce9b6a0d8cd8f81996b6328835790c122707983b8a"
+      "bytes": 316,
+      "sha256": "31d3f46e983c1b7c56fa6d3d7c4c0657580835043b4987ee8bbbde2f27d36e07"
     },
     "latest": {
-      "bytes": 705,
-      "sha256": "d23c7ab41f8e04250e0b9c74908e63ba61b6d4c72fa35b4abc07055c5cf8ba8c"
+      "bytes": 708,
+      "sha256": "097051073dbb0774acc51211496d3ebd47714e9d38a01c4b88e70f1f76cc4c67"
     },
     "privateRelease": {
-      "id": 449115131,
-      "tag": "lab-windows-unity-hub-026-20261117",
-      "source": "f7f2fd17965985de68ac29cc5c2fe3820c8f905f",
+      "id": 456695171,
+      "tag": "lab-windows-connections-027-20261124",
+      "source": "1598962f4edefd1831e973b0b069bcd8b725df93",
       "assets": {
+        "Creator.Hub_0.1.27_x64-setup.exe": {
+          "id": 786994824,
+          "bytes": 38744117,
+          "sha256": "3ef9ce5cc25a00e59b466dee216a8c7d20d63c5c981796f2e2318380af6d37b0"
+        },
         "creator-hub-windows-x86_64.json": {
-          "id": 760395360,
+          "id": 786995682,
           "bytes": 505,
-          "sha256": "6c6d6b9a8d06e0d7ef54b5fdd8bf85538e6a35e97dfcf1606e0be25fecf75686"
+          "sha256": "0b080b7de2e1548962fa62efbc86fe4a39a708e05173633f4f35894d1dfb637f"
         },
         "creator-hub-windows-x86_64.json.minisig": {
-          "id": 760395469,
-          "bytes": 300,
-          "sha256": "e08baf90f2c95cbbf6cd0cce9b6a0d8cd8f81996b6328835790c122707983b8a"
-        },
-        "Creator.Hub_0.1.26_x64-setup.exe": {
-          "id": 760393240,
-          "bytes": 38730584,
-          "sha256": "57dc7721d51611a8f26873b3d5f5f9dcab28ac27d5b53e40a43785e10c72b264"
+          "id": 786995730,
+          "bytes": 316,
+          "sha256": "31d3f46e983c1b7c56fa6d3d7c4c0657580835043b4987ee8bbbde2f27d36e07"
         },
         "latest.json": {
-          "id": 760395590,
-          "bytes": 705,
-          "sha256": "d23c7ab41f8e04250e0b9c74908e63ba61b6d4c72fa35b4abc07055c5cf8ba8c"
+          "id": 786995797,
+          "bytes": 708,
+          "sha256": "097051073dbb0774acc51211496d3ebd47714e9d38a01c4b88e70f1f76cc4c67"
         }
       }
     }
   },
   "fixtureQualification": {
-    "sha256": "4088036a6b6d5c9e031178be4d912cb91f640bbaecc83928acc0848e3628b897",
-    "kind": "unity-hub-026-signed-candidate",
+    "sha256": "ce7986d0fdd6bc74822ef24839cea67391d7c61c1a226c0df414262ae07ccbb9",
+    "kind": "windows-field-027-signed-candidate",
     "source": {
-      "commit": "f7f2fd17965985de68ac29cc5c2fe3820c8f905f",
-      "tree": "4f6026e6a252df8856a3e9ef87ee374eb8da3eb0"
+      "commit": "1598962f4edefd1831e973b0b069bcd8b725df93",
+      "tree": "8363e87e58a03bc91d8ea660d9c444fd27d5eddb"
     },
     "sourceUnchanged": true,
     "sourceProof": {
-      "frozenSourceUnchanged": true,
-      "buildWorkSourceRawUnchanged": false,
-      "buildWorkGeneratedDifferences": [
-        {
-          "path": "modules/mcp/launcher/src-tauri/gen/schemas/acl-manifests.json",
-          "before": "d5b96c76c0e3f7d9e46c34f4de83aba6be7d4a9b4e9dfefccb28cf07b846bd51",
-          "after": "bd8df0dc97f21e80a95bc61d24b4308b2df7ef33b0b479569b60734fd87e7e80"
-        },
-        {
-          "path": "modules/mcp/launcher/src-tauri/gen/schemas/desktop-schema.json",
-          "before": "5d1b1ba6408640103bb5214db091630e07d60c261df7074ec13a19484844bd93",
-          "after": "4dfaec14938e91d2772202a11d0d956f7d17fc4f04f1e120bfcb36fd1a7ec770"
-        },
-        {
-          "path": "modules/mcp/launcher/src-tauri/gen/schemas/windows-schema.json",
-          "before": "5d1b1ba6408640103bb5214db091630e07d60c261df7074ec13a19484844bd93",
-          "after": "4dfaec14938e91d2772202a11d0d956f7d17fc4f04f1e120bfcb36fd1a7ec770"
-        }
-      ],
-      "inputCount": 1606,
-      "sourceContract": {
-        "modulePayloadUnchanged": true,
-        "retainedPayloadFiles": 13,
-        "renewedPayloadFiles": [
-          "routing/runtime.json",
-          "routing/runtime.minisig"
-        ],
-        "moduleSourceChanges": [
-          "modules/project-setup/src-tauri/src/hub_package.rs",
-          "modules/project-setup/src-tauri/Cargo.toml",
-          "modules/project-setup/src-tauri/src/hub.rs",
-          "modules/project-setup/src-tauri/src/lib.rs",
-          "modules/project-setup/src-tauri/src/logic.rs",
-          "modules/project-setup/docs/COMPATIBILITY.md"
-        ],
-        "nativeSourceUnchanged": false,
-        "rootRustSourceChanges": [],
-        "rootCapabilityChanges": [],
-        "versionFilesUnchanged": false,
-        "versionFiles": [
-          "package.json",
-          "package-lock.json",
-          "src-tauri/tauri.conf.json",
-          "src-tauri/Cargo.toml",
-          "src-tauri/Cargo.lock"
-        ]
+      "baseline": {
+        "commit": "f7f2fd17965985de68ac29cc5c2fe3820c8f905f",
+        "tree": "4f6026e6a252df8856a3e9ef87ee374eb8da3eb0"
       },
-      "overlays": [
-        "modules/project-setup/docs/COMPATIBILITY.md",
-        "modules/project-setup/src-tauri/Cargo.toml",
-        "modules/project-setup/src-tauri/src/hub_package.rs",
-        "modules/project-setup/src-tauri/src/hub.rs",
-        "modules/project-setup/src-tauri/src/lib.rs",
-        "modules/project-setup/src-tauri/src/logic.rs",
-        "package-lock.json",
-        "package.json",
-        "src-tauri/Cargo.lock",
-        "src-tauri/Cargo.toml",
-        "src-tauri/tauri.conf.json",
-        "src/projects.js",
-        "tests/projects.spec.js"
-      ],
-      "payloadFilesUnchanged": 13,
-      "renewedPayloadFiles": [
-        "routing/runtime.json",
-        "routing/runtime.minisig"
-      ]
+      "candidate": {
+        "commit": "1598962f4edefd1831e973b0b069bcd8b725df93",
+        "tree": "8363e87e58a03bc91d8ea660d9c444fd27d5eddb"
+      }
     },
     "payloadSource": {
-      "commit": "e9b4cbe9c9d6bcc99bf4c79a763fe2d153a84b90",
-      "tree": "c448958bc6e4bac39f17ec35357f6afe4c8a1283",
-      "manifestSha256": "d0bfb0b5854e3ca9685cb07a920e3f0249161fe59bfba2a0deb84e90f29a2af8",
-      "runtimeSha256": "ff54ce26f738b5c59dab0c5220e384699bef3f34a396012b5b901906352da1ec",
-      "generation": "df0ec83365a0ed5e235c784243531676467e56bfeafce43c818d5309022c2b54",
-      "runtimeReceiptSha256": "6673482be203bf4dd8a8d0727090e52ce18bc4c6b7478a3303af4de37cc0f137",
-      "retainedPayloadFiles": 13
+      "commit": "f7f2fd17965985de68ac29cc5c2fe3820c8f905f",
+      "tree": "4f6026e6a252df8856a3e9ef87ee374eb8da3eb0"
     },
-    "sourceReceiptSha256": "a6851782efa8b8e5e57fdb64a9158986a2b1f8d817413fe2e86b6f4cbc699396",
-    "buildReportSha256": "515d0f403ff9174eb024ea70ad60a436ec7d6647772da66cab55e0759aa3ffab",
+    "sourceReceiptSha256": "839bb1769f819460598ac425fc57ddd5b2177c9ccba866c3075606262b9c15cb",
+    "buildReportSha256": "634295f8c632c2eedd06468e6570e50e52132f13b64e1dc41c094aa5bf2f2022",
     "buildExitCode": 0,
-    "inputCount": 1606,
+    "inputCount": 1612,
     "payloadFiles": 15,
     "fixtureUsableForOutgoingTest": true,
     "productionSourceGuardException": false,
