@@ -17,7 +17,7 @@ function readHash(file, expected, relativePath = path.basename(file)) {
     throw error;
   }
 }
-function itemFor(version) { assert.ok(['0.1.25', '0.1.26'].includes(version)); return version === '0.1.25' ? binding.baseline : binding.target; }
+function itemFor(version) { assert.ok(['0.1.26', '0.1.27'].includes(version)); return version === '0.1.26' ? binding.baseline : binding.target; }
 function assertInstalledResources(directory, version) {
   const item = itemFor(version); readHash(path.join(directory, 'creator-hub.exe'), item.executable.sha256, 'creator-hub.exe');
   const files = { ...item.manifest.modules.mcp.files, ...item.manifest.modules.setup.files, ...item.manifest.managedRouting.files };
@@ -64,7 +64,7 @@ function assertFreshConnection(held, fresh, profile) {
   for (const rows of [held, fresh]) assert.equal(rows[1].parentPid, rows[0].pid);
   const normalize = image => path.win32.normalize(image).toLowerCase();
   assert.ok(profile && profile.local && profile.home, 'Explicit old/new profile roots required');
-  for (const [rows, version] of [[held, '0.1.25'], [fresh, '0.1.26']]) {
+  for (const [rows, version] of [[held, '0.1.26'], [fresh, '0.1.27']]) {
     const locations = managedLocations(profile.local, version, profile.home);
     assert.equal(normalize(rows[0].image), normalize(locations.command), 'Exact version-bound router required');
     assert.equal(normalize(rows[1].image), normalize(path.join(locations.payload, 'mcp/server/runtime/node.exe')),
