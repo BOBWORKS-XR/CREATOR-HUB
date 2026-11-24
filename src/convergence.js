@@ -156,7 +156,7 @@
           title.textContent = stage === 'complete' ? 'Move complete' : current?.recoveryHelp ? 'Finish setting up Hub' : 'Move to Hub';
           summary.textContent = stage === 'complete' ? 'Your existing setup is now managed in Creator Hub.'
             : current?.recoveryHelp ? 'Your settings are safe. A previous setup did not finish. Check it again, or use Hub and return to this later.'
-            : 'Move existing settings and AI connections into Creator Hub.';
+            : 'MCP and Project Setup are now part of Hub. Bring over your old settings without moving your Unity projects, or choose Not now to leave this for later.';
           explanation.hidden = Boolean(current?.recoveryHelp);
           if (backupDetails) backupDetails.hidden = !details.childElementCount;
           prepare.hidden = connections.hidden = retire.hidden = true;

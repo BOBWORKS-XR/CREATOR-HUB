@@ -12,6 +12,8 @@ async function open(page, options = {}) {
       auto_start: true, enable_custom_scripts: false, allow_all_tests: true, connection_guide_version: 1,
       unrelated: { retain: ['exact', 'values'] }, ...options.config };
     window.bridgeStatuses = { '/projects/Creator': { installed: true, current: true }, '/projects/Other': { installed: true, current: false } };
+    window.checkedBridge = options.checkedBridge || {};
+    window.assistClients = options.assistClients || {};
     window.recoveryRecords = options.recovery || [];
     window.unityOptions = Object.fromEntries(channels.map(channel => [channel.unity_project_path, {
       enable_custom_scripts: window.savedConfig.enable_custom_scripts, allow_all_tests: window.savedConfig.allow_all_tests,
@@ -56,8 +58,11 @@ async function open(page, options = {}) {
           case 'discover_unity_projects': return channels.map(channel => ({ name: channel.name, path: channel.unity_project_path }));
           case 'get_onboarding_status': return window.invalidStatus ? { runtime: { ready: true }, clients: [] } : {
             managedRouting: options.managedRouting !== false, runtime: { ready: true, ...options.runtime },
-            project: fields.unityProjectPath ? { valid: true, bridgeInstalled: true, bridgeCurrent: true, stateStatus: 'fresh', sdkProfile: window.profiles[fields.unityProjectPath] } : null,
-            clients: ['codex', 'claude', 'claudeDesktop', 'antigravity', 'opencode'].map(id => ({ id, detected: true, configured: true, supported: true })),
+            project: fields.unityProjectPath ? { valid: true, bridgeInstalled: true, bridgeCurrent: true, stateStatus: 'fresh', sdkProfile: window.profiles[fields.unityProjectPath], ...window.checkedBridge } : null,
+            clients: ['codex', 'claude', 'claudeDesktop', 'antigravity', 'opencode'].filter(id => id !== options.omittedClient).map(id => ({
+              id, detected: true, configured: id !== 'claude' || options.claudeUserConfigured !== false, supported: true,
+              ...window.assistClients[id],
+            })),
             unityCli: { canEnable: true, enabled: false, message: 'Optional Unity CLI' },
           };
           case 'get_unity_extension_status': return window.bridgeStatuses[fields.unityProjectPath];
@@ -77,7 +82,16 @@ async function open(page, options = {}) {
             if (options.partialSetup) throw new Error('Setup stopped after saving; earlier steps remain');
             return { channel };
           }
-          case 'update_codex_mcp_config': case 'update_claude_mcp_config': case 'update_claude_desktop_mcp_config':
+          case 'install_unity_extension':
+            if (!options.missedReadback) window.checkedBridge = { bridgeCurrent: true, bridgeInstalled: true, stateStatus: 'stale' };
+            return null;
+          case 'update_claude_mcp_config':
+            if (!options.missedReadback) window.assistClients.claude = { configured: true };
+            return null;
+          case 'remove_claude_mcp_config':
+            if (!options.missedReadback) window.assistClients.claude = { configured: false };
+            return null;
+          case 'update_codex_mcp_config': case 'update_claude_desktop_mcp_config':
           case 'update_antigravity_mcp_config': case 'update_opencode_mcp_config': return null;
           case 'set_unity_custom_scripts': case 'set_unity_allow_all_tests': {
             const key = name === 'set_unity_custom_scripts' ? 'enable_custom_scripts' : 'allow_all_tests';
@@ -106,6 +120,15 @@ const mutationCalls = page => page.evaluate(() => calls.filter(call => call.comm
   && /^(?:save_|one_click_setup$|add_project$|install_|update_|set_|remove_|review_|recover_)/.test(call.args.command)));
 const row = (page, name) => field(page, 'projects').locator(`[data-project-path="/projects/${name}"]`);
 const idle = page => expect(page.locator('#feature-mcp')).toHaveAttribute('aria-busy', 'false');
+
+test('Claude Code reports user-level configuration without judging or changing project setup', async ({ page }) => {
+  await open(page, { claudeUserConfigured: false });
+  const client = page.locator('.feature-client').filter({ has: page.locator('[data-client="claude"]') });
+  await expect(client).toContainText('Detected · No user-level setup found');
+  await expect(page.locator('.feature-client').filter({ has: page.locator('[data-client="codex"]') }))
+    .toContainText('Detected · Configured');
+  expect(await mutationCalls(page)).toEqual([]);
+});
 
 test('latest SDK lookup is independent of the installed future SDK and never changes settings', async ({ page }) => {
   await open(page, { latestSdkVersion: '100.42.8', profiles: {
@@ -292,6 +315,8 @@ test('recent saved state does not claim a live Unity connection', async ({ page 
   await expect(field(page, 'checks')).not.toContainText('Connected');
   await expect(field(page, 'guide-steps')).toContainText('A live connection has not been verified.');
   await expect(field(page, 'guide-steps')).toContainText('get_bridge_status');
+  await expect(field(page, 'guide-steps')).toContainText('For an existing connection, check it in your AI app first.');
+  await expect(page.getByText('MCP is included with Creator Hub.', { exact: false })).toBeVisible();
   await expect(field(page, 'guide-steps')).not.toContainText('Unity bridge is responding.');
   expect(await mutationCalls(page)).toEqual([]);
 });
@@ -303,7 +328,205 @@ async function controlsLocked(page, locked) {
     else await expect(field(page, name)).toBeEnabled();
   }
 }
+test('returning builders go to connection status without installing a bridge or changing clients', async ({ page }, testInfo) => {
+  await open(page, { config: { connection_guide_version: 0 } });
+  await expect(field(page, 'guide-dialog')).toBeVisible();
+  await field(page, 'guide-dialog').screenshot({ path: testInfo.outputPath('connection-guide.png') });
+  await page.getByRole('button', { name: 'I already use MCP' }).click(); await idle(page);
+  await expect(field(page, 'connection-heading')).toBeFocused();
+  await expect(field(page, 'guide-dialog')).not.toBeVisible();
+  const saved = await commands(page, 'save_config');
+  expect(saved).toHaveLength(1);
+  expect(saved[0].args.args.config.connection_guide_version).toBe(1);
+  await field(page, 'guide').click();
+  await field(page, 'guide-skip').click(); await idle(page);
+  await expect(field(page, 'connection-heading')).toBeFocused();
+  expect((await mutationCalls(page)).map(call => call.args.command)).toEqual(['save_config']);
+});
 async function navigateBack(page) { await page.evaluate(async () => { CreatorFeaturePages.hide(); await CreatorFeaturePages.show('mcp'); }); }
+
+for (const installed of [false, true]) test(`connection help reviews just the ${installed ? 'outdated' : 'missing'} bridge and verifies it`, async ({ page }) => {
+  await open(page, { checkedBridge: { bridgeInstalled: installed, bridgeCurrent: false } });
+  const action = field(page, 'assist-action');
+  await expect(action).toHaveText(installed ? 'Review bridge update' : 'Review bridge installation');
+  await action.click();
+  await expect(page.getByRole('dialog')).toContainText('/projects/Creator');
+  await page.getByRole('button', { name: 'Cancel', exact: true }).click(); await idle(page);
+  expect(await mutationCalls(page)).toEqual([]);
+  await action.click(); await page.getByRole('button', { name: 'Apply bridge change' }).click(); await idle(page);
+  expect((await mutationCalls(page)).map(call => [call.args.command, call.args.args]))
+    .toEqual([['install_unity_extension', { unityProjectPath: '/projects/Creator' }]]);
+  await expect(field(page, 'assist-result')).toContainText('Bridge verified');
+  await expect(action).toHaveText('Check again');
+  await action.click(); await idle(page);
+  expect(await mutationCalls(page)).toHaveLength(1);
+});
+
+test('bridge fixed elsewhere during review does not trigger a second installation', async ({ page }) => {
+  await open(page, { checkedBridge: { bridgeInstalled: false, bridgeCurrent: false } });
+  await field(page, 'assist-action').click();
+  await page.evaluate(() => { window.checkedBridge = {}; });
+  await page.getByRole('button', { name: 'Apply bridge change' }).click(); await idle(page);
+  await expect(field(page, 'assist-result')).toContainText('nothing was applied');
+  expect(await mutationCalls(page)).toEqual([]);
+});
+
+test('connection help keeps project-scoped Claude working and can connect only Claude after approval', async ({ page }, testInfo) => {
+  await open(page, { claudeUserConfigured: false });
+  await field(page, 'assist-client').selectOption('claude');
+  await expect(field(page, 'assist-message')).toContainText('may already connect through this project');
+  await expect(field(page, 'assist-copy')).toHaveClass(/primary-button/);
+  expect(await field(page, 'assist-copy').evaluate(button => !button.previousElementSibling)).toBe(true);
+  await expect(field(page, 'assist-relink')).toBeHidden();
+  await page.evaluate(() => Object.defineProperty(navigator, 'clipboard', { value: { writeText: async t => { window.copied = t; } } }));
+  await field(page, 'assist-copy').click();
+  expect(await page.evaluate(() => window.copied)).toContain('get_bridge_status');
+  await field(page, 'assist-action').click();
+  await page.getByRole('button', { name: 'Cancel', exact: true }).click(); await idle(page);
+  expect(await mutationCalls(page)).toEqual([]);
+  await field(page, 'assist-details').locator('summary').click();
+  await page.getByRole('region', { name: 'Connection status' }).screenshot({ path: testInfo.outputPath('connection-help.png') });
+  await field(page, 'assist-action').click();
+  await page.getByRole('button', { name: 'Connect this app' }).click(); await idle(page);
+  expect((await mutationCalls(page)).map(call => call.args.command)).toEqual(['update_claude_mcp_config']);
+  await expect(field(page, 'assist-result')).toContainText('Fully quit and reopen Claude Code');
+  await expect(field(page, 'assist-action')).toHaveText('Copy connection check');
+});
+
+test('wrong-project help is opt-in and rebinds only the chosen user-level app', async ({ page }) => {
+  await open(page);
+  await field(page, 'assist-client').selectOption('codex');
+  await expect(field(page, 'assist-action')).toHaveText('Copy connection check');
+  const relink = field(page, 'assist-relink');
+  await relink.click();
+  await expect(page.getByRole('dialog')).toContainText('/projects/Creator');
+  await page.getByRole('button', { name: 'Cancel', exact: true }).click(); await idle(page);
+  expect(await mutationCalls(page)).toEqual([]);
+  await relink.click();
+  await page.getByRole('button', { name: 'Use this project', exact: true }).click(); await idle(page);
+  expect((await mutationCalls(page)).map(c => [c.args.command, c.args.args.channel.unity_project_path]))
+    .toEqual([['update_codex_mcp_config', '/projects/Creator']]);
+  await expect(field(page, 'assist-result')).toContainText('Fully quit and reopen Codex');
+});
+
+for (const [entry, expected] of [['present', 'Project entry found'], ['unreadable', 'Project settings could not be checked']]) {
+  test(`Claude project file is ${entry}: no duplicate setup or user-level rebind is suggested`, async ({ page }) => {
+    await open(page, { checkedBridge: { claudeProjectEntry: entry }, claudeUserConfigured: false });
+    const box = page.locator('#feature-mcp [data-client="claude"]');
+    await expect(box.locator('xpath=../..')).toContainText(expected);
+    await expect(box).not.toBeChecked();
+    await field(page, 'assist-client').selectOption('claude');
+    await expect(field(page, 'assist-action')).toHaveText('Copy connection check');
+    if (entry === 'present') await expect(field(page, 'assist-message')).toContainText('type /mcp');
+    await expect(field(page, 'assist-relink')).toBeHidden();
+    await box.check(); await field(page, 'check').click(); await idle(page);
+    await expect(box).toBeChecked();
+    expect(await mutationCalls(page)).toEqual([]);
+  });
+}
+
+for (const [name, options, button] of [
+  ['missing report', { omittedClient: 'claude' }, 'Check again'],
+  ['unreadable settings', { assistClients: { claude: { configured: false, issue: 'Could not read settings' } } }, 'Show app status'],
+  ['incomplete report', { assistClients: { claude: { configured: null } } }, 'Show app status'],
+]) test(`unverified client: ${name} cannot be changed by the normal connection controls`, async ({ page }) => {
+  await open(page, options); await field(page, 'assist-client').selectOption('claude');
+  await expect(field(page, 'assist-action')).toHaveText(button);
+  await expect(page.getByRole('button', { name: 'Apply to Claude Code', exact: true })).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'Disconnect Claude Code', exact: true })).toBeDisabled();
+  const box = page.locator('#feature-mcp [data-client="claude"]');
+  await expect(box).toBeDisabled(); await expect(box).not.toBeChecked();
+  expect(await mutationCalls(page)).toEqual([]);
+});
+
+for (const connect of [false, true]) test(`normal ${connect ? 'Apply' : 'Disconnect'} never reports success after a missed client write`, async ({ page }) => {
+  await open(page, { missedReadback: true, claudeUserConfigured: !connect });
+  await page.getByRole('button', { name: connect ? 'Apply to Claude Code' : 'Disconnect Claude Code', exact: true }).click();
+  if (!connect) await page.getByRole('dialog').getByRole('button', { name: 'Disconnect', exact: true }).click();
+  await idle(page); await controlsLocked(page, true);
+  await expect(field(page, 'error')).toContainText('could not confirm');
+  expect((await mutationCalls(page)).map(c => c.args.command)).toEqual([connect ? 'update_claude_mcp_config' : 'remove_claude_mcp_config']);
+  await expect(field(page, 'setup-result')).not.toContainText('settings saved');
+});
+
+test('ordinary Apply refuses externally changed Hub settings before writing', async ({ page }) => {
+  await open(page);
+  await page.evaluate(() => { window.savedConfig.active_channel_id = '1'; });
+  await page.getByRole('button', { name: 'Apply to Codex', exact: true }).click(); await idle(page);
+  await controlsLocked(page, true);
+  expect(await mutationCalls(page)).toEqual([]);
+});
+
+test('bulk setup stops if Claude gains a project connection during review', async ({ page }) => {
+  await open(page, { claudeUserConfigured: false, checkedBridge: { claudeProjectEntry: 'notFound' } });
+  await field(page, 'setup').click();
+  await page.evaluate(() => { window.checkedBridge.claudeProjectEntry = 'present'; });
+  await page.getByRole('button', { name: 'Apply setup', exact: true }).click(); await idle(page);
+  await expect(field(page, 'setup-result')).toContainText('Nothing was applied');
+  await expect(page.locator('#feature-mcp [data-client="claude"]')).not.toBeChecked();
+  expect(await mutationCalls(page)).toEqual([]);
+});
+
+test('bulk setup that returns without a selected client configured does not claim success or replay', async ({ page }) => {
+  await open(page, { claudeUserConfigured: false, missedReadback: true });
+  await field(page, 'setup').click();
+  await page.getByRole('button', { name: 'Apply setup', exact: true }).click(); await idle(page);
+  await controlsLocked(page, true);
+  await expect(field(page, 'error')).toContainText('could not verify');
+  expect((await mutationCalls(page)).map(c => c.args.command)).toEqual(['one_click_setup']);
+});
+
+test('connection help actions stay inside a narrow project view', async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 640 });
+  await open(page, { assistClients: { claudeDesktop: { configured: false } } });
+  await field(page, 'assist-client').selectOption('claudeDesktop');
+  const action = field(page, 'assist-action');
+  await expect(action).toHaveText('Review connection for Claude Desktop');
+  await action.scrollIntoViewIfNeeded();
+  const box = await action.boundingBox();
+  expect(box.x).toBeGreaterThanOrEqual(0);
+  expect(box.x + box.width).toBeLessThanOrEqual(320);
+  expect(await action.evaluate(e => e.scrollWidth <= e.clientWidth)).toBe(true);
+});
+
+test('unconfirmed bridge repair locks until a fresh review; no automatic retry', async ({ page }) => {
+  await open(page, { checkedBridge: { bridgeInstalled: true, bridgeCurrent: false }, missedReadback: true });
+  await field(page, 'assist-action').click();
+  await page.getByRole('button', { name: 'Apply bridge change' }).click(); await idle(page);
+  await controlsLocked(page, true);
+  await expect(field(page, 'assist-action')).toBeDisabled();
+  await expect(field(page, 'retry')).toBeVisible();
+  expect(await mutationCalls(page)).toHaveLength(1);
+});
+
+test('client assistance refuses settings changed during review', async ({ page }) => {
+  await open(page, { claudeUserConfigured: false });
+  await field(page, 'assist-client').selectOption('claude');
+  await field(page, 'assist-action').click();
+  await page.evaluate(() => { window.savedConfig.active_channel_id = '1'; });
+  await page.getByRole('button', { name: 'Connect this app' }).click(); await idle(page);
+  await controlsLocked(page, true);
+  await expect(field(page, 'assist-action')).toBeDisabled();
+  expect(await mutationCalls(page)).toEqual([]);
+});
+
+for (const [name, options, button] of [
+  ['unavailable tools', { runtime: { ready: false } }, 'Go to Home'],
+  ['invalid folder', { checkedBridge: { valid: false } }, 'Choose project'],
+  ['incomplete bridge report', { checkedBridge: { bridgeInstalled: null } }, 'Check again'],
+  ['app config issue', { assistClients: { claude: { issue: 'Needs review' } } }, 'Show app status'],
+  ['intentional custom runtime', { claudeUserConfigured: false, runtime: { bundled: true, command: 'C:/Hub/runtime/node.exe' } }, 'Review MCP choice'],
+]) test(`connection help does not guess a repair for ${name}`, async ({ page }) => {
+  await open(page, options); await field(page, 'assist-client').selectOption('claude');
+  await expect(field(page, 'assist-action')).toHaveText(button);
+  await expect(field(page, 'assist-relink')).toBeHidden();
+  if (name === 'intentional custom runtime') {
+    await field(page, 'assist-action').click();
+    await expect(page.getByRole('dialog')).toContainText('Only the saved MCP server location');
+    await page.getByRole('button', { name: 'Cancel', exact: true }).click(); await idle(page);
+  }
+  expect(await mutationCalls(page)).toEqual([]);
+});
 
 const backedUpConflict = () => ({
   status: 'conflict', currentPath: '/current/launcher-config.json', legacyPath: '/legacy/launcher-config.json',

@@ -558,7 +558,9 @@ function updateClientStatus(id, status, detectionElement, stateElement) {
     return;
   }
   detectionElement.textContent = status?.detected ? 'Detected' : 'Not detected';
-  stateElement.textContent = status?.configured ? 'Configured' : 'Not configured';
+  stateElement.textContent = id === 'claude'
+    ? (status?.configured ? 'Configured for your user' : 'No user-level setup found')
+    : (status?.configured ? 'Configured' : 'Not configured');
   stateElement.className = 'client-state ' + (status?.configured ? 'configured' : '');
   setCheck(id, status?.configured ? 'success' : (status?.detected ? 'pending' : 'warning'),
     status?.configured ? 'Configured' : (status?.detected ? 'Detected' : 'Not found'));

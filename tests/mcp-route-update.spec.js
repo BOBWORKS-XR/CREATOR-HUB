@@ -45,6 +45,7 @@ async function load(page, options = {}) {
       if (command === 'community_catalogue') return { entries: [], warnings: [], stale: false };
       if (command === 'feature_status') return { integrated: true, features: ['mcp', 'setup'] };
       if (command !== 'feature_call') throw Error('Unexpected Root call: ' + command);
+      if (args.feature === 'setup' && args.command === 'latest_sdk_requirements') return { version: '4.0.27' };
       switch (args.command) {
         case 'begin_ui_operation': return 7;
         case 'finish_ui_operation': return null;
@@ -71,7 +72,8 @@ async function load(page, options = {}) {
 }
 async function noMutations(page) {
   expect(await page.evaluate(() => calls.filter(call => ['install_hub_update', 'review_retained_hub_update', 'prepare_convergence', 'migrate_convergence_connections'].includes(call.command)
-    || (call.command === 'feature_call' && !['begin_ui_operation', 'finish_ui_operation', 'product_settings_status', 'load_config', 'discover_unity_projects',
+    || (call.command === 'feature_call' && !(call.args.feature === 'setup' && call.args.command === 'latest_sdk_requirements')
+      && !['begin_ui_operation', 'finish_ui_operation', 'product_settings_status', 'load_config', 'discover_unity_projects',
       'get_onboarding_status', 'get_project_feedback_settings', 'get_unity_extension_status', 'get_project_sdk_profile'].includes(call.args.command))))).toEqual([]);
 }
 
@@ -158,7 +160,8 @@ test('verified-current clears both notices after explicit client Apply and posit
   await expect(mcpNotice(page)).toBeHidden(); await expect(rootNotice(page)).toBeHidden();
   expect(await page.evaluate(start => calls.slice(start), count)).toEqual([{ command: 'hub_update_status', args: { online: false, preview: false } }]);
   expect(await page.evaluate(() => calls.filter(call => ['install_hub_update', 'review_retained_hub_update', 'prepare_convergence', 'migrate_convergence_connections'].includes(call.command)
-    || (call.command === 'feature_call' && !['begin_ui_operation', 'finish_ui_operation', 'product_settings_status', 'load_config', 'discover_unity_projects',
+    || (call.command === 'feature_call' && !(call.args.feature === 'setup' && call.args.command === 'latest_sdk_requirements')
+      && !['begin_ui_operation', 'finish_ui_operation', 'product_settings_status', 'load_config', 'discover_unity_projects',
       'get_onboarding_status', 'get_project_feedback_settings', 'get_unity_extension_status', 'get_project_sdk_profile', 'update_codex_mcp_config'].includes(call.args.command))))).toEqual([]);
   expect(errors).toEqual([]);
 });

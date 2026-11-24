@@ -44,6 +44,7 @@
   const directFeatures = window.CreatorHubNative.integratedFeatures === true;
   const updateRecovery = window.CreatorHubNative.updateRecovery === true;
   let directReady = false;
+  let focusConnectionHelp = false;
   const mcpRouteUpdate = window.CreatorMcpRouteUpdate.create();
   let routeRead = null;
   const routeService = { state: mcpRouteUpdate, recheck: recheckMcpRoute, openMcp: () => show('mcp') };
@@ -52,6 +53,15 @@
   if (directFeatures) {
     current = 'projects';
     document.body.classList.add('integrated-home');
+    const connectionHelp = byId('help-check-connection');
+    byId('connection-help-legacy').hidden = true;
+    byId('connection-help-integrated').hidden = false;
+    connectionHelp.hidden = false;
+    connectionHelp.addEventListener('click', () => {
+      byId('context-help-dialog').close();
+      focusConnectionHelp = true;
+      show('mcp');
+    });
     byId('restore-hosted-views').closest('label').lastChild.textContent = ' Return to last tool after updating';
     const updater = document.querySelector('.hub-update');
     updater.querySelector('.page-heading').insertBefore(byId('check-updates'), byId('hub-update-button'));
@@ -469,7 +479,15 @@
       document.body.classList.remove('hosting-app');
       byId('view-detail').classList.add('hidden');
       byId('view-builtin').classList.add('hidden');
-      window.CreatorFeaturePages?.show(tool ? current : null, { load: directReady });
+      const opening = window.CreatorFeaturePages?.show(tool ? current : null, { load: directReady });
+      if (focusConnectionHelp && current === 'mcp') {
+        focusConnectionHelp = false;
+        opening?.then(ready => {
+          if (ready && current === 'mcp' && !document.querySelector('dialog[open]')) {
+            document.querySelector('#feature-mcp [data-field="assist-client"]:enabled')?.focus();
+          }
+        });
+      }
       title.innerHTML = '<span>CREATOR</span> <strong>HUB</strong>';
       byId('mode-description').textContent = tool?.summary || 'Unity tools. One place.';
       return;

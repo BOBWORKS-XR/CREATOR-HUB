@@ -3,6 +3,42 @@
 **Unity tools in one window.** Open Creator SDK / Altspace and Banter projects,
 use Creator Works MCP and create or inspect projects with Project Setup.
 
+## Already using Creator Works MCP on Windows?
+
+**Update Creator Hub, not MCP.** In older versions, Hub opened a separate MCP
+app. Now MCP and Project Setup are both under **Menu** in Hub. If you see a
+different version number next to MCP, it identifies the tools included with
+Hub. It is not another download.
+
+1. **Already have Creator Hub?** Open it and choose **Check for updates**, then
+   **Update Hub**. If you only have the old MCP app, or your old Hub cannot
+   update, use the [official Windows Hub installer](https://github.com/BOBWORKS-XR/CREATOR-HUB/releases/latest).
+   Leave the old app and its settings in place; do not uninstall it first.
+2. **See "Move to Hub"?** Choose **Move to Hub** to back up your settings and
+   review which existing AI connections Hub can take over. Your Unity projects
+   stay where they are. Choose **Not now** to carry on without finishing the
+   move. If a move stalls and Hub offers **Keep my current setup**, use that to
+   keep the settings you have without repeating the move.
+3. **Check your connection.** Open your project in Unity, let it finish loading,
+   then fully quit and reopen your AI app. Ask it: "Call `get_bridge_status` and
+   tell me which project you're connected to and whether it's ready." If it
+   reports the right project and is ready, you don't need to run setup again.
+
+In the next update, **Help > My AI cannot see MCP tools > Help me connect**
+opens the MCP page. Choose your AI app under **Connection status** for the next
+step. You can review a change to just the Unity bridge or one AI app without
+running setup for every app. If the read-only check names the wrong project,
+choose **My AI opens the wrong project** to review pointing that app's user-level
+connection at the selected project. Project-specific settings files are left alone.
+For Claude Code, Hub checks the selected project's `.mcp.json` for a Creator
+Works or legacy Banter entry. That label means the entry exists, not that Claude
+has approved or loaded it. Open Claude Code in that project, use `/mcp` to see
+its status, then try the connection check. Hub never edits the project file.
+
+If Hub says **MCP update needs review**, open **Menu > MCP**, check the project
+name, then choose **Apply** beside your existing AI app. A connection you set up
+yourself can still point to the old MCP; updating Hub doesn't silently change it.
+
 **Platform scope:** Windows x64 is the maintained binary release target. Official
 Linux packages (AppImage, DEB, RPM and Flatpak) are discontinued; new macOS builds
 are suspended. Existing Mac/Linux downloads remain historical builds, not
@@ -108,7 +144,8 @@ Earlier published acceptance remains in the
 - **Import history:** completed requests are retained outside Assets, freeing
   active queue capacity without deleting their final receipts.
 
-Existing users: **update Hub first**, then the companion apps. A stable version
+**Historical 0.1.7 instructions only:** users updated Hub first, then the
+companion apps. A stable version
 can update an older prerelease. Channel settings do not authorize downgrades or
 silent installation. Your project folders and app settings stay put.
 Older previews reporting an intermediate-version requirement can use the 0.1.7
@@ -116,7 +153,7 @@ installer directly. If 0.1.1 shows unavailable apps, use Apps > Check for update
 after the project scan finishes. Its old footer says 0.1.0 incorrectly; reinstalling
 0.1.1 does not correct that label. See the [earlier hotfix notes](docs/RELEASE-0.1.3.md).
 
-## Companion Apps
+## Historical Companion Apps (0.1.7)
 
 **[Creator Project Setup](https://github.com/BOBWORKS-XR/CREATOR-PROJECT-SETUP)**
 installs missing approved requirements with consent, creates a pinned Creator
@@ -126,8 +163,8 @@ reviewed, backed-up repair are available separately.
 
 **[Creator Works MCP](https://github.com/BOBWORKS-XR/CREATOR-WORKS-UNITY-MCP)**
 connects compatible AI clients to Unity for inspection and focused editing.
-MCP remains standalone and retains its settings. Updating its desktop app does
-not silently replace bridges in every project.
+In 0.1.7, MCP ran as a separate app and kept its own settings. Updating that
+desktop app did not silently replace bridges in every project.
 
 **Creator Converter** is coming later. Moving Project Setup permanently into
 Hub is a separate [planned phase](docs/PROJECT-SETUP-IN-HUB.md), not this release.

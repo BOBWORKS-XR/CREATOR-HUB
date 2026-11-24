@@ -66,7 +66,7 @@ async function load(page, { recovery = false, preview = false, previewSupported,
   await page.goto('http://127.0.0.1:4188');
   await expect(page.locator('#check-updates')).toBeEnabled();
   if (recoveryError) {
-    await expect(page.locator('#action-error')).toContainText('Retained update state could not be read');
+    await expectRecoveryReadFailure(page, recoveryError);
     await expect(page.locator('#hub-update-button')).toBeDisabled();
     expect(state.calls.some(c => ['hub_preferences_status', 'convergence_status', 'app_inventory',
       'hub_update_status', 'install_hub_update', 'download_hub_update'].includes(c.command))).toBe(false);
@@ -86,6 +86,15 @@ async function load(page, { recovery = false, preview = false, previewSupported,
   return state;
 }
 
+async function expectRecoveryReadFailure(page, diagnostic) {
+  const alert = page.locator('#action-error');
+  await expect(alert).toBeVisible();
+  await expect(alert.locator(':scope > p')).toContainText('Hub could not finish starting');
+  await expect(alert.locator('summary')).toHaveText('Technical details');
+  await expect(alert.locator('details > p')).toHaveText('Error: ' + diagnostic);
+  await expect(alert.locator('details > p')).toBeHidden();
+}
+
 test('startup recovery read failure can resume through Check for updates after the state is readable', async ({ page }) => {
   const state = await load(page, { recovery: true, recoveryError: 'Recovery state temporarily unavailable' });
   state.recoveryError = null;
@@ -102,7 +111,7 @@ test('startup recovery retry keeps startup blocked on another read failure or a 
   const state = await load(page, { recovery: true, recoveryError: 'Recovery state temporarily unavailable' });
   await page.locator('#check-updates').click();
   await expect(page.locator('#check-updates')).toBeEnabled();
-  await expect(page.locator('#action-error')).toContainText('Retained update state could not be read');
+  await expectRecoveryReadFailure(page, state.recoveryError);
   expect(state.calls.filter(c => c.command === 'hub_update_recovery_status')).toHaveLength(2);
   state.recoveryError = null;
   state.recovery = { retained: true, message: 'Review the retained update before closing Hub.' };

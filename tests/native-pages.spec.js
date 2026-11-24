@@ -149,7 +149,11 @@ async function open(page, options = {}) {
           case 'update_codex_mcp_config': case 'update_claude_mcp_config': case 'update_claude_desktop_mcp_config':
           case 'update_antigravity_mcp_config': case 'update_opencode_mcp_config':
           case 'remove_codex_mcp_config': case 'remove_claude_mcp_config': case 'remove_claude_desktop_mcp_config':
-          case 'remove_antigravity_mcp_config': case 'remove_opencode_mcp_config':
+          case 'remove_antigravity_mcp_config': case 'remove_opencode_mcp_config': {
+            const id = name.replace(/^(update|remove)_|_mcp_config$/g, '').replace('claude_desktop', 'claudeDesktop');
+            clients.find(client => client.id === id).configured = name.startsWith('update_');
+            return null;
+          }
           case 'set_unity_custom_scripts': case 'set_unity_allow_all_tests': case 'install_unity_extension': return null;
           default: throw new Error('Unexpected feature command: ' + name);
         }
@@ -288,6 +292,17 @@ test('actual Root maps old pending app restoration directly without permission/b
   expect(await page.locator('iframe').count()).toBe(0);
   expect(await page.locator('#convergence-dialog')).not.toBeVisible();
   expect(await page.evaluate(() => calls.filter(call => ['start_hosted_app', 'hosted_app_call', 'stop_hosted_app'].includes(call.command)))).toEqual([]);
+});
+
+test('Home Help opens built-in connection assistance without starting a repair or support report', async ({ page }) => {
+  await open(page, { shell: true });
+  await page.locator('#context-help-open').click();
+  await page.getByText('My AI cannot see MCP tools', { exact: true }).click();
+  await page.getByRole('button', { name: 'Help me connect' }).click();
+  await expect(page.locator('#context-help-dialog')).not.toBeVisible();
+  await expect(field(page, 'mcp', 'assist-client')).toBeVisible();
+  await expect(field(page, 'mcp', 'assist-client')).toBeFocused();
+  for (const name of ['install_unity_extension', 'one_click_setup', 'save_config']) expect(await commands(page, name)).toEqual([]);
 });
 
 test('real direct pages mount with scoped IDs, original font and icons, no module globals or iframes', async ({ page }) => {
@@ -850,7 +865,9 @@ for (const partial of [false, true]) test(`failed explicit setup keeps the uncon
   await page.getByRole('dialog', { name: 'Review connection setup' }).getByRole('button', { name: 'Apply setup' }).click();
   await expect(field(page, 'mcp', 'error')).toContainText(partial ? 'earlier steps remain' : 'one_click_setup');
   await expect(field(page, 'mcp', 'project')).toHaveValue('/projects/Canonical/.');
-  expect((await commands(page, 'load_config')).length).toBe(1);
+  const sequence = await page.evaluate(() => calls.filter(c => c.command === 'feature_call')
+    .map(c => c.args.command).filter(n => n === 'load_config' || n === 'one_click_setup'));
+  expect(sequence).toEqual(['load_config', 'load_config', 'one_click_setup']);
   expect((await commands(page, 'save_config')).length).toBe(0);
   expect((await commands(page, 'one_click_setup')).length).toBe(1);
   expect(await page.evaluate(() => savedConfig.channels.find(channel => channel.id === savedConfig.active_channel_id).unity_project_path))
@@ -910,7 +927,10 @@ test('MCP errors do not mutate Setup and an unreleased native workflow stays loc
   await expect(field(page, 'mcp', 'error')).toContainText('update_codex_mcp_config');
   expect((await commands(page, 'update_codex_mcp_config')).length).toBe(1);
   await show(page, 'setup'); await expect(field(page, 'setup', 'error')).toBeHidden();
-  await show(page, 'mcp'); await page.evaluate(() => { window.failNext = 'finish_ui_operation'; });
+  await show(page, 'mcp'); await expect(field(page, 'mcp', 'retry')).toBeVisible();
+  await field(page, 'mcp', 'retry').click();
+  await expect(field(page, 'mcp', 'check')).toBeEnabled();
+  await page.evaluate(() => { window.failNext = 'finish_ui_operation'; });
   await field(page, 'mcp', 'check').click(); await expect(field(page, 'mcp', 'error')).toContainText('Operation state is unknown');
   await expect(field(page, 'mcp', 'setup')).toBeDisabled();
 });

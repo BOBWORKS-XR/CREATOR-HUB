@@ -15,6 +15,39 @@
 !ifmacrondef CheckIfAppIsRunning
   !error "Expected Tauri running-app macro is missing; review installer template"
 !endif
+
+!macro CreatorHubExtractPreflight productName
+  Push $4
+  StrCpy $4 0
+  ${Do}
+    ClearErrors
+    InitPluginsDir
+    ${If} $PLUGINSDIR != ""
+      SetOverwrite try
+      File /oname=$PLUGINSDIR\creator-hub-preflight.exe "${CREATOR_HUB_PREFLIGHT_EXE}"
+      SetOverwrite lastused
+      ${IfNot} ${Errors}
+        ${ExitDo}
+      ${EndIf}
+    ${EndIf}
+    IntOp $4 $4 + 1
+    ${If} $4 >= 12
+      ${IfNot} ${Silent}
+        SendMessage $HWNDPARENT ${WM_SETTEXT} 0 "STR:${productName}"
+        ShowWindow $HWNDPARENT ${SW_SHOW}
+        BringToFront
+      ${EndIf}
+      MessageBox MB_ICONSTOP|MB_RETRYCANCEL \
+        "Setup could not prepare its temporary safety check.$\r$\n$\r$\nWait a moment and choose Retry, or choose Cancel and try the update again later. Setup will not continue without the check." /SD IDCANCEL IDRETRY +3
+      SetErrorLevel 11
+      Abort
+      StrCpy $4 0
+    ${EndIf}
+    Sleep 500
+  ${Loop}
+  Pop $4
+!macroend
+
 !macroundef CheckIfAppIsRunning
 !macro CheckIfAppIsRunning executableName productName
   ; Tauri launches /UPDATE immediately before exiting. Allow that exit to
@@ -22,8 +55,7 @@
   ${Do}
   Push $2
   Push $3
-  InitPluginsDir
-  File /oname=$PLUGINSDIR\creator-hub-preflight.exe "${CREATOR_HUB_PREFLIGHT_EXE}"
+  !insertmacro CreatorHubExtractPreflight "${productName}"
   ${GetParameters} $2
   ClearErrors
   ${GetOptions} $2 "/UPDATE" $3

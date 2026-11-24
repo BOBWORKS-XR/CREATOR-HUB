@@ -4,6 +4,7 @@ mod capability_profiles;
 #[cfg(test)]
 mod capability_profiles_tests;
 mod claude_desktop;
+mod client_config_status;
 mod client_migration;
 mod client_ownership;
 mod client_recovery_ui;
@@ -125,6 +126,7 @@ struct ProjectSetupStatus {
     bridge_installed: bool,
     bridge_current: bool,
     state_status: String,
+    claude_project_entry: &'static str,
     sdk_profile: SdkProfileStatus,
 }
 
@@ -2019,117 +2021,58 @@ fn command_is_available(command: &str) -> bool {
     find_command_on_path(command).is_some()
 }
 
-fn codex_is_configured() -> bool {
-    fs::read_to_string(get_codex_config_path())
-        .map(|content| codex_config_is_configured(&content))
-        .unwrap_or(false)
-}
-
+#[cfg(test)]
 fn codex_config_is_configured(content: &str) -> bool {
-    let Ok(document) = content.parse::<toml_edit::Document>() else {
-        return false;
-    };
-    document
-        .get("mcp_servers")
-        .and_then(toml_edit::Item::as_table_like)
-        .is_some_and(|servers| {
-            [MCP_CLIENT_ID, LEGACY_MCP_CLIENT_ID]
-                .iter()
-                .any(|id| servers.get(id).is_some_and(toml_edit::Item::is_table_like))
-        })
-}
-
-fn claude_is_configured() -> bool {
-    fs::read_to_string(get_claude_config_path())
-        .ok()
-        .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
-        .and_then(|config| {
-            let servers = config.get("mcpServers")?;
-            servers
-                .get(MCP_CLIENT_ID)
-                .or_else(|| servers.get(LEGACY_MCP_CLIENT_ID))
-                .cloned()
-        })
-        .is_some()
-}
-
-fn antigravity_is_configured() -> bool {
-    fs::read_to_string(get_antigravity_config_path())
-        .ok()
-        .and_then(|content| {
-            if content.trim().is_empty() {
-                return None;
-            }
-            serde_json::from_str::<serde_json::Value>(&content).ok()
-        })
-        .and_then(|config| {
-            let servers = config.get("mcpServers")?;
-            servers
-                .get(MCP_CLIENT_ID)
-                .or_else(|| servers.get(LEGACY_MCP_CLIENT_ID))
-                .cloned()
-        })
-        .is_some()
-}
-
-fn opencode_is_configured() -> bool {
-    fs::read_to_string(get_opencode_config_path())
-        .ok()
-        .and_then(|content| parse_opencode_config(&content).ok())
-        .and_then(|config| {
-            let servers = config.get("mcp")?;
-            servers
-                .get(MCP_CLIENT_ID)
-                .or_else(|| servers.get(LEGACY_MCP_CLIENT_ID))
-                .cloned()
-        })
-        .is_some()
+    client_config_status::toml_entries(content) == Ok(true)
 }
 
 fn client_statuses() -> Vec<ClientStatus> {
+    use client_config_status::{from_file, json_entries, json_servers, toml_entries};
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    let report = |id: &str,
+                  name: &str,
+                  detected,
+                  path: PathBuf,
+                  parse: fn(&str) -> Result<bool, ()>| {
+        let checked = from_file(&path, parse);
+        ClientStatus {
+            id: id.into(), name: name.into(), detected, configured: checked == Ok(true),
+            config_path: path.to_string_lossy().into_owned(), supported: true,
+            issue: checked.err().map(|_| "Hub could not read this app's MCP settings. Check them in the app before making changes.".into()),
+        }
+    };
     vec![
-        ClientStatus {
-            id: "codex".to_string(),
-            name: "Codex".to_string(),
-            detected: home.join(".codex").is_dir() || command_is_available("codex"),
-            configured: codex_is_configured(),
-            config_path: get_codex_config_path().to_string_lossy().to_string(),
-            supported: true,
-            issue: None,
-        },
-        ClientStatus {
-            id: "claude".to_string(),
-            name: "Claude Code".to_string(),
-            detected: home.join(".claude").is_dir()
+        report(
+            "codex",
+            "Codex",
+            home.join(".codex").is_dir() || command_is_available("codex"),
+            get_codex_config_path(),
+            toml_entries,
+        ),
+        report(
+            "claude",
+            "Claude Code",
+            home.join(".claude").is_dir()
                 || get_claude_config_path().is_file()
                 || command_is_available("claude"),
-            configured: claude_is_configured(),
-            config_path: get_claude_config_path().to_string_lossy().to_string(),
-            supported: true,
-            issue: None,
-        },
+            get_claude_config_path(),
+            json_servers,
+        ),
         desktop_status(),
-        ClientStatus {
-            id: "antigravity".to_string(),
-            name: "Antigravity".to_string(),
-            detected: home.join(".gemini").is_dir()
-                || get_antigravity_config_path().is_file()
-                || command_is_available("antigravity"),
-            configured: antigravity_is_configured(),
-            config_path: get_antigravity_config_path().to_string_lossy().to_string(),
-            supported: true,
-            issue: None,
-        },
-        ClientStatus {
-            id: "opencode".to_string(),
-            name: "OpenCode".to_string(),
-            detected: get_opencode_config_path().is_file() || command_is_available("opencode"),
-            configured: opencode_is_configured(),
-            config_path: get_opencode_config_path().to_string_lossy().to_string(),
-            supported: true,
-            issue: None,
-        },
+        report(
+            "antigravity",
+            "Antigravity",
+            home.join(".gemini").is_dir() || command_is_available("antigravity"),
+            get_antigravity_config_path(),
+            client_config_status::antigravity_servers,
+        ),
+        report(
+            "opencode",
+            "OpenCode",
+            get_opencode_config_path().is_file() || command_is_available("opencode"),
+            get_opencode_config_path(),
+            |text| json_entries(&parse_opencode_config(text).map_err(|_| ())?, "mcp"),
+        ),
     ]
 }
 
@@ -2402,6 +2345,11 @@ fn project_setup_status(source_bridge: Option<&Path>, project_path: &Path) -> Pr
         bridge_installed: extension.installed,
         bridge_current: extension.current,
         state_status: state_status.to_string(),
+        claude_project_entry: if valid {
+            client_config_status::project_claude(project_path)
+        } else {
+            "unchecked"
+        },
         sdk_profile: project_sdk_profile(project_path),
     }
 }
