@@ -10,8 +10,24 @@ permissions:
   actions: read
 
 jobs:
+  reviewed-windows-027:
+    if: ${{ github.ref == 'refs/tags/v0.1.27' && github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.repository_id == '1364807512' }}
+    runs-on: windows-latest
+    timeout-minutes: 10
+    permissions: {contents: write, actions: read} # Draft reads need contents:write; no mutation steps.
+    steps:
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v6
+        with: {fetch-depth: 2, persist-credentials: false}
+      - uses: actions/setup-node@v6
+        with: {node-version: 24}
+      - run: npm ci --ignore-scripts
+      - name: Verify parent, tag, tested assets, signatures and feed size
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/verify-027-draft.cjs
   qualified-windows-draft:
-    if: ${{ ((github.ref_type == 'tag' && startsWith(github.ref_name, 'v')) || github.event_name == 'workflow_dispatch') && github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.repository_id == '1364807512' }}
+    if: ${{ github.ref != 'refs/tags/v0.1.27' && ((github.ref_type == 'tag' && startsWith(github.ref_name, 'v')) || github.event_name == 'workflow_dispatch') && github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.repository_id == '1364807512' }}
     runs-on: windows-latest
     timeout-minutes: 20
     permissions:
