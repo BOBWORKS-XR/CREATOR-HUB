@@ -401,6 +401,17 @@ async function main() {
       if (lastTool === 'mcp') await continueMcpGuide(page);
     } else { assert.equal(observedTicket, undefined); await direct.checkHome(page); }
     assert.equal(fs.existsSync(ticket), false);
+    // Observe a fresh client before any native review or route preparation by the harness.
+    const expected = target.binding.target.manifest.modules.mcp.version;
+    const beforeReview = async () => {
+      const spec=JSON.parse(direct.readEvidence(selectedPath)).mcpServers['creator-works']; assert.equal(spec.command,newRoute.command);
+      const c=new Client({name:'unassisted-restart-review',version:'1'});
+      try {await c.connect(new StdioClientTransport({command:spec.command,args:spec.args,env:{...process.env,...spec.env},stderr:'ignore'})); await roundTrip(c); return c.getServerVersion().version;}finally{await c.close();}
+    };
+    const first=await beforeReview(); if(first!==expected) await new Promise(resolve=>setTimeout(resolve,15000));
+    const afterGrace=await beforeReview();
+    report.unassisted={first,afterGrace,expected,generation:JSON.parse(fs.readFileSync(newRoute.active,'utf8')).generation,view:restore?lastTool:'home'};
+    fs.writeFileSync(path.join(out,'unassisted-restart.json'),JSON.stringify(report.unassisted),{flag:'wx'});
     await direct.prepareManagedRoute(page, { clientConfig, active: newRoute.active,
       approve: () => { throw Error('Existing physical route must not request new permission'); } });
     report.afterRoute = active('0.1.28');

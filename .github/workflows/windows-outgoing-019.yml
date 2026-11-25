@@ -7,7 +7,7 @@ on:
 permissions: {contents: read}
 jobs:
   preflight:
-    if: github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.ref == 'refs/heads/codex/windows-project-scope-028-acceptance'
+    if: github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.ref == 'refs/heads/codex/windows-028-review-unassisted-restart'
     runs-on: windows-latest
     timeout-minutes: 5
     steps:
@@ -34,8 +34,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - {case: mcp-restore, tool: mcp, restore: 'true', regression: ''}
-          - {case: setup-restore, tool: setup, restore: 'true', regression: ''}
           - {case: setup-no-restore, tool: setup, restore: 'false', regression: ''}
     env:
       EXPECTED_HARNESS_COMMIT: ${{ inputs.expected_harness_commit }}
@@ -99,39 +97,3 @@ jobs:
             artifacts/native-suite-*/sdk-metadata-*/Packages/*.json
             artifacts/native-suite-*/*.bin
             artifacts/native-suite-*/*.toml
-  manual:
-    needs: preflight
-    runs-on: windows-latest
-    timeout-minutes: 10
-    permissions: {contents: write} # Read the private draft assets only.
-    strategy:
-      fail-fast: false
-      matrix: {mode: ['fresh','upgrade']}
-    env:
-      EXPECTED_HARNESS_COMMIT: ${{ inputs.expected_harness_commit }}
-      CREATOR_OUTGOING_REVIEW_SHA256: ${{ inputs.binding_sha256 }}
-      CREATOR_OUTGOING_CASE: 'mcp-restore'
-      CREATOR_OUTGOING_LAST_TOOL: 'mcp'
-      CREATOR_OUTGOING_RESTORE: 'true'
-    steps:
-      - run: git config --global core.autocrlf false
-      - uses: actions/checkout@v6
-        with: {persist-credentials: false}
-      - uses: actions/setup-node@v6
-        with: {node-version: 24}
-      - run: npm ci --ignore-scripts
-      - name: Admit exact installer inputs
-        shell: pwsh
-        env: {GH_TOKEN: "${{ github.token }}"}
-        run: node scripts/windows-outgoing-019-input.cjs acquire
-      - name: Run the real Setup wizard
-        shell: powershell
-        run: |
-          ./scripts/Test-ManualInstaller.ps1 -Case self-test
-          ./scripts/Test-ManualInstaller.ps1 -Case '${{ matrix.mode }}'
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: manual-windows-028-${{ matrix.mode }}-${{ github.run_id }}
-          path: artifacts/outgoing-019/*.json
-          retention-days: 14

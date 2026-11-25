@@ -14,3 +14,5 @@ test('Windows Editor lookup compares physical path spelling without equating dif
 });
 
 test('relabeling the old generation or server cannot qualify',()=>{for(const key of ['generation','manifest']) {const b=structuredClone(target.binding);b.target[key]=b.baseline[key];assert.throws(()=>target.validateBindingShape(b));}});
+
+test('observe real client before manual route preparation and verify in receipt',()=>{const d=fs.readFileSync(path.join(__dirname,'windows-outgoing-019-driver.cjs'),'utf8'),i=fs.readFileSync(path.join(__dirname,'windows-outgoing-019-input.cjs'),'utf8');assert.ok(d.indexOf('const afterGrace=await beforeReview()')>d.indexOf('await observeAutomaticSuccessor({ hub,'));assert.ok(d.indexOf('const afterGrace=await beforeReview()')<d.indexOf('await direct.prepareManagedRoute(page, { clientConfig, active: newRoute.active'));assert.match(i,/assert.equal\(report.unassisted\?\.afterGrace,binding.target.manifest.modules.mcp.version/);});

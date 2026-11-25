@@ -84,6 +84,7 @@ function checkMigrationReceipt(report) {
   }
 }
 function checkReceipt(report, rows, config, env = process.env) {
+  assert.equal(report.unassisted?.afterGrace,binding.target.manifest.modules.mcp.version,'Fresh client before connection review on Home');
   assert.deepEqual(report.preservedProjectScope,['automatic-restart','normal-restart']);
   assert.equal(report.customEditorFoundInBaseline, true); assert.equal(report.customEditorFoundInTarget, true);
   target.assertBound(config); assert.equal(report.kind, target.KIND); assert.equal(report.sourceCommit, binding.target.source.commit);
