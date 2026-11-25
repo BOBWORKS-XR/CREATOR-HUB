@@ -14,3 +14,16 @@ test('Windows Editor lookup compares physical path spelling without equating dif
 });
 
 test('relabeling the old generation or server cannot qualify',()=>{for(const key of ['generation','manifest']) {const b=structuredClone(target.binding);b.target[key]=b.baseline[key];assert.throws(()=>target.validateBindingShape(b));}});
+
+test('old first client cannot be rescued by a later manual connection',()=>{
+  const r={phase:'automatic',view:'home',configUnchanged:true,version:'2.7.10',generation:target.binding.target.generation,roundTrip:true,assisted:'2.7.11'};
+  assert.throws(()=>require('./unassisted.cjs').check(r,target.binding,'automatic','home',()=>{}),/wrong runtime/);
+});
+test('both restarts probe before manual review; baseline consent remains',()=>{
+  const d=fs.readFileSync(path.join(__dirname,'windows-outgoing-019-driver.cjs'),'utf8');
+  assert.equal(d.split('await direct.prepareManagedRoute(page,').length,2);
+  assert.ok(d.includes('prepareManagedRoute(page, { clientConfig, active: oldRoute.active'));
+  assert.ok(d.indexOf("await probe('automatic'")>d.indexOf('await observeAutomaticSuccessor({ hub,'));
+  assert.ok(d.indexOf("await probe('automatic'")<d.indexOf("if (restore && lastTool === 'mcp') await continueMcpGuide(page)"));
+  assert.ok(d.indexOf("await probe('normal'")>d.indexOf('report.normalRestartRoot = rootRecord'));
+});
