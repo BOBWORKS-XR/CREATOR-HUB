@@ -76,37 +76,45 @@ fn pick_parent_folder(app: tauri::AppHandle) -> Result<Option<String>, String> {
 async fn create_project(
     app: tauri::AppHandle,
     request: CreateRequest,
-) -> Result<CreationResult, String> {
+) -> Result<creation_sdk::CreationOutcome, String> {
     let operation = lifecycle::LIFECYCLE.command()?;
     tauri::async_runtime::spawn_blocking(move || {
         let _operation = operation;
         let _exclusive = setup_operation(&bootstrap::OPERATION)?;
-        logic::creation_target(&request)?;
-        let sdk = creation_sdk::resolve(&request)?;
-        bootstrap::ensure(
-            &request,
-            |plan| approve_installation(&app, plan),
-            |progress| hosted::emit(&app, "requirements-progress", progress),
-        )?;
-        if !bootstrap::licence_ready(|progress| hosted::emit(&app, "requirements-progress", progress))? {
-            if !logic::probe_environment().hub_installed {
-                bootstrap::ensure_activation_hub(&request,
-                    |plan| approve_installation(&app, plan),
-                    |progress| hosted::emit(&app, "requirements-progress", progress))?;
-            }
-            let open = app.dialog().message("Unity is installed, but an active Unity licence could not be confirmed.\n\nComplete any first-run setup, sign in and activate your licence in Unity Hub, then return to Setup and choose Create and validate project again. Your installed requirements will be reused. No project files have been created.\n\nOpen Unity Hub now?")
-                .title("Unity activation required")
-                .buttons(MessageDialogButtons::OkCancelCustom("Open Unity Hub".into(), "Not now".into()))
-                .blocking_show();
-            if open { logic::launch_hub()?; }
-            return Err("Unity licence activation is required. Finish activation in Unity Hub, then choose Create and validate project again. Installed requirements were kept; no project was created.".into());
-        }
-        logic::create_project_with_sdk(request, sdk, |progress| {
-            hosted::emit(&app, "setup-progress", progress);
+        creation_sdk::checked_create(request, creation_sdk::registry_lookup, |request, sdk| {
+            create_verified_project(&app, request, sdk)
         })
     })
     .await
     .map_err(|error| format!("Setup worker failed: {error}"))?
+}
+
+fn create_verified_project(
+    app: &tauri::AppHandle,
+    request: CreateRequest,
+    sdk: creation_sdk::Selection,
+) -> Result<CreationResult, String> {
+    bootstrap::ensure(
+        &request,
+        |plan| approve_installation(app, plan),
+        |progress| hosted::emit(app, "requirements-progress", progress),
+    )?;
+    if !bootstrap::licence_ready(|progress| hosted::emit(app, "requirements-progress", progress))? {
+        if !logic::probe_environment().hub_installed {
+            bootstrap::ensure_activation_hub(&request,
+                |plan| approve_installation(app, plan),
+                |progress| hosted::emit(app, "requirements-progress", progress))?;
+        }
+        let open = app.dialog().message("Unity is installed, but an active Unity licence could not be confirmed.\n\nComplete any first-run setup, sign in and activate your licence in Unity Hub, then return to Setup and choose Create and validate project again. Your installed requirements will be reused. No project files have been created.\n\nOpen Unity Hub now?")
+            .title("Unity activation required")
+            .buttons(MessageDialogButtons::OkCancelCustom("Open Unity Hub".into(), "Not now".into()))
+            .blocking_show();
+        if open { logic::launch_hub()?; }
+        return Err("Unity licence activation is required. Finish activation in Unity Hub, then choose Create and validate project again. Installed requirements were kept; no project was created.".into());
+    }
+    logic::create_project_with_sdk(request, sdk, |progress| {
+        hosted::emit(app, "setup-progress", progress);
+    })
 }
 
 fn approve_installation(app: &tauri::AppHandle, plan: &bootstrap::Plan) -> bool {

@@ -6,6 +6,7 @@ import * as path from "path";
 import { BanterMCPConfig, createConfigForProject } from "./config.js";
 import { projectListPage } from "./project-list.js";
 import { assertOrdinaryPath, readBoundedJson } from "./bounded-json.js";
+import { inspectBridgeInstance, isLiveHeartbeat, type BridgeInstanceDescriptor, type BridgeInstanceEvidence } from "./unity-bridge-transport.js";
 
 interface LauncherProjectChannel {
   id?: string;
@@ -18,22 +19,6 @@ interface LauncherProjectChannel {
 interface LauncherConfigFile {
   channels?: LauncherProjectChannel[];
   active_channel_id?: string | null;
-}
-
-interface ProjectInstanceState {
-  editorInstanceId?: string;
-  bridgeVersion?: string;
-  protocolVersion?: number;
-  minimumProtocolVersion?: number;
-  capabilities?: string[];
-  preferredTransport?: string;
-  pipeName?: string;
-  projectPath?: string;
-  projectName?: string;
-  unityVersion?: string;
-  processId?: number;
-  processStartedAt?: number;
-  updatedAt?: number;
 }
 
 export interface UnityProjectRoute {
@@ -49,7 +34,7 @@ export interface UnityProjectRoute {
   validProject: boolean;
   bridgeInstalled: boolean;
   editorState: "live" | "stale" | "not_seen";
-  editorInstance?: ProjectInstanceState;
+  editorInstance?: BridgeInstanceDescriptor;
   sessionRegistered: boolean;
 }
 
@@ -383,8 +368,8 @@ function buildProjectRoute(
   const projectSettingsPath = path.join(candidate.projectPath, "ProjectSettings");
   const statePath = path.join(candidate.projectPath, ".bantworks-mcp", "state");
   const bridgePath = path.join(assetsPath, "Editor", "BanterMCPBridge.cs");
-  const instance = readProjectInstance(path.join(statePath, "project-instance.json"), candidate.projectPath);
-  const editorState = editorHeartbeatState(statePath, candidate.projectPath, instance?.updatedAt);
+  const evidence = inspectBridgeInstance(statePath, candidate.projectPath);
+  const editorState = editorHeartbeatState(statePath, candidate.projectPath, evidence);
   const channelEnabled = candidate.channels.length === 0 || candidate.channels.some((channel) => channel.enabled !== false);
   const projectName = candidate.channels.find((channel) => channel.name)?.name || path.basename(candidate.projectPath);
   const fromEnvironment = candidate.fromEnvironment || canonicalPathKey(candidate.projectPath) === canonicalPathKey(environmentProjectPath);
@@ -404,38 +389,17 @@ function buildProjectRoute(
     validProject: fs.existsSync(assetsPath) && fs.existsSync(projectSettingsPath),
     bridgeInstalled: fs.existsSync(bridgePath),
     editorState,
-    editorInstance: instance,
+    editorInstance: evidence.descriptor,
     sessionRegistered: false,
   };
 }
 
-function readProjectInstance(instancePath: string, root: string): ProjectInstanceState | undefined {
-  try {
-    assertOrdinaryPath(instancePath, root);
-    const value = readBoundedJson(instancePath, 65536);
-    if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
-    const raw = value as Record<string, unknown>;
-    const result: Record<string, unknown> = {};
-    for (const key of ["editorInstanceId", "bridgeVersion", "preferredTransport", "pipeName", "projectPath", "projectName", "unityVersion"]) {
-      if (typeof raw[key] === "string" && raw[key].length <= 4096) result[key] = raw[key];
-    }
-    for (const key of ["protocolVersion", "minimumProtocolVersion", "processId", "processStartedAt", "updatedAt"]) {
-      if (typeof raw[key] === "number" && Number.isFinite(raw[key]) && raw[key] >= 0) result[key] = raw[key];
-    }
-    if (Array.isArray(raw.capabilities) && raw.capabilities.length <= 128 &&
-      raw.capabilities.every(item => typeof item === "string" && item.length <= 128)) result.capabilities = raw.capabilities;
-    return result as ProjectInstanceState;
-  } catch {
-    return undefined;
-  }
-}
-
-export function editorHeartbeatState(stateDir: string, root: string, instanceTimestamp: unknown): UnityProjectRoute["editorState"] {
-  const stamp = typeof instanceTimestamp === "number" && Number.isSafeInteger(instanceTimestamp) && instanceTimestamp >= 0
-    ? instanceTimestamp : readTimestamp(path.join(stateDir, "editor-state.json"), root);
-  if (typeof stamp !== "number" || !Number.isFinite(stamp) || stamp <= 0) return "not_seen";
-  const age = Date.now() - stamp;
-  return age >= 0 && age <= 10_000 ? "live" : "stale";
+export function editorHeartbeatState(stateDir: string, root: string, evidence: BridgeInstanceEvidence): UnityProjectRoute["editorState"] {
+  // A legacy timestamp has no project identity and cannot overrule a rejected descriptor.
+  if (evidence.error) return "not_seen";
+  const stamp = evidence.descriptor?.updatedAt ?? readTimestamp(path.join(stateDir, "editor-state.json"), root);
+  if (stamp === undefined || !Number.isSafeInteger(stamp) || stamp <= 0) return "not_seen";
+  return isLiveHeartbeat(stamp) ? "live" : "stale";
 }
 
 function readTimestamp(statePath: string, root: string): number | undefined {

@@ -9,8 +9,8 @@ import { MCP_VERSION } from "../lib/version.js";
 import { editorHeartbeatState } from "../lib/project-router.js";
 import {
   BRIDGE_PROTOCOL_VERSION,
+  inspectBridgeInstance,
   namedPipeEligibility,
-  readBridgeInstanceDescriptor,
 } from "../lib/unity-bridge-transport.js";
 
 const STATE_FILES = [
@@ -89,7 +89,8 @@ export function getBridgeStatus(config: BanterMCPConfig): BridgeStatusResult {
   const bridgeInstalled = fs.existsSync(bridgePath);
   const stateDirectoryExists = fs.existsSync(config.mcpStatePath);
   const commandsDirectoryExists = fs.statSync(config.mcpCommandsPath, { throwIfNoEntry: false })?.isDirectory() === true;
-  const descriptor = readBridgeInstanceDescriptor(config);
+  const evidence = inspectBridgeInstance(config.mcpStatePath, config.unityProjectPath);
+  const descriptor = evidence.descriptor;
   const now = Date.now();
 
   const stateFiles = STATE_FILES.map((name): StateFileStatus => {
@@ -108,7 +109,7 @@ export function getBridgeStatus(config: BanterMCPConfig): BridgeStatusResult {
     };
   });
 
-  const heartbeat = editorHeartbeatState(config.mcpStatePath, config.unityProjectPath, descriptor?.updatedAt);
+  const heartbeat = editorHeartbeatState(config.mcpStatePath, config.unityProjectPath, evidence);
   const stateStatus = heartbeat === "live" ? "fresh" : heartbeat === "not_seen" ? "missing" : "stale";
   const bridgeProtocol = descriptor?.protocolVersion;
   const minimumBridgeProtocol = descriptor?.minimumProtocolVersion ?? bridgeProtocol;
@@ -129,6 +130,8 @@ export function getBridgeStatus(config: BanterMCPConfig): BridgeStatusResult {
     nextSteps.push("Point UNITY_PROJECT_PATH at a Unity project root containing an Assets folder.");
   } else if (!bridgeInstalled) {
     nextSteps.push("Install unity-extension/Editor/BanterMCPBridge.cs into Assets/Editor, then let Unity compile it.");
+  } else if (evidence.error) {
+    nextSteps.push(`${evidence.error} Open the selected project in Unity and wait for its own Editor heartbeat, then check again.`);
   } else if (!stateDirectoryExists || stateStatus === "missing") {
     nextSteps.push("Open the project in Unity and wait for Creator Works MCP to export state.");
   } else if (stateStatus === "stale") {

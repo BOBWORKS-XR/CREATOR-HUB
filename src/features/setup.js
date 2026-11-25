@@ -81,7 +81,7 @@ export function mount(root, api) {
   let latestPending = false;
   let latestTimer;
   let selectedSdk = null;
-  let sdkLookupError = null;
+  let sdkSelectionError = null;
   let disposed = false;
   let refreshLatestOnShow = false;
   let hub = null;
@@ -112,10 +112,10 @@ export function mount(root, api) {
     $('import-guidance').hidden = !inspectedProjectPath;
     $('latest-refresh').disabled = latestPending;
     $('sdk-retry').disabled = latestPending || Boolean(created);
-    $('sdk-tested').hidden = !sdkLookupError || Boolean(created) || !stableSdkVersion(environment?.recipe?.creatorSdkVersion);
+    $('sdk-tested').hidden = !sdkSelectionError || Boolean(created) || !stableSdkVersion(environment?.recipe?.creatorSdkVersion);
     $('sdk-tested').disabled = latestPending || selectedSdk?.tested === true;
     $('sdk-tested').textContent = `Use tested SDK ${environment?.recipe?.creatorSdkVersion || ''}`;
-    $('sdk-selection').textContent = latestPending && !created ? 'Checking latest stable Creator SDK... No SDK selected.'
+    $('sdk-selection').textContent = latestPending && !selectedSdk && !created ? 'Checking latest stable Creator SDK... No SDK selected.'
       : selectedSdk ? `Selected: Creator SDK ${selectedSdk.version} (${selectedSdk.tested ? 'tested fallback, not latest' : 'latest stable'}).`
       : 'No SDK selected.';
     const declaredUrp = !selectedSdk?.tested && selectedSdk?.version === latestSdk?.version
@@ -124,16 +124,17 @@ export function mount(root, api) {
     $('sdk-package-plan').hidden = !urpOverride;
     $('sdk-package-plan').textContent = urpOverride
       ? `URP ${environment.recipe.urpVersion} will be validated with this SDK; its metadata declares ${declaredUrp}. The project is not ready until Unity validation passes.` : '';
-    $('sdk-error').hidden = !sdkLookupError || Boolean(created);
-    $('sdk-error').textContent = sdkLookupError ? `${sdkLookupError} Retry the latest SDK lookup or explicitly choose the tested fallback.` : '';
+    $('sdk-error').hidden = !sdkSelectionError || Boolean(created);
+    $('sdk-error').textContent = sdkSelectionError ? `${sdkSelectionError} Retry the latest SDK lookup or explicitly choose the tested fallback.` : '';
     $('register').hidden = !created || Boolean(hub?.registered);
     $('restart').hidden = !hub?.registered || !hub?.refreshPending || !['windows', 'linux'].includes(environment?.platform);
   }
-  async function refreshLatestSdk() {
+  async function refreshLatestSdk(chooseLatest = false) {
     if (latestPending || disposed || operation === 'create') return;
     latestPending = true;
-    if (!created) selectedSdk = null;
-    sdkLookupError = null;
+    // Existing-project refreshes must not undo a refusal or an explicit tested choice.
+    const updateSelection = !created && (chooseLatest || !(selectedSdk && (selectedSdk.tested || sdkSelectionError)));
+    if (updateSelection) { selectedSdk = null; sdkSelectionError = null; }
     $('latest-status').textContent = 'Checking latest Creator SDK requirements...';
     $('latest-error').hidden = true;
     controls();
@@ -152,7 +153,7 @@ export function mount(root, api) {
         throw new Error('Latest SDK requirements were incomplete.');
       }
       latestSdk = value;
-      if (!created) selectedSdk = { version: value.version, tested: false };
+      if (updateSelection) selectedSdk = { version: value.version, tested: false };
       $('latest-status').textContent = `Latest Creator SDK: ${value.version}. ${value.unityVersion ? `Unity requirement: ${value.unityVersion}.` : 'No minimum Unity version declared.'}`;
       $('latest-dependencies').textContent = [
         ['com.unity.render-pipelines.universal', 'URP'],
@@ -161,7 +162,7 @@ export function mount(root, api) {
       ].filter(([name]) => value.dependencies[name]).map(([name, label]) => `${label}: ${value.dependencies[name]}`).join(' · ');
     } catch (error) {
       if (disposed) return;
-      sdkLookupError = `Latest SDK unavailable. ${text(error)}`;
+      if (updateSelection) sdkSelectionError = `Latest SDK unavailable. ${text(error)}`;
       $('latest-status').textContent = latestSdk ? `Last retrieved Creator SDK: ${latestSdk.version}. ${latestSdk.unityVersion ? `Unity requirement: ${latestSdk.unityVersion}.` : 'No minimum Unity version declared.'}` : 'Latest SDK requirements unavailable.';
       $('latest-error').textContent = `${text(error)} You can still inspect this project or open the SDK guide.`;
       $('latest-error').hidden = false;
@@ -243,9 +244,9 @@ export function mount(root, api) {
     return run(async () => { renderEnvironment(await page.call('probe_environment')); }, 'Checking requirements');
   });
   page.on($('latest-refresh'), 'click', () => { if (!page.busy()) void refreshLatestSdk(); });
-  page.on($('sdk-retry'), 'click', () => { if (!page.busy() && !created) void refreshLatestSdk(); });
+  page.on($('sdk-retry'), 'click', () => { if (!page.busy() && !created) void refreshLatestSdk(true); });
   page.on($('sdk-tested'), 'click', () => {
-    if (page.busy() || created || latestPending || !sdkLookupError || !stableSdkVersion(environment?.recipe?.creatorSdkVersion)) return;
+    if (page.busy() || created || latestPending || !sdkSelectionError || !stableSdkVersion(environment?.recipe?.creatorSdkVersion)) return;
     selectedSdk = { version: environment.recipe.creatorSdkVersion, tested: true };
     controls();
   });
@@ -268,10 +269,16 @@ export function mount(root, api) {
     if (created || !environment || !$('name').value.trim() || !$('parent').value.trim()) throw new Error('Enter a project name and folder.');
     if (latestPending || !selectedSdk) throw new Error('Wait for the latest SDK lookup, retry it, or explicitly choose the tested SDK before creating a project.');
     startActivity('create', 'Creating project', 'Checking project path and Unity requirements.'); $('created').replaceChildren();
+    sdkSelectionError = null;
+    controls();
     let creationError;
     try {
       const sdkChoice = selectedSdk.tested ? { useTestedSdk: true } : { sdkVersion: selectedSdk.version };
       const value = await page.call('create_project', { request: { projectName: $('name').value, parentDirectory: $('parent').value, ...sdkChoice } });
+      if (!selectedSdk.tested && value?.success === false && value.failureCode === 'sdkPrecreationRefused') {
+        sdkSelectionError = `SDK ${selectedSdk.version} was refused before project creation. ${value.message}`;
+        throw new Error(value.message);
+      }
       lines($('created'), [value.message, value.projectPath, value.logPath ? `Log: ${value.logPath}` : null]);
       if (!value.success) throw new Error(value.message || 'Project validation failed. Review the local log before retrying.');
       created = value.projectPath; showHub(value.hub);
@@ -286,7 +293,7 @@ export function mount(root, api) {
     }
   }, 'Creating project'));
   page.on($('open'), 'click', () => run(() => page.call('open_project', { path: created }), 'Opening project'));
-  page.on($('another'), 'click', () => { if (page.busy()) return; created = null; hub = null; $('created').replaceChildren(); $('hub-result').textContent = ''; void refreshLatestSdk(); $('name').focus(); });
+  page.on($('another'), 'click', () => { if (page.busy()) return; created = null; hub = null; $('created').replaceChildren(); $('hub-result').textContent = ''; void refreshLatestSdk(true); $('name').focus(); });
   page.on($('register'), 'click', () => run(async () => showHub(await page.call('register_project', { path: created })), 'Adding to Unity Hub'));
   page.on($('restart'), 'click', () => run(async () => { if (await page.call('restart_hub')) showHub({ ...hub, refreshPending: false, message: 'Unity Hub restarted. Check its Projects list.' }); }, 'Restarting Unity Hub'));
   page.on($('existing-path'), 'input', clearInspection);

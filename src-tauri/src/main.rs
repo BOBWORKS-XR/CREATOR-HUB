@@ -517,6 +517,8 @@ fn main() {
                 }
                 #[cfg(unix)]
                 self_update::initialize(app.handle());
+                #[cfg(all(windows, feature = "integrated-features"))]
+                builtin::refresh_installed_shared_mcp(app.handle());
                 #[cfg(not(unix))]
                 let _ = app;
             }

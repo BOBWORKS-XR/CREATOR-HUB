@@ -4,6 +4,7 @@ import * as net from "net";
 import * as path from "path";
 
 import type { BanterMCPConfig } from "./config.js";
+import { assertOrdinaryPath, readBoundedJson } from "./bounded-json.js";
 import { atomicWriteFileSync } from "./files.js";
 
 export const BRIDGE_PROTOCOL_VERSION = 1;
@@ -77,9 +78,15 @@ export interface BridgeInstanceDescriptor {
   capabilities?: string[];
   preferredTransport?: string;
   pipeName?: string;
+  unityVersion?: string;
   processId?: number;
+  processStartedAt?: number;
   updatedAt?: number;
 }
+
+export type BridgeInstanceEvidence =
+  | { descriptor?: BridgeInstanceDescriptor; error?: never }
+  | { descriptor?: never; error: string };
 
 interface PipeAttempt {
   status: "acknowledged" | "sent_without_acknowledgement" | "unavailable";
@@ -100,13 +107,10 @@ export async function dispatchUnityBridgeCommand(
     deliveryPhase: "not_sent",
   };
   try {
-    const descriptor = readBridgeInstanceDescriptor(config);
+    const evidence = inspectBridgeInstance(config.mcpStatePath, config.unityProjectPath);
+    if (evidence.error) throw new Error(evidence.error);
+    const descriptor = evidence.descriptor;
     context.editorInstanceId = descriptor?.editorInstanceId;
-    if (descriptor?.projectPath && !pathsReferToSameProject(descriptor.projectPath, config.unityProjectPath)) {
-      throw new Error(
-        `Unity bridge project mismatch: selected '${config.unityProjectPath}', descriptor reports '${descriptor.projectPath}'.`
-      );
-    }
     const payload = {
       ...command,
       id: commandId,
@@ -170,12 +174,49 @@ export async function dispatchUnityBridgeCommand(
 export function readBridgeInstanceDescriptor(
   config: BanterMCPConfig
 ): BridgeInstanceDescriptor | undefined {
-  const descriptorPath = path.join(config.mcpStatePath, "project-instance.json");
+  // Metadata consumers (including receipt correlation) do not require a valid heartbeat.
+  try { return readInstanceObject(config.mcpStatePath, config.unityProjectPath); }
+  catch { return undefined; }
+}
+
+function readInstanceObject(statePath: string, projectPath: string): Record<string, unknown> | undefined {
+  const file = path.join(statePath, "project-instance.json");
+  assertOrdinaryPath(file, projectPath);
+  const value = readBoundedJson(file, 65536);
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+
+export function inspectBridgeInstance(statePath: string, projectPath: string): BridgeInstanceEvidence {
+  const invalid = { error: "The Unity bridge instance descriptor is invalid or unreadable." };
   try {
-    const descriptor = JSON.parse(fs.readFileSync(descriptorPath, "utf-8")) as BridgeInstanceDescriptor;
-    return descriptor && typeof descriptor === "object" ? descriptor : undefined;
-  } catch {
-    return undefined;
+    const raw = readInstanceObject(statePath, projectPath);
+    if (!raw) return invalid;
+    if (raw.projectPath !== undefined) {
+      const reported = raw.projectPath;
+      if (typeof reported !== "string" || reported.length > 4096 || /[\x00-\x1f\x7f]/.test(reported) ||
+        !path.isAbsolute(reported.trim())) return invalid;
+      // Compare the reported spelling only. Never resolve a descriptor-supplied path on disk.
+      if (!pathsReferToSameProject(reported, projectPath)) {
+        return { error: `Unity bridge project mismatch: selected '${projectPath}', descriptor reports '${reported}'.` };
+      }
+    }
+    const descriptor: BridgeInstanceDescriptor = {};
+    for (const key of ["editorInstanceId", "bridgeVersion", "preferredTransport", "pipeName", "projectPath", "projectName", "unityVersion"] as const) {
+      if (typeof raw[key] === "string" && raw[key].length <= 4096) descriptor[key] = raw[key];
+    }
+    for (const key of ["protocolVersion", "minimumProtocolVersion", "updatedAt"] as const) {
+      if (raw[key] === undefined) continue;
+      if (typeof raw[key] !== "number" || !Number.isSafeInteger(raw[key]) || raw[key] < 0) return invalid;
+      descriptor[key] = raw[key];
+    }
+    for (const key of ["processId", "processStartedAt"] as const) {
+      if (typeof raw[key] === "number" && Number.isFinite(raw[key]) && raw[key] >= 0) descriptor[key] = raw[key];
+    }
+    if (Array.isArray(raw.capabilities) && raw.capabilities.length <= 128 &&
+      raw.capabilities.every(item => typeof item === "string" && item.length <= 128)) descriptor.capabilities = raw.capabilities;
+    return { descriptor };
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT" ? {} : invalid;
   }
 }
 
@@ -188,10 +229,7 @@ export function namedPipeEligibility(
   if (!descriptor) {
     return { eligible: false, reason: "The bridge instance descriptor is unavailable." };
   }
-  if (
-    typeof descriptor.updatedAt !== "number" ||
-    Date.now() - descriptor.updatedAt > BRIDGE_HEARTBEAT_MAX_AGE_MS
-  ) {
+  if (!isLiveHeartbeat(descriptor.updatedAt)) {
     return { eligible: false, reason: "The bridge instance descriptor is stale." };
   }
   if (
@@ -213,6 +251,12 @@ export function namedPipeEligibility(
     return { eligible: false, reason: "The bridge pipe name is missing or invalid." };
   }
   return { eligible: true };
+}
+
+export function isLiveHeartbeat(stamp: number | undefined): boolean {
+  if (stamp === undefined || !Number.isSafeInteger(stamp) || stamp <= 0) return false;
+  const age = Date.now() - stamp;
+  return age >= 0 && age <= BRIDGE_HEARTBEAT_MAX_AGE_MS;
 }
 
 async function dispatchOverFiles(

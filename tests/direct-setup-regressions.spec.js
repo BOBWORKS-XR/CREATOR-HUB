@@ -45,6 +45,10 @@ async function openSetup(page, options = {}) {
           case 'probe_environment': return structuredClone(fixture.environment);
           case 'latest_sdk_requirements': return latest;
           case 'create_project':
+            if (fixture.creationOutcome === 'sdkRefusal') return { success: false, failureCode: 'sdkPrecreationRefused',
+              message: 'The SDK requires URP 18.0.0; this creation recipe uses 17.3.0. No project files were created.' };
+            if (fixture.creationOutcome === 'partial') return { success: false, projectPath: fields.request.parentDirectory + '/' + fields.request.projectName,
+              logPath: '/fixture/unity.log', message: 'SDK verification failed during Unity validation.' };
             if (fixture.creationOutcome === 'throw') throw new Error('Selected SDK metadata could not be fetched. No project files were created.');
             return { success: fixture.creationOutcome === 'success', projectPath: fields.request.parentDirectory + '/' + fields.request.projectName,
               message: fixture.creationOutcome === 'success' ? 'Validated project' : 'Selected SDK requirements could not be resolved. No project files were created.',
@@ -277,7 +281,7 @@ for (const name of Object.keys(latestSdk.dependencies)) for (const [issue, versi
   }]);
 });
 
-for (const creationOutcome of ['throw', 'failure']) test(`backend metadata ${creationOutcome} keeps fields and explicit SDK retry available`, async ({ page }) => {
+for (const creationOutcome of ['throw', 'failure']) test(`unidentified backend ${creationOutcome} keeps fields and never infers fallback from wording`, async ({ page }) => {
   await openSetup(page, { creationOutcome });
   await field(page, 'name').fill('Keep on backend refusal'); await field(page, 'parent').fill('/keep/refusal');
   await field(page, 'create').click();
@@ -295,6 +299,57 @@ for (const creationOutcome of ['throw', 'failure']) test(`backend metadata ${cre
   expect((await calls(page, 'create_project'))[1].args.args.request).toEqual({
     projectName: 'Keep on backend refusal', parentDirectory: '/keep/refusal', sdkVersion: '4.0.26',
   });
+});
+
+const incompatibleLatest = { ...latestSdk, version: '5.0.0', dependencies: {
+  ...latestSdk.dependencies, 'com.unity.render-pipelines.universal': '18.0.0',
+} };
+
+test('precreation refusal offers tested without changing the latest choice or creating on selection', async ({ page }) => {
+  await openSetup(page, { latest: incompatibleLatest, creationOutcome: 'sdkRefusal' });
+  await field(page, 'name').fill('Keep this name'); await field(page, 'parent').fill('/keep/parent');
+  await expect(field(page, 'sdk-tested')).toBeHidden();
+  await field(page, 'create').click();
+  await expect(field(page, 'sdk-error')).toContainText('requires URP 18.0.0');
+  await expect(field(page, 'sdk-selection')).toContainText('5.0.0 (latest stable)');
+  await expect(field(page, 'sdk-tested')).toBeEnabled();
+  await expect(field(page, 'created')).toBeEmpty();
+  await field(page, 'existing-tab').click(); await expect(field(page, 'latest-status')).toContainText('5.0.0');
+  await field(page, 'new-tab').click();
+  await field(page, 'sdk-tested').click();
+  await page.evaluate(() => { setupFixture.latest.version = '5.0.1'; setupFixture.creationOutcome = 'success'; });
+  await field(page, 'existing-tab').click(); await expect(field(page, 'latest-status')).toContainText('5.0.1');
+  await field(page, 'new-tab').click();
+  await expect(field(page, 'sdk-selection')).toContainText('4.0.14 (tested fallback');
+  expect(await calls(page, 'create_project')).toHaveLength(1);
+  await field(page, 'create').click(); await expect(field(page, 'created')).toContainText('Validated project');
+  const draft = { projectName: 'Keep this name', parentDirectory: '/keep/parent' };
+  expect((await calls(page, 'create_project')).map(call => call.args.args.request)).toEqual([
+    { ...draft, sdkVersion: '5.0.0' }, { ...draft, useTestedSdk: true },
+  ]);
+});
+
+test('retry latest after a refused precheck does not create or keep stale fallback eligibility', async ({ page }) => {
+  await openSetup(page, { latest: incompatibleLatest, creationOutcome: 'sdkRefusal' });
+  await field(page, 'create').click(); await expect(field(page, 'sdk-tested')).toBeVisible();
+  await page.evaluate(() => { setupFixture.latest.version = '5.0.1'; });
+  await field(page, 'sdk-retry').click();
+  await expect(field(page, 'sdk-selection')).toContainText('5.0.1 (latest stable)');
+  await expect(field(page, 'sdk-tested')).toBeHidden(); await expect(field(page, 'sdk-error')).toBeHidden();
+  expect(await calls(page, 'create_project')).toHaveLength(1);
+});
+
+test('a partial creation after an SDK refusal clears the previous fallback offer', async ({ page }) => {
+  await openSetup(page, { latest: incompatibleLatest, creationOutcome: 'sdkRefusal' });
+  await field(page, 'create').click(); await expect(field(page, 'sdk-tested')).toBeVisible();
+  await page.evaluate(() => { setupFixture.creationOutcome = 'partial'; });
+  await field(page, 'create').click();
+  await expect(field(page, 'created')).toContainText('/fixture/unity.log');
+  await expect(field(page, 'sdk-selection')).toContainText('5.0.0 (latest stable)');
+  await expect(field(page, 'sdk-tested')).toBeHidden(); await expect(field(page, 'sdk-error')).toBeHidden();
+  await field(page, 'sdk-tested').dispatchEvent('click');
+  expect((await calls(page, 'create_project')).map(call => call.args.args.request.sdkVersion)).toEqual(['5.0.0', '5.0.0']);
+  await expect(field(page, 'sdk-selection')).toContainText('5.0.0 (latest stable)');
 });
 
 for (const width of [940, 390]) test(`new project SDK selection and fallback fit at ${width}px`, async ({ page }, testInfo) => {

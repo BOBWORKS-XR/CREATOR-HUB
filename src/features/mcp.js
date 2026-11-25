@@ -2,7 +2,7 @@ import { controller, node, lines, text, confirm } from './common.js';
 import { capabilityView } from './capability-profiles.js';
 import { recalledProductReview, rememberProductReview } from './product-review.js';
 import { bundledServerPath, sameSettingsExceptServer } from './runtime-repair.js';
-import { connectionStep, liveCheck } from './connection-assistance.js';
+import { connectionStep, liveCheck, projectPathWarning } from './connection-assistance.js';
 
 const clients = [
   ['codex', 'Codex', 'codex'], ['claude', 'Claude Code', 'claude'],
@@ -46,6 +46,11 @@ export function mount(root, api) {
         <section class="feature-section" aria-label="Connection status"><h3 data-field="connection-heading" tabindex="-1">Connection status</h3><p data-field="checked-project" class="feature-note"></p>
           <label>AI app to check<select data-field="assist-client"><option value="">Choose an AI app</option></select></label>
           <p data-field="assist-message" role="status"></p>
+          <div data-field="project-path-review" hidden>
+            <p>Review <code data-field="project-path-file"></code>. Under <code>mcpServers</code>, find <code>creator-works</code> (or <code>banter</code>) and check <code>UNITY_PROJECT_PATH</code> and <code>BANTER_PROJECT_PATH</code> in its <code>env</code>.</p>
+            <p data-field="project-path-advice"></p>
+            <p>Reopen Claude Code in the checked folder and run the read-only check. Compare the folder it reports with the checked project above.</p>
+          </div>
           <div class="feature-actions"><button data-field="assist-action" class="primary-button" type="button">Check this project</button>
           <button data-field="assist-copy" class="text-button" type="button" hidden>Copy read-only check</button>
           <button data-field="assist-relink" class="text-button" type="button" hidden>My AI opens the wrong project</button></div>
@@ -207,7 +212,8 @@ export function mount(root, api) {
       const projectOnly = id === 'claude' && scopedClaude(onboarding?.project);
       ui.checkbox.disabled = projectOnly || !checkedClient(state);
       if (projectOnly) ui.checkbox.checked = false;
-      const action = projectOnly ? onboarding.project.claudeProjectRoute === 'oldProjectRouter' ? 'Update this project connection' : 'Check project connection' : 'Apply';
+      const action = !projectOnly ? 'Apply' : onboarding.project.claudeProjectRoute === 'reviewableProjectPath' ? 'Review folder change'
+        : onboarding.project.claudeProjectRoute === 'oldProjectRouter' ? 'Update this project connection' : 'Check project connection';
       ui.apply.textContent = action;
       ui.apply.setAttribute('aria-label', projectOnly ? action : `Apply to ${clients.find(([key]) => key === id)[1]}`);
       ui.apply.disabled = projectOnly ? !onboarding.project.valid : !ready || !active() || !checkedClient(state) || active().unity_project_path !== $('project').value || profileDirty || !capabilities.ready;
@@ -222,7 +228,19 @@ export function mount(root, api) {
     $('feedback-save').disabled = !feedbackReady;
     $('feedback-check').disabled = !onboarding?.project?.valid;
     const [step, message, action] = assistance();
+    const projectPathReview = $('assist-client').value === 'claude' && !!projectPathWarning(onboarding?.project);
+    $('project-path-review').hidden = !projectPathReview;
+    if (projectPathReview) {
+      const path = $('project').value.replaceAll('\\', '/');
+      $('project-path-file').textContent = path.replace(/\/+$/, '') + '/.mcp.json';
+      $('project-path-advice').textContent = onboarding.project.claudeProjectRoute === 'reviewableProjectPath'
+        ? 'Review folder change shows the current and proposed folders. Hub backs up this file before any approved edit. Choose Not now to keep the current connection.'
+        : onboarding.project.claudeProjectRoute === 'differentProjectPath'
+        ? 'Keep the settings if the other folder is intentional. For a copied project, back up .mcp.json first, then change only the existing project path values to ' + JSON.stringify(path) + '. Leave account settings alone.'
+        : 'Keep custom paths and variables as they are until you know which folder they select. Hub has not changed the file or your account settings.';
+    }
     $('shared-connection').hidden = onboarding?.canReviewSharedConnection !== true ||
+      projectPathReview ||
       ($('assist-client').value === 'claude' && ['direct', 'oldProjectRouter'].includes(onboarding?.project?.claudeProjectRoute));
     $('assist-message').textContent = message;
     $('assist-action').textContent = action;
@@ -260,6 +278,7 @@ export function mount(root, api) {
         : projectEntry === 'unreadable' ? 'Project settings could not be checked' : '';
       const userStatus = !checkedClient(state) ? (state?.issue || 'Connection status not verified') : scopeStatus;
       ui.status.textContent = state?.supported === false ? 'Not available on this OS'
+        : id === 'claude' && projectPathWarning(p) ? projectPathWarning(p)
         : projectEntry === 'present' && p.claudeProjectRoute === 'oldProjectRouter' ? 'This project uses an older connection.'
         : [state?.detected ? 'Detected' : state ? 'Not detected' : '', projectNote, userStatus].filter(Boolean).join(' · ');
       ui.checkbox.checked = checkedClient(state) && (manualClientChoices.get(id) ?? Boolean(state.configured || (state.detected && !projectNote)));
@@ -493,7 +512,7 @@ export function mount(root, api) {
       if (apply.disabled) return;
       if (id === 'claude' && scopedClaude(onboarding?.project)) {
         $('assist-client').value = id; controls();
-        if (onboarding.project.claudeProjectRoute === 'oldProjectRouter') await updateProjectConnection();
+        if (['oldProjectRouter', 'reviewableProjectPath'].includes(onboarding.project.claudeProjectRoute)) await updateProjectConnection();
         else $('assist-action').focus();
         return;
       }
@@ -571,12 +590,14 @@ export function mount(root, api) {
   page.on($('assist-copy'), 'click', copyConnectionCheck);
   async function updateProjectConnection() {
     const project = $('project').value;
+    const reviewingFolder = onboarding?.project?.claudeProjectRoute === 'reviewableProjectPath';
     const outcome = await page.call('review_claude_project_connection', { unityProjectPath: project });
     if ($('project').value !== project) return;
     if (outcome?.status === 'cancelled') { $('assist-result').textContent = 'No changes made.'; return; }
     await check();
     if ($('project').value !== project) return;
-    if (outcome?.status !== 'updated' || onboarding?.project?.claudeProjectRoute !== 'shared') {
+    if (outcome?.status !== 'updated' || onboarding?.project?.claudeProjectRoute !== 'shared'
+        || (reviewingFolder && !(typeof outcome.backup === 'string' && outcome.backup.trim()))) {
       $('assist-result').textContent = 'Hub could not confirm the update. Check the connection before trying again.'; return;
     }
     $('assist-result').textContent = 'Project connection updated. Reopen Claude Code in this folder. If Claude asks, approve the Creator Works connection for this project.';

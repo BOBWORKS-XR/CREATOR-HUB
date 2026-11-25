@@ -95,6 +95,18 @@ exports.fixture = function fixture(options = {}) {
       if (name === "net") return net;
       if (name === "path") return path;
       if (name === "crypto") return crypto;
+      // The virtual filesystem contains ordinary strings only; keep descriptor IO inside it.
+      if (name === "./bounded-json.js") return {
+        assertOrdinaryPath(file, root) {
+          assert.equal(key(root), config.unityProjectPath);
+          assert.equal(key(file), path.join(config.mcpStatePath, "project-instance.json"));
+        },
+        readBoundedJson(file, maxBytes) {
+          const text = vfs.readFileSync(file);
+          assert(Buffer.byteLength(text) <= maxBytes);
+          return JSON.parse(text);
+        },
+      };
       if (name.endsWith("/project-router.js")) return { projectIdForPath() { throw new Error("Fixture requires an explicit project ID"); } };
       if (name.startsWith(".")) return load(path.relative(root, path.resolve(path.dirname(filename), name)).replace(/\\/g, "/").replace(/\.js$/, ".ts"));
       throw new Error(`Unexpected dependency: ${name}`);

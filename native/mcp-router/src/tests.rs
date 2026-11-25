@@ -48,6 +48,29 @@ fn activate_a(store: &Store) -> Vec<u8> {
 }
 
 #[test]
+fn checking_the_selected_version_does_not_certify_or_repair_missing_payloads() {
+    let (_temporary, store) = setup();
+    let previous = activate_a(&store);
+    let runtime = store.resolve().unwrap();
+    let server = runtime.server.clone();
+    let expected = runtime.generation.clone();
+    drop(runtime);
+    fs::remove_file(&server).unwrap();
+
+    let selected = store.selected_descriptor(&previous).unwrap();
+    assert_eq!(generation(&selected.module).unwrap(), expected);
+    assert!(store.resolve().is_err());
+    assert!(!server.exists());
+    assert_eq!(store.snapshot().unwrap().unwrap(), previous);
+    let (_, signature) = fixture("a");
+    let receipt: Receipt = serde_json::from_slice(&previous).unwrap();
+    let signed = store.root.join("descriptors").join(receipt.descriptor_sha256).join("runtime.minisig");
+    fs::write(&signed, b"invalid").unwrap();
+    assert!(store.selected_descriptor(&previous).is_err());
+    fs::write(signed, signature).unwrap();
+}
+
+#[test]
 fn fresh_discovery_is_read_only_and_missing_routes_fail_clearly() {
     let (_temporary, store) = setup();
     assert_eq!(store.snapshot().unwrap(), None);

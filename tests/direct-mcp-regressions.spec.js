@@ -58,7 +58,7 @@ async function open(page, options = {}) {
           case 'discover_unity_projects': return channels.map(channel => ({ name: channel.name, path: channel.unity_project_path }));
           case 'review_shared_mcp_update': return { status: options.sharedOutcome };
           case 'review_claude_project_connection':
-            if (options.projectOutcome === 'updated') window.checkedBridge.claudeProjectRoute = 'shared';
+            if (options.projectOutcome === 'updated' && !options.missedReadback) window.checkedBridge.claudeProjectRoute = 'shared';
             return { status: options.projectOutcome, backup: '/fixture/backup' };
           case 'get_onboarding_status': return window.invalidStatus ? { runtime: { ready: true }, clients: [] } : {
             canReviewSharedConnection: options.sharedReview === true,
@@ -475,6 +475,72 @@ for (const [route, message] of [['direct', "starts MCP directly for this project
     expect(await mutationCalls(page)).toEqual([]);
   });
 }
+
+test('Claude folder decision distinguishes reviewed repair from manual recheck without a live bridge', () => {
+  const { connectionStep } = require('../src/features/connection-assistance.js');
+  for (const [route, expected] of [
+    ['differentProjectPath', 'check'], ['unverifiedProjectPath', 'check'], ['reviewableProjectPath', 'project-update'],
+  ]) {
+    const args = { project: 'C:/Copy', activePath: 'C:/Original', client: { id: 'claude', configured: true },
+      status: { runtime: { ready: true }, project: { valid: true, stateStatus: 'stale', bridgeInstalled: false,
+        claudeProjectEntry: 'present', claudeProjectRoute: route } } };
+    const [action, warning] = connectionStep(args);
+    expect(action).toBe(expected);
+    expect(warning).not.toMatch(/no setup needed/i);
+    expect(connectionStep({ ...args, client: { id: 'codex' }, status: {
+      ...args.status, project: { ...args.status.project, bridgeCurrent: false },
+    } })[0]).toBe('install');
+  }
+});
+
+for (const [route, warning, guidance] of [
+  ['differentProjectPath', 'names a different folder', 'back up .mcp.json first'],
+  ['unverifiedProjectPath', 'cannot verify the project path', 'Keep custom paths and variables'],
+]) test(`Claude ${route}: explain the checked file and recheck without writing`, async ({ page }) => {
+  await open(page, { sharedReview: true, claudeUserConfigured: true,
+    checkedBridge: { claudeProjectEntry: 'present', claudeProjectRoute: route, stateStatus: 'stale' } });
+  const row = page.locator('[data-client="claude"]').locator('xpath=../..');
+  await expect(row).toContainText(warning);
+  await expect(row).not.toContainText('No second setup needed');
+  await expect(row.getByRole('checkbox')).toBeDisabled();
+  await expect(row.getByRole('checkbox')).not.toBeChecked();
+  await row.getByRole('button', { name: 'Check project connection', exact: true }).click(); await idle(page);
+  await expect(field(page, 'assist-message')).toContainText(warning);
+  await expect(field(page, 'project-path-file')).toHaveText('/projects/Creator/.mcp.json');
+  const review = field(page, 'project-path-review');
+  for (const part of ['UNITY_PROJECT_PATH', 'BANTER_PROJECT_PATH', guidance, 'read-only check']) await expect(review).toContainText(part);
+  await expect(field(page, 'assist-relink')).toBeHidden();
+  await expect(field(page, 'shared-connection')).toBeHidden();
+  await expect(field(page, 'assist-copy')).toBeVisible();
+  await expect(field(page, 'assist-action')).toHaveText('Recheck project paths');
+  if (process.env.CREATOR_CONNECTION_PREVIEW && route === 'differentProjectPath') {
+    await field(page, 'assist-message').locator('..').screenshot({ path: test.info().outputPath('project-path-review.png') });
+  }
+  await field(page, 'assist-action').click(); await idle(page);
+  await expect(review).toBeVisible();
+  await page.evaluate(() => Object.assign(window.checkedBridge, { claudeProjectRoute: 'shared', stateStatus: 'fresh' }));
+  await field(page, 'assist-action').click(); await idle(page);
+  await expect(review).toBeHidden();
+  await expect(field(page, 'assist-message')).toContainText("uses Hub's connection");
+  expect(await mutationCalls(page)).toEqual([]);
+});
+
+for (const [outcome, missedReadback, message] of [
+  ['cancelled', false, 'No changes made'], ['updated', false, 'Backup location'], ['updated', true, 'could not confirm'],
+]) test(`verified Claude folder change: ${outcome}, missed readback ${missedReadback}`, async ({ page }) => {
+  await open(page, { sharedReview: true, projectOutcome: outcome, missedReadback,
+    checkedBridge: { claudeProjectEntry: 'present', claudeProjectRoute: 'reviewableProjectPath', stateStatus: 'stale' } });
+  await field(page, 'assist-client').selectOption('claude');
+  await expect(field(page, 'assist-action')).toHaveText('Review folder change');
+  await expect(field(page, 'project-path-advice')).toContainText('Not now');
+  await expect(field(page, 'shared-connection')).toBeHidden();
+  await expect(field(page, 'assist-relink')).toBeHidden();
+  expect(await mutationCalls(page)).toEqual([]);
+  await field(page, 'assist-action').click(); await idle(page);
+  await expect(field(page, 'assist-result')).toContainText(message);
+  expect((await mutationCalls(page)).map(c => [c.args.command, c.args.args]))
+    .toEqual([['review_claude_project_connection', { unityProjectPath: '/projects/Creator' }]]);
+});
 
 test('Claude can check its running MCP version even when the Unity Editor is closed', async ({ page }) => {
   await open(page, { checkedBridge: { claudeProjectEntry: 'present', stateStatus: 'stale' }, claudeUserConfigured: false });

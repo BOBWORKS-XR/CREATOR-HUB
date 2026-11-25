@@ -353,22 +353,64 @@ pub fn managed_route(
 #[cfg(all(windows, feature = "integrated-features"))]
 pub(crate) fn review_shared_mcp_update(handle: &tauri::AppHandle) -> Result<&'static str, String> {
     use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
+    let result = update_existing_shared_mcp(handle, false, || {
+        handle.dialog().message("New AI sessions that use Hub's shared connection will use the MCP included with this Hub. Open sessions keep running. Project files, settings and other connections will not be changed.")
+            .title("Update the shared MCP connection?")
+            .buttons(MessageDialogButtons::OkCancelCustom("Update connection".into(), "Keep current connection".into()))
+            .blocking_show()
+    });
+    if result.is_ok() {
+        SHARED_MCP_REVIEW_NEEDED.store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+    result
+}
+
+#[cfg(all(windows, feature = "integrated-features"))]
+static SHARED_MCP_REVIEW_NEEDED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(all(windows, feature = "integrated-features"))]
+pub(crate) fn shared_mcp_needs_review() -> bool {
+    SHARED_MCP_REVIEW_NEEDED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+#[cfg(all(windows, feature = "integrated-features"))]
+pub(crate) fn refresh_installed_shared_mcp(handle: &tauri::AppHandle) {
+    if !enabled() || crate::self_update::installed_location(handle).is_err() { return; }
+    if let Err(reason) = update_existing_shared_mcp(handle, true, || true) {
+        SHARED_MCP_REVIEW_NEEDED.store(true, std::sync::atomic::Ordering::Relaxed);
+        eprintln!("Could not confirm the shared MCP update: {reason}");
+    }
+}
+
+#[cfg(all(windows, feature = "integrated-features"))]
+fn update_existing_shared_mcp(handle: &tauri::AppHandle, startup: bool, approve: impl FnOnce() -> bool) -> Result<&'static str, String> {
     let manifest = manifest()?;
     let target = generation_id(manifest.modules.get("mcp").ok_or("Missing bundled MCP identity.")?)?;
     let store = creator_hub_mcp_router::Store::installed()?;
     let Some(previous) = store.snapshot()? else { return Ok("notManaged"); };
-    let _router = store.router()?;
+    let descriptor = store.selected_descriptor(&previous)?;
+    let active = creator_hub_mcp_router::generation(&descriptor.module)?;
+    let decision = shared_connection_decision(&active, &descriptor.hub_version, &target, env!("CARGO_PKG_VERSION"))?;
+    // A normal launch need not hash the entire Node runtime just to do nothing.
+    // Actual connections still verify the payload on every launch.
+    if startup {
+        if let Some(outcome) = decision { return Ok(outcome); }
+    }
+    let router = store.router()?;
+    if startup && router.command.parent().and_then(std::path::Path::file_name) != Some(std::ffi::OsStr::new("router-v2")) {
+        return Ok("keepExisting");
+    }
     let current = store.resolve()?;
     if store.snapshot()?.as_deref() != Some(previous.as_slice()) {
         return Err("The connection changed while Hub checked it. Check again.".into());
     }
-    let decision = shared_connection_decision(&current.generation, &current.hub_version, &target, env!("CARGO_PKG_VERSION"))?;
+    if current.generation != active || current.hub_version != descriptor.hub_version {
+        return Err("The connection changed while Hub checked it. Check again.".into());
+    }
     if let Some(outcome) = decision { return Ok(outcome); }
     drop(current);
-    if !handle.dialog().message("New AI sessions that use Hub's shared connection will use the MCP included with this Hub. Open sessions keep running. Project files, settings and other connections will not be changed.")
-        .title("Update the shared MCP connection?")
-        .buttons(MessageDialogButtons::OkCancelCustom("Update connection".into(), "Keep current connection".into()))
-        .blocking_show() { return Ok("cancelled"); }
+    if !approve() { return Ok("cancelled"); }
+    hosting_candidate(handle, AppId::Mcp)?.ok_or("The bundled MCP could not be prepared.")?;
     let review = convergence_route_review(handle)?.ok_or("No signed connection update is available.")?;
     if review.previous.as_deref() != Some(previous.as_slice()) {
         return Err("The connection changed during review. Hub did not replace it.".into());

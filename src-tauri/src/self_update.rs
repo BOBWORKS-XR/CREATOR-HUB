@@ -231,7 +231,7 @@ fn validate_for(release: &Release, preview: bool, target: Target) -> Result<(), 
     Ok(())
 }
 
-fn installed_location(_handle: &tauri::AppHandle) -> Result<PathBuf, String> {
+pub(crate) fn installed_location(_handle: &tauri::AppHandle) -> Result<PathBuf, String> {
     let path = raw_installed_location(_handle)?;
     #[cfg(unix)]
     {
@@ -394,6 +394,14 @@ fn check(handle: &tauri::AppHandle, online: bool, preview: bool) -> Result<State
             Ok(None) => {}
             Err(error) => warning = Some(error),
         }
+    }
+    #[cfg(all(windows, feature = "integrated-features"))]
+    if crate::builtin::shared_mcp_needs_review() {
+        let notice = "Hub could not confirm the MCP connection update. Open Menu > MCP and check the connection. Your projects and AI settings were not changed.";
+        warning = Some(match warning {
+            Some(other) => format!("{other} {notice}"),
+            None => notice.to_owned(),
+        });
     }
     let mut releases = Vec::new();
     for (index, entry) in fs::read_dir(&dir)

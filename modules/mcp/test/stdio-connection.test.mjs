@@ -67,6 +67,71 @@ async function project(root, name) {
   return directory;
 }
 
+test('SDK stdio: status and project list only accept heartbeat evidence for their target', async t => {
+  const root = await fixture(t);
+  const original = await project(root, 'Original');
+  const copy = await project(root, 'Copy');
+  const states = directory => path.join(directory, '.bantworks-mcp', 'state');
+  const instance = directory => path.join(states(directory), 'project-instance.json');
+  for (const directory of [original, copy]) {
+    await mkdir(path.join(directory, 'Assets', 'Editor'));
+    await writeFile(path.join(directory, 'Assets', 'Editor', 'BanterMCPBridge.cs'), '// fixture');
+    await mkdir(states(directory), { recursive: true });
+    await mkdir(path.join(directory, '.bantworks-mcp', 'commands'));
+  }
+  await writeFile(path.join(root, 'launcher-config.json'), JSON.stringify({
+    channels: [{ unity_project_path: original }, { unity_project_path: copy }],
+  }));
+  const client = await connect(t, root, { UNITY_PROJECT_PATH: copy });
+  const descriptor = {
+    projectPath: original, editorInstanceId: 'original-editor', updatedAt: Date.now(),
+    protocolVersion: 1, capabilities: ['named_pipe_commands'], pipeName: 'bantworks-unity-fixture',
+  };
+  await writeFile(instance(original), JSON.stringify(descriptor));
+  await writeFile(instance(copy), JSON.stringify(descriptor));
+  const legacy = path.join(states(copy), 'editor-state.json');
+  await writeFile(legacy, JSON.stringify({ timestamp: Date.now() }));
+
+  const inspect = async () => {
+    const before = await snapshot(root);
+    const status = await call(client, 'get_bridge_status');
+    const list = await call(client, 'list_unity_projects');
+    assert.deepEqual(await snapshot(root), before, 'inspection must not modify either project');
+    return { status, rows: list.projects, row: list.projects.find(p => p.projectPath === copy) };
+  };
+  const foreign = await inspect();
+  assert.equal(foreign.status.ready, false);
+  assert.match(foreign.status.nextSteps.join(' '), /project mismatch/i);
+  assert.equal(foreign.row.editorState, 'not_seen');
+  assert.equal(foreign.row.editorInstance, undefined);
+  assert.equal(foreign.status.bridge.transport.namedPipeAdvertised, false);
+  assert.equal(foreign.rows.find(p => p.projectPath === original).editorState, 'live');
+
+  const samePath = (process.platform === 'win32' ? copy.toUpperCase().replaceAll('\\', '/') : copy) + '/.';
+  await writeFile(instance(copy), JSON.stringify({ ...descriptor, projectPath: samePath, updatedAt: Date.now() }));
+  const matching = await inspect();
+  assert.equal(matching.status.ready, true);
+  assert.equal(matching.row.editorState, 'live');
+  for (const malformed of ['{', '[]', ...[null, 17, '', 'Copy'].map(projectPath =>
+    JSON.stringify({ ...descriptor, projectPath, updatedAt: Date.now() }))]) {
+    await writeFile(instance(copy), malformed);
+    const rejected = await inspect();
+    assert.equal(rejected.status.ready, false, malformed);
+    assert.equal(rejected.row.editorState, 'not_seen', malformed);
+    assert.equal(rejected.row.editorInstance, undefined);
+    assert.match(rejected.status.nextSteps.join(' '), /invalid|unreadable/i);
+  }
+  await rm(instance(copy));
+  await writeFile(legacy, JSON.stringify({ timestamp: Date.now() }));
+  const older = await inspect();
+  assert.equal(older.status.ready, true);
+  assert.equal(older.row.editorState, 'live');
+  await rm(legacy);
+  const missing = await inspect();
+  assert.equal(missing.status.ready, false);
+  assert.equal(missing.row.editorState, 'not_seen');
+});
+
 test('SDK stdio: a fresh user can connect and receives actionable missing-project diagnostics', async t => {
   const root = await fixture(t);
   const before = await snapshot(root);

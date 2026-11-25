@@ -388,7 +388,9 @@ impl Store {
         })
     }
 
-    fn resolve_receipt(&self, bytes: &[u8]) -> Result<Runtime, String> {
+    /// Inspect the signed selection without opening every payload file. Only
+    /// resolve_receipt/resolve and activation verify the executable payload.
+    pub fn selected_descriptor(&self, bytes: &[u8]) -> Result<Descriptor, String> {
         let receipt: Receipt =
             serde_json::from_slice(bytes).map_err(|_| "Invalid active MCP routing receipt.")?;
         if receipt.schema_version != 1
@@ -410,7 +412,11 @@ impl Store {
         if generation(&descriptor.module)? != receipt.generation {
             return Err("Active MCP generation does not match its signed descriptor.".into());
         }
-        self.payload(&descriptor)
+        Ok(descriptor)
+    }
+
+    fn resolve_receipt(&self, bytes: &[u8]) -> Result<Runtime, String> {
+        self.payload(&self.selected_descriptor(bytes)?)
     }
 
     pub fn resolve(&self) -> Result<Runtime, String> {

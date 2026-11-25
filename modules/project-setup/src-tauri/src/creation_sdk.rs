@@ -22,36 +22,76 @@ fn stable(version: &str) -> Result<semver::Version, String> {
     Ok(parsed)
 }
 
-pub(crate) fn resolve(request: &logic::CreateRequest) -> Result<Selection, String> {
-    resolve_with(request, |version| match version {
+pub(crate) fn registry_lookup(
+    version: Option<&str>,
+) -> Result<sdk_requirements::Requirements, String> {
+    match version {
         Some(version) => sdk_requirements::exact(version),
         None => sdk_requirements::latest(),
-    })
+    }
 }
 
-fn resolve_with(
-    request: &logic::CreateRequest,
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+pub(crate) enum CreationOutcome {
+    Project(logic::CreationResult),
+    SdkRefused {
+        success: bool,
+        #[serde(rename = "failureCode")]
+        failure_code: &'static str,
+        message: String,
+    },
+}
+
+pub(crate) fn checked_create(
+    request: logic::CreateRequest,
     lookup: impl FnOnce(Option<&str>) -> Result<sdk_requirements::Requirements, String>,
-) -> Result<Selection, String> {
+    create: impl FnOnce(logic::CreateRequest, Selection) -> Result<logic::CreationResult, String>,
+) -> Result<CreationOutcome, String> {
+    logic::creation_target(&request)?;
+    let sdk = match explicit_choice(&request)? {
+        Some(tested) => tested,
+        None => match verify_registry_selection(&request, lookup) {
+            Ok(selected) => selected,
+            Err(reason) => {
+                return Ok(CreationOutcome::SdkRefused {
+                    success: false,
+                    failure_code: "sdkPrecreationRefused",
+                    message: format!("{reason} No project files were created."),
+                });
+            }
+        },
+    };
+    // Bootstrap and project writes start in this callback. Its failures are never SDK refusals.
+    create(request, sdk).map(CreationOutcome::Project)
+}
+
+fn explicit_choice(request: &logic::CreateRequest) -> Result<Option<Selection>, String> {
     if request.use_tested_sdk {
         if request.sdk_version.is_some() {
             return Err("Choose either the latest SDK or the tested fallback, not both.".into());
         }
-        return Ok(Selection {
+        return Ok(Some(Selection {
             version: logic::CREATOR_SDK_VERSION.into(),
             visual_scripting_version: "1.9.1".into(),
             declared_urp_version: Some(logic::SDK_DECLARED_URP_VERSION.into()),
             declared_input_version: "1.4.4".into(),
             compatibility_overrides: vec!["Tested fallback tool versions".into()],
             source: "explicit-tested-fallback",
-        });
+        }));
     }
     if let Some(version) = &request.sdk_version {
         stable(version)?;
     }
-    let metadata = lookup(request.sdk_version.as_deref()).map_err(|error| format!(
-        "The selected stable SDK could not be verified. {error} No project files were created. Retry the SDK check, or explicitly choose the tested SDK in Project Setup."
-    ))?;
+    Ok(None)
+}
+
+fn verify_registry_selection(
+    request: &logic::CreateRequest,
+    lookup: impl FnOnce(Option<&str>) -> Result<sdk_requirements::Requirements, String>,
+) -> Result<Selection, String> {
+    let metadata = lookup(request.sdk_version.as_deref())
+        .map_err(|error| format!("The selected stable SDK could not be verified. {error}"))?;
     stable(&metadata.version)?;
     if request
         .sdk_version
@@ -75,22 +115,20 @@ fn resolve_with(
             .ok_or("The creation Editor version could not be verified.")?;
         if selected < required {
             return Err(format!(
-                "SDK {} requires Unity {minimum} or newer; this creation recipe uses Unity {}. No project files were created. Choose another SDK or check again after updating Hub.",
+                "SDK {} requires Unity {minimum} or newer; this creation recipe uses Unity {}.",
                 metadata.version, logic::EDITOR_VERSION
             ));
         }
     }
     let vs = metadata.dependencies.get("com.unity.visualscripting")
-        .ok_or("The SDK does not declare an exact Visual Scripting dependency. No project files were created; retry or explicitly choose the tested SDK.")?;
+        .ok_or("The SDK does not declare an exact Visual Scripting dependency.")?;
     stable(vs)?;
     let urp = metadata
         .dependencies
         .get("com.unity.render-pipelines.universal")
-        .ok_or(
-            "The SDK does not declare an exact URP dependency. No project files were created.",
-        )?;
+        .ok_or("The SDK does not declare an exact URP dependency.")?;
     let input = metadata.dependencies.get("com.unity.inputsystem").ok_or(
-        "The SDK does not declare an exact Input System dependency. No project files were created.",
+        "The SDK does not declare an exact Input System dependency.",
     )?;
     let compatibility_overrides = validate_tool_versions(urp, input)?;
     Ok(Selection {
@@ -101,6 +139,22 @@ fn resolve_with(
         compatibility_overrides,
         source: "official-registry",
     })
+}
+
+#[cfg(test)]
+fn resolve_with(
+    request: &logic::CreateRequest,
+    lookup: impl FnOnce(Option<&str>) -> Result<sdk_requirements::Requirements, String>,
+) -> Result<Selection, String> {
+    match explicit_choice(request)? {
+        Some(tested) => Ok(tested),
+        None => verify_registry_selection(request, lookup),
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn resolve(request: &logic::CreateRequest) -> Result<Selection, String> {
+    resolve_with(request, registry_lookup)
 }
 
 fn validate_tool_versions(urp: &str, input: &str) -> Result<Vec<String>, String> {
@@ -119,7 +173,7 @@ fn validate_tool_versions(urp: &str, input: &str) -> Result<Vec<String>, String>
             && selected == "17.3.0"
             && logic::EDITOR_VERSION == "6000.3.21f1";
         if (required.major != installed.major || required > installed) && !validate_urp_in_new_project {
-            return Err(format!("The SDK requires {name} {declared}; this creation recipe uses {selected}. No project files were created. Choose the tested SDK or update Hub's tool recipe."));
+            return Err(format!("The SDK requires {name} {declared}; this creation recipe uses {selected}."));
         }
         if declared != selected {
             overrides.push(format!(
@@ -202,8 +256,48 @@ mod tests {
     #[test]
     fn registry_failure_never_silently_falls_back() {
         let error = resolve_with(&request(), |_| Err("offline".into())).unwrap_err();
-        assert!(error.contains("No project files were created"));
-        assert!(error.contains("explicitly choose"));
+        assert!(error.contains("could not be verified. offline"));
+    }
+
+    #[test]
+    fn only_metadata_refused_before_creation_carries_the_fallback_code() {
+        let parent = tempfile::tempdir().unwrap();
+        let mut request = request();
+        request.parent_directory = parent.path().display().to_string();
+        request.sdk_version = Some("5.0.0".into());
+        let target = parent.path().join(&request.project_name);
+
+        let mut incompatible = metadata("5.0.0");
+        incompatible.dependencies.insert("com.unity.render-pipelines.universal".into(), "18.0.0".into());
+        for (lookup, reason) in [
+            (Ok(incompatible), "requires URP 18.0.0"),
+            (Err("Incomplete exact-version metadata.".into()), "Incomplete exact-version metadata"),
+        ] {
+            let outcome = checked_create(request.clone(), |version| {
+                assert_eq!(version, Some("5.0.0"));
+                lookup
+            }, |_, _| panic!("refusal must precede bootstrap and writes")).unwrap();
+            let wire = serde_json::to_value(outcome).unwrap();
+            assert_eq!(wire["success"], false);
+            assert_eq!(wire["failureCode"], "sdkPrecreationRefused");
+            let message = wire["message"].as_str().unwrap();
+            assert!(message.contains(reason) && message.contains("No project files were created"));
+            assert!(!target.exists());
+        }
+
+        let mut invalid = request.clone();
+        invalid.use_tested_sdk = true;
+        assert!(checked_create(invalid, |_| panic!("conflicting choice"),
+            |_, _| panic!("invalid request")).unwrap_err().contains("not both"));
+
+        let late_error = checked_create(request.clone(), |_| Ok(metadata("5.0.0")), |_, sdk| {
+            assert_eq!(sdk.version, "5.0.0");
+            std::fs::create_dir(&target).unwrap();
+            Err("SDK verification failed during Unity validation.".into())
+        }).unwrap_err();
+        assert_eq!(late_error, "SDK verification failed during Unity validation.");
+        assert!(checked_create(request, |_| panic!("target already exists"),
+            |_, _| panic!("must not overwrite partial project")).unwrap_err().contains("already exists"));
     }
 
     #[test]

@@ -1,12 +1,24 @@
 export const liveCheck = 'Call get_bridge_status. Which Unity project answered, is its bridge ready, and what running MCP version does mcpServerVersion report? If that field is missing, say "version not reported"; do not guess from the bridge version or saved settings. Do not change anything.';
 
+export function projectPathWarning(project) {
+  if (project?.claudeProjectEntry !== 'present') return '';
+  if (['differentProjectPath', 'reviewableProjectPath'].includes(project.claudeProjectRoute)) return "A project path in Claude Code's .mcp.json names a different folder.";
+  if (project.claudeProjectRoute === 'unverifiedProjectPath') return "Hub cannot verify the project path in Claude Code's .mcp.json.";
+  return '';
+}
+
 // Describe the next local step, not whether a separate AI process is connected.
 export function connectionStep({ status, project, activePath, client, label, canApply, differentRuntime }) {
   if (!project.trim()) return ['browse', 'Choose the Unity project you want to connect.', 'Choose project'];
   if (!status) return ['check', 'Check this folder before changing its connection.', 'Check this project'];
   if (!status.project?.valid) return ['browse', 'This is not a Unity project folder. Choose the folder that contains Assets, Packages and ProjectSettings.', 'Choose project'];
-  if (!status.runtime.ready) return ['home', 'Hub could not find its MCP tools. Check Home for a Hub update before changing your project.', 'Go to Home'];
   const p = status.project;
+  const warning = projectPathWarning(p);
+  if (warning && (client?.id === 'claude' || (!client && label === 'Claude Code'))) {
+    if (p.claudeProjectRoute === 'reviewableProjectPath') return ['project-update', warning + ' Keep it if intentional, or review changing it to the checked folder.', 'Review folder change'];
+    return ['check', warning + ' Check which folder Claude reaches before asking it to make changes.', 'Recheck project paths'];
+  }
+  if (!status.runtime.ready) return ['home', 'Hub could not find its MCP tools. Check Home for a Hub update before changing your project.', 'Go to Home'];
   if (client?.id === 'claude' && p.claudeProjectEntry === 'present' && p.claudeProjectRoute === 'oldProjectRouter') {
     return ['project-update', 'Claude uses an older connection for this project. Update it here without changing your other projects.', 'Update this project connection'];
   }

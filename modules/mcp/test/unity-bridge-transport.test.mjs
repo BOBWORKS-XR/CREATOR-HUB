@@ -183,20 +183,30 @@ test("a sent pipe command is not duplicated through the file fallback", {
   }
 });
 
-test("command transport refuses a descriptor from another Unity project", async () => {
+test("rejected instance evidence stops dispatch before either transport", async () => {
   const { projectPath, config } = await createFixture();
   try {
     await writePipeDescriptor(config, "bantworks-unity-wrong-project");
     const descriptorPath = path.join(config.mcpStatePath, "project-instance.json");
     const descriptor = JSON.parse(await readFile(descriptorPath, "utf8"));
     descriptor.projectPath = path.join(projectPath, "OtherProject");
-    await writeFile(descriptorPath, JSON.stringify(descriptor));
-
-    await assert.rejects(
-      dispatchUnityBridgeCommand({ type: "refresh" }, config, 100),
-      /bridge project mismatch/i
-    );
-    assert.deepEqual(await readdir(config.mcpCommandsPath), []);
+    for (const [text, reason] of [
+      [JSON.stringify(descriptor), /bridge project mismatch/i],
+      [JSON.stringify({ ...descriptor, projectPath: null }), /invalid/i],
+      [JSON.stringify({ ...descriptor, projectPath: "x".repeat(4097) }), /invalid/i],
+      [JSON.stringify({ ...descriptor, projectPath, updatedAt: "now" }), /invalid/i],
+      ["{", /invalid/i],
+    ]) {
+      await writeFile(descriptorPath, text);
+      await assert.rejects(dispatchUnityBridgeCommand({ type: "refresh" }, config, 100), error => {
+        assert.match(error.message, reason);
+        assert.equal(error.deliveryPhase, "not_sent");
+        assert.equal(error.transport, undefined);
+        assert.equal(error.editorInstanceId, undefined);
+        return true;
+      });
+      assert.deepEqual(await readdir(config.mcpCommandsPath), []);
+    }
   } finally {
     await rm(projectPath, { recursive: true, force: true });
   }
@@ -263,6 +273,11 @@ test("command status stays scoped to its project and active Editor instance", as
     const wrongEditor = getUnityCommandStatus(commandId, config.projectId, config);
     assert.equal(wrongEditor.status, "unknown");
     assert.match(wrongEditor.error ?? "", /different-editor/);
+
+    await writeFile(path.join(config.mcpStatePath, "project-instance.json"), JSON.stringify({
+      projectPath, editorInstanceId: "editor-fixture", updatedAt: "malformed",
+    }));
+    assert.match(getUnityCommandStatus(commandId, config.projectId, config).error ?? "", /Editor mismatch/);
   } finally {
     await rm(projectPath, { recursive: true, force: true });
   }

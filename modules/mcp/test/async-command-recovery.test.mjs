@@ -212,6 +212,7 @@ test("pre-send target rejection is distinguishable from unknown completion", asy
   const f = fixture();
   f.descriptor({ projectPath: path.resolve("other-project") });
   await assert.rejects(f.dispatchUnityBridgeCommand({ type: "refresh" }, f.config), error => {
+    assert.match(error.message, /bridge project mismatch/i);
     assert.equal(error.deliveryPhase, "not_sent");
     assert.equal(error.completion, "not_started");
     assert.equal(error.projectPath, f.config.unityProjectPath);
@@ -219,6 +220,7 @@ test("pre-send target rejection is distinguishable from unknown completion", asy
     return true;
   });
   assert.equal(f.writes.length, 0);
+  assert.equal(f.sockets.length, 0);
 });
 
 test("serialization failure is pre-send and file publication failure is conservatively unknown", async () => {

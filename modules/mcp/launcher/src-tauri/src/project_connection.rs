@@ -3,7 +3,10 @@ use super::{
     json_insert, json_member, json_object, json_trivia, recovery, safe_environment,
     same_router_path,
 };
-use crate::{client_ownership, jsonc, settings_backup as storage};
+use crate::{
+    client_config_status::{project_pins, static_project_path, ProjectPins},
+    client_ownership, jsonc, settings_backup as storage,
+};
 use serde_json::{json, Value};
 use std::path::{Component, Path, PathBuf};
 
@@ -30,6 +33,12 @@ fn display_path(path: &Path) -> Result<String, String> {
 
 // Compare to a path Hub derived itself before inspecting either signed executable.
 fn trusted_routes(command: &str) -> Result<(PathBuf, creator_hub_mcp_router::Router), String> {
+    if !local_project(Path::new(command))
+        || Path::new(command).file_name().and_then(|s| s.to_str())
+            != Some("creator-hub-mcp-router.exe")
+    {
+        return Err(KEEP.into());
+    }
     let base = creator_hub_mcp_router::Store::installed_base()?;
     let scope = PathBuf::from("mcp-route-v1").join(format!("windows-{}", std::env::consts::ARCH));
     let file = "creator-hub-mcp-router.exe";
@@ -78,20 +87,16 @@ fn render(text: &str, project: &str, old: &str, new: &str) -> Result<String, Str
     if !same_router_path(entry["command"].as_str().ok_or(KEEP)?, old) {
         return Err(KEEP.into());
     }
+    if !static_project_path(project)
+        || project_pins(entry, Path::new(project)) != ProjectPins::Compatible
+    {
+        return Err("The saved project path does not match this folder or could not be verified. Review this project's .mcp.json; Hub left it alone.".into());
+    }
     if let Some(env) = entry.get("env") {
         let env = env.as_object().ok_or(KEEP)?;
         safe_environment(env.keys().map(String::as_str))?;
         for (k, value) in env {
             let v = value.as_str().ok_or(KEEP)?;
-            if k.eq_ignore_ascii_case("UNITY_PROJECT_PATH")
-                || k.eq_ignore_ascii_case("BANTER_PROJECT_PATH")
-            {
-                if !matches!(k.as_str(), "UNITY_PROJECT_PATH" | "BANTER_PROJECT_PATH")
-                    || !same_router_path(v.trim_end_matches(['/', '\\']), project)
-                {
-                    return Err("This connection names a different project or uses a custom project path. Hub left it alone.".into());
-                }
-            }
             if k == client_ownership::OWNER_KEY && v != client_ownership::OWNER {
                 return Err(KEEP.into());
             }
@@ -151,6 +156,108 @@ pub(crate) fn plan(text: &str, project: &Path) -> Result<String, String> {
     )
 }
 
+#[derive(PartialEq, Eq)]
+struct PinRepair {
+    previous: String,
+    keys: Vec<&'static str>,
+    after: String,
+}
+
+fn pin_repair(
+    text: &str,
+    project: &Path,
+    verified_router: impl FnOnce(&str) -> bool,
+) -> Result<PinRepair, String> {
+    if text.len() > 256 * 1024 || !local_project(project) {
+        return Err(KEEP.into());
+    }
+    let mut data: Value = serde_json::from_str(text).map_err(|_| KEEP)?;
+    jsonc::parse_unambiguous(text)?;
+    let (id, entry) = connection_entry(&data)?;
+    let id = id.to_owned();
+    if project_pins(entry, project) != ProjectPins::DifferentPath
+        || entry
+            .as_object()
+            .ok_or(KEEP)?
+            .keys()
+            .any(|k| !matches!(k.as_str(), "command" | "type" | "args" | "env"))
+    {
+        return Err(KEEP.into());
+    }
+    let env = entry["env"].as_object().ok_or(KEEP)?;
+    safe_environment(env.keys().map(String::as_str))?;
+    if env.values().any(|v| !v.is_string())
+        || env
+            .get(client_ownership::OWNER_KEY)
+            .is_some_and(|v| v != client_ownership::OWNER)
+    {
+        return Err(KEEP.into());
+    }
+    let keys: Vec<_> = ["UNITY_PROJECT_PATH", "BANTER_PROJECT_PATH"]
+        .into_iter()
+        .filter(|k| env.contains_key(*k))
+        .collect();
+    let old = Path::new(env[*keys.first().ok_or(KEEP)?].as_str().ok_or(KEEP)?);
+    if keys
+        .iter()
+        .any(|k| env[*k].as_str().map(Path::new) != Some(old))
+        || !verified_router(entry["command"].as_str().ok_or(KEEP)?)
+    {
+        return Err(KEEP.into());
+    }
+    storage::reject_links(project)?;
+    storage::reject_links(old)?;
+    if !crate::is_valid_unity_project(project) || !crate::is_valid_unity_project(old) {
+        return Err(KEEP.into());
+    }
+    let previous = display_path(old)?;
+    let target = display_path(project)?;
+    if previous == target || !static_project_path(&target) {
+        return Err(KEEP.into());
+    }
+
+    let root = json_object(text, json_trivia(text, 0))?;
+    let servers = json_object(text, json_member(&root, "mcpServers")?.start)?;
+    let object = json_object(text, json_member(&servers, &id)?.start)?;
+    let env = json_object(text, json_member(&object, "env")?.start)?;
+    let mut ranges = Vec::new();
+    for key in &keys {
+        ranges.push(json_member(&env, key)?);
+        data["mcpServers"][&id]["env"][*key] = json!(target);
+    }
+    ranges.sort_by_key(|r| std::cmp::Reverse(r.start));
+    let mut after = text.to_owned();
+    for r in ranges {
+        after.replace_range(r, &json!(target).to_string());
+    }
+    if serde_json::from_str::<Value>(&after).map_err(|_| KEEP)? != data {
+        return Err(KEEP.into());
+    }
+    Ok(PinRepair {
+        previous,
+        keys,
+        after,
+    })
+}
+
+fn installed_pin_repair(text: &str, project: &Path) -> Result<PinRepair, String> {
+    pin_repair(text, project, |command| {
+        let path = Path::new(command);
+        if !local_project(path)
+            || path.file_name().and_then(|s| s.to_str()) != Some("creator-hub-mcp-router.exe")
+        {
+            return false;
+        }
+        creator_hub_mcp_router::Store::installed()
+            .and_then(|store| store.router())
+            .is_ok_and(|router| same_router_path(command, &router.command.to_string_lossy()))
+    })
+}
+
+pub(crate) fn can_review_pins(text: &str, project: &Path) -> bool {
+    installed_pin_repair(text, project).is_ok()
+}
+
 fn commit(project: &Path, backups: &Path, before: &str, after: &str) -> Result<PathBuf, String> {
     let path = project.join(".mcp.json");
     if storage::read_text(&path)?.as_deref() != Some(before) {
@@ -183,12 +290,30 @@ pub(crate) fn review(app: &tauri::AppHandle, project: &Path) -> Result<Value, St
         return Err(KEEP.into());
     }
     let before = storage::read_text(&project.join(".mcp.json"))?.ok_or(KEEP)?;
-    let after = plan(&before, project)?;
-    if !app.dialog().message(format!("Update Claude Code for this Unity project?\n\n{label}\n\nHub will back up this project's connection file, then point it to Hub's MCP. Your other projects and account settings stay as they are."))
-        .title("Update this project connection").buttons(MessageDialogButtons::OkCancelCustom("Update this project".into(), "Not now".into())).blocking_show() {
+    let repair = installed_pin_repair(&before, project).ok();
+    let (after, message, accept) = if let Some(r) = &repair {
+        (r.after.clone(), format!("Change the folder Claude Code uses?\n\nCurrent folder: {}\nNew folder: {label}\n\nHub will back up {label}/.mcp.json and change only {}. The other folder and your account settings will not change. Keep the current folder if you chose it intentionally.", r.previous, r.keys.join(" and ")), "Use this folder")
+    } else {
+        (plan(&before, project)?, format!("Update Claude Code for this Unity project?\n\n{label}\n\nHub will back up this project's connection file, then point it to Hub's MCP. Your other projects and account settings stay as they are."), "Update this project")
+    };
+    if !app
+        .dialog()
+        .message(message)
+        .title("Review this project connection")
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            accept.into(),
+            "Not now".into(),
+        ))
+        .blocking_show()
+    {
         return Ok(json!({"status":"cancelled"}));
     }
-    if !crate::is_valid_unity_project(project) || plan(&before, project)? != after {
+    if !crate::is_valid_unity_project(project)
+        || match repair {
+            Some(r) => installed_pin_repair(&before, project)? != r,
+            None => plan(&before, project)? != after,
+        }
+    {
         return Err(KEEP.into());
     }
     let root = creator_hub_mcp_router::Store::installed_base()?.join("project-connection-backups");
@@ -248,6 +373,9 @@ mod tests {
         }
         for env in [
             json!({"UNITY_PROJECT_PATH":"C:/Wrong"}),
+            json!({"UNITY_PROJECT_PATH":project, "BANTER_PROJECT_PATH":"C:/Other"}),
+            json!({"UNITY_PROJECT_PATH":"C:/Other", "BANTER_PROJECT_PATH":project}),
+            json!({"UNITY_PROJECT_PATH":project, "BANTER_PROJECT_PATH":null}),
             json!({"BANTER_PROJECT_PATH":"${CUSTOM}"}),
             json!({"unity_project_path":project}),
             json!({"NODE_OPTIONS":"custom"}),
@@ -256,6 +384,7 @@ mod tests {
             assert!(render(&fixture(env), project, V1, V2).is_err());
         }
         let base = fixture(json!({}));
+        assert!(render(&base, "C:/Projects/${CUSTOM}", V1, V2).is_err());
         for b in [
             base.replace(V1, "custom"),
             base.replace("\"args\":[]", "\"args\":[\"--custom\"]"),
@@ -265,6 +394,64 @@ mod tests {
             assert!(render(&b, project, V1, V2).is_err());
         }
     }
+    #[test]
+    fn reviewed_copy_repair_changes_only_existing_pins_and_backs_up_exact_bytes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let old = tmp.path().join("Original");
+        let copy = tmp.path().join("Copy");
+        for dir in [&old, &copy] {
+            for child in ["Assets", "Packages", "ProjectSettings"] {
+                std::fs::create_dir_all(dir.join(child)).unwrap();
+            }
+        }
+        let from = display_path(&old).unwrap();
+        let to = display_path(&copy).unwrap();
+        let file = copy.join(".mcp.json");
+        for env in [
+            json!({"UNITY_PROJECT_PATH":from}),
+            json!({"BANTER_PROJECT_PATH":from}),
+            json!({"UNITY_PROJECT_PATH":from,"BANTER_PROJECT_PATH":from,"OTHER_VALUE":"keep"}),
+        ] {
+            let before = format!("  {}\r\n", fixture(env.clone()).replace(V1, V2));
+            std::fs::write(old.join(".mcp.json"), &before).unwrap();
+            std::fs::write(&file, &before).unwrap();
+            assert!(pin_repair(&before, &copy, |_| false).is_err());
+            let r = pin_repair(&before, &copy, |command| command == V2).unwrap();
+            assert_eq!(r.previous, from);
+            assert_eq!(
+                r.keys.len(),
+                env.as_object()
+                    .unwrap()
+                    .keys()
+                    .filter(|k| k.ends_with("_PROJECT_PATH"))
+                    .count()
+            );
+            assert_eq!(r.after, before.replace(&from, &to));
+            assert_eq!(std::fs::read_to_string(&file).unwrap(), before); // Review alone (or Cancel).
+            let backup = commit(&copy, &tmp.path().join("backups"), &before, &r.after).unwrap();
+            assert_eq!(std::fs::read_to_string(backup).unwrap(), before);
+            assert_eq!(std::fs::read_to_string(&file).unwrap(), r.after);
+            assert_eq!(
+                std::fs::read_to_string(old.join(".mcp.json")).unwrap(),
+                before
+            );
+            assert!(pin_repair(&r.after, &copy, |_| true).is_err());
+        }
+        for env in [
+            json!({"UNITY_PROJECT_PATH":from,"BANTER_PROJECT_PATH":to}),
+            json!({"UNITY_PROJECT_PATH":from,"BANTER_PROJECT_PATH":"${CUSTOM}"}),
+            json!({"BANTER_PROJECT_PATH":tmp.path().join("missing")}),
+            json!({"UNITY_PROJECT_PATH":from,"NODE_OPTIONS":"custom"}),
+            json!({"unity_project_path":from}),
+            json!({"UNITY_PROJECT_PATH":from,"CREATOR_WORKS_CONFIG_OWNER":"other"}),
+        ] {
+            assert!(pin_repair(&fixture(env), &copy, |_| true).is_err());
+        }
+        let custom = fixture(json!({"UNITY_PROJECT_PATH":from}))
+            .replace("\"args\":[]", "\"args\":[],\"custom\":true");
+        assert!(pin_repair(&custom, &copy, |_| true).is_err());
+    }
+
     #[test]
     fn changed_since_review_does_not_write_or_back_up_the_wrong_bytes() {
         let tmp = tempfile::tempdir().unwrap();
