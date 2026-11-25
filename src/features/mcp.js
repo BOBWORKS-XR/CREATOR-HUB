@@ -14,7 +14,7 @@ const noticeKey = 'creator-works-mcp.ai-usage-notice-hidden.v1';
 export function mount(root, api) {
   root.innerHTML = `
     <div class="feature-heading"><h2>Creator Works MCP</h2><span data-field="status" role="status">Checking availability</span></div>
-    <p class="feature-note">MCP is included with Creator Hub. Update Hub to get MCP updates. If your AI already connects to the right Unity project, you normally don't need to set it up again.</p>
+    <p class="feature-note">MCP updates come with Hub. If your AI connects to the right Unity project, no setup is needed.</p>
     <section data-field="route-update" hidden></section>
     <p data-field="error" class="feature-error" role="alert" hidden></p><button data-field="retry" class="text-button" type="button" hidden>Check connection again</button>
     <section data-field="product-panel" class="feature-section" aria-label="Saved MCP settings review" hidden>
@@ -28,7 +28,7 @@ export function mount(root, api) {
         <button data-field="product-check" data-native-action class="text-button" type="button" disabled><span class="icon icon-refresh" aria-hidden="true"></span> Check again</button>
       </details>
     </section>
-    <div data-field="notice" class="feature-banner"><p>AI results and token charges are unpredictable. Your AI provider controls billing. Back up projects and review generated actions.</p><label class="feature-check"><input data-field="notice-remember" type="checkbox">Don't show again</label><button data-field="notice-close" class="icon-button" type="button" title="Dismiss AI usage notice" aria-label="Dismiss AI usage notice">&#215;</button></div>
+    <div data-field="notice" class="feature-banner"><p>Your AI provider may charge for use. Back up your project and check changes your AI suggests.</p><label class="feature-check"><input data-field="notice-remember" type="checkbox">Don't show again</label><button data-field="notice-close" class="icon-button" type="button" title="Dismiss AI usage notice" aria-label="Dismiss AI usage notice">&#215;</button></div>
     <fieldset data-field="controls" disabled aria-label="MCP controls">
       <section data-field="runtime-repair" class="feature-section" hidden><h3>Your setup points to a different copy of MCP</h3><p>Keep it if you chose it yourself. To use the copy updated with Hub, switch below. This changes Hub's saved choice, not your Unity projects or AI app settings.</p><button data-field="repair-runtime" class="primary-button" type="button">Use MCP included with Hub</button></section>
       <div class="feature-actions feature-section"><button data-field="guide" class="text-button" type="button">Connection guide</button><button data-field="check" class="icon-button" type="button" title="Check Unity connection" aria-label="Check Unity connection"><span class="icon icon-refresh" aria-hidden="true"></span></button></div>
@@ -37,7 +37,7 @@ export function mount(root, api) {
           <div class="feature-input-row"><label>Unity project<input data-field="project" type="text" autocomplete="off" spellcheck="false"></label><button data-field="browse" class="text-button" type="button"><span class="icon icon-folder" aria-hidden="true"></span> Browse</button></div>
           <label>Recent Unity projects<select data-field="discovered"><option value="">Choose a project</option></select></label>
           <p data-field="selection" class="feature-note" role="status"></p>
-          <p class="feature-note">Connecting for the first time? Tick the apps you use, then choose <strong>Set up Creator Works MCP</strong>. To update just one app for your saved project, choose <strong>Apply</strong> beside it.</p>
+          <p class="feature-note">First time? Tick your apps and choose <strong>Set up Creator Works MCP</strong>. Use <strong>Apply</strong> to change just one app.</p>
           <div data-field="clients"></div>
           <details><summary>Optional Unity CLI</summary><p data-field="cli-status" class="feature-note"></p><label class="feature-check"><input data-field="cli" type="checkbox" disabled><span>Also connect Unity CLI to the selected AI clients</span></label><p class="feature-note">Off by default. Experimental in Creator Hub and Unity. Requires Unity 6 and the Unity Pipeline package; this option does not install that package.</p><button data-field="cli-docs" class="text-button" type="button">Unity CLI requirements <span class="icon icon-external" aria-hidden="true"></span></button></details>
           <button data-field="setup" class="primary-button" type="button" disabled>Set up Creator Works MCP</button>
@@ -49,6 +49,7 @@ export function mount(root, api) {
           <div class="feature-actions"><button data-field="assist-action" class="primary-button" type="button">Check this project</button>
           <button data-field="assist-copy" class="text-button" type="button" hidden>Copy read-only check</button>
           <button data-field="assist-relink" class="text-button" type="button" hidden>My AI opens the wrong project</button></div>
+          <div data-field="shared-connection" hidden><button data-field="check-shared" class="text-button" type="button">Check for a connection update</button><p data-field="shared-result" class="feature-note" role="status"></p><details data-field="shared-error" hidden><summary>Technical details</summary><p data-field="shared-error-detail"></p></details></div>
           <details data-field="assist-details"><summary>Connection details and read-only check</summary><div data-field="checks"></div><p data-field="assist-prompt" class="feature-note" tabindex="-1"></p></details>
           <p data-field="assist-result" class="feature-note" role="status"></p>
         </section>
@@ -114,7 +115,8 @@ export function mount(root, api) {
     const path = $('project').value;
     $('discovered').value = [...$('discovered').options].some(option => option.value === path) ? path : '';
   }
-  const selectedClients = () => clients.filter(([id]) => clientUi.get(id).checkbox.checked);
+  const scopedClaude = p => ['present', 'unreadable'].includes(p?.claudeProjectEntry);
+  const selectedClients = () => clients.filter(([id]) => clientUi.get(id).checkbox.checked && !(id === 'claude' && scopedClaude(onboarding?.project)));
   const checkedClient = state => !!state && !state.issue && state.supported === true && typeof state.configured === 'boolean';
   const run = async (action, label) => { const result = await page.run(action, label); controls(); return result; };
   function requireReload(reason) {
@@ -202,9 +204,15 @@ export function mount(root, api) {
     $('bridge').disabled = !onboarding?.project?.valid;
     for (const [id, ui] of clientUi) {
       const state = onboarding?.clients?.find(client => client.id === id);
-      ui.checkbox.disabled = !checkedClient(state);
-      ui.apply.disabled = !ready || !active() || !checkedClient(state) || active().unity_project_path !== $('project').value || profileDirty || !capabilities.ready;
-      ui.disconnect.disabled = !checkedClient(state) || !state.configured;
+      const projectOnly = id === 'claude' && scopedClaude(onboarding?.project);
+      ui.checkbox.disabled = projectOnly || !checkedClient(state);
+      if (projectOnly) ui.checkbox.checked = false;
+      const action = projectOnly ? onboarding.project.claudeProjectRoute === 'oldProjectRouter' ? 'Update this project connection' : 'Check project connection' : 'Apply';
+      ui.apply.textContent = action;
+      ui.apply.setAttribute('aria-label', projectOnly ? action : `Apply to ${clients.find(([key]) => key === id)[1]}`);
+      ui.apply.disabled = projectOnly ? !onboarding.project.valid : !ready || !active() || !checkedClient(state) || active().unity_project_path !== $('project').value || profileDirty || !capabilities.ready;
+      ui.disconnect.disabled = projectOnly || !checkedClient(state) || !state.configured;
+      ui.disconnect.hidden = projectOnly;
     }
     $('cli').disabled = !onboarding?.unityCli?.canEnable && !onboarding?.unityCli?.enabled;
     $('recover').disabled = !recovery.some(item => item.canResume);
@@ -214,9 +222,12 @@ export function mount(root, api) {
     $('feedback-save').disabled = !feedbackReady;
     $('feedback-check').disabled = !onboarding?.project?.valid;
     const [step, message, action] = assistance();
+    $('shared-connection').hidden = onboarding?.canReviewSharedConnection !== true ||
+      ($('assist-client').value === 'claude' && ['direct', 'oldProjectRouter'].includes(onboarding?.project?.claudeProjectRoute));
     $('assist-message').textContent = message;
     $('assist-action').textContent = action;
-    $('assist-copy').hidden = !['connect', 'runtime', 'client-status', 'setup'].includes(step);
+    const hasProjectEntry = $('assist-client').value === 'claude' && onboarding?.project?.claudeProjectEntry === 'present';
+    $('assist-copy').hidden = !['connect', 'runtime', 'client-status', 'setup'].includes(step) && !(hasProjectEntry && step !== 'prompt');
     const checkFirst = step === 'connect' && $('assist-client').value === 'claude';
     for (const [button, primary] of [[$('assist-copy'), checkFirst], [$('assist-action'), !checkFirst]]) {
       button.classList.toggle('primary-button', primary);
@@ -238,13 +249,19 @@ export function mount(root, api) {
     $('checks').replaceChildren(...rows.map(([name, value, ready]) => { const row = node('div', null, 'feature-row'); row.append(node('span', name), node('span', value, ready ? 'feature-good' : 'feature-warn')); return row; }));
     for (const [id, ui] of clientUi) {
       const state = value.clients.find(client => client.id === id);
-      const scopeStatus = id === 'claude'
-        ? (state?.configured ? 'Configured for your user' : 'No user-level setup found')
-        : (state?.configured ? 'Configured' : 'Not configured');
       const projectEntry = id === 'claude' ? p?.claudeProjectEntry : null;
-      const projectNote = projectEntry === 'present' ? 'Project entry found' : projectEntry === 'unreadable' ? 'Project settings could not be checked' : '';
+      const scopeStatus = id === 'claude'
+        ? (state?.configured ? 'Configured for your user' : projectEntry === 'present'
+          ? (['shared', 'direct'].includes(p.claudeProjectRoute) ? 'No second setup needed' : 'Check in Claude Code') : 'No user-level setup found')
+        : (state?.configured ? 'Configured' : 'Not configured');
+      const projectNote = projectEntry === 'present'
+        ? (p.claudeProjectRoute === 'shared' ? "Project uses Hub's shared connection"
+          : p.claudeProjectRoute === 'direct' ? 'Project starts its own server' : 'Project entry found')
+        : projectEntry === 'unreadable' ? 'Project settings could not be checked' : '';
       const userStatus = !checkedClient(state) ? (state?.issue || 'Connection status not verified') : scopeStatus;
-      ui.status.textContent = state?.supported === false ? 'Not available on this OS' : [state?.detected ? 'Detected' : state ? 'Not detected' : '', projectNote, userStatus].filter(Boolean).join(' · ');
+      ui.status.textContent = state?.supported === false ? 'Not available on this OS'
+        : projectEntry === 'present' && p.claudeProjectRoute === 'oldProjectRouter' ? 'This project uses an older connection.'
+        : [state?.detected ? 'Detected' : state ? 'Not detected' : '', projectNote, userStatus].filter(Boolean).join(' · ');
       ui.checkbox.checked = checkedClient(state) && (manualClientChoices.get(id) ?? Boolean(state.configured || (state.detected && !projectNote)));
     }
     $('cli-status').textContent = value.unityCli?.message || 'Optional Unity CLI is unavailable.';
@@ -318,6 +335,7 @@ export function mount(root, api) {
     if (!capabilities.ready) throw new Error(capabilities.status);
     for (const [id, , commandId] of clients) {
       const client = target.clients.find(item => item.id === id);
+      if (id === 'claude' && scopedClaude(target.project)) continue;
       if (checkedClient(client) && client.configured) await page.call(`update_${commandId}_mcp_config`, {
         channel, mcpServerPath: config.mcp_server_path, toolGroups: config.tool_groups || 'core',
       });
@@ -407,6 +425,27 @@ export function mount(root, api) {
     }
   }
   page.on($('sdk-check'), 'click', checkLatestSdk);
+  page.on($('check-shared'), 'click', () => run(async () => {
+    if (onboarding?.canReviewSharedConnection !== true) return;
+    const messages = new Map([
+      ['current', "The connection already uses Hub's MCP. If your AI still shows an older version, quit and reopen the app."],
+      ['updated', 'Connection updated. Quit and reopen your AI app in this project.'],
+      ['cancelled', 'Your connection was kept. Nothing to do.'],
+      ['notManaged', 'No shared Hub connection was found. If your AI already works, no setup is needed.'],
+      ['keepExisting', 'Hub kept the existing connection rather than replacing it with an older or different copy. Check Home for a Hub update.'],
+    ]);
+    $('shared-result').textContent = 'Checking the shared connection…';
+    $('shared-error').hidden = true;
+    try {
+      const answer = await page.call('review_shared_mcp_update');
+      if (!messages.has(answer?.status)) throw new Error('Unrecognised shared connection result.');
+      $('shared-result').textContent = messages.get(answer.status);
+    } catch (reason) {
+      $('shared-result').textContent = 'Hub could not verify the connection. Leave your settings as they are and try the connection check in your AI app.';
+      $('shared-error-detail').textContent = text(reason);
+      $('shared-error').hidden = false;
+    }
+  }, 'Checking the shared MCP connection'));
   async function reload() {
     try { await loadSettings(); $('retry').hidden = true; }
     catch (reason) { $('retry').hidden = false; throw reason; }
@@ -452,8 +491,17 @@ export function mount(root, api) {
     page.on(checkbox, 'change', () => { manualClientChoices.set(id, checkbox.checked); controls(); });
     page.on(apply, 'click', () => run(async () => {
       if (apply.disabled) return;
+      if (id === 'claude' && scopedClaude(onboarding?.project)) {
+        $('assist-client').value = id; controls();
+        if (onboarding.project.claudeProjectRoute === 'oldProjectRouter') await updateProjectConnection();
+        else $('assist-action').focus();
+        return;
+      }
       $('setup-result').textContent = '';
       await check();
+      if (id === 'claude' && scopedClaude(onboarding?.project)) {
+        $('assist-client').value = id; controls(); $('assist-action').focus(); return;
+      }
       if (apply.disabled) throw new Error('This connection changed. Check the project and app before applying.');
       await checkSavedConfig();
       await changeClient(id, commandId, true);
@@ -521,10 +569,27 @@ export function mount(root, api) {
     catch { $('assist-prompt').focus(); $('assist-result').textContent = 'Copy the question under Connection details and paste it into your AI app.'; }
   }
   page.on($('assist-copy'), 'click', copyConnectionCheck);
+  async function updateProjectConnection() {
+    const project = $('project').value;
+    const outcome = await page.call('review_claude_project_connection', { unityProjectPath: project });
+    if ($('project').value !== project) return;
+    if (outcome?.status === 'cancelled') { $('assist-result').textContent = 'No changes made.'; return; }
+    await check();
+    if ($('project').value !== project) return;
+    if (outcome?.status !== 'updated' || onboarding?.project?.claudeProjectRoute !== 'shared') {
+      $('assist-result').textContent = 'Hub could not confirm the update. Check the connection before trying again.'; return;
+    }
+    $('assist-result').textContent = 'Project connection updated. Reopen Claude Code in this folder. If Claude asks, approve the Creator Works connection for this project.';
+    if (typeof outcome.backup === 'string') {
+      const details = node('details'); details.append(node('summary', 'Backup location'), node('p', outcome.backup));
+      $('assist-result').append(details);
+    }
+  }
   async function assist(relink) {
     if ($('controls').disabled) return;
     const [action] = assistance();
     if (relink && !canRelink(action)) return;
+    if (action === 'project-update') { await run(updateProjectConnection, 'Updating this project connection'); return; }
     if (action === 'home') { api.openHome(); return; }
     if (action === 'browse' || action === 'check') { $(action).click(); return; }
     if (action === 'setup') { ($('setup').disabled ? $('project') : $('setup')).focus(); return; }
@@ -631,7 +696,7 @@ export function mount(root, api) {
       config = after;
       changed = true;
       await reload();
-      $('setup-result').textContent = 'Hub runtime selected. Projects, preferences and existing AI connections are unchanged. Finish the backup review to remember this setup.';
+      $('setup-result').textContent = "Hub's MCP choice is saved. Your AI apps still use their existing connections.";
     }, 'Updating MCP runtime location');
     if (repaired && changed && !page.needsRestart() && ['legacy-only', 'conflict'].includes(productReport?.status)) await reviewProductSettings();
   });
@@ -823,7 +888,8 @@ export function mount(root, api) {
     },
     help: [
       ['Coming from the old MCP app?', 'Use Home to update Creator Hub. Keep the old app installed while Hub reviews your setup. If you see Move to Hub, you can bring over recognised connections or choose Not now. If migration stops and Keep my current setup is offered, it keeps your settings without repeating the move.'],
-      ['Do I need to enable managed MCP routing?', 'Choose Enable managed routing if you want Hub to keep connections it manages pointing to its tools across compatible updates. Not now leaves existing connections alone. This choice does not move an AI connection you set up yourself.'],
+      ['Will my project use the MCP included with Hub?', 'Enable managed routing switches the shared Hub router, not your project files. If your project starts that router, fully quit and reopen the AI app to use the new runtime. If it starts an old server directly, enabling routing does not change that connection.'],
+      ['Which review backs up my settings?', 'Use Review saved MCP settings for backups, or Back up and continue when prompted. Review selected connections is for changing AI app connections, not for backing up your Hub settings.'],
       ['Claude Code works but Hub shows no user-level setup', 'Hub checks settings for your user account. Claude Code can also connect through a project file called .mcp.json. If it already reaches the right project, leave that file alone.'],
       ['Which tool is this?', 'MCP connects compatible AI clients to Unity. It is not an AI model. Project Setup creates and validates projects; Hub brings both tools together.'],
       ['My AI cannot see MCP', 'Choose your project and pick the AI app under Connection status. Hub checks the project and its bridge, and can help you connect without setting everything up again. Fully quit and reopen a changed client. Use the read-only check in the AI app before trying another repair.'],

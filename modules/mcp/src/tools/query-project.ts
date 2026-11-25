@@ -20,6 +20,7 @@ export interface ProjectStateQueryOptions {
   maxResults?: number;
   fields?: string[];
   componentType?: string;
+  componentTypes?: string[];
   propertyNames?: string[];
   componentDetails?: "identity" | "properties";
   maxResponseBytes?: number;
@@ -39,6 +40,7 @@ interface QuerySummary {
   maxResults: number;
   fields?: string[];
   componentType?: string;
+  componentTypes?: string[];
   propertyNames?: string[];
   componentDetails?: "identity" | "properties";
   maxResponseBytes: number;
@@ -153,6 +155,9 @@ export async function queryProjectState(
   if (validationError) {
     return { success: false, error: validationError };
   }
+  if (options.componentTypes && !options.propertyNames?.length && options.componentDetails === undefined) {
+    options = { ...options, componentDetails: "identity" };
+  }
 
   try {
     if ((query === "hierarchy" || query === "components") &&
@@ -191,6 +196,16 @@ export async function queryProjectState(
 }
 
 function validateQueryOptions(query: string, options: ProjectStateQueryOptions): string | undefined {
+  if (options.componentTypes !== undefined) {
+    const names = options.componentTypes;
+    if (!Array.isArray(names) || names.length < 1 || names.length > 16 ||
+        names.some(name => typeof name !== "string" || !name.trim() || name.trim() !== name || name.length > 128) ||
+        new Set(names.map(name => name.toLowerCase())).size !== names.length) {
+      return "componentTypes must contain 1 to 16 distinct component type names, each at most 128 characters.";
+    }
+    if (options.componentType !== undefined) return "Use either componentType or componentTypes, not both.";
+    if (options.refresh !== false) return "Multi-type search reads the saved hierarchy. Set refresh:false, or use componentType for a fresh live query.";
+  }
   if (options.componentDetails !== undefined && !["identity", "properties"].includes(options.componentDetails)) {
     return "componentDetails must be identity or properties.";
   }
@@ -529,14 +544,15 @@ function matchingHierarchyObjects(
       return false;
     }
 
-    if (options.componentType && !objectHasComponent(object, options.componentType)) {
+    const types = options.componentTypes || options.componentType;
+    if (types && !objectHasComponent(object, types)) {
       return false;
     }
     return !filter || matchesFilter(object, filter, match);
   });
 
-  if (options.componentType || options.propertyNames?.length || options.componentDetails === "identity") {
-    matches = matches.map((object) => projectMatchingComponents(object, options.componentType, options.propertyNames, options.componentDetails));
+  if (options.componentTypes || options.componentType || options.propertyNames?.length || options.componentDetails === "identity") {
+    matches = matches.map((object) => projectMatchingComponents(object, options.componentTypes || options.componentType, options.propertyNames, options.componentDetails));
   }
 
   return matches;
@@ -574,6 +590,7 @@ function selectHierarchyObjects(
       maxResults,
       fields,
       componentType: options.componentType,
+      componentTypes: options.componentTypes,
       propertyNames: options.propertyNames,
       componentDetails: options.componentDetails,
       maxResponseBytes: bounded.maxResponseBytes,
@@ -584,7 +601,7 @@ function selectHierarchyObjects(
 
 function projectMatchingComponents(
   object: Record<string, unknown>,
-  componentType: string | undefined,
+  componentType: string | string[] | undefined,
   propertyNames: string[] | undefined,
   componentDetails?: "identity" | "properties"
 ): Record<string, unknown> {
@@ -627,12 +644,13 @@ function projectComponent(
   };
 }
 
-function objectHasComponent(object: Record<string, unknown>, componentType: string): boolean {
+function objectHasComponent(object: Record<string, unknown>, componentType: string | string[]): boolean {
   return Array.isArray(object.components) &&
     object.components.filter(isRecord).some((component) => componentMatchesType(component, componentType));
 }
 
-function componentMatchesType(component: Record<string, unknown>, componentType: string): boolean {
+function componentMatchesType(component: Record<string, unknown>, componentType: string | string[]): boolean {
+  if (Array.isArray(componentType)) return componentType.some(name => componentMatchesType(component, name));
   const requested = componentType.toLowerCase();
   return stringValue(component.type)?.toLowerCase() === requested ||
     stringValue(component.fullType)?.toLowerCase() === requested;
@@ -769,12 +787,15 @@ function readComponentsFromHierarchy(
     ...options,
     fields: undefined,
     componentType: undefined,
+    componentTypes: undefined,
   });
   let components: Array<Record<string, unknown>> = [];
 
   for (const object of selectedObjects) {
     const objectComponents = Array.isArray(object.components) ? object.components : [];
     for (const component of objectComponents.filter(isRecord)) {
+      const types = options.componentTypes || options.componentType;
+      if (types && !componentMatchesType(component, types)) continue;
       components.push({
         objectName: object.name,
         objectPath: object.path,
@@ -784,9 +805,6 @@ function readComponentsFromHierarchy(
     }
   }
 
-  if (options.componentType) {
-    components = components.filter((component) => componentMatchesType(component, options.componentType as string));
-  }
   if (filter) {
     components = components.filter((component) => matchesFilter(component, filter, options.match ?? "contains"));
   }
@@ -815,6 +833,7 @@ function readComponentsFromHierarchy(
       maxResults,
       fields,
       componentType: options.componentType,
+      componentTypes: options.componentTypes,
       propertyNames: options.propertyNames,
       componentDetails: options.componentDetails,
       maxResponseBytes: bounded.maxResponseBytes,

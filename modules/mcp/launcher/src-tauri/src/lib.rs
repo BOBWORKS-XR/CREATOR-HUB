@@ -127,6 +127,7 @@ struct ProjectSetupStatus {
     bridge_current: bool,
     state_status: String,
     claude_project_entry: &'static str,
+    claude_project_route: &'static str,
     sdk_profile: SdkProfileStatus,
 }
 
@@ -1135,6 +1136,9 @@ fn update_claude_mcp_config(
     mcp_server_path: String,
     tool_groups: String,
 ) -> Result<(), String> {
+    if integration_context::protected_writers() {
+        client_config_status::allow_claude_account_setup(Path::new(&channel.unity_project_path))?;
+    }
     let config_path = get_claude_config_path();
     let mcp_server_path = validate_mcp_server_path(&mcp_server_path)?
         .to_string_lossy()
@@ -1169,6 +1173,9 @@ fn update_claude_mcp_config(
     let content = serde_json::to_string_pretty(&config)
         .map_err(|e| format!("Failed to serialize Claude config: {}", e))?;
 
+    if integration_context::protected_writers() {
+        client_config_status::allow_claude_account_setup(Path::new(&channel.unity_project_path))?;
+    }
     client_setup_write::commit(
         "Claude Code",
         &config_path,
@@ -2304,6 +2311,50 @@ fn get_project_sdk_profile(unity_project_path: String) -> SdkProfileStatus {
     project_sdk_profile(Path::new(&unity_project_path))
 }
 
+fn editor_heartbeat_status(state_dir: &Path, now_ms: u64) -> &'static str {
+    let timestamp = |name: &str, key: &str| -> Option<u64> {
+        use std::io::Read;
+        let path = state_dir.join(name);
+        settings_backup::reject_links(&path).ok()?;
+        let mut options = settings_backup::protected_options();
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE};
+            // Unity atomically replaces heartbeat files while Hub is reading them.
+            options.share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
+        }
+        let file = options.open(path).ok()?;
+        if !file.metadata().ok()?.is_file() { return None; }
+        let mut bytes = Vec::new();
+        file.take(65_537).read_to_end(&mut bytes).ok()?;
+        if bytes.len() > 65_536 { return None; }
+        serde_json::from_slice::<serde_json::Value>(&bytes).ok()?.get(key)?.as_u64()
+    };
+    match timestamp("project-instance.json", "updatedAt").or_else(|| timestamp("editor-state.json", "timestamp")) {
+        Some(0) | None => "missing",
+        Some(ms) if now_ms.checked_sub(ms).is_some_and(|age| age <= 10_000) => "fresh",
+        Some(_) => "stale",
+    }
+}
+
+#[test]
+fn project_heartbeat_uses_editor_timestamps_not_copied_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path();
+    let now = 50_000;
+    fs::write(state.join("scene-hierarchy.json"), "{}").unwrap();
+    assert_eq!(editor_heartbeat_status(state, now), "missing");
+    fs::write(state.join("editor-state.json"), r#"{"timestamp":40000}"#).unwrap();
+    assert_eq!(editor_heartbeat_status(state, now), "fresh");
+    for value in [39_999, 50_001] {
+        fs::write(state.join("project-instance.json"), format!("{{\"updatedAt\":{value}}}")).unwrap();
+        assert_eq!(editor_heartbeat_status(state, now), "stale");
+    }
+    fs::write(state.join("project-instance.json"), r#"{"updatedAt":50000}"#).unwrap();
+    assert_eq!(editor_heartbeat_status(state, now), "fresh");
+}
+
 fn project_setup_status(source_bridge: Option<&Path>, project_path: &Path) -> ProjectSetupStatus {
     let valid = is_valid_unity_project(project_path);
     let extension = source_bridge
@@ -2313,43 +2364,19 @@ fn project_setup_status(source_bridge: Option<&Path>, project_path: &Path) -> Pr
             current: false,
         });
     let state_dir = project_path.join(".bantworks-mcp").join("state");
-    let state_files = [
-        "scene-hierarchy.json",
-        "editor-state.json",
-        "project-instance.json",
-        "console-log.json",
-        "import-status.json",
-        "compilation-status.json",
-        "prefab-catalog.json",
-    ];
-    let newest_modified = state_files
-        .iter()
-        .filter_map(|name| fs::metadata(state_dir.join(name)).ok()?.modified().ok())
-        .max();
-    let state_status = match newest_modified {
-        None => "missing",
-        Some(modified) => {
-            let age = SystemTime::now()
-                .duration_since(modified)
-                .unwrap_or_default();
-            if age.as_secs() <= 10 {
-                "fresh"
-            } else {
-                "stale"
-            }
-        }
-    };
+    let now_ms = SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
+    let state_status = editor_heartbeat_status(&state_dir, now_ms);
 
+    let (claude_project_entry, claude_project_route) = if valid {
+        client_config_status::project_claude_setup(project_path)
+    } else { ("unchecked", "unknown") };
     ProjectSetupStatus {
         valid,
         bridge_installed: extension.installed,
         bridge_current: extension.current,
         state_status: state_status.to_string(),
-        claude_project_entry: if valid {
-            client_config_status::project_claude(project_path)
-        } else {
-            "unchecked"
-        },
+        claude_project_entry,
+        claude_project_route,
         sdk_profile: project_sdk_profile(project_path),
     }
 }

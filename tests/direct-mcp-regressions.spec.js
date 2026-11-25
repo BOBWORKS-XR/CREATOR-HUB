@@ -56,7 +56,12 @@ async function open(page, options = {}) {
             if (window.failAfterSave) { window.failAfterSave = false; throw new Error('Save outcome unknown after publication'); }
             return null;
           case 'discover_unity_projects': return channels.map(channel => ({ name: channel.name, path: channel.unity_project_path }));
+          case 'review_shared_mcp_update': return { status: options.sharedOutcome };
+          case 'review_claude_project_connection':
+            if (options.projectOutcome === 'updated') window.checkedBridge.claudeProjectRoute = 'shared';
+            return { status: options.projectOutcome, backup: '/fixture/backup' };
           case 'get_onboarding_status': return window.invalidStatus ? { runtime: { ready: true }, clients: [] } : {
+            canReviewSharedConnection: options.sharedReview === true,
             managedRouting: options.managedRouting !== false, runtime: { ready: true, ...options.runtime },
             project: fields.unityProjectPath ? { valid: true, bridgeInstalled: true, bridgeCurrent: true, stateStatus: 'fresh', sdkProfile: window.profiles[fields.unityProjectPath], ...window.checkedBridge } : null,
             clients: ['codex', 'claude', 'claudeDesktop', 'antigravity', 'opencode'].filter(id => id !== options.omittedClient).map(id => ({
@@ -316,7 +321,7 @@ test('recent saved state does not claim a live Unity connection', async ({ page 
   await expect(field(page, 'guide-steps')).toContainText('A live connection has not been verified.');
   await expect(field(page, 'guide-steps')).toContainText('get_bridge_status');
   await expect(field(page, 'guide-steps')).toContainText('For an existing connection, check it in your AI app first.');
-  await expect(page.getByText('MCP is included with Creator Hub.', { exact: false })).toBeVisible();
+  await expect(page.getByText('MCP updates come with Hub.', { exact: false })).toBeVisible();
   await expect(field(page, 'guide-steps')).not.toContainText('Unity bridge is responding.');
   expect(await mutationCalls(page)).toEqual([]);
 });
@@ -419,11 +424,66 @@ for (const [entry, expected] of [['present', 'Project entry found'], ['unreadabl
     await expect(field(page, 'assist-action')).toHaveText('Copy connection check');
     if (entry === 'present') await expect(field(page, 'assist-message')).toContainText('type /mcp');
     await expect(field(page, 'assist-relink')).toBeHidden();
-    await box.check(); await field(page, 'check').click(); await idle(page);
-    await expect(box).toBeChecked();
+    await expect(box).toBeDisabled();
+    await page.getByRole('button', { name: 'Check project connection', exact: true }).click(); await idle(page);
+    await field(page, 'check').click(); await idle(page);
+    await expect(box).not.toBeChecked();
     expect(await mutationCalls(page)).toEqual([]);
   });
 }
+
+for (const outcome of ['updated', 'cancelled', 'unexpected']) {
+  test(`old Claude project router: ${outcome} never changes account settings`, async ({ page }) => {
+    await open(page, { sharedReview: true, projectOutcome: outcome, claudeUserConfigured: true,
+      checkedBridge: { claudeProjectEntry: 'present', claudeProjectRoute: 'oldProjectRouter', stateStatus: 'stale' } });
+    const row = page.locator('[data-client="claude"]').locator('xpath=../..');
+    const before = await page.evaluate(() => structuredClone(savedConfig));
+    await expect(row.getByRole('checkbox')).toBeDisabled();
+    await expect(row.getByRole('checkbox')).not.toBeChecked();
+    await expect(row.getByRole('button', { name: 'Apply to Claude Code', exact: true })).toHaveCount(0);
+    await expect(row.getByRole('button', { name: 'Disconnect Claude Code', exact: true })).toHaveCount(0);
+    await expect(row).toContainText('This project uses an older connection.');
+    await field(page, 'assist-client').selectOption('claude');
+    await expect(field(page, 'assist-action')).toHaveText('Update this project connection');
+    await expect(field(page, 'assist-message')).toContainText('without changing your other projects');
+    const action = row.getByRole('button', { name: 'Update this project connection', exact: true });
+    await expect(action).toBeVisible();
+    if (outcome === 'updated' && process.env.CREATOR_CONNECTION_PREVIEW) {
+      await row.screenshot({ path: test.info().outputPath('project-connection.png') });
+    }
+    await (outcome === 'cancelled' ? field(page, 'assist-action') : action).click(); await idle(page);
+    await expect(field(page, 'assist-result')).toContainText(outcome === 'updated' ? 'Reopen Claude Code in this folder' :
+      outcome === 'cancelled' ? 'No changes made' : 'could not confirm');
+    if (outcome === 'updated') await expect(field(page, 'assist-result')).toContainText('If Claude asks, approve the Creator Works connection for this project.');
+    const calls = await commands(page, 'review_claude_project_connection');
+    expect(calls.map(c => c.args.args)).toEqual([{ unityProjectPath: '/projects/Creator' }]);
+    expect(await commands(page, 'update_claude_mcp_config')).toEqual([]);
+    expect(await commands(page, 'review_shared_mcp_update')).toEqual([]);
+    expect(await page.evaluate(() => savedConfig)).toEqual(before);
+  });
+}
+
+for (const [route, message] of [['direct', "starts MCP directly for this project"], ['shared', "uses Hub's connection. No setup needed"]]) {
+  test(`Claude project route ${route}: guide only offers actions that apply`, async ({ page }) => {
+    await open(page, { sharedReview: true, checkedBridge: { claudeProjectEntry: 'present', claudeProjectRoute: route }, claudeUserConfigured: false });
+    await field(page, 'assist-client').selectOption('claude');
+    await expect(field(page, 'assist-message')).toContainText(message);
+    await expect(page.locator('#feature-mcp [data-client="claude"]').locator('xpath=../..')).toContainText('No second setup needed');
+    await expect(field(page, 'shared-connection')).toBeVisible({ visible: route === 'shared' });
+    await expect(field(page, 'assist-relink')).toBeHidden();
+    await expect(field(page, 'assist-prompt')).toContainText('version not reported');
+    expect(await mutationCalls(page)).toEqual([]);
+  });
+}
+
+test('Claude can check its running MCP version even when the Unity Editor is closed', async ({ page }) => {
+  await open(page, { checkedBridge: { claudeProjectEntry: 'present', stateStatus: 'stale' }, claudeUserConfigured: false });
+  await field(page, 'assist-client').selectOption('claude');
+  await expect(field(page, 'assist-copy')).toBeVisible();
+  await expect(field(page, 'assist-message')).toContainText('Open this project in Unity');
+  await expect(field(page, 'assist-prompt')).toContainText('mcpServerVersion');
+  expect(await mutationCalls(page)).toEqual([]);
+});
 
 for (const [name, options, button] of [
   ['missing report', { omittedClient: 'claude' }, 'Check again'],
@@ -596,7 +656,27 @@ test('runtime repair before route binding preserves every other setting without 
   const after = await page.evaluate(() => structuredClone(savedConfig));
   expect(after).toEqual({ ...before, mcp_server_path: 'C:/Hub/mcp/server/creator-works-mcp.mjs' });
   expect((await mutationCalls(page)).map(call => call.args.command)).toEqual(['save_config']);
+  await expect(field(page, 'setup-result')).toContainText("Hub's MCP choice is saved");
+  await expect(field(page, 'setup-result')).toContainText("Your AI apps still use their existing connections");
+  await expect(field(page, 'setup-result')).not.toContainText('Finish the backup review');
   await expect(field(page, 'runtime-repair')).toBeHidden();
+});
+
+for (const [status, explanation] of [
+  ['updated', 'Quit and reopen'], ['current', 'already uses'], ['cancelled', 'was kept'],
+  ['notManaged', 'No shared Hub connection'], ['keepExisting', 'kept the existing connection'],
+  ['unexpected', 'could not verify'],
+]) test(`shared connection check: ${status} leaves project-level Claude setup alone`, async ({ page }) => {
+  await open(page, { sharedReview: true, sharedOutcome: status, claudeUserConfigured: false, checkedBridge: { claudeProjectEntry: 'present' } });
+  const before = await page.evaluate(() => structuredClone(savedConfig));
+  expect(await commands(page, 'review_shared_mcp_update')).toHaveLength(0);
+  await field(page, 'check-shared').click(); await idle(page);
+  await expect(field(page, 'shared-result')).toContainText(explanation);
+  expect(await commands(page, 'review_shared_mcp_update')).toHaveLength(1);
+  expect(await page.evaluate(() => savedConfig)).toEqual(before);
+  expect(await commands(page, 'review_existing_client_connections')).toHaveLength(0);
+  expect(await commands(page, 'update_claude_mcp_config')).toHaveLength(0);
+  expect(await commands(page, 'save_config')).toHaveLength(0);
 });
 
 test('runtime repair cancellation keeps all settings unchanged', async ({ page }) => {

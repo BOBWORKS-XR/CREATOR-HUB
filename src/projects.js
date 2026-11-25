@@ -134,9 +134,9 @@
       byId('project-status').textContent = missingUnity
         ? `Unity ${missingUnity} is needed. Install this version in Unity Hub, then try opening again. Your project version has not changed.`
         : registryUnavailable && window.CreatorHubNative?.integratedFeatures === true ? 'Could not find the Editor for this project. Try opening the project in Unity Hub.'
-        : command === 'open_unity_project' ? 'Could not open this project. Check the technical details, then try again.'
-        : command === 'prepare_project_registry' ? 'Could not prepare project discovery. Check the technical details, then try again.'
-        : 'Could not refresh the project list. Your saved projects are kept. Try again or check the technical details.';
+        : command === 'open_unity_project' ? 'Hub could not open this project. Refresh the list, then try opening it again.'
+        : command === 'prepare_project_registry' ? 'Hub could not load the Unity project list. You can still add a project folder.'
+        : 'Could not refresh the project list. Your saved projects are still here. Try again.';
     }
     finally {
       busy = false; render();
@@ -156,7 +156,7 @@
         : 'Unity Hub launch requested. Open the project from its Projects list, or add it from disk.';
     } catch (reason) {
       lastError = String(reason); diagnostics.open = false;
-      byId('project-status').textContent = 'Could not open Unity Hub. Check the technical details, then try again.';
+      byId('project-status').textContent = 'Could not open Unity Hub. Open it from your apps, then choose your project.';
     } finally { busy = false; render(); }
   });
   byId('prepare-project-registry').addEventListener('click', () => run('prepare_project_registry'));

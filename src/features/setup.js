@@ -298,12 +298,12 @@ export function mount(root, api) {
     const unqualified = result.findings.some(finding => finding.qualificationRequired === true);
     const inspectionNote = afterOperation ? '' : ' No project files were changed.';
     $('inspection-summary').textContent = blockers
-      ? `${blockers} ${blockers === 1 ? 'item needs' : 'items need'} review before automatic repair.${inspectionNote}${unqualified ? ' Newer versions are kept; their version-specific checks are not a full validation.' : ''} For manual review, open this project in its existing Editor.`
+      ? `${blockers} ${blockers === 1 ? 'item needs' : 'items need'} review. See the items marked "Needs attention" below.${unqualified ? ' Hub will keep your newer versions.' : ''}${inspectionNote}`
       : result.partialRepair === true
-        ? `Inspection complete. Newer versions are kept. Only the supported repairs listed below can be applied; skipped checks are not a full project validation.${inspectionNote}`
+        ? `Inspection complete. Hub can repair the items below without changing your newer versions. Some checks will be skipped.${inspectionNote}`
       : result.canRepair && !result.canValidate
-        ? `Inspection complete.${inspectionNote} Review the proposed changes; repairs are required before validation is available.`
-        : `Inspection complete.${inspectionNote} Review the findings before approving a repair or validation.`;
+        ? `Inspection complete. Review the repairs below. Hub can check the project again after repair.${inspectionNote}`
+        : `Inspection complete.${inspectionNote}`;
     const labels = { pass: ['Ready', 'feature-good'], blocked: ['Needs attention', 'feature-warn'], repair: ['Repair available', 'feature-warn'], check: ['Check in Unity', 'feature-note'] };
     $('findings').replaceChildren(...result.findings.map(finding => {
       const [label, style] = finding.qualificationRequired === true ? ['Newer version kept', 'feature-note'] : Object.hasOwn(labels, finding.status) ? labels[finding.status] : ['Review', 'feature-note'];

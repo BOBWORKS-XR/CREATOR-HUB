@@ -44,6 +44,13 @@ struct Entry {
     after_sha256: String,
 }
 
+pub(super) const PROJECT_CONNECTION: &str = "Claude Code project connection";
+impl Entry {
+    fn project_connection(&self) -> bool {
+        self.client == PROJECT_CONNECTION && self.path.file_name().is_some_and(|n| n == ".mcp.json")
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct Pending {
@@ -372,7 +379,7 @@ impl Transaction {
         }
         for (index, (before, after)) in images.into_iter().enumerate() {
             let entry = &transaction.pending.files[index];
-            storage::retain_image(&entry.path, &before)?;
+            if !entry.project_connection() { storage::retain_image(&entry.path, &before)?; }
             storage::durable_image(&transaction.image(index, "before"), &before)?;
             hook(Boundary::BeforeImage(index))?;
             storage::durable_image(&transaction.image(index, "after"), &after)?;
@@ -554,14 +561,25 @@ impl Transaction {
         self.directory.join(format!("{index}.{kind}.json"))
     }
     fn capture(&self, index: usize) -> PathBuf {
-        self.pending.files[index]
-            .path
-            .parent()
-            .unwrap()
-            .join(format!(
+        let entry = &self.pending.files[index];
+        let parent = entry.path.parent().unwrap();
+        let base = if entry.project_connection() {
+            // Keep recovery images out of the source tree. Windows replacement
+            // requires same-volume staging; use Unity's cache on a different drive.
+            if self.directory.components().next() == parent.components().next() {
+                self.directory.clone()
+            } else { parent.join("Library") }
+        } else { parent.to_owned() };
+        base.join(format!(
                 ".creator-hub-migration-{}-{index}",
                 self.directory.file_name().unwrap().to_string_lossy()
             ))
+    }
+    fn backup_path(&self, index: usize) -> PathBuf {
+        let entry = &self.pending.files[index];
+        if entry.project_connection() { return self.image(index, "before"); }
+        entry.path.parent().unwrap().join(".creator-hub-settings-backups")
+            .join(format!("{}.{}.bak", entry.path.file_name().unwrap().to_string_lossy(), entry.before_sha256))
     }
     fn displaced(&self, index: usize) -> Result<PathBuf, String> {
         let capture = self.capture(index);
@@ -622,16 +640,7 @@ impl Transaction {
                 }
             }
             let before = storage::read_bytes(&self.image(index, "before"))?.unwrap();
-            let backup = entry
-                .path
-                .parent()
-                .unwrap()
-                .join(".creator-hub-settings-backups")
-                .join(format!(
-                    "{}.{}.bak",
-                    entry.path.file_name().unwrap().to_string_lossy(),
-                    entry.before_sha256
-                ));
+            let backup = self.backup_path(index);
             if storage::read_bytes(&backup)?.as_deref() != Some(&before) {
                 return Err("Retained before-image backup is unavailable or changed.".into());
             }
@@ -706,20 +715,13 @@ impl Transaction {
         self.validate()?;
         let mut files = Vec::new();
         for (index, entry) in self.pending.files.iter().enumerate() {
-            let before = storage::read_bytes(&self.image(index, "before"))?.unwrap();
-            let name = entry.path.file_name().unwrap().to_string_lossy();
             files.push(FileReport {
                 client: entry.client.clone(),
                 path: entry.path.clone(),
                 status: self.status(index)?,
                 before_image: self.image(index, "before"),
                 after_image: self.image(index, "after"),
-                before_backup: entry
-                    .path
-                    .parent()
-                    .unwrap()
-                    .join(".creator-hub-settings-backups")
-                    .join(format!("{name}.{}.bak", digest(&before))),
+                before_backup: self.backup_path(index),
                 displaced: self
                     .displaced(index)
                     .unwrap_or_else(|_| self.capture(index).join("displaced.bin")),
@@ -965,6 +967,12 @@ impl Transaction {
             use std::os::windows::fs::OpenOptionsExt;
             let entry = &self.pending.files[index];
             let capture = self.capture(index);
+            if entry.project_connection() {
+                let cache = entry.path.parent().unwrap().join("Library");
+                if capture.parent() == Some(cache.as_path()) {
+                    storage::private_directory(&cache)?;
+                }
+            }
             storage::private_directory(&capture)?;
             let stage = capture.join("stage.bin");
             let displaced = capture.join("displaced.bin");

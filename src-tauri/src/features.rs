@@ -172,12 +172,34 @@ fn returned_result(dispatch: impl FnOnce() -> Result<Value, String>) -> Result<V
 #[cfg(feature = "integrated-features")]
 fn dispatch_mcp(handle: &tauri::AppHandle, command: &str, args: Value) -> Result<Value, String> {
     initialize_mcp(handle)?;
+    #[cfg(windows)]
+    if command == "review_claude_project_connection" {
+        let path = args.as_object().filter(|v| v.len() == 1)
+            .and_then(|v| v.get("unityProjectPath")).and_then(Value::as_str)
+            .filter(|s| !s.is_empty() && s.len() <= 4096).ok_or("Choose one Unity project.")?;
+        return creator_works_mcp_launcher::service::review_project_connection(handle, std::path::Path::new(path));
+    }
+    #[cfg(windows)]
+    if command == "review_shared_mcp_update" {
+        if !args.as_object().is_some_and(|fields| fields.is_empty()) {
+            return Err("This connection check takes no project or client arguments.".into());
+        }
+        return crate::builtin::review_shared_mcp_update(handle).map(|status| json!({ "status": status }));
+    }
     if creator_works_mcp_launcher::service::needs_managed_route(command) {
         crate::builtin::managed_route(handle)?
             .ok_or("This Hub has no verified managed MCP route. Existing settings were kept.")?;
         creator_works_mcp_launcher::service::bind_managed_route(handle)?;
     }
-    creator_works_mcp_launcher::service::call(handle, command, args)
+    let value = creator_works_mcp_launcher::service::call(handle, command, args)?;
+    #[cfg(windows)]
+    if command == "get_onboarding_status" {
+        let mut status = value;
+        let fields = status.as_object_mut().ok_or("Missing MCP onboarding status.")?;
+        fields.insert("canReviewSharedConnection".into(), json!(true));
+        return Ok(status);
+    }
+    Ok(value)
 }
 
 #[cfg(feature = "integrated-features")]

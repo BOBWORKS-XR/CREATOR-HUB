@@ -9,6 +9,11 @@ import {
   type BridgeCommandResult,
 } from "../lib/unity-bridge-transport.js";
 
+export const menuFollowUpEvidence = {
+  followUpVerified: false,
+  verificationHint: "The menu callback returned. For work it starts later, check the Play Mode observation, test report or build output for this run before claiming success. Do not rerun the menu just to verify it.",
+} as const;
+
 export interface UnityCommandStatusResult extends Record<string, unknown> {
   success: boolean;
   accepted?: boolean;
@@ -104,6 +109,7 @@ export function getUnityCommandStatus(
         ...(menuResult ? {
           executionSucceeded: menuResult.success === true,
           settleVerified: false,
+          ...(menuResult.success === true ? menuFollowUpEvidence : {}),
           message: menuResult.success === true
             ? "The menu callback succeeded. Post-command settling and any asynchronous build completion are not verified by status polling."
             : result.message,

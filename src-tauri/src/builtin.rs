@@ -348,6 +348,58 @@ pub fn managed_route(
     review.activate().map(Some)
 }
 
+// A project-scoped client can already use the router without having a user-level
+// entry. Updating that shared selector must not run the client-configuration workflow.
+#[cfg(all(windows, feature = "integrated-features"))]
+pub(crate) fn review_shared_mcp_update(handle: &tauri::AppHandle) -> Result<&'static str, String> {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
+    let manifest = manifest()?;
+    let target = generation_id(manifest.modules.get("mcp").ok_or("Missing bundled MCP identity.")?)?;
+    let store = creator_hub_mcp_router::Store::installed()?;
+    let Some(previous) = store.snapshot()? else { return Ok("notManaged"); };
+    let _router = store.router()?;
+    let current = store.resolve()?;
+    if store.snapshot()?.as_deref() != Some(previous.as_slice()) {
+        return Err("The connection changed while Hub checked it. Check again.".into());
+    }
+    let decision = shared_connection_decision(&current.generation, &current.hub_version, &target, env!("CARGO_PKG_VERSION"))?;
+    if let Some(outcome) = decision { return Ok(outcome); }
+    drop(current);
+    if !handle.dialog().message("New AI sessions that use Hub's shared connection will use the MCP included with this Hub. Open sessions keep running. Project files, settings and other connections will not be changed.")
+        .title("Update the shared MCP connection?")
+        .buttons(MessageDialogButtons::OkCancelCustom("Update connection".into(), "Keep current connection".into()))
+        .blocking_show() { return Ok("cancelled"); }
+    let review = convergence_route_review(handle)?.ok_or("No signed connection update is available.")?;
+    if review.previous.as_deref() != Some(previous.as_slice()) {
+        return Err("The connection changed during review. Hub did not replace it.".into());
+    }
+    review.activate()?;
+    if store.resolve()?.generation != target {
+        return Err("Hub could not confirm the active MCP version after the update. Check again before making another change.".into());
+    }
+    Ok("updated")
+}
+
+#[cfg(any(test, all(windows, feature = "integrated-features")))]
+fn shared_connection_decision(active_generation: &str, active_version: &str, target_generation: &str, target_version: &str) -> Result<Option<&'static str>, String> {
+    let active = semver::Version::parse(active_version).map_err(|_| "Unknown active Hub version.")?;
+    let target = semver::Version::parse(target_version).map_err(|_| "Unknown Hub version.")?;
+    Ok(if active_generation == target_generation { Some("current") }
+        else if active >= target { Some("keepExisting") }
+        else { None })
+}
+
+#[cfg(test)]
+#[test]
+fn shared_connection_only_offers_a_different_generation_from_a_newer_hub() {
+    assert_eq!(shared_connection_decision("a", "0.1.26", "a", "0.1.27").unwrap(), Some("current"));
+    assert_eq!(shared_connection_decision("a", "0.1.26", "b", "0.1.27").unwrap(), None);
+    for active in ["0.1.27", "0.1.28"] {
+        assert_eq!(shared_connection_decision("a", active, "b", "0.1.27").unwrap(), Some("keepExisting"));
+    }
+    assert!(shared_connection_decision("a", "unknown", "b", "0.1.27").is_err());
+}
+
 pub(crate) struct ManagedRouteReview {
     source: Source,
     root: PathBuf,

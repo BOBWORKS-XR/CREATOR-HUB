@@ -36,6 +36,8 @@ for (const folder of ["command-results", "command-status"]) {
     assert.equal(result.status, "completed");
     assert.equal(result.executionSucceeded, true);
     assert.equal(result.settleVerified, false);
+    assert.equal(result.followUpVerified, false);
+    assert.match(result.verificationHint, /Play Mode/);
     assert.match(result.message, /not verified/);
     assert.deepEqual(JSON.parse(JSON.stringify(result.menuResult)), receipt);
   });

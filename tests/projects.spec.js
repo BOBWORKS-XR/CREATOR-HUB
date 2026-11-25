@@ -151,7 +151,7 @@ test('declined or failed Linux preparation retains the explicit action without a
   for (const failure of ['Unity registry helper download was declined.', 'Helper download failed.']) {
     await page.evaluate(failure => { window.preparationFailure = failure; }, failure);
     await prepare.click();
-    await expect(page.locator('#project-status')).toHaveText('Could not prepare project discovery. Check the technical details, then try again.');
+    await expect(page.locator('#project-status')).toHaveText('Hub could not load the Unity project list. You can still add a project folder.');
     await expect(page.locator('#project-status-detail')).toHaveText(failure);
     await expect(prepare).toBeEnabled();
     await expect(prepare).toBeVisible();
@@ -159,7 +159,7 @@ test('declined or failed Linux preparation retains the explicit action without a
   expect(await page.evaluate(() => calls.filter(c => c.command === 'prepare_project_registry').length)).toBe(2);
   await page.evaluate(() => { window.failure = 'Inventory unavailable'; });
   await page.locator('#refresh-projects').click();
-  await expect(page.locator('#project-status')).toHaveText('Could not refresh the project list. Your saved projects are kept. Try again or check the technical details.');
+  await expect(page.locator('#project-status')).toHaveText('Could not refresh the project list. Your saved projects are still here. Try again.');
   await expect(page.locator('#project-status-detail')).toHaveText('Inventory unavailable');
   await expect(prepare).toBeVisible();
 });
@@ -210,7 +210,7 @@ test('a project-opening warning already in the inventory is shown once and keeps
   await expect(page.locator('#project-warnings')).toBeVisible();
   await page.evaluate(warning => { window.failure = warning; }, warning);
   await page.getByRole('button', { name: 'Open Creator Forest', exact: true }).click();
-  await expect(page.locator('#project-status')).toHaveText('Could not open this project. Check the technical details, then try again.');
+  await expect(page.locator('#project-status')).toHaveText('Hub could not open this project. Refresh the list, then try opening it again.');
   await expect(page.locator('#project-status-detail')).toHaveText(warning);
   await expect(page.locator('#project-status-detail')).toBeHidden();
   await expect(page.locator('#project-warnings')).toBeHidden();

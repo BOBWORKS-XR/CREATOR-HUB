@@ -29,11 +29,15 @@ opens the MCP page. Choose your AI app under **Connection status** for the next
 step. You can review a change to just the Unity bridge or one AI app without
 running setup for every app. If the read-only check names the wrong project,
 choose **My AI opens the wrong project** to review pointing that app's user-level
-connection at the selected project. Project-specific settings files are left alone.
-For Claude Code, Hub checks the selected project's `.mcp.json` for a Creator
-Works or legacy Banter entry. That label means the entry exists, not that Claude
-has approved or loaded it. Open Claude Code in that project, use `/mcp` to see
-its status, then try the connection check. Hub never edits the project file.
+connection at the selected project.
+
+**Use Claude Code with more than one project?** In the next Windows update, select
+one project on the MCP page. If Hub recognises its old connection, choose
+**Update this project connection**. Hub backs up the file first and updates just
+that folder. It doesn't set a default project for your account. Restart Claude
+Code in that folder. If it asks, approve Creator Works for that project, then
+ask which Unity project it's connected to. Repeat for
+another project when you need it. Custom connections stay as they are.
 
 If Hub says **MCP update needs review**, open **Menu > MCP**, check the project
 name, then choose **Apply** beside your existing AI app. A connection you set up

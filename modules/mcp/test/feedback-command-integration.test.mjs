@@ -43,6 +43,29 @@ test("post-send identity errors keep a single recoverable command and its receip
   } finally { clearInterval(timer); }
 });
 
+test("a menu that schedules a Play Mode check cannot verify its outcome on return", { timeout: 10000 }, async t => {
+  const config = project(t);
+  const generic = path.join(config.mcpStatePath, "command-results");
+  const typed = path.join(config.mcpStatePath, "editor-menu-results");
+  for (const folder of [generic, typed]) fs.mkdirSync(folder, { recursive: true });
+  const menuPath = "Custom/Schedule Play Mode check";
+  const timer = setInterval(() => {
+    const file = fs.readdirSync(config.mcpCommandsPath).find(f => f.endsWith(".json"));
+    if (!file || fs.existsSync(path.join(typed, file))) return;
+    const { id } = JSON.parse(fs.readFileSync(path.join(config.mcpCommandsPath, file), "utf8"));
+    fs.writeFileSync(path.join(typed, file), JSON.stringify({ commandId: id, menuPath, success: true,
+      executionSucceeded: true, executionReturnedTrue: true, diagnostics: [] }));
+    fs.writeFileSync(path.join(generic, file), JSON.stringify({ commandId: id, success: true,
+      projectPath: config.unityProjectPath, commandType: "execute_editor_menu_item" }));
+  }, 10);
+  t.after(() => clearInterval(timer));
+  const reply = await handleToolCall("execute_editor_menu_item", { menuPath, waitForSettled: false }, config);
+  const result = JSON.parse(reply.content[0].text);
+  assert.equal(result.success, true);
+  assert.equal(result.followUpVerified, false);
+  assert.match(result.verificationHint, /Play Mode/);
+});
+
 test("polled menu failure is a tool error with redacted diagnostics and retained evidence", async t => {
   const config = project(t);
   const id = "31faac5a-b2e5-44ca-98c1-aea3e9a145b6";

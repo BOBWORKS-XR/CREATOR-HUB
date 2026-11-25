@@ -16,6 +16,7 @@ const NATIVE_WINDOW_ONLY: &[&str] = &[
     "feature_select",
     "feature_call",
     "move_to_hub",
+    "keep_current_convergence",
     "inspect_convergence_outcome",
     "hub_update_recovery_status",
     "review_retained_hub_update",

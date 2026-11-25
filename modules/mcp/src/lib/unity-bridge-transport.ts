@@ -179,7 +179,7 @@ export function readBridgeInstanceDescriptor(
   }
 }
 
-function namedPipeEligibility(
+export function namedPipeEligibility(
   descriptor: BridgeInstanceDescriptor | undefined
 ): { eligible: boolean; reason?: string } {
   if (process.platform !== "win32") {
@@ -203,7 +203,7 @@ function namedPipeEligibility(
       reason: `Bridge protocol ${String(descriptor.protocolVersion)} is not compatible with server protocol ${BRIDGE_PROTOCOL_VERSION}.`,
     };
   }
-  if (!descriptor.capabilities?.includes("named_pipe_commands")) {
+  if (!Array.isArray(descriptor.capabilities) || !descriptor.capabilities.includes("named_pipe_commands")) {
     return { eligible: false, reason: "The bridge does not advertise named-pipe commands." };
   }
   if (

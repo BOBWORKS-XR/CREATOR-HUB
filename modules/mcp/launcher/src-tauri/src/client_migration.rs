@@ -7,6 +7,9 @@ const LAUNCHER_CONFIG: &str = "CREATOR_WORKS_LAUNCHER_CONFIG";
 
 #[path = "migration_recovery.rs"]
 pub(crate) mod recovery;
+#[cfg(windows)]
+#[path = "project_connection.rs"]
+pub(crate) mod project_connection;
 
 #[cfg(test)]
 #[path = "client_migration_render_tests.rs"]
@@ -40,7 +43,7 @@ fn target(path: &Path) -> Result<String, String> {
         .ok_or("Runtime paths must be UTF-8.".into())
 }
 
-fn same_router_path(command: &str, expected: &str) -> bool {
+pub(crate) fn same_router_path(command: &str, expected: &str) -> bool {
     // Ordinary Windows setup writes forward slashes; do not adopt a different path.
     if cfg!(windows) {
         command.replace('\\', "/") == expected.replace('\\', "/")

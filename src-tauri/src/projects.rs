@@ -2402,19 +2402,20 @@ mod tests {
         let real = root.path().join("real");
         fs::create_dir(&real).unwrap();
         fs::write(real.join("unity.exe"), b"fixture").unwrap();
-        let link = root.path().join("linked");
-        let junction = || {
-            assert!(std::process::Command::new("cmd")
-                .args(["/c", "mklink", "/J"])
-                .arg(&link)
+        let junction = |link: &Path| {
+            let output = std::process::Command::new("node")
+                .env_remove("NODE_OPTIONS")
+                .args(["-e", "require('node:fs').symlinkSync(process.argv[1], process.argv[2], 'junction')"])
                 .arg(&real)
+                .arg(link)
                 .output()
-                .unwrap()
-                .status
-                .success());
+                .expect("Windows junction fixture requires Node.js");
+            assert!(output.status.success(), "junction fixture {} ({}): {} {}", link.display(), output.status,
+                String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
         };
+        let link = root.path().join("linked-before-review");
         let path = link.join("unity.exe");
-        junction();
+        junction(&link);
         assert!(prepare_missing_helper(
             &path,
             || panic!("Linked cache cannot be approved"),
@@ -2423,11 +2424,13 @@ mod tests {
         .is_err());
         assert!(pin_helper(&path, 7, &format!("{:x}", Sha256::digest(b"fixture"))).is_err());
         fs::remove_dir(&link).unwrap();
+        let link = root.path().join("linked-during-review");
+        let path = link.join("unity.exe");
         assert!(prepare_missing_helper(
             &path,
             || true,
             || {
-                junction();
+                junction(&link);
                 Ok(path.clone())
             }
         )

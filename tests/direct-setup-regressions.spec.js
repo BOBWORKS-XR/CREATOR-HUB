@@ -359,7 +359,7 @@ test('existing project requirements use its own Editor and never require a creat
   await expect(field(page, 'requirements')).not.toContainText('URP template');
   await expect(field(page, 'blockers')).toBeEmpty();
   await expect(field(page, 'findings')).toContainText('Newer version kept');
-  await expect(field(page, 'inspection-summary')).toContainText('not a full project validation');
+  await expect(field(page, 'inspection-summary')).toContainText('Some checks will be skipped');
   await page.screenshot({ path: testInfo.outputPath('existing-requirements.png'), fullPage: true });
   await field(page, 'new-tab').click();
   await expect(field(page, 'requirements-title')).toHaveText('New-project requirements');
@@ -547,7 +547,7 @@ test('direct Setup exposes approved missing-SDK repair for a URP project, withou
     proposedChanges: ['Add com.sidequest.creator-sdk 4.0.14.', 'Add missing Creator SDK registry scopes; preserve unrelated registries.'],
   } });
   await existing(page, '/projects/URP without SDK');
-  await expect(field(page, 'inspection-summary')).toContainText('repairs are required before validation is available');
+  await expect(field(page, 'inspection-summary')).toContainText('Hub can check the project again after repair');
   await expect(field(page, 'findings')).toContainText('Creator SDK: Repair available');
   await expect(field(page, 'changes')).toContainText('Add com.sidequest.creator-sdk 4.0.14.');
   await expect(field(page, 'repair')).toBeVisible(); await expect(field(page, 'repair')).toBeDisabled();

@@ -49,7 +49,7 @@ import {
 import type { UnityProjectRouter } from "../lib/project-router.js";
 import { PROJECT_LIST_FIELDS } from "../lib/project-list.js";
 import { getNativeInventory, NATIVE_INVENTORY_SCHEMA } from "./native-inventory.js";
-import { getUnityCommandStatus, pendingCommandTimeout, readUnitySceneResult, readUnityEditorMenuResult } from "./get-unity-command-status.js";
+import { getUnityCommandStatus, menuFollowUpEvidence, pendingCommandTimeout, readUnitySceneResult, readUnityEditorMenuResult } from "./get-unity-command-status.js";
 import {
   describeToolGroupSelection,
   isToolEnabled,
@@ -122,7 +122,7 @@ export function registerTools(selection: ToolGroupSelection = "all"): Tool[] {
       inputSchema: {
         type: "object",
         properties: {
-          source: { type: "string", enum: ["manual", "components", "javascript", "workflows", "creator-docs", "graph-performance", "native-diagnostics"] },
+          source: { type: "string", enum: ["manual", "components", "javascript", "workflows", "creator-docs", "graph-performance", "native-diagnostics", "udon-porting"] },
           query: { type: "string", minLength: 1, maxLength: 128, description: "Keyword search; mutually exclusive with entryId" },
           entryId: { type: "string", minLength: 1, maxLength: 128, description: "Exact entry ID from an earlier result" },
           startOffset: { type: "integer", minimum: 0, default: 0, description: "Use nextOffset from the same entry to continue" },
@@ -933,7 +933,7 @@ Built-in Unity roots such as File, Edit, Assets, GameObject, Component, Window, 
           waitForSettled: {
             type: "boolean",
             default: true,
-            description: "Wait for compilation and asset updates started by the menu item",
+            description: "Wait for the Editor's compile/import activity to settle, not for gameplay, tests or builds to finish",
           },
           timeoutMs: {
             type: "number",
@@ -1004,6 +1004,11 @@ Requires the BanterMCPBridge Unity extension to be installed and Unity Editor ru
           componentType: {
             type: "string",
             description: "Exact short or full component type; hierarchy results retain only matching components",
+          },
+          componentTypes: {
+            type: "array", minItems: 1, maxItems: 16, uniqueItems: true,
+            items: { type: "string", minLength: 1, maxLength: 128 },
+            description: "Saved hierarchy only (refresh:false). Match any exact short or full component type in one search. Identity only by default. Do not combine with componentType.",
           },
           propertyNames: {
             type: "array",
@@ -1864,6 +1869,7 @@ export async function handleToolCall(
           maxResults: args.maxResults as number | undefined,
           fields: args.fields as string[] | undefined,
           componentType: args.componentType as string | undefined,
+          componentTypes: args.componentTypes as string[] | undefined,
           propertyNames: args.propertyNames as string[] | undefined,
           componentDetails: args.componentDetails as "identity" | "properties" | undefined,
           maxResponseBytes: args.maxResponseBytes as number | undefined,
@@ -3322,9 +3328,8 @@ async function executeEditorMenuItem(
           error instanceof Error ? error.message : "Invalid Unity menu receipt. The receipt was kept."), receiptInvalid: true };
       }
       if (menuResult) {
-          if (menuResult.success !== true || waitForSettled === false) {
-            return menuResult;
-          }
+          if (menuResult.success !== true) return menuResult;
+          if (waitForSettled === false) return { ...menuResult, settleVerified: false, ...menuFollowUpEvidence };
 
           // Give delayCall-based menu code a brief chance to start its import or compilation.
           await new Promise((resolve) => setTimeout(resolve, 250));
@@ -3375,6 +3380,7 @@ export function combineEditorMenuSettleResult(
 
   return {
     ...menuResult,
+    ...(executionSucceeded ? menuFollowUpEvidence : {}),
     success: executionSucceeded && !settleFailed,
     executionSucceeded,
     settled,

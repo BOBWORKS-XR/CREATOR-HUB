@@ -384,8 +384,7 @@ function buildProjectRoute(
   const statePath = path.join(candidate.projectPath, ".bantworks-mcp", "state");
   const bridgePath = path.join(assetsPath, "Editor", "BanterMCPBridge.cs");
   const instance = readProjectInstance(path.join(statePath, "project-instance.json"), candidate.projectPath);
-  const updatedAt = instance?.updatedAt ?? readTimestamp(path.join(statePath, "editor-state.json"), candidate.projectPath);
-  const age = updatedAt ? Date.now() - updatedAt : Number.POSITIVE_INFINITY;
+  const editorState = editorHeartbeatState(statePath, candidate.projectPath, instance?.updatedAt);
   const channelEnabled = candidate.channels.length === 0 || candidate.channels.some((channel) => channel.enabled !== false);
   const projectName = candidate.channels.find((channel) => channel.name)?.name || path.basename(candidate.projectPath);
   const fromEnvironment = candidate.fromEnvironment || canonicalPathKey(candidate.projectPath) === canonicalPathKey(environmentProjectPath);
@@ -404,7 +403,7 @@ function buildProjectRoute(
     scenePaths: candidate.channels.flatMap((channel) => typeof channel.scene_path === "string" ? [channel.scene_path] : []),
     validProject: fs.existsSync(assetsPath) && fs.existsSync(projectSettingsPath),
     bridgeInstalled: fs.existsSync(bridgePath),
-    editorState: age >= 0 && age <= 10_000 ? "live" : updatedAt ? "stale" : "not_seen",
+    editorState,
     editorInstance: instance,
     sessionRegistered: false,
   };
@@ -429,6 +428,14 @@ function readProjectInstance(instancePath: string, root: string): ProjectInstanc
   } catch {
     return undefined;
   }
+}
+
+export function editorHeartbeatState(stateDir: string, root: string, instanceTimestamp: unknown): UnityProjectRoute["editorState"] {
+  const stamp = typeof instanceTimestamp === "number" && Number.isSafeInteger(instanceTimestamp) && instanceTimestamp >= 0
+    ? instanceTimestamp : readTimestamp(path.join(stateDir, "editor-state.json"), root);
+  if (typeof stamp !== "number" || !Number.isFinite(stamp) || stamp <= 0) return "not_seen";
+  const age = Date.now() - stamp;
+  return age >= 0 && age <= 10_000 ? "live" : "stale";
 }
 
 function readTimestamp(statePath: string, root: string): number | undefined {

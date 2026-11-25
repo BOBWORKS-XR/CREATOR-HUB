@@ -127,6 +127,35 @@ test("hierarchy queries bound descendants, depth, and component projection", asy
   }
 });
 
+test("multi-type inventory uses one saved snapshot, without duplicate objects, hidden properties or live dispatch", async t => {
+  const { config, projectPath } = await createHierarchyFixture();
+  t.after(() => rm(projectPath, { recursive: true, force: true }));
+  const types = ["UnityEngine.Transform", "rigidbody"];
+  const snapshot = path.join(config.mcpStatePath, "scene-hierarchy.json");
+  const before = await readFile(snapshot);
+  const args = { query: "hierarchy", componentTypes: types, rootPath: "Root", includeDescendants: true, maxDepth: 1,
+    refresh: false, fields: ["path", "components"], maxResults: 2 };
+  const result = JSON.parse((await handleToolCall("query_project_state", args, config)).content[0].text);
+  assert.equal(result.success, true);
+  assert.deepEqual(result.data.objects.map(o => o.path), ["Root", "Root/Child"]);
+  assert.deepEqual(result.data.objects[1].components.map(c => c.type), ["Transform", "Rigidbody"]);
+  assert.deepEqual(result.query.componentTypes, types);
+  assert.equal(result.snapshot.refreshRequested, false);
+  assert.equal(result.query.sourceCompleteness, "unknown");
+  assert.ok(!JSON.stringify(result.data).includes("m_Mass"));
+  const components = await queryProjectState("components", undefined, config, { ...args, fields: ["type"], maxResults: 1 });
+  assert.equal(components.query.totalMatches, 3);
+  assert.equal(components.query.returned, 1);
+  assert.equal(components.query.truncated, true);
+  for (const invalid of [{ componentType: "Transform" }, { refresh: true }, { refresh: undefined },
+    { componentTypes: [] }, { componentTypes: ["Foo","foo"] }, { componentTypes: Array(17).fill("Foo") },
+    { componentTypes: [null] }, { componentTypes: ["x".repeat(129)] }]) {
+    assert.equal((await queryProjectState("hierarchy", undefined, config, { ...args, ...invalid })).success, false);
+  }
+  assert.deepEqual(await readdir(config.mcpCommandsPath), []);
+  assert.deepEqual(await readFile(snapshot), before);
+});
+
 test("exact filters do not expand matching descendant paths", async () => {
   const fixture = await createHierarchyFixture();
   try {

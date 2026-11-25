@@ -148,6 +148,12 @@ try {
   assert.match(rejected.error, /indexed relative \.md path/);
   assert.equal(rejected.networkRequests, undefined, "Invalid source refused before networking");
   const call = (id, name, args) => request({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } });
+  const status = await call(12, "get_bridge_status", {});
+  const runtime = JSON.parse(status.result.content[0].text);
+  assert.equal(runtime.mcpServerVersion, packageVersion);
+  assert.equal(runtime.ready, false, "Reporting the responding version does not require or imply a live Editor");
+  const porting = await call(13, "get_mcp_reference", { source: "udon-porting", query: "arity", limit: 1 });
+  assert.match(JSON.parse(porting.result.content[0].text).entries[0].text, /caller/);
   const omitted = await call(7, "set_object_reference", { objectPath: "Owner", componentType: "FixedJoint", propertyName: "m_ConnectedBody" });
   assert.equal(omitted.result.isError, true);
   assert.equal(JSON.parse(omitted.result.content[0].text).success, false);

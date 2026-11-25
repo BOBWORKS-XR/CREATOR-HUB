@@ -287,6 +287,14 @@ test("Editor menu execution is custom-only and fail-closed by default", () => {
 });
 
 test("Editor menu execution remains successful when settling is unverified", () => {
+  const settled = combineEditorMenuSettleResult(
+    { success: true, executionReturnedTrue: true },
+    { success: true, settled: true, stale: false }
+  );
+  assert.equal(settled.success, true);
+  assert.equal(settled.settleVerified, true);
+  assert.equal(settled.followUpVerified, false);
+  assert.match(settled.verificationHint, /Play Mode/);
   const stale = combineEditorMenuSettleResult(
     { success: true, executionReturnedTrue: true },
     { success: false, settled: false, stale: true, message: "Unity editor state is stale." }

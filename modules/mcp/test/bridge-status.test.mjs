@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { getBridgeStatus } from "../dist/tools/get-bridge-status.js";
+import { MCP_VERSION } from "../dist/lib/version.js";
 import { handleToolCall } from "../dist/tools/index.js";
 
 function createConfig(projectPath) {
@@ -55,6 +56,8 @@ test("get_bridge_status reports a ready bridge with fresh Unity state", async ()
     const response = await handleToolCall("get_bridge_status", {}, config);
     const publicResult = JSON.parse(response.content[0].text);
     assert.equal(publicResult.ready, true);
+    assert.equal(publicResult.mcpServerVersion, MCP_VERSION);
+    assert.notEqual(publicResult.mcpServerVersion, publicResult.bridge.protocol.bridgeRelease);
     assert.equal(publicResult.bridge.stateStatus, "fresh");
   } finally {
     await rm(projectPath, { recursive: true, force: true });
@@ -72,8 +75,37 @@ test("get_bridge_status explains how to recover from an unconfigured project", (
   });
 
   assert.equal(result.success, false);
+  assert.equal(result.mcpServerVersion, MCP_VERSION);
   assert.match(result.error, /UNITY_PROJECT_PATH/);
   assert.match(result.nextSteps?.[0] ?? "", /restart the MCP client/i);
+});
+
+test("copied snapshots cannot stand in for an Editor heartbeat or a file command channel", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "creator-heartbeat-"));
+  const config = createConfig(root);
+  try {
+    await mkdir(path.join(config.assetsPath, "Editor"), { recursive: true });
+    await writeFile(path.join(config.assetsPath, "Editor", "BanterMCPBridge.cs"), "// fixture");
+    await mkdir(config.mcpStatePath, { recursive: true });
+    await mkdir(config.mcpCommandsPath);
+    const state = (name, data) => writeFile(path.join(config.mcpStatePath, name), JSON.stringify(data));
+    await state("scene-hierarchy.json", {});
+    assert.equal(getBridgeStatus(config).ready, false, "a newly copied inventory is not a heartbeat");
+    for (const timestamp of [Date.now() - 60_000, Date.now() + 60_000]) {
+      await state("project-instance.json", { updatedAt: timestamp });
+      assert.equal(getBridgeStatus(config).ready, false, "a copied or future-dated heartbeat is not live");
+    }
+    await rm(path.join(config.mcpStatePath, "project-instance.json"));
+    await state("editor-state.json", { timestamp: Date.now() });
+    assert.equal(getBridgeStatus(config).ready, true, "legacy editor heartbeat and file commands still work");
+    await rm(config.mcpCommandsPath, { recursive: true });
+    const missing = getBridgeStatus(config);
+    assert.equal(missing.ready, false);
+    assert.match(missing.nextSteps.join(" "), /command/i);
+    assert.equal(missing.mcpServerVersion, MCP_VERSION);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("get_bridge_status rejects an incompatible live bridge protocol", async () => {

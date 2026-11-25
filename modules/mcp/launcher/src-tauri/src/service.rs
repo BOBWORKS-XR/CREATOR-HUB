@@ -14,6 +14,18 @@ pub fn connection_update_key() -> Result<Option<String>, String> {
     crate::connection_update::review_key()
 }
 
+#[cfg(windows)]
+pub fn review_project_connection(app: &AppHandle, project: &std::path::Path) -> Result<Value, String> {
+    available()?;
+    let context = app.try_state::<Context>().ok_or("MCP is not ready in this Hub.")?;
+    let session = context.state.try_lock().map_err(|_| "Another connection operation is running.")?;
+    if session.blocked || !session.journal.pending().is_empty() || !session.lifecycle.has_workflow() {
+        return Err("Check the current connection setup before making a change.".into());
+    }
+    ensure_owner(&context.owner)?;
+    crate::client_migration::project_connection::review(app, project)
+}
+
 /// Home inventory only: verifies payload bytes without acquiring writer
 /// ownership, creating a service context, binding routes or changing settings.
 pub fn project_bridge_statuses(

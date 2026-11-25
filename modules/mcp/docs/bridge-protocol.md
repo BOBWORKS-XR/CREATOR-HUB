@@ -231,6 +231,20 @@ post-command compile/import state. `executionSucceeded` reports the menu call
 independently of `settled` and `settleVerified`. A stale heartbeat after a long
 synchronous command produces an explicit warning without erasing proven
 execution success; a settled compilation with errors still fails the operation.
+On a successful callback, both the direct tool and command-status polling return
+`followUpVerified: false`. Neither menu return nor an idle Editor proves that a
+scheduled Play Mode action, build, or test finished. Check an observation or
+report from that run; do not invoke the menu again just to verify the outcome.
+
+## Read-only component inventory
+
+For a read-only inventory across component types, call `query_project_state` with
+`refresh:false`, `componentTypes` (1 to 16 exact short or full type names), and
+only the needed fields. Hierarchy results return each matching object once,
+even if it has several matching components. This uses the last saved snapshot;
+check its age, completeness and truncation. The legacy `active` field is the
+object's own active flag, not its effective state under its parents, and
+`position` is a transform position, not a collider's world bounds centre.
 
 ## Unity Test Runner
 
@@ -281,13 +295,14 @@ the previous build settings untouched when preflight fails.
 
 `get_bridge_status` is read-only. It reports:
 
+- `mcpServerVersion`, the version of the MCP process that actually answered (not the Hub version or Unity bridge release);
 - whether the currently selected route points to a Unity project;
 - whether `Assets/Editor/BanterMCPBridge.cs` is installed;
 - whether the bridge state and command directories exist;
 - which exported state files exist and their age; and
 - the next setup step when the bridge is not ready.
 
-`stateStatus: "fresh"` means at least one known state file was updated in the preceding 10 seconds. It is an observation of export freshness, not a guarantee that the Unity Editor will remain available for future commands.
+`stateStatus: "fresh"` means the Editor reported a heartbeat within the last 10 seconds, using the instance descriptor or the legacy Editor state timestamp. Copying a hierarchy or touching its file does not count. A ready result also requires a compatible bridge and a file command directory or eligible named pipe; this check does not send a command. An older MCP that omits `mcpServerVersion` has not reported its version. Do not substitute a version from saved settings.
 
 ## Security Boundary
 
