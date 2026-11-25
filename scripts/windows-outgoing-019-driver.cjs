@@ -15,12 +15,12 @@ async function retry(read, seconds = 30) {
   throw last || Error('Timed out');
 }
 function assertProtocol(state, version) {
-  assert.ok(['0.1.26', '0.1.27'].includes(version));
+  assert.ok(['0.1.27', '0.1.28'].includes(version));
   assert.equal(state.version, version); assert.equal(state.protocol, 1); assert.equal(state.integrated, true);
   assert.deepEqual(state.services, { integrated: true, features: ['setup', 'mcp'] });
 }
 function assertTicket(ticket, lastTool, hub) {
-  assert.equal(ticket.schemaVersion, 1); assert.equal(ticket.fromVersion, '0.1.26'); assert.equal(ticket.toVersion, '0.1.27');
+  assert.equal(ticket.schemaVersion, 1); assert.equal(ticket.fromVersion, '0.1.27'); assert.equal(ticket.toVersion, '0.1.28');
   assert.equal(ticket.views.length, 1); const view = ticket.views[0];
   assert.equal(view.app, lastTool); assert.equal(view.direct, true); assert.equal(view.bundled, true);
   assert.equal(path.win32.normalize(view.path).toLowerCase(), path.win32.normalize(hub).toLowerCase());
@@ -33,8 +33,8 @@ async function observeAutomaticSuccessor({ hub, previousPid, expectedSha256, inv
     const record = rows[0];
     assert.equal(record.kernelIdentityVerified, true, 'Replacement Root identity unavailable');
     assert.equal(hashFile(hub), expectedSha256, 'Replacement Root image differs');
-    const version = peVersion(27);
-    assert.deepEqual(version, [0, 1, 27, 0], 'Replacement Root PE version differs');
+    const version = peVersion(28);
+    assert.deepEqual(version, [0, 1, 28, 0], 'Replacement Root PE version differs');
     assert.deepEqual(inventory().filter(item => item.pid === record.pid), [record], 'Replacement Root identity changed');
     return { record, version };
   }, 90);
@@ -43,9 +43,9 @@ async function observeAutomaticSuccessor({ hub, previousPid, expectedSha256, inv
   return ready;
 }
 async function completeStartup(page, version, report) {
-  assert.ok(['0.1.26','0.1.27'].includes(version));
+  assert.ok(['0.1.27','0.1.28'].includes(version));
   const terms=page.locator('#usage-terms-dialog'),guide=page.locator('#convergence-dialog');
-  if (version==='0.1.26') {
+  if (version==='0.1.27') {
     await terms.waitFor({state:'visible'}); await page.locator('#usage-terms-checkbox').check();
     await page.locator('#usage-terms-continue').click(); await terms.waitFor({state:'hidden'});
   } else assert.equal(await terms.isVisible(),false,'Terms must survive update');
@@ -65,7 +65,7 @@ function assertSavedPreferences(saved, restore) {
 }
 function assertFreshOldConnection(held, freshOld, freshNew, profile) {
   target.assertFreshConnection(held, freshNew, profile);
-  target.assertFreshConnection(freshOld, freshNew, profile);
+  target.assertFreshConnection(held, freshOld, profile);
   assert.equal(new Set([...held, ...freshOld, ...freshNew].map(row => row.pid)).size, 6,
     'Fresh old-client connection must not reuse either observed connection');
 }
@@ -157,8 +157,8 @@ async function main() {
   const local = process.env.LOCALAPPDATA, roaming = process.env.APPDATA, home = process.env.USERPROFILE;
   for (const folder of [local, roaming, home]) assert.ok(path.win32.isAbsolute(folder || ''));
   const profile = { local, roaming, home };
-  const oldRoute = target.managedLocations(local, '0.1.26', home);
-  const newRoute = target.managedLocations(local, '0.1.27', home);
+  const oldRoute = target.managedLocations(local, '0.1.27', home);
+  const newRoute = target.managedLocations(local, '0.1.28', home);
   const hub = path.join(local, 'Creator Hub/creator-hub.exe');
   const ticket = path.join(local, 'CreatorHub/hub-updates/hosted-restore.json');
   const clientConfig = path.join(home, '.codex/config.toml');
@@ -253,9 +253,9 @@ async function main() {
     assert.notEqual(result.isError, true); assert.equal(JSON.parse(result.content[0].text).success, true);
   }
   function active(version) {
-    const route = version === '0.1.26' ? oldRoute : newRoute;
+    const route = version === '0.1.27' ? oldRoute : newRoute;
     const value = JSON.parse(target.readBounded(route.active, 4096));
-    const expected = config.runtime[version === '0.1.26' ? 'baselineDescriptor' : 'targetDescriptor'];
+    const expected = config.runtime[version === '0.1.27' ? 'baselineDescriptor' : 'targetDescriptor'];
     assert.equal(value.descriptorSha256, expected); assert.match(value.generation, /^[a-f0-9]{64}$/);
     const body = target.readBounded(path.join(path.dirname(route.active), 'descriptors', expected, 'runtime.json'), target.LIMITS.metadata);
     assert.equal(target.hash(body), expected); assert.equal(JSON.parse(body).hubVersion, version);
@@ -282,7 +282,7 @@ async function main() {
     assert.deepEqual(await preferences(), preferencesBefore);
     if (!migrated) assert.equal(fs.existsSync(clientConfig), false);
     verifyClients();
-    assert.deepEqual(active(report.afterRoute ? '0.1.27' : '0.1.26'), report.afterRoute || report.beforeRoute, 'Only the approved descriptor may be active');
+    assert.deepEqual(active(report.afterRoute ? '0.1.28' : '0.1.27'), report.afterRoute || report.beforeRoute, 'Only the approved descriptor may be active');
     assert.equal(sdkClient.getServerVersion().version, target.binding.baseline.manifest.modules.mcp.version);
     sameProcess(sentinelRecord); for (const p of sdkRecords) sameProcess(p);
     await roundTrip(sdkClient); assert.deepEqual(moduleGuis(), []);
@@ -290,8 +290,8 @@ async function main() {
   try {
     assert.deepEqual(inventory().filter(p => /creator-hub\.exe$/i.test(p.image)), []);
     if (!migrated) execFileSync(installer, ['/S', '/NS'], { windowsHide: true, timeout: 180000, stdio: 'pipe' });
-    assert.equal(hashFile(hub), config.baseline.exe); report.beforePeVersion = peVersion(26);
-    target.assertInstalledResources(path.dirname(hub), '0.1.26');
+    assert.equal(hashFile(hub), config.baseline.exe); report.beforePeVersion = peVersion(27);
+    target.assertInstalledResources(path.dirname(hub), '0.1.27');
     if (!migrated) {
       const settings = require('./sdk-retention-023.cjs').settings(lastTool, restore);
       protect(settingsPath, settings);
@@ -305,7 +305,7 @@ async function main() {
     policyEnabled = true; policy('Enable');
     child = spawn(hub, [], { windowsHide: true, stdio: 'ignore', env: { ...process.env, WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: '--remote-debugging-port=9238' } });
     rootRecord = await retry(() => record(child.pid)); report.beforeRoot = rootRecord;
-    await connect('0.1.26');
+    await connect('0.1.27');
     const custom = path.join(out, 'Unity Editors/6000.3.21f1/Editor/Unity.exe');
     protect(custom, Buffer.from('fixture marker only, not an executable'));
     protect(path.join(roaming, 'UnityHub/editors-v2.json'), JSON.stringify({ schema_version: 2,
@@ -318,13 +318,13 @@ async function main() {
       (report.customEditorProbe ||= []).push({ phase, rows, expectedPath: custom, found, rawMatch: rows.includes(custom) });
       return found;
     };
-    assert.equal(await registered('baseline'), false, 'Public 0.1.26 should reproduce the custom-location observation');
-    report.customEditorAbsentInBaseline = true;
+    assert.equal(await registered('baseline'), true, 'Public 0.1.27 must already discover this location');
+    report.customEditorFoundInBaseline = true;
     await direct.checkPages({ page, showApp: show, processes: moduleGuis, requests, expectedVersion: target.binding.baseline.version,
       screenshot: name => page.screenshot({ path: path.join(out, `baseline-${name}.png`) }) });
     if (!migrated) await direct.prepareManagedRoute(page, { clientConfig, active: oldRoute.active,
       approve: () => retry(() => button('Enable managed routing')) });
-    report.beforeRoute = active('0.1.26');
+    report.beforeRoute = active('0.1.27');
     const entry = { command: oldRoute.command, args: [],
       env: { CREATOR_WORKS_CONFIG_OWNER: 'creator-hub-v1', CREATOR_WORKS_LAUNCHER_CONFIG: settingsPath }, disabled: false };
     const selected = { mcpServers: { 'creator-works': entry, other: { command: 'keep' } },
@@ -346,7 +346,7 @@ async function main() {
       env: { ...process.env, ...oldEntry.env }, stderr: 'ignore' });
     await sdkClient.connect(sdkTransport); await roundTrip(sdkClient);
     sdkRecords = await retry(() => {
-      const rows = connectionProcesses(sdkTransport, oldRoute, '0.1.26');
+      const rows = connectionProcesses(sdkTransport, oldRoute, '0.1.27');
       assert.equal(sdkClient.getServerVersion().version, target.binding.baseline.manifest.modules.mcp.version); return rows;
     });
     report.heldProcessesBefore = sdkRecords;
@@ -365,13 +365,13 @@ async function main() {
     if (!migrated) await page.evaluate(() => localStorage.setItem('outgoing-preserved', 'direct24-to25'));
     await retry(async () => assert.equal(await page.locator('#hub-update-button').isEnabled(), true), 90);
     const status = await page.evaluate(() => window.CreatorHubNative.invoke('hub_update_status', { online: false, preview: false }));
-    assert.equal(status.currentVersion, '0.1.26'); assert.equal(status.availableVersion, '0.1.27'); assert.equal(status.installBlocked, null);
+    assert.equal(status.currentVersion, '0.1.27'); assert.equal(status.availableVersion, '0.1.28'); assert.equal(status.installBlocked, null);
     // The native prompt precedes download/cache reuse. Cancel must preserve both states.
     if (migrated) migrated.guard.verify();
     await page.locator('#hub-update-button').click(); await retry(() => button('Not now'));
     await retry(async () => assert.equal(await page.locator('#hub-update-button').isEnabled(), true));
     sameProcess(rootRecord); assert.equal(hashFile(hub), config.baseline.exe); await preserved();
-    assert.deepEqual(active('0.1.26'), report.beforeRoute); report.activeRouteUnchangedAfterCancel = true;
+    assert.deepEqual(active('0.1.27'), report.beforeRoute); report.activeRouteUnchangedAfterCancel = true;
     report.clients.afterUpdateCancel = { selected: capture('claude-update-cancel.json', selectedPath),
       old: capture('old-client-update-cancel.json', oldClientPath) };
     assert.equal(await page.locator('#feature-setup [data-field="name"]').inputValue(), draft);
@@ -387,10 +387,10 @@ async function main() {
       onObserved: (record, version) => { rootRecord = record; report.afterRoot = record; report.afterPeVersion = version; },
       verifyResources: () => {
         report.resourceProbe = { phase: 'after-automatic-root', attempts: 1, passed: false };
-        target.assertInstalledResources(path.dirname(hub), '0.1.27');
+        target.assertInstalledResources(path.dirname(hub), '0.1.28');
         report.resourceProbe.passed = true;
       } });
-    await connect('0.1.27');
+    await connect('0.1.28');
     assert.equal(await registered('target'), true, 'Installed candidate must discover the same registration');
     report.customEditorFoundInTarget = true;
     clearInterval(watch); watch = null;
@@ -403,8 +403,8 @@ async function main() {
     assert.equal(fs.existsSync(ticket), false);
     await direct.prepareManagedRoute(page, { clientConfig, active: newRoute.active,
       approve: () => { throw Error('Existing physical route must not request new permission'); } });
-    report.afterRoute = active('0.1.27');
-    assert.equal(report.afterRoute.generation, report.beforeRoute.generation);
+    report.afterRoute = active('0.1.28');
+    assert.notEqual(report.afterRoute.generation, report.beforeRoute.generation);
     assert.equal(oldRoute.command, newRoute.command);
     if (!migrated) assert.equal(await page.evaluate(() => localStorage.getItem('outgoing-preserved')), 'direct24-to25');
     await preserved();
@@ -444,11 +444,13 @@ async function main() {
       const transport = new StdioClientTransport({ command: newRoute.command, args: migratedEntry.args,
         env: { ...process.env, ...migratedEntry.env }, stderr: 'ignore' });
       await reconnect.connect(transport); await roundTrip(reconnect);
-      const rows = await retry(() => connectionProcesses(transport, newRoute, '0.1.27'));
+      const rows = await retry(() => connectionProcesses(transport, newRoute, '0.1.28'));
       target.assertFreshConnection(sdkRecords, rows, profile);
       assert.equal(reconnect.getServerVersion().version, target.binding.target.manifest.modules.mcp.version);
       report.reconnectedProcesses = rows;
       report.reconnectedServerVersion = reconnect.getServerVersion();
+      const udon=await reconnect.callTool({name:'get_mcp_reference',arguments:{source:'udon-porting',query:'prefab overrides',limit:1}});
+      assert.ok(!udon.isError); const reference=JSON.parse(udon.content[0].text);assert.equal(reference.returned,1);assert.match(reference.entries[0].text,/explicitly stored zero/);report.udonLookup=true;
       const oldReconnect = new Client({ name: 'outgoing-direct-fresh-old-client', version: '1' });
       try {
         const retainedEntry = JSON.parse(direct.readEvidence(oldClientPath)).mcpServers['creator-works'];
@@ -456,9 +458,9 @@ async function main() {
         const oldTransport = new StdioClientTransport({ command: oldRoute.command, args: retainedEntry.args,
           env: { ...process.env, ...retainedEntry.env }, stderr: 'ignore' });
         await oldReconnect.connect(oldTransport); await roundTrip(oldReconnect);
-        const oldRows = await retry(() => connectionProcesses(oldTransport, oldRoute, '0.1.26'));
+        const oldRows = await retry(() => connectionProcesses(oldTransport, newRoute, '0.1.28'));
         assertFreshOldConnection(sdkRecords, oldRows, rows, profile);
-        assert.equal(oldReconnect.getServerVersion().version, target.binding.baseline.manifest.modules.mcp.version);
+        assert.equal(oldReconnect.getServerVersion().version, target.binding.target.manifest.modules.mcp.version);
         report.freshOldProcesses = oldRows; report.freshOldServerVersion = oldReconnect.getServerVersion();
         await preserved();
       } finally { await oldReconnect.close(); }
@@ -476,15 +478,15 @@ async function main() {
     rootRecord = await retry(() => record(child.pid));
     assert.equal(rootRecord.kernelIdentityVerified, true); assert.notEqual(rootRecord.pid, report.beforeNormalRestart.pid);
     report.normalRestartRoot = rootRecord;
-    assert.equal(hashFile(hub), config.pins.executable); peVersion(27);
-    target.assertInstalledResources(path.dirname(hub), '0.1.27');
-    await connect('0.1.27');
+    assert.equal(hashFile(hub), config.pins.executable); peVersion(28);
+    target.assertInstalledResources(path.dirname(hub), '0.1.28');
+    await connect('0.1.28');
     assert.equal(fs.existsSync(ticket), false);
     await direct.checkHome(page);
-    await direct.checkPages({ page, showApp: show, processes: moduleGuis, requests, expectedVersion: '0.1.27',
+    await direct.checkPages({ page, showApp: show, processes: moduleGuis, requests, expectedVersion: '0.1.28',
       screenshot: name => page.screenshot({ path: path.join(out, `normal-restart-${name}.png`) }) });
     await scopeCheck('normal-restart');
-    await preserved(); assert.deepEqual(active('0.1.27'), report.afterRoute);
+    await preserved(); assert.deepEqual(active('0.1.28'), report.afterRoute);
     assert.equal(await page.evaluate(() => localStorage.getItem('outgoing-preserved')), 'direct24-to25');
     verifyClients();
     await show('mcp'); await continueMcpGuide(page);
@@ -497,7 +499,7 @@ async function main() {
     report.heldProcessesAfter = sdkRecords.map(saved => record(saved.pid));
     report.heldServerVersion = sdkClient.getServerVersion();
     const registry = execFileSync('reg.exe', ['query', 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Creator Hub', '/v', 'DisplayVersion'], { encoding: 'utf8', windowsHide: true });
-    assert.equal(registry.match(/DisplayVersion\s+REG_SZ\s+(\S+)/)?.[1], '0.1.27');
+    assert.equal(registry.match(/DisplayVersion\s+REG_SZ\s+(\S+)/)?.[1], '0.1.28');
     assert.deepEqual(report.pageErrors || [], []);
     Object.assign(report, { passed: true, nativeUpdateAccepted: true, automaticRestart: true,
       existingConnectionSurvived: true, newConnectionVerified: true, restorationVerified: true, observedTicket,
@@ -528,7 +530,7 @@ async function main() {
     try {
       if (selectedBefore) verifyClients();
       for (const { file, sha256 } of protectedFiles) assert.equal(hashFile(file), sha256);
-      if (report.beforeRoute) assert.deepEqual(active(report.afterRoute ? '0.1.27' : '0.1.26'), report.afterRoute || report.beforeRoute);
+      if (report.beforeRoute) assert.deepEqual(active(report.afterRoute ? '0.1.28' : '0.1.27'), report.afterRoute || report.beforeRoute);
       report.fixtureEvidencePreservedAfterCleanup = true;
     } catch (error) { report.passed = false; report.preservationError = String(error); }
     if (!report.passed) process.exitCode = 1;

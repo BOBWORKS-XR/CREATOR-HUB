@@ -265,7 +265,7 @@ async function main() {
   if (process.argv[3] === 'validate') {
     console.log(JSON.stringify({ kind: 'lab-contract-validated', targetVersion: contract.targetVersion,
       installerSha256: contract.pins.installer, executableSha256: contract.pins.executable,
-      ...(contract.actualScope?.kind === 'direct-outgoing-026-027' ? { baselineVersion: contract.baseline.version,
+      ...(contract.actualScope?.kind === 'direct-outgoing-027-028' ? { baselineVersion: contract.baseline.version,
         baselineInstallerSha256: contract.baseline.installer, baselineExecutableSha256: contract.baseline.exe } : {}) }));
     return;
   }
@@ -363,7 +363,7 @@ $actualScope = if ($Outgoing019) { 'exact-direct24-to-qualified25-acceptance-fix
     elseif ($Incoming016) { 'exact-public14-to-direct16-lab-only' }
     elseif ($Scenario -ceq 'public-stable') { 'unmodified-public-0.1.12-lab-only' }
     else { 'accepted-unmodified-B05-0.1.14-to-outer-only-0.1.15-fixture-lab-only' }
-$reportedScenario = if ($Outgoing019) { 'direct-outgoing-026-027' } else { $Scenario }
+$reportedScenario = if ($Outgoing019) { 'direct-outgoing-027-028' } else { $Scenario }
 try {
     Set-LabPhase 'timeout'
     if (-not $Outgoing019 -or $Incoming016 -or $Scenario -cne 'public-stable' -or $env:EXPECTED_HARNESS_COMMIT -cne $env:GITHUB_SHA) { throw 'Only the exact reviewed outgoing19 mode is admitted.' }
@@ -429,7 +429,7 @@ try {
     $validated = Read-LabLine $validator.StandardOutput | ConvertFrom-Json
     if ($validated.kind -cne 'lab-contract-validated' -or -not $validator.WaitForExit(10000) -or $validator.ExitCode -ne 0) { throw 'Reviewed contract refused.' }
     if ($Outgoing019) {
-        if ($validated.baselineVersion -cne '0.1.26' -or $validated.targetVersion -cne '0.1.27' -or
+        if ($validated.baselineVersion -cne '0.1.27' -or $validated.targetVersion -cne '0.1.28' -or
             $validated.baselineInstallerSha256 -cnotmatch '^[a-f0-9]{64}$' -or
             $validated.baselineExecutableSha256 -cnotmatch '^[a-f0-9]{64}$') { throw 'Outgoing version/baseline binding refused.' }
         if ((Get-FileHash -LiteralPath $BaselineInstallerPath -Algorithm SHA256).Hash.ToLowerInvariant() -cne $validated.baselineInstallerSha256) {

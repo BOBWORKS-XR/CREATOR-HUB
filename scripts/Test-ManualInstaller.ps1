@@ -120,8 +120,8 @@ function Pin([string]$File, [string]$Hash) {
 }
 function ConfirmInstalled {
     Pin $dest $binding.target.executable.sha256
-    if ((Get-Item -LiteralPath $dest).VersionInfo.ProductVersion -cne '0.1.27' -or
-        (Get-ItemPropertyValue -LiteralPath $reg -Name DisplayVersion) -cne '0.1.27') { throw 'Wrong installed version.' }
+    if ((Get-Item -LiteralPath $dest).VersionInfo.ProductVersion -cne '0.1.28' -or
+        (Get-ItemPropertyValue -LiteralPath $reg -Name DisplayVersion) -cne '0.1.28') { throw 'Wrong installed version.' }
     if ($Case -ceq 'upgrade') {
         foreach ($file in $sentinels.Keys) {
             if ([IO.File]::ReadAllText($file) -cne $sentinels[$file]) { throw 'Saved fixture data changed.' }
@@ -155,7 +155,7 @@ if ($Case -ceq 'upgrade') {
         $previous.Dispose()
     }
     Pin $dest $binding.baseline.executable.sha256
-    if ((Get-ItemPropertyValue -LiteralPath $reg -Name DisplayVersion) -cne '0.1.26') { throw 'Wrong registered baseline.' }
+    if ((Get-ItemPropertyValue -LiteralPath $reg -Name DisplayVersion) -cne '0.1.27') { throw 'Wrong registered baseline.' }
     foreach ($file in $sentinels.Keys) {
         [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($file))
         $s=[IO.File]::Open($file, 'CreateNew', 'Write')
@@ -219,7 +219,7 @@ try {
     ConfirmInstalled
     [pscustomobject]@{ case=$Case; source=$binding.target.source.commit; manualWizard=$true; steps=$trace.ToArray();
         installerSha256=$binding.target.installer.sha256; installedSha256=$binding.target.executable.sha256;
-        installedVersion='0.1.27'; fixtureSettingsPreserved=($Case -ceq 'upgrade') } |
+        installedVersion='0.1.28'; fixtureSettingsPreserved=($Case -ceq 'upgrade') } |
         ConvertTo-Json -Depth 6 | Set-Content -LiteralPath 'artifacts/outgoing-019/manual-wizard.json' -Encoding UTF8
 } finally {
     [pscustomobject]@{ case=$Case; phase=$phase; steps=$trace.ToArray(); windows=$observed.ToArray(); exited=$run.HasExited } |

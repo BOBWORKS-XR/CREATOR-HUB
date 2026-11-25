@@ -1,4 +1,4 @@
-name: Private Windows 026 to 027 update acceptance
+name: Private Windows 027 to 028 update acceptance
 on:
   workflow_dispatch:
     inputs:
@@ -7,7 +7,7 @@ on:
 permissions: {contents: read}
 jobs:
   preflight:
-    if: github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.ref == 'refs/heads/codex/windows-connections-027-acceptance'
+    if: github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.ref == 'refs/heads/codex/windows-project-scope-028-acceptance'
     runs-on: windows-latest
     timeout-minutes: 5
     steps:
@@ -68,7 +68,7 @@ jobs:
         run: |
           if ((git -C product rev-parse HEAD) -cne '${{ steps.source.outputs.commit }}' -or (git -C product rev-parse 'HEAD^{tree}') -cne '${{ steps.source.outputs.tree }}') { throw 'Wrong product source' }
       - run: npm --prefix product/modules/mcp ci --ignore-scripts
-      - name: Acquire signed private target and public 026 baseline
+      - name: Acquire signed private target and public 027 baseline
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -80,7 +80,7 @@ jobs:
         if: matrix.regression == ''
         shell: pwsh
         run: |
-          ./scripts/native-self-update-outgoing-019.ps1 -Outgoing019 -ContractPath (Join-Path $PWD artifacts/outgoing-019/runner-config.json) -BaselineInstallerPath (Join-Path $PWD artifacts/outgoing-019/data/Creator.Hub_0.1.26_x64-setup.exe) -TimeoutSeconds 480 | Tee-Object -FilePath artifacts/outgoing-019/lifecycle.jsonl
+          ./scripts/native-self-update-outgoing-019.ps1 -Outgoing019 -ContractPath (Join-Path $PWD artifacts/outgoing-019/runner-config.json) -BaselineInstallerPath (Join-Path $PWD artifacts/outgoing-019/data/Creator.Hub_0.1.27_x64-setup.exe) -TimeoutSeconds 480 | Tee-Object -FilePath artifacts/outgoing-019/lifecycle.jsonl
           if ($LASTEXITCODE -ne 0) { throw 'Native update failed' }
           $reports=@(Get-ChildItem artifacts/native-suite-*/outgoing-report.json)
           if ($reports.Count -ne 1) { throw 'One native report required' }
@@ -89,7 +89,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: windows-026-${{ matrix.case }}-${{ matrix.regression }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: windows-027-${{ matrix.case }}-${{ matrix.regression }}-${{ github.run_id }}-${{ github.run_attempt }}
           retention-days: 14
           path: |
             artifacts/outgoing-019/*.json
@@ -132,6 +132,6 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: manual-windows-027-${{ matrix.mode }}-${{ github.run_id }}
+          name: manual-windows-028-${{ matrix.mode }}-${{ github.run_id }}
           path: artifacts/outgoing-019/*.json
           retention-days: 14
