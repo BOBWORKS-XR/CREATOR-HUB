@@ -1,0 +1,31 @@
+name: Windows revised native Rust fixtures only
+on:
+  workflow_dispatch:
+    inputs:
+      expected_harness_commit: {type: string, required: true}
+permissions: {contents: read}
+jobs:
+  rust:
+    if: github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.ref == 'refs/heads/codex/windows-028-revised-1795607720993-rust-fixtures' && github.sha == inputs.expected_harness_commit
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v6
+        with: {path: harness, persist-credentials: false}
+      - uses: actions/checkout@v6
+        with: {path: product, ref: '8450f463a61aa0a09d575541ffc8a8c09728bfe1', persist-credentials: false}
+      - name: Read and verify private installer without installing it
+        run: node harness/lab/rust-runner.cjs prepare
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: Pin Rust
+        run: rustup toolchain install 1.99.0 --profile minimal
+      - name: Test integrated Windows Hub and MCP with short scratch paths
+        run: node harness/lab/rust-runner.cjs test
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: signed-input-native-rust-fixtures
+          path: native-results/
+          retention-days: 14

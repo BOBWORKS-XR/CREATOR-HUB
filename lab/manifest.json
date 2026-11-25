@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "platform": "windows",
+  "arch": "x86_64",
+  "modules": {
+    "mcp": {
+      "executable": "mcp/creator-works-mcp-launcher.exe",
+      "version": "2.7.11",
+      "files": {
+        "mcp/creator-works-mcp-launcher.exe": "9de003d05188a804b3dbf14772443e6514c058d90100ef0240f682643f316929",
+        "mcp/server/creator-works-mcp.mjs": "546c600b242a3d60dd084889bdd9c9a5756eb0312bc410fd661cb5150259cf52",
+        "mcp/server/runtime/node.exe": "c6335d08331c23d68b9f2b18adb102002d76ef150b47248e954c507e0d033664",
+        "mcp/server/runtime/LICENSE": "8efdacdc1cfa3460aeb7fe98e3c54337b971d5da70e6eee292b73b981acb220c",
+        "mcp/server/runtime/VERSION": "98182b41c9ce3357797985cf12dc3b0124490ef88bc918a905373e7688e6aec9",
+        "mcp/server/unity-extension/Editor/BanterMCPBridge.cs": "c9768042cb2d1b34f5cbf78297b1fcd771b59ca8808693d5362b8084c633bcec",
+        "mcp/server/unity-extension/Editor/CreatorWorksMCPLogo.png": "f3f68baa0d887de92e6cf7aba8beae7ff8ea5c44b13444f018413041ade19ea7",
+        "mcp/server/LICENSE": "b1cfe8ff7191d3e9c6c6b0f832adcd2ebece8e6070ef72d2f7afc1c082fb757f",
+        "mcp/server/THIRD_PARTY_NOTICES.md": "3596f4ad9f49cd460fa4da49ce3f1b92ad2f67113270b96d361e7e27ae0460af"
+      }
+    },
+    "setup": {
+      "executable": "setup/creator-project-setup.exe",
+      "version": "0.3.7",
+      "files": {
+        "setup/creator-project-setup.exe": "a95315eb9759e9e177e3daac44bd3f53b722b34cbe396919cfc022454b3c4924"
+      }
+    }
+  },
+  "managedRouting": {
+    "protocol": 1,
+    "files": {
+      "routing/creator-hub-mcp-router.exe": "230af0a95cc7ca5d4ee421d192be084a0a1cfaea56788b0fefeffae9eb98721c",
+      "routing/router.json": "cdddc5932a85a294940d488ebbbc7373d4943798b0f436de98b246087783b845",
+      "routing/router.minisig": "79886cf754859a9312961ffed187fedb1c83d6ebf8e2d80c94ca531ec515ad3e",
+      "routing/runtime.json": "7f948338af4256085e1e67d287ce3351cfede5ebbb8733aa79425345b38c4a63",
+      "routing/runtime.minisig": "7b15515442675dd57f48d5ad2a5ac8da80d580d69fc60d8df30babe307db6764"
+    }
+  }
+}
