@@ -1,0 +1,39 @@
+name: Windows revised 028 browser fixtures only
+on:
+  workflow_dispatch:
+    inputs:
+      expected_harness_commit: {type: string, required: true}
+permissions: {contents: read}
+jobs:
+  browser:
+    if: github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.ref == 'refs/heads/codex/windows-028-revised-1795607720993-fixtures' && github.sha == inputs.expected_harness_commit
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v6
+        with: {ref: '8450f463a61aa0a09d575541ffc8a8c09728bfe1', persist-credentials: false}
+      - uses: actions/setup-node@v6
+        with: {node-version: 24}
+      - name: Verify exact product separate from harness
+        shell: pwsh
+        run: |
+          if ((git rev-parse HEAD) -cne '8450f463a61aa0a09d575541ffc8a8c09728bfe1' -or (git rev-parse 'HEAD^{tree}') -cne 'b1532089278c1c9efe259169b663e4c7c97305c2') { throw 'Wrong frozen product source' }
+      - run: npm ci --ignore-scripts --no-audit --fund=false
+      - run: npx --no-install playwright install chromium
+      - name: Run full browser contract suite
+        shell: pwsh
+        run: |
+          node node_modules/@playwright/test/cli.js test --workers=3 --reporter=json --output=test-results | Out-File -Encoding utf8 suite.json
+          if ($LASTEXITCODE -ne 0) { throw 'Browser suite failed' }
+          $stats=(Get-Content -Raw suite.json | ConvertFrom-Json).stats
+          if ($stats.expected -lt 708 -or $stats.unexpected -ne 0 -or $stats.flaky -ne 0) { throw 'Incomplete or unstable browser result' }
+          @{product='8450f463a61aa0a09d575541ffc8a8c09728bfe1';tree='b1532089278c1c9efe259169b663e4c7c97305c2';harness=$env:GITHUB_SHA;expected=$stats.expected;skipped=$stats.skipped;unexpected=$stats.unexpected;flaky=$stats.flaky;installerExecuted=$false} | ConvertTo-Json | Out-File -Encoding utf8 browser-receipt.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: revised-browser-fixtures
+          path: |
+            suite.json
+            browser-receipt.json
+          retention-days: 14
