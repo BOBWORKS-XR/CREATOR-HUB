@@ -1,9 +1,10 @@
-name: Public Windows 026 to 027 acceptance
+name: Public Windows 027 to 028 acceptance
 on:
   workflow_dispatch:
     inputs:
       expected_harness_commit: {type: string, required: true}
       binding_sha256: {type: string, required: true}
+      expected_tag_commit: {type: string, required: true}
 permissions: {contents: read}
 jobs:
   preflight:
@@ -17,9 +18,10 @@ jobs:
         with: {node-version: 24}
       - run: npm ci --ignore-scripts
       - run: node --test scripts/public-update-025.test.cjs
+      - run: node scripts/public-update-025.cjs preflight
   acceptance:
     needs: preflight
-    if: github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.ref == 'refs/heads/codex/windows-public-connections-027'
+    if: github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.ref == 'refs/heads/codex/windows-public-028'
     runs-on: windows-latest
     timeout-minutes: 20
     strategy:
@@ -31,13 +33,14 @@ jobs:
           - {case: setup-no-restore, tool: setup, restore: 'false'}
     env:
       EXPECTED_HARNESS_COMMIT: ${{ inputs.expected_harness_commit }}
+      EXPECTED_TAG_COMMIT: ${{ inputs.expected_tag_commit }}
       CREATOR_PUBLIC_BINDING_SHA256: ${{ inputs.binding_sha256 }}
       CREATOR_OUTGOING_CASE: ${{ matrix.case }}
       CREATOR_OUTGOING_LAST_TOOL: ${{ matrix.tool }}
       CREATOR_OUTGOING_RESTORE: ${{ matrix.restore }}
-      CREATOR_SELF_UPDATE_TARGET_VERSION: '0.1.27'
-      CREATOR_SELF_UPDATE_INSTALLER_SHA256: '3ef9ce5cc25a00e59b466dee216a8c7d20d63c5c981796f2e2318380af6d37b0'
-      CREATOR_SELF_UPDATE_EXECUTABLE_SHA256: '6233f80b86b70ca8e965e81724a2ff3f7daf8aaaef58d6a06fad528f30715ccb'
+      CREATOR_SELF_UPDATE_TARGET_VERSION: '0.1.28'
+      CREATOR_SELF_UPDATE_INSTALLER_SHA256: '1cb612c8cff49950004d0c429cf4b4ddb9adf2e2821ab72e31e8351490cad1b1'
+      CREATOR_SELF_UPDATE_EXECUTABLE_SHA256: '0d0dac1967c65c1f0ba1373949122596825751e87a9a2c27030794d89a6856f8'
     steps:
       - run: git config --global core.autocrlf false
       - uses: actions/checkout@v6
@@ -46,10 +49,11 @@ jobs:
         with: {node-version: 24}
       - run: npm ci --ignore-scripts
       - uses: actions/checkout@v6
-        with: {ref: 1598962f4edefd1831e973b0b069bcd8b725df93, path: product, persist-credentials: false}
+        with: {ref: 989bccc6d6e204dc581b662d59b2a0f3471b35b1, path: product, persist-credentials: false}
       - shell: pwsh
         run: |
-          if ((git -C product rev-parse HEAD) -cne '1598962f4edefd1831e973b0b069bcd8b725df93' -or (git -C product rev-parse 'HEAD^{tree}') -cne '8363e87e58a03bc91d8ea660d9c444fd27d5eddb') { throw 'Product source differs' }
+          if ((git rev-parse HEAD) -cne $env:EXPECTED_HARNESS_COMMIT -or $env:GITHUB_SHA -cne $env:EXPECTED_HARNESS_COMMIT) { throw 'Harness source differs' }
+          if ((git -C product rev-parse HEAD) -cne '989bccc6d6e204dc581b662d59b2a0f3471b35b1' -or (git -C product rev-parse 'HEAD^{tree}') -cne '834540a1cb1cde1d415d11b0ffdb423c63debb43') { throw 'Product source differs' }
       - run: npm --prefix product/modules/mcp ci --ignore-scripts
       - name: Anonymous public feed and exact assets
         shell: pwsh
@@ -67,7 +71,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: public-025-${{ matrix.case }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: public-028-${{ matrix.case }}-${{ github.run_id }}-${{ github.run_attempt }}
           retention-days: 14
           path: |
             artifacts/public-update-025-input/*.json

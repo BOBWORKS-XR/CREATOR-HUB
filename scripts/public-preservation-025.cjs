@@ -16,15 +16,15 @@ function checkMigrationReceipt(report) {
     if(key==='selected'||key==='old')assert.ok(capture(clients.afterUpdateCancel[key],file,name+'-update-cancel.json').equals(before));
   }
   assert.equal(report.clientReview,undefined);assert.equal(report.clientConnectionsUnchanged,true);
-  const old=target.managedLocations(profile.local,'0.1.26',profile.home),next=target.managedLocations(profile.local,'0.1.27',profile.home);
-  assert.equal(old.command,next.command);assert.equal(old.active,next.active);assert.equal(old.payload,next.payload);
-  target.assertActiveResources(profile.local,'0.1.26',report.beforeRoute,false,profile.home);
-  target.assertActiveResources(profile.local,'0.1.27',report.afterRoute,true,profile.home);
-  target.assertInstalledResources(path.join(profile.local,'Creator Hub'),'0.1.27');
+  const old=target.managedLocations(profile.local,'0.1.27',profile.home),next=target.managedLocations(profile.local,'0.1.28',profile.home);
+  assert.equal(old.command,next.command);assert.equal(old.active,next.active);assert.notEqual(old.payload,next.payload);
+  target.assertActiveResources(profile.local,'0.1.27',report.beforeRoute,false,profile.home);
+  target.assertActiveResources(profile.local,'0.1.28',report.afterRoute,true,profile.home);
+  target.assertInstalledResources(path.join(profile.local,'Creator Hub'),'0.1.28');
   target.assertFreshConnection(report.heldProcessesBefore,report.reconnectedProcesses,profile);
-  target.assertFreshConnection(report.freshOldProcesses,report.reconnectedProcesses,profile);
+  target.assertFreshConnection(report.freshOldProcesses,report.reconnectedProcesses,profile,'0.1.28');
   assert.equal(new Set([...report.heldProcessesBefore,...report.freshOldProcesses,...report.reconnectedProcesses].map(p=>p.pid)).size,6);
-  assert.equal(report.freshOldServerVersion.version,'2.7.10');
+  assert.equal(report.freshOldServerVersion.version,'2.7.11');
   assert.deepEqual(report.sdkMetadata,{checked:[{version:'4.0.25',mismatch:true,profile:'creator',tested:true,filesUnchanged:true},{version:'4.0.27',mismatch:false,profile:'creator',tested:false,filesUnchanged:true}],lookupNonBlocking:true,afterNormalRestartLookupNonBlocking:true});
   assert.equal(report.sdkLookups?.length,2);
   for(const [i,e] of report.sdkLookups.entries()) {

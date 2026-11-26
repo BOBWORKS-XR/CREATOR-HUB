@@ -17,7 +17,7 @@ function readHash(file, expected, relativePath = path.basename(file)) {
     throw error;
   }
 }
-function itemFor(version) { assert.ok(['0.1.26', '0.1.27'].includes(version)); return version === '0.1.26' ? binding.baseline : binding.target; }
+function itemFor(version) { assert.ok(['0.1.27', '0.1.28'].includes(version)); return version === '0.1.27' ? binding.baseline : binding.target; }
 function assertInstalledResources(directory, version) {
   const item = itemFor(version); readHash(path.join(directory, 'creator-hub.exe'), item.executable.sha256, 'creator-hub.exe');
   const files = { ...item.manifest.modules.mcp.files, ...item.manifest.modules.setup.files, ...item.manifest.managedRouting.files };
@@ -44,16 +44,18 @@ function assertActiveResources(local, version, value, current = true, home) {
   const files = item.manifest.managedRouting.files;
   assert.deepEqual(value, { schemaVersion: 1, descriptorSha256: files['routing/runtime.json'], generation: item.generation });
   for (const name of ['runtime.json', 'runtime.minisig']) readHash(path.join(root, 'descriptors', value.descriptorSha256, name), files[`routing/${name}`]);
+  // Existing client entries keep their already-published router-v2; the target changes the selector and payload.
+  const retainedRouter = binding.baseline.manifest.managedRouting.files;
   for (const name of ['router.json', 'router.minisig', 'creator-hub-mcp-router.exe'])
-    readHash(path.join(root, locations.router, name), files[`routing/${name}`]);
+    readHash(path.join(root, locations.router, name), retainedRouter[`routing/${name}`]);
   const identity = JSON.parse(readBounded(path.join(root, locations.router, 'router.json'), 32768));
   assert.deepEqual(identity, { schemaVersion: 1, product: 'com.creatorworks.hub.mcp-router',
     platform: 'windows', arch: 'x86_64', protocol: 1,
-    storeBinding: 2, sha256: files['routing/creator-hub-mcp-router.exe'] });
+    storeBinding: 2, sha256: retainedRouter['routing/creator-hub-mcp-router.exe'] });
   for (const [name, sha] of Object.entries(item.manifest.modules.mcp.files)) readHash(path.join(locations.payload, name), sha);
   if (current) assert.deepEqual(JSON.parse(readBounded(path.join(root, 'active.json'), 4096)), value);
 }
-function assertFreshConnection(held, fresh, profile) {
+function assertFreshConnection(held, fresh, profile, heldVersion = '0.1.27') {
   assert.equal(held.length, 2); assert.equal(fresh.length, 2);
   for (const row of [...held, ...fresh]) {
     assert.ok(Number.isSafeInteger(row.pid) && row.pid > 0);
@@ -64,7 +66,7 @@ function assertFreshConnection(held, fresh, profile) {
   for (const rows of [held, fresh]) assert.equal(rows[1].parentPid, rows[0].pid);
   const normalize = image => path.win32.normalize(image).toLowerCase();
   assert.ok(profile && profile.local && profile.home, 'Explicit old/new profile roots required');
-  for (const [rows, version] of [[held, '0.1.26'], [fresh, '0.1.27']]) {
+  for (const [rows, version] of [[held, heldVersion], [fresh, '0.1.28']]) {
     const locations = managedLocations(profile.local, version, profile.home);
     assert.equal(normalize(rows[0].image), normalize(locations.command), 'Exact version-bound router required');
     assert.equal(normalize(rows[1].image), normalize(path.join(locations.payload, 'mcp/server/runtime/node.exe')),
