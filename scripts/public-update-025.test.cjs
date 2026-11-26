@@ -1,4 +1,14 @@
 'use strict';
+
+require('node:test')('public post-restart page accepts exact 0.1.28 and still requires direct integration',()=>{
+  const assert=require('node:assert/strict');
+  const {assertProtocol}=require('./native-outgoing-direct-019.cjs');
+  const native={version:'0.1.28',protocol:1,integrated:true,services:{integrated:true,features:['setup','mcp']}};
+  assert.doesNotThrow(()=>assertProtocol(native,'0.1.28'));
+  assert.throws(()=>assertProtocol({...native,integrated:false},'0.1.28'),/hosted build/);
+  assert.throws(()=>assertProtocol({...native,version:'0.1.27'},'0.1.28'),/exact native/);
+  assert.throws(()=>assertProtocol({...native,version:'0.1.29'},'0.1.29'),/reviewed direct/);
+});
 const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),vm=require('node:vm'),Module=require('node:module');
 const scripts=path.basename(__dirname)==='scripts'?__dirname:path.join(__dirname,'source/scripts');
 const read=name=>fs.readFileSync(path.join(scripts,name),'utf8');

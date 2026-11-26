@@ -12,7 +12,7 @@ function directTarget(target, source) {
 }
 
 function assertProtocol(state, expectedVersion = VERSION) {
-  assert.ok([VERSION, '0.1.27'].includes(expectedVersion), 'Only reviewed direct baselines are supported');
+  assert.ok([VERSION, '0.1.27', '0.1.28'].includes(expectedVersion), 'Only reviewed direct baselines are supported');
   assert.equal(state.version, expectedVersion, 'Direct smoke requires the exact native baseline build');
   assert.equal(state.protocol, 1, 'Native direct-feature protocol is required');
   assert.equal(state.integrated, true, 'A hosted build cannot satisfy direct acceptance');
