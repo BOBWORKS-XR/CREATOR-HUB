@@ -197,14 +197,68 @@ pub(crate) fn durable_image(path: &Path, bytes: &[u8]) -> Result<(), String> {
         })
 }
 
+#[cfg(windows)]
+fn migration_move_path(path: &Path) -> io::Result<Vec<u16>> {
+    use std::{
+        os::windows::ffi::OsStrExt,
+        path::{Component, Prefix},
+    };
+
+    let mut wide: Vec<_> = path.as_os_str().encode_wide().collect();
+    if wide.contains(&0) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Invalid migration path",
+        ));
+    }
+    if wide.len() >= 260
+        && !path.components().next().is_some_and(
+            |part| matches!(part, Component::Prefix(prefix) if prefix.kind().is_verbatim()),
+        )
+    {
+        if !path.is_absolute() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Migration path is not absolute",
+            ));
+        }
+        // Normalize DOS paths before adding the verbatim prefix. Do not resolve links
+        // or require the destination file to exist.
+        let absolute = std::path::absolute(path)?;
+        let (prefix, skip) = match absolute.components().next() {
+            Some(Component::Prefix(p)) => match p.kind() {
+                Prefix::Disk(_) => (r"\\?\", 0),
+                Prefix::UNC(..) => (r"\\?\UNC\", 2),
+                _ => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "Unsupported migration path",
+                    ))
+                }
+            },
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Invalid migration path",
+                ))
+            }
+        };
+        wide = prefix
+            .encode_utf16()
+            .chain(absolute.as_os_str().encode_wide().skip(skip))
+            .collect();
+    }
+    wide.push(0);
+    Ok(wide)
+}
+
 /// Both names are reserved migration storage. Destination must never be overwritten.
 pub(crate) fn durable_move(source: &Path, path: &Path) -> io::Result<()> {
     #[cfg(windows)]
     {
-        use std::os::windows::ffi::OsStrExt;
         use windows_sys::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_WRITE_THROUGH};
-        let source: Vec<_> = source.as_os_str().encode_wide().chain(Some(0)).collect();
-        let destination: Vec<_> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+        let source = migration_move_path(source)?;
+        let destination = migration_move_path(path)?;
         // No REPLACE_EXISTING and no cross-volume copy fallback.
         if unsafe {
             MoveFileExW(
@@ -382,6 +436,50 @@ impl Drop for StagedFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_retains_and_publishes_beyond_max_path_without_overwrite() {
+        use std::os::windows::ffi::OsStrExt;
+
+        let fixture = tempfile::tempdir().unwrap();
+        let canonical = fixture.path().canonicalize().unwrap();
+        let root = Path::new(canonical.to_str().unwrap().strip_prefix(r"\\?\").unwrap());
+        let parent = root
+            .join("settings-".repeat(12))
+            .join("profile-".repeat(13))
+            .join("connection-".repeat(10));
+        let config = parent.join("config.json");
+        assert!(config.as_os_str().encode_wide().count() > 260);
+        fs::create_dir_all(&parent).unwrap();
+        fs::write(&config, b"unchanged user settings").unwrap();
+
+        let backup = retain_image(&config, b"reviewed settings").unwrap();
+        assert_eq!(retain_image(&config, b"reviewed settings").unwrap(), backup);
+        assert_eq!(fs::read(&backup).unwrap(), b"reviewed settings");
+        assert_eq!(fs::read(&config).unwrap(), b"unchanged user settings");
+        assert!(durable_image(&backup, b"different settings").is_err());
+
+        let source = parent.join("next.tmp");
+        fs::write(&source, b"attempted overwrite").unwrap();
+        assert!(durable_move(&source, &backup).is_err());
+        assert_eq!(fs::read(&source).unwrap(), b"attempted overwrite");
+        assert_eq!(fs::read(&backup).unwrap(), b"reviewed settings");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_move_encoding_preserves_unc_and_normalizes_dos_separators() {
+        let leaf = "config".repeat(45);
+        let path = PathBuf::from(format!(r"//server/share/profile/../{leaf}"));
+        let encoded = migration_move_path(&path).unwrap();
+        let expected = format!("\\\\?\\UNC\\server\\share\\{leaf}\0");
+        assert_eq!(encoded, expected.encode_utf16().collect::<Vec<_>>());
+        let verbatim = Path::new(expected.trim_end_matches('\0'));
+        assert_eq!(migration_move_path(verbatim).unwrap(), encoded);
+        assert!(migration_move_path(Path::new(&leaf)).is_err());
+        assert!(migration_move_path(Path::new("settings\0different")).is_err());
+    }
 
     #[test]
     fn reviewed_binary_image_is_retained_without_rereading_or_changing_the_target() {
