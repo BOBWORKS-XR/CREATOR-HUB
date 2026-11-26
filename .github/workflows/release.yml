@@ -10,8 +10,25 @@ permissions:
   actions: read
 
 jobs:
+  reviewed-windows-028:
+    if: ${{ github.ref == 'refs/tags/v0.1.28' && github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.repository_id == '1364807512' }}
+    runs-on: windows-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write # Draft visibility requires push access; the verifier only issues GETs.
+    steps:
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v6
+        with: {fetch-depth: 2, persist-credentials: false}
+      - uses: actions/setup-node@v6
+        with: {node-version: 24}
+      - run: npm ci --ignore-scripts
+      - name: Verify final draft, unchanged signed assets and legacy feed cap
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/verify-028-draft.cjs
   qualified-windows-draft:
-    if: ${{ ((github.ref_type == 'tag' && startsWith(github.ref_name, 'v')) || github.event_name == 'workflow_dispatch') && github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.repository_id == '1364807512' }}
+    if: ${{ github.ref != 'refs/tags/v0.1.28' && ((github.ref_type == 'tag' && startsWith(github.ref_name, 'v')) || github.event_name == 'workflow_dispatch') && github.repository == 'BOBWORKS-XR/CREATOR-HUB' && github.repository_id == '1364807512' }}
     runs-on: windows-latest
     timeout-minutes: 20
     permissions:
