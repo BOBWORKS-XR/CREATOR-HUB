@@ -398,11 +398,20 @@ async function main() {
       assertTicket(observedTicket, lastTool, hub); await direct.checkRestored(page);
       await page.waitForFunction(feature => document.querySelector(`#feature-${feature} [data-field="status"]`)?.textContent === 'Ready', lastTool);
       assert.equal(await page.locator(`#feature-${lastTool}`).isVisible(), true);
-      if (lastTool === 'mcp') await continueMcpGuide(page);
+
     } else { assert.equal(observedTicket, undefined); await direct.checkHome(page); }
     assert.equal(fs.existsSync(ticket), false);
-    await direct.prepareManagedRoute(page, { clientConfig, active: newRoute.active,
-      approve: () => { throw Error('Existing physical route must not request new permission'); } });
+    const probe = async (phase, view) => require('./unassisted.cjs').observe({
+      phase, view, selectedBefore, specBytes: () => direct.readEvidence(selectedPath), command: newRoute.command,
+      open: spec => ({ client: new Client({name:'unassisted-'+phase,version:'1'}), transport: new StdioClientTransport({
+        command:spec.command,args:spec.args,env:{...process.env,...spec.env},stderr:'ignore'}) }),
+      roundTrip, active: () => JSON.parse(direct.readEvidence(newRoute.active)).generation, binding:target.binding,
+      inspect: t => retry(() => connectionProcesses(t,newRoute,'0.1.28')),
+      verifyProcesses: rows => target.assertFreshConnection(sdkRecords,rows,profile),
+      record: r => { (report.unassisted ||= {})[phase]=r; fs.writeFileSync(path.join(out,'unassisted-'+phase+'.json'),JSON.stringify(r),{flag:'wx'}); }
+    });
+    await probe('automatic',restore?lastTool:'home');
+    if (restore && lastTool === 'mcp') await continueMcpGuide(page);
     report.afterRoute = active('0.1.28');
     assert.notEqual(report.afterRoute.generation, report.beforeRoute.generation);
     assert.equal(oldRoute.command, newRoute.command);
@@ -483,6 +492,7 @@ async function main() {
     await connect('0.1.28');
     assert.equal(fs.existsSync(ticket), false);
     await direct.checkHome(page);
+    await probe('normal','home');
     await direct.checkPages({ page, showApp: show, processes: moduleGuis, requests, expectedVersion: '0.1.28',
       screenshot: name => page.screenshot({ path: path.join(out, `normal-restart-${name}.png`) }) });
     await scopeCheck('normal-restart');

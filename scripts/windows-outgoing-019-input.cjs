@@ -84,6 +84,9 @@ function checkMigrationReceipt(report) {
   }
 }
 function checkReceipt(report, rows, config, env = process.env) {
+  for (const [phase,view] of [['automatic', report.restore?report.lastTool:'home'],['normal','home']]) {
+    require('./unassisted.cjs').check(report.unassisted?.[phase],binding,phase,view,rows=>target.assertFreshConnection(report.heldProcessesBefore,rows,report.profile));
+  }
   assert.deepEqual(report.preservedProjectScope,['automatic-restart','normal-restart']);
   assert.equal(report.customEditorFoundInBaseline, true); assert.equal(report.customEditorFoundInTarget, true);
   target.assertBound(config); assert.equal(report.kind, target.KIND); assert.equal(report.sourceCommit, binding.target.source.commit);

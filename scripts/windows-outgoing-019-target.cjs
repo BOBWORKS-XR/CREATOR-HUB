@@ -8,7 +8,7 @@ const binding = require('./fixtures/windows-outgoing-019-binding.json');
 const KIND = 'direct-outgoing-027-028';
 const ASSET = 'Creator.Hub_0.1.28_x64-setup.exe';
 const BASELINE_ASSET = 'Creator.Hub_0.1.27_x64-setup.exe';
-const EXPECTED_TARGET_SOURCE = Object.freeze({"commit":"62c7eff8c7641057773d60fd5d5dbc0f187dd1db","tree":"b4b1af3ffe2fd608bbe9186bc4ecac1aa9dc7a5b"});
+const EXPECTED_TARGET_SOURCE = Object.freeze({"commit":"989bccc6d6e204dc581b662d59b2a0f3471b35b1","tree":"834540a1cb1cde1d415d11b0ffdb423c63debb43"});
 const CASES = Object.freeze({ 'mcp-restore': ['mcp', 'true'], 'setup-restore': ['setup', 'true'], 'setup-no-restore': ['setup', 'false'] });
 const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 const generation = module => hash(JSON.stringify({ executable: module.executable, version: module.version,
@@ -43,6 +43,8 @@ function source(value) {
 function validateBindingShape(value) {
   assert.equal(value.schemaVersion, 1); assert.equal(value.enabled, true, 'Pending exact23/private24 pins: native admission refused');
   assert.equal(value.privateOnly, true); assert.equal(value.kind, KIND);
+  assert.notEqual(value.target.installer.sha256,'3159591795b3be1208d65a1664e05fec8fb448ef481d73317a77e48f9f35192d');
+  assert.notEqual(value.target.generation,'c02cda35b8a00dd7e636441755760b79b9a90463fad4cf12d70d91ef2b39979e');
   assert.equal(value.baseline.version, '0.1.27'); assert.equal(value.target.version, '0.1.28');
   assert.equal(value.baseline.asset, BASELINE_ASSET); assert.equal(value.target.asset, ASSET);
   assert.equal(value.baseline.releaseId,457371653); assert.equal(value.baseline.assetId,788972386);
@@ -87,7 +89,7 @@ function validateBindingShape(value) {
   assert.ok(release && Number.isSafeInteger(release.id) && release.id > 0);
   assert.notEqual(value.baseline.releaseId, release.id);
   assert.equal(release.source, value.target.source.commit);
-  assert.equal(release.tag, 'lab-windows-project-scope-028-20261125');
+  assert.equal(release.tag, 'lab-windows-028-long-path-989bccc');
   const assetPins = { [ASSET]: value.target.installer, 'creator-hub-windows-x86_64.json': value.target.descriptor,
     'creator-hub-windows-x86_64.json.minisig': value.target.descriptorSignature, 'latest.json': value.target.latest };
   assert.deepEqual(Object.keys(release.assets).sort(), Object.keys(assetPins).sort());
@@ -114,8 +116,8 @@ function assertHost(env = process.env, platform = process.platform) {
   assert.equal(platform, 'win32');
   for (const [key, expected] of Object.entries({ GITHUB_ACTIONS: 'true', RUNNER_ENVIRONMENT: 'github-hosted', RUNNER_OS: 'Windows', RUNNER_ARCH: 'X64',
     GITHUB_REPOSITORY: 'BOBWORKS-XR/CREATOR-HUB', GITHUB_REPOSITORY_ID: '1364807512', GITHUB_EVENT_NAME: 'workflow_dispatch',
-    GITHUB_JOB: env.GITHUB_JOB === 'manual' ? 'manual' : 'acceptance', GITHUB_REF: 'refs/heads/codex/windows-project-scope-028-acceptance',
-    GITHUB_WORKFLOW_REF: 'BOBWORKS-XR/CREATOR-HUB/.github/workflows/windows-outgoing-019.yml@refs/heads/codex/windows-project-scope-028-acceptance' })) assert.equal(env[key], expected, key);
+    GITHUB_JOB: env.GITHUB_JOB === 'manual' ? 'manual' : 'acceptance', GITHUB_REF: 'refs/heads/codex/windows-028-long-path-989bccc-acceptance',
+    GITHUB_WORKFLOW_REF: 'BOBWORKS-XR/CREATOR-HUB/.github/workflows/windows-outgoing-019.yml@refs/heads/codex/windows-028-long-path-989bccc-acceptance' })) assert.equal(env[key], expected, key);
   assert.match(env.GITHUB_SHA || '', /^[a-f0-9]{40}$/); assert.equal(env.EXPECTED_HARNESS_COMMIT, env.GITHUB_SHA);
   assert.ok(Object.hasOwn(CASES, env.CREATOR_OUTGOING_CASE));
   assert.deepEqual([env.CREATOR_OUTGOING_LAST_TOOL, env.CREATOR_OUTGOING_RESTORE], CASES[env.CREATOR_OUTGOING_CASE]);
